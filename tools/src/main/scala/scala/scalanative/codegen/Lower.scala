@@ -598,6 +598,9 @@ object Lower {
             Op.Load(ty, genVal(buf, ptr), syncAttrs),
             unwind
           )
+          if (config.gc.needsReadBarrier && ty.isInstanceOf[Type.RefKind]) {
+            buf.call(readBarrierSig, readBarrier, Seq(ptr), unwind)
+          }
       }
     }
 
@@ -634,6 +637,9 @@ object Lower {
             Op.Store(ty, genVal(buf, ptr), genVal(buf, value), syncAttrs),
             unwind
           )
+          if (config.gc.needsWriteBarrier && ty.isInstanceOf[Type.RefKind]) {
+            buf.call(writeBarrierSig, writeBarrier, Seq(ptr, value), Next.None)
+          }
       }
     }
 
@@ -1715,6 +1721,13 @@ object Lower {
   val RuntimeNull = Type.Ref(Global.Top("scala.runtime.Null$"))
   val RuntimeNothing = Type.Ref(Global.Top("scala.runtime.Nothing$"))
 
+  val writeBarrierName = extern("scalanative_field_write_barrier")
+  val readBarrierName  = extern("scalanative_field_read_barrier")
+  val writeBarrierSig  = Type.Function(Seq(Type.Ptr, Type.Ptr), Type.Unit)
+  val readBarrierSig   = Type.Function(Seq(Type.Ptr), Type.Ptr)
+  val writeBarrier     = Val.Global(writeBarrierName, Type.Ptr)
+  val readBarrier      = Val.Global(readBarrierName, Type.Ptr)
+
   val injects: Seq[Defn] = {
     implicit val pos = Position.NoPosition
     val buf = mutable.UnrolledBuffer.empty[Defn]
@@ -1722,6 +1735,8 @@ object Lower {
     buf += Defn.Declare(Attrs.None, largeAllocName, allocSig)
     buf += Defn.Declare(Attrs.None, dyndispatchName, dyndispatchSig)
     buf += Defn.Declare(Attrs.None, throwName, throwSig)
+    buf += Defn.Declare(Attrs.None, writeBarrierName, writeBarrierSig)
+    buf += Defn.Declare(Attrs.None, readBarrierName, readBarrierSig)
     buf.toSeq
   }
 

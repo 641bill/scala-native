@@ -124,6 +124,9 @@ void *scalanative_alloc_atomic(void *info, size_t size) {
 
 void scalanative_collect() {}
 
+void scalanative_field_write_barrier(void **field, void* value) {}
+void scalanative_field_read_barrier(void **field){}
+
 void scalanative_register_weak_reference_handler(void *handler) {}
 
 #ifdef SCALANATIVE_MULTITHREADING_ENABLED
