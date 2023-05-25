@@ -21,6 +21,10 @@ object GC {
   def alloc_large(cls: Class[_], size: CSize): RawPtr = extern
   @name("scalanative_collect")
   def collect(): Unit = extern
+  @name("scalanative_field_write_barrier")
+  def field_write_barrier(fld: Object, value: Object): Unit = extern
+  @name("scalanative_field_read_barrier")
+  def field_read_barrier(fld: Object): Unit = extern
   @name("scalanative_init")
   def init(): Unit = extern
   @name("scalanative_register_weak_reference_handler")
