@@ -1,4 +1,5 @@
 import build.Build
+import scala.scalanative.build._
 
 // scalafmt: { align.preset = most}
 lazy val scalaNative              = Build.root
@@ -37,5 +38,13 @@ lazy val scalaPartestJunitTests   = Build.scalaPartestJunitTests
 lazy val scalaPartestRuntime      = Build.scalaPartestRuntime
 
 commands ++= build.Commands.values
-
+// nativeConfig ~= { c =>
+// 	c.withCompileOptions(c.compileOptions ++ Seq(
+// 		"-I/home/dcl/mmtk-scala-native/scala-native"))
+// 	.withLinkingOptions(c.linkingOptions ++ 
+// 		Seq("-L/home/dcl/mmtk-scala-native/mmtk/target/debug") ++
+// 		Seq("-lmmtk_scala_native")
+// 	)
+// 	.withGC(GC.experimental)
+// }
 inThisBuild(build.Settings.thisBuildSettings)

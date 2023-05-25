@@ -47,7 +47,7 @@ object GC {
   private[scalanative] case object Commix
       extends GC("commix", Seq.empty, Seq("shared", "immix_commix"))
   private[scalanative] case object Experimental
-      extends GC("experimental", Seq.empty, Seq.empty)
+      extends GC("experimental", Seq.empty, Seq("shared", "immix", "immix_commix"))
 
   /** Non-freeing garbage collector. */
   def none: GC = None
