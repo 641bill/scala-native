@@ -25,8 +25,6 @@ void *scalanative_alloc_small(void *info, size_t size);
 void *scalanative_alloc_large(void *info, size_t size);
 void *scalanative_alloc_atomic(void *info, size_t size);
 void scalanative_collect();
-void scalanative_field_write_barrier(void **field, void* value) {}
-void scalanative_field_read_barrier(void **field){}
 void scalanative_register_weak_reference_handler(void *handler);
 size_t scalanative_get_init_heapsize();
 size_t scalanative_get_max_heapsize();

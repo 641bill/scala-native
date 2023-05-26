@@ -25,9 +25,7 @@ package scala.scalanative.build
 sealed abstract class GC private (
     val name: String,
     val links: Seq[String],
-    val include: Seq[String],
-    private[scalanative] val needsWriteBarrier: Boolean = false,
-    private[scalanative] val needsReadBarrier: Boolean = false
+    val include: Seq[String]
 ) {
 
   /** The name of the [[GC]] object
