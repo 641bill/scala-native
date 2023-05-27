@@ -1,13 +1,23 @@
+import java.lang.Thread
+
 object Test {
   def main(args: Array[String]): Unit = {
+    // Initialize a thread
+    val thread = new Thread {
+      override def run(): Unit = {
+        println("Hello, World! from thread")
+      }
+    }
+    thread.start()
     println("Hello, World!")
-    // Do some tests that allocates memory
-    val array = new Array[Int](10)
-    array(0) = 1
-    println(array(0))
-    // Allocate a user-defined class
+    // Do some tests that allocates a large chunk of memory
+    // Allocate a large array
+    val array = new Array[Int](1000000)
+    println(array.length)
+
     class Foo(val x: Int)
-    val foo = new Foo(42)
-    println(foo.x)
+    // Allocate a large array of user-defined class
+    val array2 = new Array[Foo](1000000)
+    println(array2.length)
   }
 }

@@ -481,16 +481,18 @@ object Build {
       .withNativeCompilerPlugin
       .withJUnitPlugin
       .dependsOn(scalalib, testInterface % "test")
-      .settings(nativeConfig ~= { c =>
-        c.withCompileOptions(c.compileOptions ++ Seq(
-          "-I/home/dcl/mmtk-scala-native/scala-native"))
-        .withLinkingOptions(c.linkingOptions ++ 
-          Seq("-L/home/dcl/mmtk-scala-native/mmtk/target/debug") ++
-          Seq("-lmmtk_scala_native")
-        )
-        .withGC(GC.experimental)
-        .withMultithreadingSupport(true)
-      })
+      .settings(
+        nativeConfig ~= { c =>
+          c.withCompileOptions(c.compileOptions ++ Seq(
+            "-I/home/bill641/mmtk-scala-native/scala-native"))
+          .withLinkingOptions(c.linkingOptions ++ 
+            Seq("-L/home/bill641/mmtk-scala-native/mmtk/target/debug") ++
+            Seq("-lmmtk_scala_native")
+          )
+          .withGC(GC.experimental)
+          .withMultithreadingSupport(true)
+        },
+      )
 
 // Testing infrastructure ------------------------------------------------
   lazy val testingCompilerInterface =
