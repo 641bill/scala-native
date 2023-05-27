@@ -475,23 +475,36 @@ object Build {
       )
       .dependsOn(junitAsyncJVM % "test")
 
+  lazy val parentPath = settingKey[String]("The parent path of the project")
+
   lazy val sandbox =
     MultiScalaProject("sandbox", file("sandbox"))
       .enablePlugins(MyScalaNativePlugin)
       .withNativeCompilerPlugin
       .withJUnitPlugin
       .dependsOn(scalalib, testInterface % "test")
+      .settings( 
+        parentPath := (ThisBuild / baseDirectory).value.getParentFile.getAbsolutePath
+      )
       .settings(
-        nativeConfig ~= { c =>
-          c.withCompileOptions(c.compileOptions ++ Seq(
-            "-I/home/bill641/mmtk-scala-native/scala-native"))
-          .withLinkingOptions(c.linkingOptions ++ 
-            Seq("-L/home/bill641/mmtk-scala-native/mmtk/target/debug") ++
+        nativeConfig := {
+          nativeConfig.value.withCompileOptions(
+            nativeConfig.value.compileOptions ++
+              Seq(s"-I${parentPath.value}/mmtk-scala-native/scala-native")
+          )
+          .withLinkingOptions(
+            nativeConfig.value.linkingOptions ++ 
+            Seq(s"-L${parentPath.value}/mmtk-scala-native/mmtk/target/debug") ++
             Seq("-lmmtk_scala_native")
           )
           .withGC(GC.experimental)
           .withMultithreadingSupport(true)
-        },
+        }
+      )
+      .settings(
+        envVars := Map(
+          "LD_LIBRARY_PATH" -> s"${parentPath.value}/mmtk-scala-native/mmtk/target/debug:$$LD_LIBRARY_PATH"
+        )
       )
 
 // Testing infrastructure ------------------------------------------------
