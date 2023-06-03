@@ -9,6 +9,17 @@ object Test {
       }
     }
     thread.start()
+    // Initializa a bunch of threads
+    val threads = (1 to 100).map { i =>
+      new Thread {
+        override def run(): Unit = {
+          println("Hello, World! from thread " + i)
+        }
+      }
+    }
+    threads.foreach(_.start())
+    thread.join()
+    threads.foreach(_.join())
     println("Hello, World!")
     // Do some tests that allocates a large chunk of memory
     // Allocate a large array

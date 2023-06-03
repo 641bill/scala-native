@@ -474,8 +474,13 @@ object Build {
         libraryDependencies ++= Deps.JUnitJvm
       )
       .dependsOn(junitAsyncJVM % "test")
-
+      
   lazy val parentPath = settingKey[String]("The parent path of the project")
+
+  val mmtkBuild = taskKey[Unit]("Build MMTk")
+
+  import sys.process.Process
+  import sys.process.ProcessLogger
 
   lazy val sandbox =
     MultiScalaProject("sandbox", file("sandbox"))
@@ -487,6 +492,26 @@ object Build {
         parentPath := (ThisBuild / baseDirectory).value.getParentFile.getAbsolutePath
       )
       .settings(
+        mmtkBuild := {
+          val s = streams.value
+          val cmd = "cargo build"
+          val workingDirectory = new File(s"${parentPath.value}/mmtk-scala-native/mmtk")
+          val output = new StringBuilder
+          val error = new StringBuilder
+          val exitCode = Process(cmd, workingDirectory) ! ProcessLogger(
+            (out: String) => {
+              output append out
+              s.log.info(out)
+            },
+            (err: String) => {
+              error append err
+              s.log.info(err)
+            }
+          )
+          if (exitCode != 0) {
+            throw new RuntimeException("MMTk build failed with output: " + error.toString)
+          }
+        },
         nativeConfig := {
           nativeConfig.value.withCompileOptions(
             nativeConfig.value.compileOptions ++
@@ -499,7 +524,8 @@ object Build {
           )
           .withGC(GC.experimental)
           .withMultithreadingSupport(true)
-        }
+        },
+        Compile / compile := (Compile / compile).dependsOn(mmtkBuild).value
       )
       .settings(
         envVars := Map(
