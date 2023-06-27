@@ -7,3 +7,5 @@ BlockAllocator blockAllocator = {};
 MutatorThreads mutatorThreads = NULL;
 thread_local MutatorThread *currentMutatorThread = NULL;
 safepoint_t scalanative_gc_safepoint = NULL;
+GC_Roots *roots = NULL;
+thread_local void* third_party_heap_collector = NULL;

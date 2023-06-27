@@ -129,6 +129,10 @@ void Synchronizer_init() {
     SetupPageFaultHandler();
 }
 
+void Synchronizer_changeToCollecting() {
+    isCollecting = true;
+}
+
 void Synchronizer_wait() {
     MutatorThread *self = currentMutatorThread;
     MutatorThread_switchState(self, MutatorThreadState_Unmanaged);

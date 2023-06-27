@@ -534,7 +534,8 @@ object Build {
         nativeConfig := {
           nativeConfig.value.withCompileOptions(
             nativeConfig.value.compileOptions ++
-              Seq(s"-I${parentPath.value}/mmtk-scala-native/scala-native")
+              Seq(s"-I${parentPath.value}/mmtk-scala-native/scala-native") ++
+              Seq(s"-g")
           )
           .withLinkingOptions(
             nativeConfig.value.linkingOptions ++ 
@@ -548,7 +549,10 @@ object Build {
       )
       .settings(
         envVars := Map(
-          "LD_LIBRARY_PATH" -> s"${parentPath.value}/mmtk-scala-native/mmtk/target/debug:$$LD_LIBRARY_PATH"
+          "LD_LIBRARY_PATH" -> (
+              s"${parentPath.value}/mmtk-scala-native/mmtk/target/debug:" +
+              s"$$LD_LIBRARY_PATH"
+            )
         )
       )
 

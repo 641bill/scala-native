@@ -5,6 +5,8 @@
 #include "ThreadUtil.h"
 #include "MutatorThread.h"
 #include "Safepoint.h"
+#include "GCRoots.h"
+#include "stddef.h"
 
 extern Heap heap;
 extern Stack stack;
@@ -13,5 +15,7 @@ extern BlockAllocator blockAllocator;
 extern MutatorThreads mutatorThreads;
 extern thread_local MutatorThread *currentMutatorThread;
 extern safepoint_t scalanative_gc_safepoint;
+extern GC_Roots *roots;
+extern thread_local void* third_party_heap_collector;
 
 #endif // IMMIX_STATE_H

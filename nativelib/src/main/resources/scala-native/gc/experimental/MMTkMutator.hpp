@@ -1,10 +1,14 @@
-#ifndef MMTK_MUTATOR_H
-#define MMTK_MUTATOR_H
+#ifndef MMTK_MUTATOR_HPP
+#define MMTK_MUTATOR_HPP
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #include "mmtk.h"
 #include <assert.h>
 
-enum Allocator {
+enum MMTkAllocator {
   AllocatorDefault = 0,
   AllocatorImmortal = 1,
   AllocatorLos = 2,
@@ -113,22 +117,26 @@ struct MutatorConfig {
 struct HeapWordImpl;             // Opaque, never defined.
 typedef struct HeapWordImpl* HeapWord;
 
-struct MMTkMutatorContext {
+typedef struct {
   struct Allocators allocators;
   struct RustDynPtr barrier;
   void* mutator_tls;
   struct RustDynPtr plan;
   struct MutatorConfig config;
-};
+} MMTkMutatorContext;
 
 // Max object size that does not need to go into LOS. We get the value from mmtk-core, and cache its value here.
 extern size_t max_non_los_default_alloc_bytes;
 extern const int HeapWordSize;
 
-HeapWord* MMTkMutatorContext_alloc(struct MMTkMutatorContext* context, size_t bytes, enum Allocator allocator);
-void MMTkMutatorContext_flush(struct MMTkMutatorContext* context);
-void MMTkMutatorContext_destroy(struct MMTkMutatorContext* context);
-struct MMTkMutatorContext MMTkMutatorContext_bind(void* current);
+HeapWord* MMTkMutatorContext_alloc(MMTkMutatorContext* context, size_t bytes, enum MMTkAllocator allocator);
+void MMTkMutatorContext_flush(MMTkMutatorContext* context);
+void MMTkMutatorContext_destroy(MMTkMutatorContext* context);
+MMTkMutatorContext MMTkMutatorContext_bind(void* current);
 int MMTkMutatorContext_is_ready_to_bind();
 
-#endif // MMTK_MUTATOR_H
+#ifdef __cplusplus
+} 
+#endif
+
+#endif // MMTK_MUTATOR_HPP

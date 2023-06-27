@@ -9,21 +9,15 @@
 #include "Constants.h"
 #include "Settings.h"
 #include "WeakRefStack.h"
+#include "GCScalaNative.h"
+#include "GCRoots.h"
 #include "MutatorThread.h"
-#include "mmtkMutator.h"
+#include "MMTkMutator.hpp"
+#include "MMTkUpcalls.h"
 
 #ifdef SCALANATIVE_MULTITHREADING_ENABLED
 #include "Synchronizer.h"
 #endif
-
-static __thread MMTk_Mutator mutator = NULL;
-pthread_mutex_t mutator_mutex;
-
-pthread_t main_thread_id;
-
-static const size_t HEAP_SIZE = 128 * 1024 * 1024; // Example heap size: 128MB
-
-static __thread struct BumpAllocator* bump_allocator = NULL;
 
 // Stack boottom of the main thread
 extern word_t **__stack_bottom;
@@ -32,12 +26,13 @@ void scalanative_afterexit() { Stats_OnExit(heap.stats); }
 
 void scalanative_init() {
     // Initialize the MMTk instance with the specified heap size
-    mmtk_init(HEAP_SIZE);
+    mmtk_init(Settings_MinHeapSize());
+    max_non_los_default_alloc_bytes = get_max_non_los_default_alloc_bytes();
 
     Heap_Init(&heap, Settings_MinHeapSize(), Settings_MaxHeapSize());
+    scalanative_gc_init(&mmtk_upcalls);
     Stack_Init(&stack, INITIAL_STACK_SIZE);
     Stack_Init(&weakRefStack, INITIAL_STACK_SIZE);
-    main_thread_id = pthread_self();
 
 #ifdef SCALANATIVE_MULTITHREADING_ENABLED
     Synchronizer_init();
@@ -45,10 +40,12 @@ void scalanative_init() {
     MutatorThreads_init();
     MutatorThread_init(__stack_bottom);
 
-    mutator = mmtk_bind_mutator(currentMutatorThread);
-    mmtk_initialize_collection(currentMutatorThread);
-    bump_allocator = (struct BumpAllocator *) &mutator;
+    currentMutatorThread->third_party_heap_collector = NULL;
+    currentMutatorThread->mutatorContext = (MMTkMutatorContext *)malloc(sizeof(MMTkMutatorContext));
+    *currentMutatorThread->mutatorContext = MMTkMutatorContext_bind(currentMutatorThread);
 
+    mmtk_initialize_collection(currentMutatorThread);
+    
     atexit(scalanative_afterexit);
 }
 
@@ -57,32 +54,16 @@ INLINE void *scalanative_alloc(void *info, size_t size) {
 
     const ssize_t offset = 0;
     const int allocator = 0;
-    void *allocated_memory = NULL;
     
-    if (pthread_equal(pthread_self(), main_thread_id)) {
-        allocated_memory = mmtk_alloc(mutator, size, ALLOCATION_ALIGNMENT, offset, allocator);
-    } else {
-        allocated_memory = mmtk_alloc(mutator, size, ALLOCATION_ALIGNMENT, offset, allocator);
-    }
+    HeapWord* allocated_memory = MMTkMutatorContext_alloc(currentMutatorThread->mutatorContext, size, allocator);
 
     *((void **)allocated_memory) = info;
 
-    return allocated_memory;
+    return (void*)allocated_memory;
 }
 
 INLINE void *scalanative_alloc_fast_path(void *info, size_t size) {
     size = MathUtils_RoundToNextMultiple(size, ALLOCATION_ALIGNMENT);
-    if (bump_allocator->cursor == NULL || bump_allocator->limit == NULL) {
-        return scalanative_alloc(info, size);
-    }
-
-    if ((uintptr_t)bump_allocator->cursor + size <= (uintptr_t)bump_allocator->limit) {
-        void* allocated_memory = bump_allocator->cursor;
-        bump_allocator->cursor = (void*)((uintptr_t)bump_allocator->cursor + size);
-        *((void **)allocated_memory) = info;
-        return allocated_memory;
-    }
-
     // If we reach here, the allocation request is larger than the remaining space.
     // Fall back to the slower allocation path.
     return scalanative_alloc(info, size);
@@ -118,8 +99,11 @@ static ThreadRoutineReturnType ProxyThreadStartRoutine(void *args) {
 
     free(args);
     MutatorThread_init((Field_t *)&stackBottom);
-    mutator = mmtk_bind_mutator(currentMutatorThread);
-    bump_allocator = (struct BumpAllocator *) &mutator;
+
+    currentMutatorThread->third_party_heap_collector = NULL;
+    currentMutatorThread->mutatorContext = (MMTkMutatorContext *)malloc(sizeof(MMTkMutatorContext));
+    *currentMutatorThread->mutatorContext = MMTkMutatorContext_bind(currentMutatorThread);
+
     originalFn(originalArgs);
     MutatorThread_delete(currentMutatorThread);
     return (ThreadRoutineReturnType)0;
@@ -142,4 +126,14 @@ void scalanative_gc_set_mutator_thread_state(MutatorThreadState state) {
 }
 void scalanative_gc_safepoint_poll() {
     void *pollGC = *scalanative_gc_safepoint;
+}
+
+void scalanative_add_roots(void *addr_low, void *addr_high) {
+    AddressRange range = {addr_low, addr_high};
+    GC_Roots_Add(&roots, range);
+}
+
+void scalanative_remove_roots(void *addr_low, void *addr_high) {
+    AddressRange range = {addr_low, addr_high};
+    GC_Roots_RemoveByRange(&roots, range);
 }

@@ -7,6 +7,7 @@
 #include <assert.h>
 
 static mutex_t threadListsModifiactionLock;
+volatile atomic_uint mutatorThreadsCounter = ATOMIC_VAR_INIT(0);
 
 void MutatorThread_init(Field_t *stackbottom) {
     MutatorThread *self = (MutatorThread *)malloc(sizeof(MutatorThread));
@@ -47,6 +48,7 @@ void MutatorThread_delete(MutatorThread *self) {
 #ifdef _WIN32
     CloseHandle(self->wakeupEvent);
 #endif
+    free(self->mutatorContext);
     free(self);
 }
 
@@ -85,6 +87,7 @@ void MutatorThreads_add(MutatorThread *node) {
     newNode->next = mutatorThreads;
     mutatorThreads = newNode;
     MutatorThreads_unlock();
+    atomic_fetch_add(&mutatorThreadsCounter, 1);
 }
 
 void MutatorThreads_remove(MutatorThread *node) {

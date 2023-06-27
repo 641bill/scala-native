@@ -9,5 +9,6 @@ void Synchronizer_init();
 bool Synchronizer_acquire();
 void Synchronizer_release();
 void Synchronizer_wait();
+void Synchronizer_changeToCollecting();
 
 #endif // SYNCHRONIZER_H
