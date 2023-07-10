@@ -1,5 +1,7 @@
+#if defined(SCALANATIVE_GC_EXPERIMENTAL)
+
 #include "MMTkMutator.hpp"
-#include "CommonConstants.h"
+#include "immix_commix/CommonConstants.h"
 
 size_t max_non_los_default_alloc_bytes = 0;
 const int HeapWordSize = sizeof(HeapWord);
@@ -36,3 +38,5 @@ void MMTkMutatorContext_destroy(MMTkMutatorContext* context) {
 void MMTkMutatorContext_flush(MMTkMutatorContext* context) {
   mmtk_flush_mutator((MMTk_Mutator) context);
 }
+
+#endif

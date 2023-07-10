@@ -1,3 +1,5 @@
+#if defined(SCALANATIVE_GC_EXPERIMENTAL)
+
 #include "MMTkUpcalls.hpp"
 // #define DEBUG 1
 
@@ -109,8 +111,12 @@ static int mmtk_get_object_array_id() {
 	return __object_array_id;
 }
 
-static int mmtk_get_weak_ref_id() {
-	return __weak_ref_id;
+static int mmtk_get_weak_ref_ids_min() {
+	return __weak_ref_ids_min;
+}
+
+static int mmtk_get_weak_ref_ids_max() {
+	return __weak_ref_ids_max;
 }
 
 static int mmtk_get_weak_ref_field_offset() {
@@ -324,7 +330,8 @@ ScalaNative_Upcalls mmtk_upcalls = {
 	mmtk_schedule_finalizer,
 	// abi
 	mmtk_get_object_array_id,
-	mmtk_get_weak_ref_id,
+	mmtk_get_weak_ref_ids_min,
+	mmtk_get_weak_ref_ids_max,
 	mmtk_get_weak_ref_field_offset,
 	mmtk_get_array_ids_min,
 	mmtk_get_array_ids_max,
@@ -345,3 +352,5 @@ ScalaNative_Upcalls mmtk_upcalls = {
 	mmtk_get_gc_thread_tls,
 	mmtk_init_synchronizer_thread,
 };
+
+#endif

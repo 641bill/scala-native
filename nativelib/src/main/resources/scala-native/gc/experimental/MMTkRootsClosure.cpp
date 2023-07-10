@@ -1,3 +1,5 @@
+#if defined(SCALANATIVE_GC_EXPERIMENTAL)
+
 #include "MMTkRootsClosure.hpp"
 
 void MMTkRootsClosure::flush() {
@@ -39,3 +41,5 @@ extern "C" {
     delete reinterpret_cast<MMTkRootsClosure*>(closure);
   }
 }
+
+#endif

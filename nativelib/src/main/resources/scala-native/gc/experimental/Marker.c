@@ -1,11 +1,13 @@
+#if defined(SCALANATIVE_GC_EXPERIMENTAL)
+
 #include <stdio.h>
 #include <setjmp.h>
 #include "Marker.h"
 #include "Object.h"
-#include "Log.h"
+#include "immix_commix/Log.h"
 #include "State.h"
 #include "datastructures/Stack.h"
-#include "headers/ObjectHeader.h"
+#include "immix_commix/headers/ObjectHeader.h"
 #include "Block.h"
 #include "WeakRefStack.h"
 #include <stdatomic.h>
@@ -159,3 +161,5 @@ void Marker_MarkRoots(Heap *heap, Stack *stack) {
     Marker_markModules(heap, stack);
     Marker_Mark(heap, stack);
 }
+
+#endif

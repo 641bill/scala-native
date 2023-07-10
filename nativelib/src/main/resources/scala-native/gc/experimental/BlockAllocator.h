@@ -2,8 +2,8 @@
 #define IMMIX_BLOCKALLOCATOR_H
 
 #include "datastructures/BlockList.h"
-#include "Constants.h"
-#include "ThreadUtil.h"
+#include "experimental/Constants.h"
+#include "shared/ThreadUtil.h"
 #include <stddef.h>
 
 #define SUPERBLOCK_LIST_SIZE (BLOCK_COUNT_BITS + 1)

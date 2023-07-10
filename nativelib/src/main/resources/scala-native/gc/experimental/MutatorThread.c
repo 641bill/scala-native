@@ -1,9 +1,11 @@
+#if defined(SCALANATIVE_GC_EXPERIMENTAL)
+
 #include "MutatorThread.h"
 #include "State.h"
 #include <stdlib.h>
 #include <stdatomic.h>
 #include <setjmp.h>
-#include <ThreadUtil.h>
+#include "shared/ThreadUtil.h"
 #include <assert.h>
 
 static mutex_t threadListsModifiactionLock;
@@ -134,3 +136,5 @@ void MutatorThreads_remove(MutatorThread *node) {
 void MutatorThreads_lock() { mutex_lock(&threadListsModifiactionLock); }
 
 void MutatorThreads_unlock() { mutex_unlock(&threadListsModifiactionLock); }
+
+#endif

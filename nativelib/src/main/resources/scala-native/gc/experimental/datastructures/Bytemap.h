@@ -4,10 +4,10 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <string.h>
-#include "GCTypes.h"
-#include "../Constants.h"
-#include "Log.h"
-#include "../metadata/ObjectMeta.h"
+#include "shared/GCTypes.h"
+#include "experimental/Constants.h"
+#include "immix_commix/Log.h"
+#include "experimental/metadata/ObjectMeta.h"
 
 typedef struct {
     word_t *firstAddress;

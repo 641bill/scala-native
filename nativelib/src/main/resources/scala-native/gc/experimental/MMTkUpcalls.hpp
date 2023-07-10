@@ -4,7 +4,7 @@
 extern "C" {
 #include <stdlib.h>
 #include <pthread.h>
-#include "headers/ObjectHeader.h"
+#include "immix_commix/headers/ObjectHeader.h"
 #include "Heap.h"
 #include "Marker.h"
 #include "MutatorThread.h"

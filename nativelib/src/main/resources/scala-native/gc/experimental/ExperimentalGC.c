@@ -1,16 +1,18 @@
+#if defined(SCALANATIVE_GC_EXPERIMENTAL)
+
 #include <stddef.h>
 #include <stdio.h>
 #include "mmtk.h"
-#include "CommonConstants.h"
-#include "GCTypes.h"
-#include "utils/MathUtils.h"
-#include "ScalaNativeGC.h"
+#include "immix_commix/CommonConstants.h"
+#include "shared/GCTypes.h"
+#include "immix_commix/utils/MathUtils.h"
+#include "shared/ScalaNativeGC.h"
 #include "State.h"
-#include "Constants.h"
+#include "experimental/Constants.h"
 #include "Settings.h"
 #include "WeakRefStack.h"
-#include "GCScalaNative.h"
-#include "GCRoots.h"
+#include "shared/GCScalaNative.h"
+#include "immix_commix/GCRoots.h"
 #include "MutatorThread.h"
 #include "MMTkMutator.hpp"
 #include "MMTkUpcalls.h"
@@ -137,3 +139,5 @@ void scalanative_remove_roots(void *addr_low, void *addr_high) {
     AddressRange range = {addr_low, addr_high};
     GC_Roots_RemoveByRange(&roots, range);
 }
+
+#endif

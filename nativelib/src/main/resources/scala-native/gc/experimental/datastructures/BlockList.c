@@ -1,8 +1,8 @@
 #include <stddef.h>
 #include <stdio.h>
 #include "BlockList.h"
-#include "Log.h"
-#include "../metadata/BlockMeta.h"
+#include "immix_commix/Log.h"
+#include "experimental/metadata/BlockMeta.h"
 
 BlockMeta *BlockList_getNextBlock(word_t *blockMetaStart,
                                   BlockMeta *blockMeta) {
