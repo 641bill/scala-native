@@ -85,7 +85,8 @@ trait NirGenExpr(using Context) {
 
       val sym = fun.symbol
       def isStatic = sym.owner.isStaticOwner
-      def qualifier = qualifierOf(fun)
+      def qualifier0 = qualifierOf(fun)
+      def qualifier = qualifier0.withSpan(qualifier0.span.orElse(fun.span))
 
       fun match {
         case _: TypeApply => genApplyTypeApply(app)
@@ -422,8 +423,8 @@ trait NirGenExpr(using Context) {
           else if (sym.is(Module))
             genModule(sym)
           else curMethodEnv.resolve(sym)
-        case desuaged: Select =>
-          genSelect(desuaged)
+        case desuagred: Select =>
+          genSelect(desuagred.withSpan(tree.span))
         case tree =>
           throw FatalError(s"Unsupported desugared ident tree: $tree")
       }
@@ -2036,9 +2037,16 @@ trait NirGenExpr(using Context) {
     private def genUnsignedOp(app: Tree, code: Int): Val = {
       given nir.Position = app.span
       import NirPrimitives._
+      def castToUnsigned = code == UNSIGNED_OF
       def castUnsignedInteger = code >= BYTE_TO_UINT && code <= INT_TO_ULONG
       def castUnsignedToFloat = code >= UINT_TO_FLOAT && code <= ULONG_TO_DOUBLE
       app match {
+        case Apply(_, Seq(argp)) if castToUnsigned =>
+          val ty = genType(app.tpe.resultType)
+          val arg = genExpr(argp)
+
+          buf.box(ty, arg, unwind)
+
         case Apply(_, Seq(argp)) if castUnsignedInteger =>
           val ty = genType(app.tpe)
           val arg = genExpr(argp)
