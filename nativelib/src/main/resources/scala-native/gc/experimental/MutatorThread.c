@@ -26,20 +26,39 @@ void MutatorThread_init(Field_t *stackbottom) {
     self->thread = pthread_self();
 #endif
     MutatorThread_switchState(self, MutatorThreadState_Managed);
-    Allocator_Init(&self->allocator, &blockAllocator, heap.bytemap,
-                   heap.blockMetaStart, heap.heapStart);
+    // Allocator_Init(&self->allocator, &blockAllocator, heap.bytemap,
+    //                heap.blockMetaStart, heap.heapStart);
 
-    LargeAllocator_Init(&self->largeAllocator, &blockAllocator, heap.bytemap,
-                        heap.blockMetaStart, heap.heapStart);
-    Allocator_Init(&self->allocator, &blockAllocator, heap.bytemap,
-                   heap.blockMetaStart, heap.heapStart);
+    // LargeAllocator_Init(&self->largeAllocator, &blockAllocator, heap.bytemap,
+    //                     heap.blockMetaStart, heap.heapStart);
+    // Allocator_Init(&self->allocator, &blockAllocator, heap.bytemap,
+    //                heap.blockMetaStart, heap.heapStart);
 
-    LargeAllocator_Init(&self->largeAllocator, &blockAllocator, heap.bytemap,
-                        heap.blockMetaStart, heap.heapStart);
+    // LargeAllocator_Init(&self->largeAllocator, &blockAllocator, heap.bytemap,
+    //                     heap.blockMetaStart, heap.heapStart);
     MutatorThreads_add(self);
     // Following init operations might trigger GC, needs to be executed after
     // acknownleding the new thread in MutatorThreads_add
-    Allocator_InitCursors(&self->allocator);
+    // Allocator_InitCursors(&self->allocator);
+}
+
+void GCThread_init(Field_t *stackbottom) {
+    MutatorThread *self = (MutatorThread *)malloc(sizeof(MutatorThread));
+    memset(self, 0, sizeof(MutatorThread));
+    currentMutatorThread = self;
+
+    self->stackBottom = stackbottom;
+#ifdef _WIN32
+    self->wakeupEvent = CreateEvent(NULL, true, false, NULL);
+    if (self->wakeupEvent == NULL) {
+        fprintf(stderr, "Failed to setup mutator thread: errno=%lu\n",
+                GetLastError());
+        exit(1);
+    }
+#else
+    self->thread = pthread_self();
+#endif
+    // MutatorThreads_add(self);
 }
 
 void MutatorThread_delete(MutatorThread *self) {

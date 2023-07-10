@@ -1,7 +1,7 @@
 #include "mmtk.h"
 
 void invoke_MutatorClosure(MutatorClosure* closure, MMTk_Mutator mutator) {
-    closure->func(mutator, closure->data);
+    invoke_mutator_closure(closure, mutator);
 }
 
 NewBuffer invoke_EdgesClosure(EdgesClosure* closure, void** buf, size_t size, size_t capa) {

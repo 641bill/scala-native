@@ -52,6 +52,7 @@ extern volatile atomic_uint mutatorThreadsCounter;
 typedef MutatorThreadNode *MutatorThreads;
 
 void MutatorThread_init(word_t **stackBottom);
+void GCThread_init(word_t **stackBottom);
 void MutatorThread_delete(MutatorThread *self);
 void MutatorThread_switchState(MutatorThread *self,
                                MutatorThreadState newState);

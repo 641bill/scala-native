@@ -1,5 +1,5 @@
 #include "MMTkUpcalls.hpp"
-#define DEBUG 1
+// #define DEBUG 1
 
 thread_local MMTk_GCThreadTLS *mmtk_gc_thread_tls;
 
@@ -16,11 +16,10 @@ static void mmtk_stop_all_mutators(void *tls, bool scan_mutators_in_safepoint, M
 	printf("mmtk_stop_all_mutators\n");
 	#endif
 	
-	int stackBottom = 0;
-	MutatorThread_init((Field_t *)&stackBottom);
-	MutatorThread_switchState(currentMutatorThread, MutatorThreadState_Unmanaged);
-	MutatorThreads_remove(currentMutatorThread);
-	atomic_fetch_add(&mutatorThreadsCounter, -1);	
+	// if (currentMutatorThread == NULL) {
+	// 	int stackBottom = 0;
+	// 	GCThread_init((Field_t *)&stackBottom);
+	// } 
 
 	Synchronizer_acquire();
 	if (!scan_mutators_in_safepoint) {
@@ -39,6 +38,12 @@ static void mmtk_resume_mutators(void *tls) {
 	#ifdef DEBUG
 	printf("mmtk_resume_mutators\n");
 	#endif
+
+	if (currentMutatorThread == NULL) {
+		printf("GC Thread being inited\n");
+		int stackBottom = 0;
+		GCThread_init((Field_t *)&stackBottom);
+	}
 
 	Synchronizer_release();
 }
@@ -272,7 +277,7 @@ static void mmtk_get_mutators(MutatorClosure closure) {
 /// The caller needs to make sure that the thread is valid (a value passed in by the VM binding through API).
 static bool mmtk_is_mutator(void* tls) {
 	#ifdef DEBUG
-	printf("mmtk_is_mutator\n");
+	printf("mmtk_is_mutator: %d\n", tls != NULL ? ((MutatorThread*) tls)->third_party_heap_collector == NULL : false);
 	#endif
 
   if (tls == NULL) return false;
@@ -292,13 +297,22 @@ static void* mmtk_get_mmtk_mutator(void* tls) {
 	return reinterpret_cast<MutatorThread*>(tls)->mutatorContext;
 }
 
-static void
-mmtk_init_gc_worker_thread(MMTk_VMWorkerThread gc_thread_tls) {
+static void mmtk_init_gc_worker_thread(MMTk_VMWorkerThread gc_thread_tls) {
     mmtk_gc_thread_tls = gc_thread_tls;
+
+		int stackBottom = 0;
+		GCThread_init((Field_t *)&stackBottom);
+		MutatorThread_switchState(currentMutatorThread, MutatorThreadState_Unmanaged);
 }
 
-static MMTk_VMWorkerThread mmtk_get_gc_thread_tls(void) {
+static MMTk_VMWorkerThread mmtk_get_gc_thread_tls() {
     return mmtk_gc_thread_tls;
+}
+
+static void mmtk_init_synchronizer_thread() {
+		int stackBottom = 0;
+		GCThread_init((Field_t *)&stackBottom);
+		MutatorThread_switchState(currentMutatorThread, MutatorThreadState_Unmanaged);
 }
 
 ScalaNative_Upcalls mmtk_upcalls = {
@@ -329,4 +343,5 @@ ScalaNative_Upcalls mmtk_upcalls = {
 	mmtk_get_mmtk_mutator,
 	mmtk_init_gc_worker_thread,
 	mmtk_get_gc_thread_tls,
+	mmtk_init_synchronizer_thread,
 };
