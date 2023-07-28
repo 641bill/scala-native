@@ -65,7 +65,7 @@ object Commands {
 
   lazy val testTools = projectVersionCommand("test-tools") {
     case (version, state) =>
-      val tests = List(tools, testRunner, testInterface)
+      val tests = List(tools, testRunner, testInterface, nscPlugin, nir)
         .map(_.forBinaryVersion(version).id)
         .map(id => s"$id/test")
       tests :::
@@ -162,9 +162,7 @@ object Commands {
     import ScalaVersions._
     val publishEachVersion = for {
       version <- List(scala212, scala213, scala3)
-    } yield
-      if (isSnapshot) s"++$version; publish; crossPublish"
-      else s"++$version; publishSigned; crossPublishSigned"
+    } yield s"++$version; publishSigned; crossPublishSigned"
 
     "clean" :: publishEachVersion ::: state
   }
