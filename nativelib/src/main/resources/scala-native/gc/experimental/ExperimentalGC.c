@@ -28,7 +28,9 @@ void scalanative_afterexit() { Stats_OnExit(heap.stats); }
 
 void scalanative_init() {
     // Initialize the MMTk instance with the specified heap size
-    mmtk_init(Settings_MinHeapSize());
+
+    // mmtk_init(Settings_MinHeapSize(), Settings_MaxHeapSize() - mmtk_get_bytes_in_page());
+    mmtk_init(Settings_MinHeapSize(), Settings_MinHeapSize());
     max_non_los_default_alloc_bytes = get_max_non_los_default_alloc_bytes();
 
     Heap_Init(&heap, Settings_MinHeapSize(), Settings_MaxHeapSize());

@@ -146,7 +146,8 @@ NO_SANITIZE void mmtk_mark_range(Heap *heap, Stack *stack, word_t **from,
 			if (Heap_IsWordInHeap(heap, addr) && Bytemap_isPtrAligned(addr)) {
 				if (mmtk_is_mmtk_object(addr)) {
 					// Create the work packets for MMTk instead of marking in the runtime
-						roots_closure.do_work(addr);
+					
+					roots_closure.do_work(addr);
 				}
 			}
 	}
@@ -256,7 +257,7 @@ void mmtk_mark(Heap *heap, Stack *stack, MMTkRootsClosure &roots_closure) {
 static void mmtk_scan_vm_specific_roots(NodesClosure closure) {
 	MMTkRootsClosure roots_closure(closure);
 	mmtk_mark_modules(&heap, &stack, roots_closure);
-	mmtk_mark(&heap, &stack, roots_closure);
+	// mmtk_mark(&heap, &stack, roots_closure);
 }
 
 static void mmtk_prepare_for_roots_re_scanning() {
