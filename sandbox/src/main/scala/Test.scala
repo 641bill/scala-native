@@ -3,9 +3,9 @@ import scala.collection.mutable.ArrayBuffer
 
 object Test {
   def main(args: Array[String]): Unit = {
-    for (i <- 0 to 1000000) {
-      val ab = ArrayBuffer(i, i + 1, i + 2)
-    }
+    // for (i <- 0 to 1000000) {
+    //   val ab = ArrayBuffer(i, i + 1, i + 2)
+    // }
     val benchmarkResult = gcbench.GCBenchBenchmark.run("")
     println(s"GCBench result: $benchmarkResult")
 

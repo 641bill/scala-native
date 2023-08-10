@@ -141,16 +141,22 @@ NO_SANITIZE void mmtk_mark_range(Heap *heap, Stack *stack, word_t **from,
 	assert(to != NULL);
 	heap->heapStart = (word_t*)mmtk_starting_heap_address();
 	heap->heapEnd = (word_t*)mmtk_last_heap_address();
+	// Have a vector storing the pinned objects of the current run
+	std::vector<word_t*> current_pinned_objects;
 	for (word_t **current = from; current <= to; current += 1) {
 			word_t *addr = *current;
 			if (Heap_IsWordInHeap(heap, addr) && Bytemap_isPtrAligned(addr)) {
 				if (mmtk_is_mmtk_object(addr)) {
+					// Pin the object pointer by conservative roots
+					if (mmtk_pin_object(addr)) {
+						current_pinned_objects.push_back(addr);
+					}
 					// Create the work packets for MMTk instead of marking in the runtime
-					
 					roots_closure.do_work(addr);
 				}
 			}
 	}
+	mmtk_append_pinned_objects(current_pinned_objects.data(), current_pinned_objects.size());
 }
 
 void mmtk_mark_program_stack(MutatorThread *thread, Heap *heap, Stack *stack, MMTkRootsClosure &roots_closure) {
@@ -207,6 +213,8 @@ static void mmtk_scan_roots_in_mutator_thread(NodesClosure closure, void *tls) {
 static inline void mmtk_mark_field(Heap *heap, Stack *stack, Field_t field, MMTkRootsClosure &roots_closure) {
 	heap->heapStart = (word_t*)mmtk_starting_heap_address();
 	heap->heapEnd = (word_t*)mmtk_last_heap_address();
+	// Have a vector storing the pinned objects of the current run
+	std::vector<word_t*> current_pinned_objects;
 	if (Heap_IsWordInHeap(heap, field)) {
 		if (mmtk_is_mmtk_object(field)) {
 			roots_closure.do_work(field);

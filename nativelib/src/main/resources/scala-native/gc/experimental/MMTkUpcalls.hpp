@@ -12,5 +12,6 @@ extern "C" {
 #include "MMTkUpcalls.h"
 }
 #include "MMTkRootsClosure.hpp"
+#include <vector>
 
 #endif // MMTK_UPCALLS_HPP

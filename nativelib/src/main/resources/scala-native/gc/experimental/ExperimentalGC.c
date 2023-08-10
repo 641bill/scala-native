@@ -35,6 +35,7 @@ void scalanative_init() {
 
     Heap_Init(&heap, Settings_MinHeapSize(), Settings_MaxHeapSize());
     scalanative_gc_init(&mmtk_upcalls);
+    mmtk_init_binding(&mmtk_upcalls);
     Stack_Init(&stack, INITIAL_STACK_SIZE);
     Stack_Init(&weakRefStack, INITIAL_STACK_SIZE);
 
