@@ -49,6 +49,7 @@ Object *Object_GetUnmarkedObject(Heap *heap, word_t *word) {
     BlockMeta *blockMeta =
         Block_GetBlockMeta(heap->blockMetaStart, heap->heapStart, word);
 
+    // Align the word properly differently
     if (BlockMeta_ContainsLargeObjects(blockMeta)) {
         word = (word_t *)((word_t)word & LARGE_BLOCK_MASK);
     } else {

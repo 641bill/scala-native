@@ -10,6 +10,7 @@ extern "C" {
 #include "MutatorThread.h"
 #include "Synchronizer.h"
 #include "MMTkUpcalls.h"
+#include "Object.h"
 }
 #include "MMTkRootsClosure.hpp"
 #include <vector>

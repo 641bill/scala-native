@@ -135,6 +135,20 @@ static size_t mmtk_get_allocation_alignment() {
 	return ALLOCATION_ALIGNMENT;
 }
 
+void mmtk_mark_conservative(Heap *heap, Stack *stack, word_t *address, MMTkRootsClosure &roots_closure) {
+	assert(Heap_IsWordInHeap(heap, address));
+	Object *object = Object_GetUnmarkedObject(heap, address);
+	Bytemap *bytemap = heap->bytemap;
+	if (object != NULL) {
+		ObjectMeta *objectMeta = Bytemap_Get(bytemap, (word_t *)object);
+		assert(ObjectMeta_IsAllocated(objectMeta));
+		if (ObjectMeta_IsAllocated(objectMeta)) {
+			// Create the work packets for MMTk instead of marking in the runtime
+			roots_closure.do_work(object);
+		}
+	}
+}
+
 NO_SANITIZE void mmtk_mark_range(Heap *heap, Stack *stack, word_t **from,
                                   word_t **to, MMTkRootsClosure &roots_closure) {
 	assert(from != NULL);
@@ -144,17 +158,14 @@ NO_SANITIZE void mmtk_mark_range(Heap *heap, Stack *stack, word_t **from,
 	// Have a vector storing the pinned objects of the current run
 	std::vector<word_t*> current_pinned_objects;
 	for (word_t **current = from; current <= to; current += 1) {
-			word_t *addr = *current;
-			if (Heap_IsWordInHeap(heap, addr) && Bytemap_isPtrAligned(addr)) {
-				if (mmtk_is_mmtk_object(addr)) {
-					// Pin the object pointer by conservative roots
-					if (mmtk_pin_object(addr)) {
-						current_pinned_objects.push_back(addr);
-					}
-					// Create the work packets for MMTk instead of marking in the runtime
-					roots_closure.do_work(addr);
+		word_t *addr = *current;
+		if (Heap_IsWordInHeap(heap, addr) && Bytemap_isPtrAligned(addr)) {
+				// Pin the object pointer by conservative roots
+				if (mmtk_pin_object(addr)) {
+					current_pinned_objects.push_back(addr);
 				}
-			}
+				mmtk_mark_conservative(heap, stack, addr, roots_closure);
+		}
 	}
 	mmtk_append_pinned_objects(current_pinned_objects.data(), current_pinned_objects.size());
 }
@@ -194,8 +205,8 @@ static void mmtk_scan_roots_in_all_mutator_threads(NodesClosure closure) {
 
 	MutatorThreadNode *head = mutatorThreads;
 	MutatorThreads_foreach(mutatorThreads, node) {
-			MutatorThread *thread = node->value;
-			mmtk_mark_program_stack(thread, &heap, &stack, roots_closure);
+		MutatorThread *thread = node->value;
+		mmtk_mark_program_stack(thread, &heap, &stack, roots_closure);
 	}
 }
 
@@ -210,14 +221,56 @@ static void mmtk_scan_roots_in_mutator_thread(NodesClosure closure, void *tls) {
 	mmtk_mark_program_stack(thread, &heap, &stack, roots_closure);
 }
 
+/* If compiling with enabled lock words check if object monitor is inflated and
+ * can be marked. Otherwise, in singlethreaded mode this funciton is no-op
+ */
+static inline void mmtk_mark_lockWords(Heap *heap, Stack *stack,
+                                        Object *object, MMTkRootsClosure &roots_closure) {
+#ifdef USES_LOCKWORD
+    if (object != NULL) {
+        Field_t rttiLock = object->rtti->rt.lockWord;
+        if (Field_isInflatedLock(rttiLock)) {
+            mmtk_mark_field(heap, stack, Field_allignedLockRef(rttiLock), roots_closure);
+        }
+
+        Field_t objectLock = object->lockWord;
+        if (Field_isInflatedLock(objectLock)) {
+            Field_t field = Field_allignedLockRef(objectLock);
+            mmtk_mark_field(heap, stack, field, roots_closure);
+        }
+    }
+#endif
+}
+
+void mmtk_mark_object(Heap *heap, Stack *stack, Bytemap *bytemap,
+                       Object *object, ObjectMeta *objectMeta, MMTkRootsClosure &roots_closure) {
+    assert(ObjectMeta_IsAllocated(objectMeta));
+    assert(object->rtti != NULL);
+
+    mmtk_mark_lockWords(heap, stack, object, roots_closure);
+    if (Object_IsWeakReference(object)) {
+        // Added to the WeakReference stack for additional later visit
+        Stack_Push(&weakRefStack, object);
+    }
+
+    assert(Object_Size(object) != 0);
+		// Create the work packets for MMTk instead of marking in the runtime
+		roots_closure.do_work(object);
+    ObjectMeta_SetMarked(objectMeta);
+    Stack_Push(stack, object);
+}
+
 static inline void mmtk_mark_field(Heap *heap, Stack *stack, Field_t field, MMTkRootsClosure &roots_closure) {
 	heap->heapStart = (word_t*)mmtk_starting_heap_address();
 	heap->heapEnd = (word_t*)mmtk_last_heap_address();
 	// Have a vector storing the pinned objects of the current run
 	std::vector<word_t*> current_pinned_objects;
 	if (Heap_IsWordInHeap(heap, field)) {
-		if (mmtk_is_mmtk_object(field)) {
-			roots_closure.do_work(field);
+		ObjectMeta *fieldMeta = Bytemap_Get(heap->bytemap, field);
+		if (ObjectMeta_IsAllocated(fieldMeta)) {
+			Object *object = (Object *)field;
+			// Create the work packets for MMTk instead of marking in the runtime
+			roots_closure.do_work(object);
 		}
 	}
 }
@@ -230,8 +283,8 @@ void mmtk_mark_modules(Heap *heap, Stack *stack, MMTkRootsClosure &roots_closure
 	word_t **modules = &__modules;
 	int nb_modules = __modules_size;
 	for (int i = 0; i < nb_modules; i++) {
-			Object *object = (Object *)modules[i];
-			mmtk_mark_field(heap, stack, (Field_t)object, roots_closure);
+		Object *object = (Object *)modules[i];
+		mmtk_mark_field(heap, stack, (Field_t)object, roots_closure);
 	}
 }
 

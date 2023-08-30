@@ -14,6 +14,7 @@ MMTkMutatorContext MMTkMutatorContext_bind(void* current) {
 }
 
 HeapWord* MMTkMutatorContext_alloc(MMTkMutatorContext* context, size_t bytes, enum MMTkAllocator allocator) {
+  assert(bytes % ALLOCATION_ALIGNMENT == 0);
   // All allocations with size larger than max non-los bytes will get to this slowpath here.
   // We will use LOS for those.
   assert(max_non_los_default_alloc_bytes != 0 && "max_non_los_default_alloc_bytes hasn't been initialized");

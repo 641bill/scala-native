@@ -58,9 +58,17 @@ INLINE void *scalanative_alloc(void *info, size_t size) {
     size = MathUtils_RoundToNextMultiple(size, ALLOCATION_ALIGNMENT);
 
     const ssize_t offset = 0;
-    const int allocator = 0;
+    const int mmtk_allocator = 0;
+    Allocator *allocator = &currentMutatorThread->allocator;
+    HeapWord* allocated_memory = MMTkMutatorContext_alloc(currentMutatorThread->mutatorContext, size, mmtk_allocator);
+
+    Object *object = (Object *)allocated_memory;
+    ObjectMeta *objectMeta = Bytemap_Get(allocator->bytemap, (word_t *)object);
+    ObjectMeta_SetAllocated(objectMeta);
+
+    __builtin_prefetch(object + 36, 0, 3);
     
-    HeapWord* allocated_memory = MMTkMutatorContext_alloc(currentMutatorThread->mutatorContext, size, allocator);
+    assert(Heap_IsWordInHeap(heap, (word_t *)object));
 
     *((void **)allocated_memory) = info;
 
