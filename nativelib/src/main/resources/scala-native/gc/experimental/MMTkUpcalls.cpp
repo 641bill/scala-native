@@ -135,6 +135,36 @@ static size_t mmtk_get_allocation_alignment() {
 	return ALLOCATION_ALIGNMENT;
 }
 
+void mmtk_mark_object(Heap *heap, Stack *stack, Bytemap *bytemap,
+                       Object *object, ObjectMeta *objectMeta, MMTkRootsClosure &roots_closure) {
+    assert(ObjectMeta_IsAllocated(objectMeta));
+    assert(object->rtti != NULL);
+
+    mmtk_mark_lockWords(heap, stack, object, roots_closure);
+    if (Object_IsWeakReference(object)) {
+        // Added to the WeakReference stack for additional later visit
+        Stack_Push(&weakRefStack, object);
+    }
+
+    assert(Object_Size(object) != 0);
+		// Create the work packets for MMTk instead of marking in the runtime
+		roots_closure.do_work(object);
+    ObjectMeta_SetMarked(objectMeta);
+    Stack_Push(stack, object);
+}
+
+static inline void mmtk_mark_field(Heap *heap, Stack *stack, Field_t field, MMTkRootsClosure &roots_closure) {
+	heap->heapStart = (word_t*)mmtk_starting_heap_address();
+	heap->heapEnd = (word_t*)mmtk_last_heap_address();
+	if (Heap_IsWordInHeap(heap, field)) {
+		ObjectMeta *fieldMeta = Bytemap_Get(heap->bytemap, field);
+		if (ObjectMeta_IsAllocated(fieldMeta)) {
+			Object *object = (Object *)field;
+			mmtk_mark_object(heap, stack, heap->bytemap, object, fieldMeta, roots_closure);
+		}
+	}
+}
+
 void mmtk_mark_conservative(Heap *heap, Stack *stack, word_t *address, MMTkRootsClosure &roots_closure) {
 	assert(Heap_IsWordInHeap(heap, address));
 	Object *object = Object_GetUnmarkedObject(heap, address);
@@ -143,8 +173,7 @@ void mmtk_mark_conservative(Heap *heap, Stack *stack, word_t *address, MMTkRoots
 		ObjectMeta *objectMeta = Bytemap_Get(bytemap, (word_t *)object);
 		assert(ObjectMeta_IsAllocated(objectMeta));
 		if (ObjectMeta_IsAllocated(objectMeta)) {
-			// Create the work packets for MMTk instead of marking in the runtime
-			roots_closure.do_work(object);
+			mmtk_mark_object(heap, stack, bytemap, object, objectMeta, roots_closure);
 		}
 	}
 }
@@ -242,39 +271,6 @@ static inline void mmtk_mark_lockWords(Heap *heap, Stack *stack,
 #endif
 }
 
-void mmtk_mark_object(Heap *heap, Stack *stack, Bytemap *bytemap,
-                       Object *object, ObjectMeta *objectMeta, MMTkRootsClosure &roots_closure) {
-    assert(ObjectMeta_IsAllocated(objectMeta));
-    assert(object->rtti != NULL);
-
-    mmtk_mark_lockWords(heap, stack, object, roots_closure);
-    if (Object_IsWeakReference(object)) {
-        // Added to the WeakReference stack for additional later visit
-        Stack_Push(&weakRefStack, object);
-    }
-
-    assert(Object_Size(object) != 0);
-		// Create the work packets for MMTk instead of marking in the runtime
-		roots_closure.do_work(object);
-    ObjectMeta_SetMarked(objectMeta);
-    Stack_Push(stack, object);
-}
-
-static inline void mmtk_mark_field(Heap *heap, Stack *stack, Field_t field, MMTkRootsClosure &roots_closure) {
-	heap->heapStart = (word_t*)mmtk_starting_heap_address();
-	heap->heapEnd = (word_t*)mmtk_last_heap_address();
-	// Have a vector storing the pinned objects of the current run
-	std::vector<word_t*> current_pinned_objects;
-	if (Heap_IsWordInHeap(heap, field)) {
-		ObjectMeta *fieldMeta = Bytemap_Get(heap->bytemap, field);
-		if (ObjectMeta_IsAllocated(fieldMeta)) {
-			Object *object = (Object *)field;
-			// Create the work packets for MMTk instead of marking in the runtime
-			roots_closure.do_work(object);
-		}
-	}
-}
-
 extern word_t *__modules;
 extern int __modules_size;
 #define LAST_FIELD_OFFSET -1
@@ -282,10 +278,16 @@ extern int __modules_size;
 void mmtk_mark_modules(Heap *heap, Stack *stack, MMTkRootsClosure &roots_closure) {
 	word_t **modules = &__modules;
 	int nb_modules = __modules_size;
+	// Have a vector storing the pinned objects of the current run
+	std::vector<word_t*> current_pinned_objects;
 	for (int i = 0; i < nb_modules; i++) {
 		Object *object = (Object *)modules[i];
+		if (mmtk_pin_object((Field_t)object)) {
+			current_pinned_objects.push_back((Field_t)object);
+		}
 		mmtk_mark_field(heap, stack, (Field_t)object, roots_closure);
 	}
+	mmtk_append_pinned_objects(current_pinned_objects.data(), current_pinned_objects.size());
 }
 
 void mmtk_mark(Heap *heap, Stack *stack, MMTkRootsClosure &roots_closure) {
@@ -302,15 +304,65 @@ void mmtk_mark(Heap *heap, Stack *stack, MMTkRootsClosure &roots_closure) {
 				}
 			}
 			// non-object arrays do not contain pointers
-	} else {
-			int64_t *ptr_map = object->rtti->refMapStruct;
-			for (int i = 0; ptr_map[i] != LAST_FIELD_OFFSET; i++) {
-				if (Object_IsReferantOfWeakReference(object, ptr_map[i]))
-					continue;
-				mmtk_mark_field(heap, stack, object->fields[ptr_map[i]], roots_closure);
-			}
+		} else {
+				int64_t *ptr_map = object->rtti->refMapStruct;
+				for (int i = 0; ptr_map[i] != LAST_FIELD_OFFSET; i++) {
+					if (Object_IsReferantOfWeakReference(object, ptr_map[i]))
+						continue;
+					mmtk_mark_field(heap, stack, object->fields[ptr_map[i]], roots_closure);
+				}
+		}
 	}
+}
+
+void mmtk_scan_object(Heap *heap, Bytemap *bytemap,
+                       Object *object, ObjectMeta *objectMeta, void* &edge_vistor) {
+    assert(ObjectMeta_IsAllocated(objectMeta));
+    assert(object->rtti != NULL);
+
+    mmtk_mark_lockWords(heap, &stack, object, );
+    if (Object_IsWeakReference(object)) {
+        // Added to the WeakReference stack for additional later visit
+        Stack_Push(&weakRefStack, object);
+    }
+
+    assert(Object_Size(object) != 0);
+		// Create the work packets for MMTk instead of marking in the runtime
+		closure.visit_edge
+    ObjectMeta_SetMarked(objectMeta);
+}
+
+static inline void mmtk_scan_field(Heap *heap, Field_t field, void* &edge_vistor) {
+	heap->heapStart = (word_t*)mmtk_starting_heap_address();
+	heap->heapEnd = (word_t*)mmtk_last_heap_address();
+	if (Heap_IsWordInHeap(heap, field)) {
+		ObjectMeta *fieldMeta = Bytemap_Get(heap->bytemap, field);
+		if (ObjectMeta_IsAllocated(fieldMeta)) {
+			Object *object = (Object *)field;
+			mmtk_scan_object(heap, heap->bytemap, object, fieldMeta, );
+		}
 	}
+}
+
+static void mmtk_obj_iterate(Object &obj, void* &edge_vistor) {
+	int64_t *ptr_map = obj.rtti->refMapStruct;
+	for (int i = 0; ptr_map[i] != LAST_FIELD_OFFSET; i++) {
+		if (Object_IsReferantOfWeakReference(&obj, ptr_map[i]))
+			continue;
+		mmtk_scan_field(&heap, obj.fields[ptr_map[i]], closure);
+	}
+}
+
+static void mmtk_array_iterate(ArrayHeader &array, void* &edge_vistor) {
+	Bytemap *bytemap = (&heap) -> bytemap;
+	if (array.rtti->rt.id == __object_array_id) {
+		size_t length = array.length;
+		word_t **fields = (word_t **)(&array + 1);
+		for (int i = 0; i < length; i++) {
+			mmtk_scan_field(&heap, fields[i], closure);
+		}
+	}
+	// non-object arrays do not contain pointers
 }
 
 /// Scan VM-specific roots. The creation of all root scan tasks (except thread scanning)
@@ -318,7 +370,7 @@ void mmtk_mark(Heap *heap, Stack *stack, MMTkRootsClosure &roots_closure) {
 static void mmtk_scan_vm_specific_roots(NodesClosure closure) {
 	MMTkRootsClosure roots_closure(closure);
 	mmtk_mark_modules(&heap, &stack, roots_closure);
-	// mmtk_mark(&heap, &stack, roots_closure);
+	mark_mark(&heap, &stack, roots_closure);
 }
 
 static void mmtk_prepare_for_roots_re_scanning() {
