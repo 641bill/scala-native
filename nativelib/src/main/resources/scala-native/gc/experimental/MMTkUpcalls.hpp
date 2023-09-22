@@ -11,8 +11,10 @@ extern "C" {
 #include "Synchronizer.h"
 #include "MMTkUpcalls.h"
 #include "Object.h"
+#include "WeakRefStack.h"
 }
 #include "MMTkRootsClosure.hpp"
 #include <vector>
+#include <iostream>
 
 #endif // MMTK_UPCALLS_HPP

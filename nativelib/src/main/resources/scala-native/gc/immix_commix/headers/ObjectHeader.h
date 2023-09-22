@@ -86,12 +86,12 @@ static inline size_t Object_Size(Object *object) {
     }
 }
 
-static inline bool Object_IsWeakReference(Object *object) {
+static inline bool Object_IsWeakReference(const Object *object) {
     int32_t id = object->rtti->rt.id;
     return __weak_ref_ids_min <= id && id <= __weak_ref_ids_max;
 }
 
-static inline bool Object_IsReferantOfWeakReference(Object *object,
+static inline bool Object_IsReferantOfWeakReference(const Object *object,
                                                     int fieldOffset) {
     return Object_IsWeakReference(object) &&
            fieldOffset == __weak_ref_field_offset;

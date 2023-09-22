@@ -10,6 +10,7 @@
 #include "Stats.h"
 #include <stdio.h>
 #include "shared/ThreadUtil.h"
+#include "mmtk.h"
 
 typedef struct {
     word_t *blockMetaStart;
@@ -28,6 +29,8 @@ typedef struct {
 } Heap;
 
 static inline bool Heap_IsWordInHeap(Heap *heap, word_t *word) {
+	heap->heapStart = (word_t*)mmtk_starting_heap_address();
+	heap->heapEnd = (word_t*)mmtk_last_heap_address();
     return word >= heap->heapStart && word < heap->heapEnd;
 }
 

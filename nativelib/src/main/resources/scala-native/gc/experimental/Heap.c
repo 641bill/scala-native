@@ -16,6 +16,7 @@
 #include <time.h>
 #include "WeakRefStack.h"
 #include "Synchronizer.h"
+#include "mmtk.h"
 
 void Heap_exitWithOutOfMemory(const char *details) {
     fprintf(stderr, "Out of heap space %s\n", details);
@@ -89,28 +90,28 @@ void Heap_Init(Heap *heap, size_t minHeapSize, size_t maxHeapSize) {
         maxHeapSize = memoryLimit;
     }
 
-    uint32_t maxNumberOfBlocks = maxHeapSize / SPACE_USED_PER_BLOCK;
-    uint32_t initialBlockCount = minHeapSize / SPACE_USED_PER_BLOCK;
+    // uint32_t maxNumberOfBlocks = maxHeapSize / SPACE_USED_PER_BLOCK;
+    // uint32_t initialBlockCount = minHeapSize / SPACE_USED_PER_BLOCK;
     heap->maxHeapSize = maxHeapSize;
-    heap->blockCount = initialBlockCount;
-    heap->maxBlockCount = maxNumberOfBlocks;
+    // heap->blockCount = initialBlockCount;
+    // heap->maxBlockCount = maxNumberOfBlocks;
 
-    // reserve space for block headers
-    size_t blockMetaSpaceSize = maxNumberOfBlocks * sizeof(BlockMeta);
-    word_t *blockMetaStart = Heap_mapAndAlign(blockMetaSpaceSize, WORD_SIZE);
-    heap->blockMetaStart = blockMetaStart;
-    heap->blockMetaEnd =
-        blockMetaStart + initialBlockCount * sizeof(BlockMeta) / WORD_SIZE;
+    // // reserve space for block headers
+    // size_t blockMetaSpaceSize = maxNumberOfBlocks * sizeof(BlockMeta);
+    // word_t *blockMetaStart = Heap_mapAndAlign(blockMetaSpaceSize, WORD_SIZE);
+    // heap->blockMetaStart = blockMetaStart;
+    // heap->blockMetaEnd =
+    //     blockMetaStart + initialBlockCount * sizeof(BlockMeta) / WORD_SIZE;
 
-    // reserve space for line headers
-    size_t lineMetaSpaceSize =
-        (size_t)maxNumberOfBlocks * LINE_COUNT * LINE_METADATA_SIZE;
-    word_t *lineMetaStart = Heap_mapAndAlign(lineMetaSpaceSize, WORD_SIZE);
-    heap->lineMetaStart = lineMetaStart;
-    assert(LINE_COUNT * LINE_SIZE == BLOCK_TOTAL_SIZE);
-    assert(LINE_COUNT * LINE_METADATA_SIZE % WORD_SIZE == 0);
-    heap->lineMetaEnd = lineMetaStart + initialBlockCount * LINE_COUNT *
-                                            LINE_METADATA_SIZE / WORD_SIZE;
+    // // reserve space for line headers
+    // size_t lineMetaSpaceSize =
+    //     (size_t)maxNumberOfBlocks * LINE_COUNT * LINE_METADATA_SIZE;
+    // word_t *lineMetaStart = Heap_mapAndAlign(lineMetaSpaceSize, WORD_SIZE);
+    // heap->lineMetaStart = lineMetaStart;
+    // assert(LINE_COUNT * LINE_SIZE == BLOCK_TOTAL_SIZE);
+    // assert(LINE_COUNT * LINE_METADATA_SIZE % WORD_SIZE == 0);
+    // heap->lineMetaEnd = lineMetaStart + initialBlockCount * LINE_COUNT *
+    //                                         LINE_METADATA_SIZE / WORD_SIZE;
 
     // reserve space for bytemap
     size_t bytemapSpaceSize =
@@ -120,16 +121,16 @@ void Heap_Init(Heap *heap, size_t minHeapSize, size_t maxHeapSize) {
     heap->bytemap = bytemap;
 
     // Init heap for small objects
-    word_t *heapStart = Heap_mapAndAlign(maxHeapSize, BLOCK_TOTAL_SIZE);
+    word_t *heapStart = (word_t*)mmtk_starting_heap_address();
     heap->heapSize = minHeapSize;
     heap->heapStart = heapStart;
-    heap->heapEnd = heapStart + minHeapSize / WORD_SIZE;
+    heap->heapEnd = (word_t*)mmtk_last_heap_address();
 
 #ifdef _WIN32
     // Commit memory chunks reserved using mapMemory
     bool commitStatus =
-        memoryCommit(blockMetaStart, blockMetaSpaceSize) &&
-        memoryCommit(lineMetaStart, lineMetaSpaceSize) &&
+        // memoryCommit(blockMetaStart, blockMetaSpaceSize) &&
+        // memoryCommit(lineMetaStart, lineMetaSpaceSize) &&
         memoryCommit(bytemap, bytemapSpaceSize) &&
         // Due to lack of over-committing on Windows on Heap init reserve memory
         // chunk equal to maximal size of heap, but commit only minimal needed
@@ -141,7 +142,7 @@ void Heap_Init(Heap *heap, size_t minHeapSize, size_t maxHeapSize) {
     }
 #endif // _WIN32
 
-    BlockAllocator_Init(&blockAllocator, blockMetaStart, initialBlockCount);
+    // BlockAllocator_Init(&blockAllocator, blockMetaStart, initialBlockCount);
     Bytemap_Init(bytemap, heapStart, maxHeapSize);
     char *statsFile = Settings_StatsFileName();
     if (statsFile != NULL) {

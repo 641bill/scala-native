@@ -59,12 +59,12 @@ INLINE void *scalanative_alloc(void *info, size_t size) {
 
     const ssize_t offset = 0;
     const int mmtk_allocator = 0;
-    Allocator *allocator = &currentMutatorThread->allocator;
     HeapWord* allocated_memory = MMTkMutatorContext_alloc(currentMutatorThread->mutatorContext, size, mmtk_allocator);
 
     Object *object = (Object *)allocated_memory;
-    ObjectMeta *objectMeta = Bytemap_Get(allocator->bytemap, (word_t *)object);
+    ObjectMeta *objectMeta = Bytemap_Get(heap.bytemap, (word_t *)object);
     ObjectMeta_SetAllocated(objectMeta);
+    // printf("Setting allocated for %p, with size %lu\n", object, size);
 
     __builtin_prefetch(object + 36, 0, 3);
     
@@ -95,6 +95,10 @@ INLINE void *scalanative_alloc_atomic(void *info, size_t size) {
 }
 
 void scalanative_collect() {
+}
+
+INLINE void scalanative_register_weak_reference_handler(void *handler) {
+    WeakRefStack_SetHandler(handler);
 }
 
 #ifdef SCALANATIVE_MULTITHREADING_ENABLED
