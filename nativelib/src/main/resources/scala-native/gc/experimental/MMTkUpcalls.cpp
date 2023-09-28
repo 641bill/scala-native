@@ -31,12 +31,12 @@ static void mmtk_stop_all_mutators(void *tls, bool scan_mutators_in_safepoint, M
 		}
 	}
 	// Print out the heap start and end, and the stack start and end
-	printf("Heap start: %p\n", mmtk_starting_heap_address());
-	printf("Heap end: %p\n", mmtk_last_heap_address());
-	printf("Stack bottom: %p\n", currentMutatorThread->stackBottom);
-	printf("Stack top: %p\n", currentMutatorThread->stackTop);
-	printf("Reference stack bottom: %p\n", stack.bottom);
-	printf("Some random local variable address on the stack: %p\n", &closure);
+	// printf("Heap start: %p\n", mmtk_starting_heap_address());
+	// printf("Heap end: %p\n", mmtk_last_heap_address());
+	// printf("Stack bottom: %p\n", currentMutatorThread->stackBottom);
+	// printf("Stack top: %p\n", currentMutatorThread->stackTop);
+	// printf("Reference stack bottom: %p\n", stack.bottom);
+	// printf("Some random local variable address on the stack: %p\n", &closure);
 }
 
 /// Resume all the mutator threads, the opposite of the above. When a GC is finished, MMTk calls this method.
@@ -212,6 +212,33 @@ NO_SANITIZE void mmtk_mark_range(Heap *heap, Stack *stack, word_t **from,
 	#endif
 }
 
+StackRange mmtk_get_stack_range(void* thread) {
+	MutatorThread* mutatorThread = static_cast<MutatorThread*>(thread);
+	word_t **stackBottom = mutatorThread->stackBottom;
+	/* At this point ALL threads are stopped and their stackTop is not NULL -
+		* that's the condition to exit Sychronizer_acquire However, for some
+		* reasons I'm not aware of there are some rare situations upon which on the
+		* first read of volatile stackTop it still would return NULL.
+		* Due to the lack of alternatives or knowledge why this happends, just
+		* retry to reach non-null state
+		*/
+	word_t **stackTop;
+	do {
+			stackTop = mutatorThread->stackTop;
+	} while (stackTop == NULL);
+	StackRange range = {stackTop, stackBottom};
+	return range;
+}
+
+RegsRange mmtk_get_regs_range(void* thread) {
+	// Mark last context of execution
+	assert(thread->executionContext != NULL);
+	word_t **regs = (word_t **)static_cast<MutatorThread*>(thread)->executionContext;
+	size_t regsSize = sizeof(jmp_buf) / sizeof(word_t *);
+	RegsRange range = {regs, regsSize};
+	return range;
+}
+
 void mmtk_mark_program_stack(MutatorThread *thread, Heap *heap, Stack *stack, MMTkRootsClosure &roots_closure) {
 	word_t **stackBottom = thread->stackBottom;
 	/* At this point ALL threads are stopped and their stackTop is not NULL -
@@ -287,6 +314,14 @@ static inline void mmtk_mark_lockWords(Heap *heap, Stack *stack,
 extern word_t *__modules;
 extern int __modules_size;
 #define LAST_FIELD_OFFSET -1
+
+word_t* mmtk_get_modules() {
+	return __modules;
+}
+
+int mmtk_get_modules_size() {
+	return __modules_size;
+}
 
 void mmtk_mark_modules(Heap *heap, Stack *stack, MMTkRootsClosure &roots_closure) {
 	word_t **modules = &__modules;
@@ -377,16 +412,6 @@ static inline void mmtk_scan_field(Heap *heap, Field_t field, void* edge_visitor
 			Object *object = (Object *)field;
 			StringObject* string = (StringObject*)(object->rtti->rt.name);
 			CharArray* charArr = string->value;
-			// Create a string from the int16_t array.
-			std::string str;
-			for(size_t i = 0; i < charArr->header.length; i++) {
-				// Append each int16_t as a char to the string
-				if(charArr->value[i] >= 0 && charArr->value[i] < 128)
-					str.push_back(static_cast<char>(charArr->value[i]));
-			}
-			// Print the string
-			std::cout << "Field class name: " << str << std::endl;
-			fflush(stdout);
 			mmtk_scan_object(heap, heap->bytemap, object, fieldMeta, edge_visitor);
 		}
 	}
@@ -528,6 +553,10 @@ ScalaNative_Upcalls mmtk_upcalls = {
 	mmtk_get_array_ids_max,
 	mmtk_get_allocation_alignment,
 	// scanning
+	mmtk_get_stack_range,
+	mmtk_get_regs_range,
+	mmtk_get_modules,
+	mmtk_get_modules_size,
 	/// Scan all the mutators for roots.
 	mmtk_scan_roots_in_all_mutator_threads,
 	/// Scan one mutator for roots.

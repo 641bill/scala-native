@@ -14,7 +14,5 @@ extern "C" {
 #include "WeakRefStack.h"
 }
 #include "MMTkRootsClosure.hpp"
-#include <vector>
-#include <iostream>
 
 #endif // MMTK_UPCALLS_HPP
