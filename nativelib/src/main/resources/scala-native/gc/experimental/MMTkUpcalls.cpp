@@ -511,11 +511,12 @@ static void* mmtk_get_mmtk_mutator(void* tls) {
 	return reinterpret_cast<MutatorThread*>(tls)->mutatorContext;
 }
 
-static void mmtk_init_gc_worker_thread(MMTk_VMWorkerThread gc_thread_tls) {
+static void mmtk_init_gc_worker_thread(MMTk_VMWorkerThread gc_thread_tls, SendCtxPtr ctx_ptr) {
     mmtk_gc_thread_tls = gc_thread_tls;
 
 		int stackBottom = 0;
 		GCThread_init((Field_t *)&stackBottom);
+		((MutatorThread*) gc_thread_tls)->third_party_heap_collector=ctx_ptr.ptr;
 		MutatorThread_switchState(currentMutatorThread, MutatorThreadState_Unmanaged);
 }
 
