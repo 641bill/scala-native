@@ -2,7 +2,6 @@
 
 #include <stddef.h>
 #include <stdio.h>
-#include "mmtk.h"
 #include "immix_commix/CommonConstants.h"
 #include "shared/GCTypes.h"
 #include "immix_commix/utils/MathUtils.h"
@@ -16,6 +15,7 @@
 #include "MutatorThread.h"
 #include "MMTkMutator.hpp"
 #include "MMTkUpcalls.h"
+#include "mmtk.h"
 
 #ifdef SCALANATIVE_MULTITHREADING_ENABLED
 #include "Synchronizer.h"
@@ -62,15 +62,12 @@ INLINE void *scalanative_alloc(void *info, size_t size) {
     HeapWord* allocated_memory = MMTkMutatorContext_alloc(currentMutatorThread->mutatorContext, size, mmtk_allocator);
 
     Object *object = (Object *)allocated_memory;
-    ObjectMeta *objectMeta = Bytemap_Get(heap.bytemap, (word_t *)object);
-    ObjectMeta_SetAllocated(objectMeta);
-    // printf("Setting allocated for %p, with size %lu\n", object, size);
 
-    __builtin_prefetch(object + 36, 0, 3);
-    
-    assert(Heap_IsWordInHeap(heap, (word_t *)object));
+    // __builtin_prefetch(object + 36, 0, 3);
 
     *((void **)allocated_memory) = info;
+
+    // printf("Allocated object at %p, with info %p\n", allocated_memory, info);
 
     return (void*)allocated_memory;
 }

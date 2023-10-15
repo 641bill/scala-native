@@ -5,15 +5,13 @@
 
 thread_local MMTk_GCThreadTLS *mmtk_gc_thread_tls;
 
-/// Stop all the mutator threads. MMTk calls this method when it requires all the mutator to yield for a GC.
-/// This method is called by a single thread in MMTk (the GC controller).
-/// This method should not return until all the threads are yielded.
-/// The actual thread synchronization mechanism is up to the VM, and MMTk does not make assumptions on that.
-///
-/// Arguments:
-/// * `tls`: The thread pointer for the GC controller/coordinator.
-/// If scan_mutators_in_safepoint is false, we will scan all the mutators here
-static void mmtk_stop_all_mutators(void *tls, bool scan_mutators_in_safepoint, MutatorClosure closure) {
+// Stop all the mutator threads. MMTk calls this method when it requires all the mutator to yield for a GC.
+// This method is called by a single thread in MMTk (the GC controller).
+// This method should not return until all the threads are yielded.
+// The actual thread synchronization mechanism is up to the VM, and MMTk does not make assumptions on that.
+// MMTk provides a callback function and expects the binding to use the callback for each mutator when it
+// is ready for stack scanning. Usually a stack can be scanned as soon as the thread stops in the yieldpoint.
+static void mmtk_stop_all_mutators(void *tls, MutatorClosure closure) {
 	#ifdef DEBUG
 	printf("mmtk_stop_all_mutators\n");
 	#endif
@@ -22,21 +20,20 @@ static void mmtk_stop_all_mutators(void *tls, bool scan_mutators_in_safepoint, M
 	// 	int stackBottom = 0;
 	// 	GCThread_init((Field_t *)&stackBottom);
 	// } 
-
-	Synchronizer_acquire();
-	if (!scan_mutators_in_safepoint) {
-		MutatorThreads_foreach(mutatorThreads, node) {
-			MutatorThread *thread = node->value;
-			invoke_MutatorClosure(&closure, thread->mutatorContext);
-		}
-	}
 	// Print out the heap start and end, and the stack start and end
 	// printf("Heap start: %p\n", mmtk_starting_heap_address());
 	// printf("Heap end: %p\n", mmtk_last_heap_address());
 	// printf("Stack bottom: %p\n", currentMutatorThread->stackBottom);
 	// printf("Stack top: %p\n", currentMutatorThread->stackTop);
-	// printf("Reference stack bottom: %p\n", stack.bottom);
-	// printf("Some random local variable address on the stack: %p\n", &closure);
+
+	Synchronizer_acquire();
+	// atomic_thread_fence(memory_order_seq_cst);
+
+	// MutatorThreadNode *head = mutatorThreads;
+	// MutatorThreads_foreach(mutatorThreads, node) {
+	// 	MutatorThread *thread = node->value;
+	// 	invoke_MutatorClosure(&closure, thread->mutatorContext);
+	// }
 }
 
 /// Resume all the mutator threads, the opposite of the above. When a GC is finished, MMTk calls this method.
@@ -146,9 +143,7 @@ static inline void mmtk_mark_lockWords(Heap *heap, Stack *stack,
                                         Object *object, MMTkRootsClosure &roots_closure);
 static inline void mmtk_scan_lockWords(Heap *heap, Object *object, void* edge_visitor);
 
-void mmtk_mark_object(Heap *heap, Stack *stack, Bytemap *bytemap,
-                       Object *object, ObjectMeta *objectMeta, MMTkRootsClosure &roots_closure) {
-    assert(ObjectMeta_IsAllocated(objectMeta));
+void mmtk_mark_object(Heap *heap, Stack *stack, Object *object, MMTkRootsClosure &roots_closure) {
     assert(object->rtti != NULL);
 
     mmtk_mark_lockWords(heap, stack, object, roots_closure);
@@ -158,31 +153,29 @@ void mmtk_mark_object(Heap *heap, Stack *stack, Bytemap *bytemap,
     }
 
     assert(Object_Size(object) != 0);
+		// printf("Marking object %p\n", object);
 		// Create the work packets for MMTk instead of marking in the runtime
 		roots_closure.do_work(object);
-    ObjectMeta_SetMarked(objectMeta);
-    Stack_Push(stack, object);
+    // Stack_Push(stack, object);
 }
 
 static inline void mmtk_mark_field(Heap *heap, Stack *stack, Field_t field, MMTkRootsClosure &roots_closure) {
 	if (Heap_IsWordInHeap(heap, field)) {
-		ObjectMeta *fieldMeta = Bytemap_Get(heap->bytemap, field);
-		if (ObjectMeta_IsAllocated(fieldMeta)) {
+		if (mmtk_is_mmtk_object(field)) {
 			Object *object = (Object *)field;
-			mmtk_mark_object(heap, stack, heap->bytemap, object, fieldMeta, roots_closure);
+			mmtk_mark_object(heap, stack, object, roots_closure);
 		}
 	}
 }
 
 void mmtk_mark_conservative(Heap *heap, Stack *stack, word_t *address, MMTkRootsClosure &roots_closure) {
 	assert(Heap_IsWordInHeap(heap, address));
-	Object *object = Object_GetUnmarkedObject(heap, address);
-	Bytemap *bytemap = heap->bytemap;
+	// printf("Before masking %p\n", address);
+	Object *object = (Object *)((word_t)address & ALLOCATION_ALIGNMENT_INVERSE_MASK);
 	if (object != NULL) {
-		ObjectMeta *objectMeta = Bytemap_Get(bytemap, (word_t *)object);
-		assert(ObjectMeta_IsAllocated(objectMeta));
-		if (ObjectMeta_IsAllocated(objectMeta)) {
-			mmtk_mark_object(heap, stack, bytemap, object, objectMeta, roots_closure);
+		if (mmtk_is_mmtk_object(object)) {
+			// printf("Scanning object %p\n", object);
+			mmtk_mark_object(heap, stack, object, roots_closure);
 		}
 	}
 }
@@ -227,15 +220,21 @@ StackRange mmtk_get_stack_range(void* thread) {
 			stackTop = mutatorThread->stackTop;
 	} while (stackTop == NULL);
 	StackRange range = {stackTop, stackBottom};
+	// printf("For thread: %p\n", thread);
+	// printf("Stack top: %p\n", stackTop);
+	// printf("Stack bottom: %p\n", stackBottom);
 	return range;
 }
 
 RegsRange mmtk_get_regs_range(void* thread) {
 	// Mark last context of execution
-	assert(thread->executionContext != NULL);
+	assert(static_cast<MutatorThread*>(thread)->executionContext != NULL);
 	word_t **regs = (word_t **)static_cast<MutatorThread*>(thread)->executionContext;
 	size_t regsSize = sizeof(jmp_buf) / sizeof(word_t *);
 	RegsRange range = {regs, regsSize};
+	// printf("For thread: %p\n", thread);
+	// printf("Regs: %p\n", regs);
+	// printf("Regs size: %zu\n", regsSize);
 	return range;
 }
 
@@ -253,6 +252,7 @@ void mmtk_mark_program_stack(MutatorThread *thread, Heap *heap, Stack *stack, MM
 			stackTop = thread->stackTop;
 	} while (stackTop == NULL);
 
+	// printf("stacktop = %p, stackbottom = %p\n", stackTop, stackBottom);
 	mmtk_mark_range(heap, stack, stackTop, stackBottom, roots_closure);
 
 	// Mark last context of execution
@@ -260,6 +260,16 @@ void mmtk_mark_program_stack(MutatorThread *thread, Heap *heap, Stack *stack, MM
 	word_t **regs = (word_t **)thread->executionContext;
 	size_t regsSize = sizeof(jmp_buf) / sizeof(word_t *);
 	mmtk_mark_range(heap, stack, regs, regs + regsSize, roots_closure);
+}
+
+MutatorThreadNode* mmtk_get_mutator_threads() {
+	// atomic_thread_fence(memory_order_seq_cst);
+
+	// MutatorThreadNode *head = mutatorThreads;
+	// MutatorThreads_foreach(mutatorThreads, node) {
+	// 	printf("Mutator thread: %p\n", node->value);
+	// }
+	return mutatorThreads;
 }
 
 /// Scan all the mutators for roots.
@@ -275,6 +285,8 @@ static void mmtk_scan_roots_in_all_mutator_threads(NodesClosure closure) {
 	MutatorThreadNode *head = mutatorThreads;
 	MutatorThreads_foreach(mutatorThreads, node) {
 		MutatorThread *thread = node->value;
+		// printf("Scanning thread %p\n", thread);
+	
 		mmtk_mark_program_stack(thread, &heap, &stack, roots_closure);
 	}
 }
@@ -369,9 +381,7 @@ void mmtk_mark(Heap *heap, Stack *stack, MMTkRootsClosure &roots_closure) {
 	}
 }
 
-void mmtk_scan_object(Heap *heap, Bytemap *bytemap,
-                       Object *object, ObjectMeta *objectMeta, void* edge_visitor) {
-    assert(ObjectMeta_IsAllocated(objectMeta));
+void mmtk_scan_object(Heap *heap, Object *object, void* edge_visitor) {
     assert(object->rtti != NULL);
 
     mmtk_scan_lockWords(heap, object, edge_visitor);
@@ -383,36 +393,16 @@ void mmtk_scan_object(Heap *heap, Bytemap *bytemap,
     assert(Object_Size(object) != 0);
 		// Create the work packets for MMTk instead of marking in the runtime
 		visit_edge(edge_visitor, object);
-    ObjectMeta_SetMarked(objectMeta);
 }
-
-typedef struct {
-  ArrayHeader header;
-  int16_t value[];
-} CharArray;
-
-typedef struct { 
-	// Extends Object, same as in the Object header
-	Rtti *rtti;
-#ifdef USES_LOCKWORD
-	word_t *lockWord;
-#endif
-    // fields
-	CharArray* value; // Array[Char] = _
-	int offset; 
-	int count;
-	int cachedHashCode;
-} StringObject;
 
 static inline void mmtk_scan_field(Heap *heap, Field_t field, void* edge_visitor) {
 	if (Heap_IsWordInHeap(heap, field)) {
-		ObjectMeta *fieldMeta = Bytemap_Get(heap->bytemap, field);
-		if (ObjectMeta_IsAllocated(fieldMeta)) {
+		if (mmtk_is_mmtk_object(field)) {
 			printf("Scanning field %p with content %p\n", field, *(word_t**)field);
 			Object *object = (Object *)field;
 			StringObject* string = (StringObject*)(object->rtti->rt.name);
 			CharArray* charArr = string->value;
-			mmtk_scan_object(heap, heap->bytemap, object, fieldMeta, edge_visitor);
+			mmtk_scan_object(heap, object, edge_visitor);
 		}
 	}
 }
@@ -475,7 +465,9 @@ static void mmtk_get_mutators(MutatorClosure closure) {
 	#ifdef DEBUG
 	printf("mmtk_get_mutators\n");
 	#endif
+	atomic_thread_fence(memory_order_seq_cst);
 
+	MutatorThreadNode *head = mutatorThreads;
 	MutatorThreads_foreach(mutatorThreads, node) {
 		MutatorThread *thread = node->value;
 		invoke_MutatorClosure(&closure, thread->mutatorContext);
@@ -491,7 +483,7 @@ static void mmtk_get_mutators(MutatorClosure closure) {
 /// The caller needs to make sure that the thread is valid (a value passed in by the VM binding through API).
 static bool mmtk_is_mutator(void* tls) {
 	#ifdef DEBUG
-	printf("mmtk_is_mutator: %d\n", tls != NULL ? ((MutatorThread*) tls)->third_party_heap_collector == NULL : false);
+	printf("tls: %p mmtk_is_mutator: %d\n", tls, tls != NULL ? ((MutatorThread*) tls)->third_party_heap_collector == NULL : false);
 	#endif
 
   if (tls == NULL) return false;
@@ -512,6 +504,9 @@ static void* mmtk_get_mmtk_mutator(void* tls) {
 }
 
 static void mmtk_init_gc_worker_thread(MMTk_VMWorkerThread gc_thread_tls, SendCtxPtr ctx_ptr) {
+		#ifdef DEBUG
+		printf("mmtk_init_gc_worker_thread for thread %p, current thread = %p\n", gc_thread_tls, currentMutatorThread);
+		#endif
     mmtk_gc_thread_tls = gc_thread_tls;
 
 		int stackBottom = 0;
@@ -558,14 +553,13 @@ ScalaNative_Upcalls mmtk_upcalls = {
 	mmtk_get_regs_range,
 	mmtk_get_modules,
 	mmtk_get_modules_size,
+	mmtk_get_mutator_threads,
 	/// Scan all the mutators for roots.
 	mmtk_scan_roots_in_all_mutator_threads,
 	/// Scan one mutator for roots.
 	mmtk_scan_roots_in_mutator_thread,
 	mmtk_scan_vm_specific_roots,
 	mmtk_prepare_for_roots_re_scanning,
-	mmtk_obj_iterate,
-	mmtk_array_iterate,
 	weak_ref_stack_nullify,
 	weak_ref_stack_call_handlers,
 	// active_plan

@@ -11,7 +11,7 @@ import scala.scalanative.annotation.alwaysinline
  */
 @extern
 object GC {
-  @name("scalanative_alloc_fast_path")
+  @name("scalanative_alloc")
   def alloc(cls: Class[_], size: CSize): RawPtr = extern
   @name("scalanative_alloc_atomic")
   def alloc_atomic(cls: Class[_], size: CSize): RawPtr = extern
