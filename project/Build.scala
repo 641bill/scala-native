@@ -551,7 +551,6 @@ object Build {
           )
           .withGC(GC.experimental)
           .withMultithreadingSupport(true)
-          .withIncrementalCompilation(false)
         },
         Compile / compile := (Compile / compile).dependsOn(mmtkBuild).value
       )

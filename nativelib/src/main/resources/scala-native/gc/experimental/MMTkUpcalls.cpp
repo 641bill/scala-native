@@ -327,8 +327,9 @@ extern word_t *__modules;
 extern int __modules_size;
 #define LAST_FIELD_OFFSET -1
 
-word_t* mmtk_get_modules() {
-	return __modules;
+word_t** mmtk_get_modules() {
+	word_t **modules = &__modules;
+	return modules;
 }
 
 int mmtk_get_modules_size() {
@@ -398,7 +399,6 @@ void mmtk_scan_object(Heap *heap, Object *object, void* edge_visitor) {
 static inline void mmtk_scan_field(Heap *heap, Field_t field, void* edge_visitor) {
 	if (Heap_IsWordInHeap(heap, field)) {
 		if (mmtk_is_mmtk_object(field)) {
-			printf("Scanning field %p with content %p\n", field, *(word_t**)field);
 			Object *object = (Object *)field;
 			StringObject* string = (StringObject*)(object->rtti->rt.name);
 			CharArray* charArr = string->value;
