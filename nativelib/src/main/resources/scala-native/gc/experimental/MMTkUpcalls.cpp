@@ -400,8 +400,6 @@ static inline void mmtk_scan_field(Heap *heap, Field_t field, void* edge_visitor
 	if (Heap_IsWordInHeap(heap, field)) {
 		if (mmtk_is_mmtk_object(field)) {
 			Object *object = (Object *)field;
-			StringObject* string = (StringObject*)(object->rtti->rt.name);
-			CharArray* charArr = string->value;
 			mmtk_scan_object(heap, object, edge_visitor);
 		}
 	}
