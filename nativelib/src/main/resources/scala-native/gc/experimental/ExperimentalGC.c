@@ -12,6 +12,7 @@
 #include "WeakRefStack.h"
 #include "shared/GCScalaNative.h"
 #include "immix_commix/GCRoots.h"
+#include "shared/Parsing.h"
 #include "MutatorThread.h"
 #include "MMTkMutator.hpp"
 #include "MMTkUpcalls.h"
@@ -54,7 +55,7 @@ void scalanative_init() {
     atexit(scalanative_afterexit);
 }
 
-INLINE void *scalanative_alloc(void *info, size_t size) {
+INLINE void *scalanative_alloc_slow_path(void *info, size_t size) {
     size = MathUtils_RoundToNextMultiple(size, ALLOCATION_ALIGNMENT);
 
     const ssize_t offset = 0;
@@ -72,11 +73,11 @@ INLINE void *scalanative_alloc(void *info, size_t size) {
     return (void*)allocated_memory;
 }
 
-INLINE void *scalanative_alloc_fast_path(void *info, size_t size) {
+INLINE void *scalanative_alloc(void *info, size_t size) {
     size = MathUtils_RoundToNextMultiple(size, ALLOCATION_ALIGNMENT);
     // If we reach here, the allocation request is larger than the remaining space.
     // Fall back to the slower allocation path.
-    return scalanative_alloc(info, size);
+    return scalanative_alloc_slow_path(info, size);
 }
 
 INLINE void *scalanative_alloc_small(void *info, size_t size) {
@@ -96,6 +97,22 @@ void scalanative_collect() {
 
 INLINE void scalanative_register_weak_reference_handler(void *handler) {
     WeakRefStack_SetHandler(handler);
+}
+
+/* Get the minimum heap size */
+/* If the user has set a minimum heap size using the GC_INITIAL_HEAP_SIZE
+ * environment variable, */
+/* then this size will be returned. */
+/* Otherwise, the default minimum heap size will be returned.*/
+size_t scalanative_get_init_heapsize() { return Settings_MinHeapSize(); }
+
+/* Get the maximum heap size */
+/* If the user has set a maximum heap size using the GC_MAXIMUM_HEAP_SIZE
+ * environment variable,*/
+/* then this size will be returned.*/
+/* Otherwise, the total size of the physical memory (guarded) will be returned*/
+size_t scalanative_get_max_heapsize() {
+    return Parse_Env_Or_Default("GC_MAXIMUM_HEAP_SIZE", Settings_MaxHeapSize() - mmtk_get_bytes_in_page());
 }
 
 #ifdef SCALANATIVE_MULTITHREADING_ENABLED

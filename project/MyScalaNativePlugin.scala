@@ -6,6 +6,7 @@ import sbt.Keys._
 import scala.scalanative.sbtplugin.ScalaNativePlugin
 import scala.scalanative.sbtplugin.ScalaNativePlugin.autoImport._
 import scala.sys.env
+import scala.scalanative.build.GC
 
 object MyScalaNativePlugin extends AutoPlugin {
   override def requires: Plugins = ScalaNativePlugin
@@ -54,7 +55,13 @@ object MyScalaNativePlugin extends AutoPlugin {
     }
   }
 
+  import sys.process.Process
+  import sys.process.ProcessLogger
+
+  lazy val parentPath = settingKey[String]("The parent path of the project")
+  lazy val mmtkBuild = taskKey[Unit]("Build MMTk")
   override def projectSettings: Seq[Setting[_]] = Def.settings(
+    parentPath := (ThisBuild / baseDirectory).value.getParentFile.getAbsolutePath,
     /* Remove libraryDependencies on ourselves; we use .dependsOn() instead
      * inside this build.
      */
@@ -71,6 +78,41 @@ object MyScalaNativePlugin extends AutoPlugin {
             .getOrElse(nc.multithreadingSupport)
         )
     },
+    nativeConfig := {
+      nativeConfig.value.withCompileOptions(
+        nativeConfig.value.compileOptions ++
+          Seq(s"-I${parentPath.value}/mmtk-scala-native/scala-native") ++
+          Seq(s"-g")
+      )
+      .withLinkingOptions(
+        nativeConfig.value.linkingOptions ++ 
+        Seq(s"-L${parentPath.value}/mmtk-scala-native/mmtk/target/debug") ++
+        Seq("-lmmtk_scala_native")
+      )
+      .withGC(GC.experimental)
+      .withMultithreadingSupport(true)
+    },
+    // mmtkBuild := {
+    //   val s = streams.value
+    //   val cmd = "cargo build"
+    //   val workingDirectory = new File(s"${parentPath.value}/mmtk-scala-native/mmtk")
+    //   val output = new StringBuilder
+    //   val error = new StringBuilder
+    //   val exitCode = Process(cmd, workingDirectory) ! ProcessLogger(
+    //     (out: String) => {
+    //       output append out
+    //       s.log.info(out)
+    //     },
+    //     (err: String) => {
+    //       error append err
+    //       s.log.info(err)
+    //     }
+    //   )
+    //   if (exitCode != 0) {
+    //     throw new RuntimeException("MMTk build failed with output: " + error.toString)
+    //   }
+    // },
+    // Compile / compile := (Compile / compile).dependsOn(mmtkBuild).value,
     scalacOptions ++= {
       // Link source maps to GitHub sources
       val isSnapshot = nativeVersion.endsWith("-SNAPSHOT")

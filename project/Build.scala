@@ -514,7 +514,7 @@ object Build {
       .withNativeCompilerPlugin
       .withJUnitPlugin
       .dependsOn(scalalib, testInterface % "test")
-      .settings( 
+      .settings(
         parentPath := (ThisBuild / baseDirectory).value.getParentFile.getAbsolutePath
       )
       .settings(
