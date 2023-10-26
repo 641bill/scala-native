@@ -23,7 +23,9 @@ object Test {
     }
     threads.foreach(_.start())
     thread.join()
+    println("Single thread joined")
     threads.foreach(_.join())
+    println("All threads joined")
     println("Hello, World!")
     // Do some tests that allocates a large chunk of memory
     // Allocate a large array

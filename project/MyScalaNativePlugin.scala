@@ -58,10 +58,14 @@ object MyScalaNativePlugin extends AutoPlugin {
   import sys.process.Process
   import sys.process.ProcessLogger
 
+  lazy val basePath = settingKey[String]("The base path of the project")
   lazy val parentPath = settingKey[String]("The parent path of the project")
   lazy val mmtkBuild = taskKey[Unit]("Build MMTk")
+  val root = (project in file("."))
+
   override def projectSettings: Seq[Setting[_]] = Def.settings(
-    parentPath := (ThisBuild / baseDirectory).value.getParentFile.getAbsolutePath,
+    basePath := root.base.getAbsolutePath(),
+    parentPath := basePath.value + "/..",
     /* Remove libraryDependencies on ourselves; we use .dependsOn() instead
      * inside this build.
      */

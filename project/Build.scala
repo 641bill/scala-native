@@ -502,6 +502,7 @@ object Build {
       .dependsOn(junitAsyncJVM % "test")
       
   lazy val parentPath = settingKey[String]("The parent path of the project")
+  lazy val basePath = settingKey[String]("The base path of the project")
 
   val mmtkBuild = taskKey[Unit]("Build MMTk")
 
@@ -515,7 +516,9 @@ object Build {
       .withJUnitPlugin
       .dependsOn(scalalib, testInterface % "test")
       .settings(
-        parentPath := (ThisBuild / baseDirectory).value.getParentFile.getAbsolutePath
+        // parentPath := (ThisBuild / baseDirectory).value.getParentFile.getAbsolutePath,
+        basePath := root.base.getAbsolutePath(),
+        parentPath := basePath.value + "/..",
       )
       .settings(
         mmtkBuild := {

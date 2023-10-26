@@ -36,13 +36,13 @@ struct BumpAllocator {
   void* cursor;
   void* limit;
   struct RustDynPtr space;
-  struct RustDynPtr plan;
+  void* context;
 };
 
 struct LargeObjectAllocator {
   void* tls;
   void* space;
-  struct RustDynPtr plan;
+  void* context;
 };
 
 struct ImmixAllocator {
@@ -50,7 +50,7 @@ struct ImmixAllocator {
   void* cursor;
   void* limit;
   void* immix_space;
-  struct RustDynPtr plan;
+  void* context;
   uint8_t hot;
   uint8_t copy;
   void* large_cursor;
@@ -75,7 +75,7 @@ struct FLBlockList {
 struct FreeListAllocator {
   void* tls;
   void* space;
-  struct RustDynPtr plan;
+  void* context;
   struct FLBlockList* available_blocks;
   struct FLBlockList* available_blocks_stress;
   struct FLBlockList* unswept_blocks;
