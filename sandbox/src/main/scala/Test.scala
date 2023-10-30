@@ -44,5 +44,29 @@ object Test {
     println("Running GCBench")
     val benchmarkResult = gcbench.GCBenchBenchmark.run("")
     println(s"GCBench result: $benchmarkResult")
+
+    // val iterations = 10
+    // for (iter <- 0 until iterations) {
+    //   val threadsCount = Runtime.getRuntime().availableProcessors() * 4
+    //   val ids = new scala.Array[String](threadsCount)
+    //   val threads = Seq.tabulate(threadsCount) { id =>
+    //     new Thread(() => {
+    //       val _ = generateGarbage() // can be GCed
+    //       ids(id) = Thread.currentThread().getName() // should be kept after thread finishes
+    //       Thread.sleep(10)
+    //     })
+    //   }
+    //   threads.foreach(_.start())
+    //   threads.foreach(_.join()) // all threads are terminated // ensure that Thread terminates, can be blocking in Thread.join()
+    //   if (ids.contains(null)) {
+    //     throw new Exception("ids contains null")
+    //   } // data allocated by threads is not GCed
+    //   // Should not segfault when iteration over memory freed by other threads
+    //   Seq.fill(iterations * 4)(generateGarbage())
+    // }
+
+    // def generateGarbage() = {
+    //   scala.util.Random.alphanumeric.take(4096).mkString.take(10)
+    // }
   }
 }

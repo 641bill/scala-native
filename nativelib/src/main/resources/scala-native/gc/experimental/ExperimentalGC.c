@@ -29,11 +29,14 @@ void scalanative_afterexit() { Stats_OnExit(heap.stats); }
 
 void scalanative_init() {
     // Initialize the MMTk instance with the specified heap size
-
     mmtk_init(Settings_MinHeapSize(), Settings_MaxHeapSize() - mmtk_get_bytes_in_page());
     // mmtk_init(Settings_MinHeapSize(), Settings_MinHeapSize());
-    max_non_los_default_alloc_bytes = get_max_non_los_default_alloc_bytes();
 
+    max_non_los_default_alloc_bytes = get_max_non_los_default_alloc_bytes();
+    mmtk_vo_bit_log_region_size = get_vo_bit_log_region_size();
+    mmtk_vo_bit_base_addr = get_vo_bit_base();
+    immix_bump_ptr_offset = get_immix_bump_ptr_offset();
+    
     Heap_Init(&heap, Settings_MinHeapSize(), Settings_MaxHeapSize());
     scalanative_gc_init(&mmtk_upcalls);
     mmtk_init_binding(&mmtk_upcalls);
@@ -49,6 +52,9 @@ void scalanative_init() {
     currentMutatorThread->third_party_heap_collector = NULL;
     currentMutatorThread->mutatorContext = (MMTkMutatorContext *)malloc(sizeof(MMTkMutatorContext));
     *currentMutatorThread->mutatorContext = MMTkMutatorContext_bind(currentMutatorThread);
+    
+    immix_bump_pointer = (BumpPointer *)((char *)currentMutatorThread->mutatorContext + immix_bump_ptr_offset);
+    currentMutatorThread->mutator_local = (void *) immix_bump_pointer;
 
     mmtk_initialize_collection(currentMutatorThread);
     
@@ -56,25 +62,77 @@ void scalanative_init() {
 }
 
 INLINE void *scalanative_alloc_slow_path(void *info, size_t size) {
-    size = MathUtils_RoundToNextMultiple(size, ALLOCATION_ALIGNMENT);
-
     const ssize_t offset = 0;
     const int mmtk_allocator = 0;
-    HeapWord* allocated_memory = MMTkMutatorContext_alloc(currentMutatorThread->mutatorContext, size, mmtk_allocator);
+    HeapWord* alloc = MMTkMutatorContext_alloc(currentMutatorThread->mutatorContext, size, mmtk_allocator);
 
-    Object *object = (Object *)allocated_memory;
+    Object *object = (Object *)alloc;
+    __builtin_prefetch(object + 36, 0, 3);
 
-    // __builtin_prefetch(object + 36, 0, 3);
+    *alloc = info;
 
-    *((void **)allocated_memory) = info;
+    return (void *)alloc;
+}
 
-    // printf("Allocated object at %p, with info %p\n", allocated_memory, info);
+#define MMTK_USE_POST_ALLOC_FAST_PATH true
+#define MMTK_VO_BIT_SET_NON_ATOMIC true
 
-    return (void*)allocated_memory;
+INLINE void scalanative_post_alloc(void* alloc, size_t size) {
+    if (MMTK_USE_POST_ALLOC_FAST_PATH) {
+        uintptr_t obj_addr = (uintptr_t)alloc;
+        uintptr_t region_offset = obj_addr >> mmtk_vo_bit_log_region_size;
+        uintptr_t byte_offset = region_offset / 8;
+        uintptr_t bit_offset = region_offset % 8;
+        uintptr_t meta_byte_address = mmtk_vo_bit_base_addr + byte_offset;
+        uint8_t byte = 1 << bit_offset;
+        if (MMTK_VO_BIT_SET_NON_ATOMIC) {
+            uint8_t *meta_byte_ptr = (uint8_t *)meta_byte_address;
+            *meta_byte_ptr |= byte;
+        } else {
+            volatile _Atomic uint8_t *meta_byte_ptr = (volatile _Atomic uint8_t*)meta_byte_address;
+            // relaxed: We don't use VO bits for synchronisation during mutator phase.
+            // When GC is triggered, the handshake between GC and mutator provides synchronization.
+            atomic_fetch_or_explicit(meta_byte_ptr, byte, memory_order_relaxed);
+        }
+    } else {
+        mmtk_post_alloc(currentMutatorThread->mutatorContext, alloc, size, 0);
+    }
+}
+
+INLINE void *scalanative_alloc_fast_path(void *info, size_t size) {
+    BumpPointer* local = (BumpPointer *)(currentMutatorThread->mutator_local);
+    uintptr_t cursor = local->cursor;
+    uintptr_t limit = local->limit;
+
+    void* alloc = (void *)cursor;
+    uintptr_t new_cursor = cursor + size;
+
+    // Note: If the selected plan is not Immix, then both the cursor and the limit will always be 0
+    // In that case this function will try the slow path.
+    if (new_cursor <= limit) {
+        immix_bump_pointer->cursor = new_cursor;
+        scalanative_post_alloc(alloc, size);
+        return alloc;
+    }
+
+    return NULL;
 }
 
 INLINE void *scalanative_alloc(void *info, size_t size) {
     size = MathUtils_RoundToNextMultiple(size, ALLOCATION_ALIGNMENT);
+    if (size > max_non_los_default_alloc_bytes) {
+        return scalanative_alloc_slow_path(info, size);
+    }
+    HeapWord* alloc = (HeapWord *)scalanative_alloc_fast_path(info, size);
+
+    if (alloc) {
+        Object *object = (Object *)alloc;
+        __builtin_prefetch(object + 36, 0, 3);
+
+        *alloc = info;
+        return alloc;
+    }
+
     // If we reach here, the allocation request is larger than the remaining space.
     // Fall back to the slower allocation path.
     return scalanative_alloc_slow_path(info, size);
@@ -134,6 +192,9 @@ static ThreadRoutineReturnType ProxyThreadStartRoutine(void *args) {
     currentMutatorThread->third_party_heap_collector = NULL;
     currentMutatorThread->mutatorContext = (MMTkMutatorContext *)malloc(sizeof(MMTkMutatorContext));
     *currentMutatorThread->mutatorContext = MMTkMutatorContext_bind(currentMutatorThread);
+    
+    immix_bump_pointer = (BumpPointer *)((char *)currentMutatorThread->mutatorContext + immix_bump_ptr_offset);
+    currentMutatorThread->mutator_local = (void *) immix_bump_pointer;
 
     originalFn(originalArgs);
     MutatorThread_delete(currentMutatorThread);

@@ -16,10 +16,10 @@ enum MMTkAllocator {
   AllocatorReadOnly = 4,
 };
 
-struct RustDynPtr {
+typedef struct {
   void* data;
   void* vtable;
-};
+} RustDynPtr;
 
 // These constants should match the constants defind in mmtk::util::alloc::allocators
 #define MAX_BUMP_ALLOCATORS 6
@@ -31,21 +31,26 @@ struct RustDynPtr {
 
 // The following types should have the same layout as the types with the same name in MMTk core (Rust)
 
-struct BumpAllocator {
+typedef struct {
   void* tls;
   void* cursor;
   void* limit;
-  struct RustDynPtr space;
+  RustDynPtr space;
   void* context;
-};
+} BumpAllocator;
 
-struct LargeObjectAllocator {
+typedef struct {
+    uintptr_t cursor;
+    uintptr_t limit;
+} BumpPointer;
+
+typedef struct {
   void* tls;
   void* space;
   void* context;
-};
+} LargeObjectAllocator;
 
-struct ImmixAllocator {
+typedef struct {
   void* tls;
   void* cursor;
   void* limit;
@@ -59,54 +64,54 @@ struct ImmixAllocator {
   uint8_t _align[7];
   uint8_t line_opt_tag;
   uintptr_t line_opt;
-};
+} ImmixAllocator;
 
-struct FLBlock {
+typedef struct {
   void* Address;
-};
+} FLBlock;
 
-struct FLBlockList {
-  struct FLBlock first;
-  struct FLBlock last;
+typedef struct {
+  FLBlock first;
+  FLBlock last;
   size_t size;
   char lock;
-};
+} FLBlockList;
 
-struct FreeListAllocator {
+typedef struct {
   void* tls;
   void* space;
   void* context;
-  struct FLBlockList* available_blocks;
-  struct FLBlockList* available_blocks_stress;
-  struct FLBlockList* unswept_blocks;
-  struct FLBlockList* consumed_blocks;
-};
+  FLBlockList* available_blocks;
+  FLBlockList* available_blocks_stress;
+  FLBlockList* unswept_blocks;
+  FLBlockList* consumed_blocks;
+} FreeListAllocator;
 
-struct MallocAllocator {
+typedef struct {
   void* tls;
   void* space;
-  struct RustDynPtr plan;
-};
+  void* context;
+} MallocAllocator;
 
-struct MarkCompactAllocator {
-  struct BumpAllocator bump_allocator;
-};
+typedef struct {
+  BumpAllocator bump_allocator;
+} MarkCompactAllocator;
 
-struct Allocators {
-  struct BumpAllocator bump_pointer[MAX_BUMP_ALLOCATORS];
-  struct LargeObjectAllocator large_object[MAX_LARGE_OBJECT_ALLOCATORS];
-  struct MallocAllocator malloc[MAX_MALLOC_ALLOCATORS];
-  struct ImmixAllocator immix[MAX_IMMIX_ALLOCATORS];
-  struct FreeListAllocator free_list[MAX_FREE_LIST_ALLOCATORS];
-  struct MarkCompactAllocator markcompact[MAX_MARK_COMPACT_ALLOCATORS];
-};
+typedef struct  {
+  BumpAllocator bump_pointer[MAX_BUMP_ALLOCATORS];
+  LargeObjectAllocator large_object[MAX_LARGE_OBJECT_ALLOCATORS];
+  MallocAllocator malloc[MAX_MALLOC_ALLOCATORS];
+  ImmixAllocator immix[MAX_IMMIX_ALLOCATORS];
+  FreeListAllocator free_list[MAX_FREE_LIST_ALLOCATORS];
+  MarkCompactAllocator markcompact[MAX_MARK_COMPACT_ALLOCATORS];
+} Allocators;
 
-struct MutatorConfig {
+typedef struct {
   void* allocator_mapping;
   void* space_mapping;
-  struct RustDynPtr prepare_func;
-  struct RustDynPtr release_func;
-};
+  RustDynPtr prepare_func;
+  RustDynPtr release_func;
+} MutatorConfig;
 
 // An opaque type, so that HeapWord* can be a generic pointer into the heap.
 // We require that object sizes be measured in units of heap words (e.g.
@@ -118,16 +123,19 @@ struct HeapWordImpl;             // Opaque, never defined.
 typedef struct HeapWordImpl* HeapWord;
 
 typedef struct {
-  struct Allocators allocators;
-  struct RustDynPtr barrier;
+  Allocators allocators;
+  RustDynPtr barrier;
   void* mutator_tls;
-  struct RustDynPtr plan;
-  struct MutatorConfig config;
+  RustDynPtr plan;
+  MutatorConfig config;
 } MMTkMutatorContext;
 
+extern const int HeapWordSize;
 // Max object size that does not need to go into LOS. We get the value from mmtk-core, and cache its value here.
 extern size_t max_non_los_default_alloc_bytes;
-extern const int HeapWordSize;
+extern size_t immix_bump_ptr_offset;
+extern uintptr_t mmtk_vo_bit_log_region_size;
+extern uintptr_t mmtk_vo_bit_base_addr;
 
 HeapWord* MMTkMutatorContext_alloc(MMTkMutatorContext* context, size_t bytes, enum MMTkAllocator allocator);
 void MMTkMutatorContext_flush(MMTkMutatorContext* context);

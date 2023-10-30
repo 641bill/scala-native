@@ -38,6 +38,7 @@ typedef struct {
     thread_t thread;
 #endif
     MMTkMutatorContext *mutatorContext;
+    void* mutator_local;
     void* third_party_heap_collector;
 } MutatorThread;
 

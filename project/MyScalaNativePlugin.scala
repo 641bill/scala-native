@@ -82,6 +82,12 @@ object MyScalaNativePlugin extends AutoPlugin {
             .getOrElse(nc.multithreadingSupport)
         )
     },
+    envVars := Map(
+      "LD_LIBRARY_PATH" -> (
+        s"${parentPath.value}/mmtk-scala-native/mmtk/target/debug:" +
+          s"$$LD_LIBRARY_PATH"
+      )
+    ),
     nativeConfig := {
       nativeConfig.value.withCompileOptions(
         nativeConfig.value.compileOptions ++
