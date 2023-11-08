@@ -504,7 +504,8 @@ object Build {
   lazy val parentPath = settingKey[String]("The parent path of the project")
   lazy val basePath = settingKey[String]("The base path of the project")
 
-  val mmtkBuild = taskKey[Unit]("Build MMTk")
+  val mmtkBuildDebug = taskKey[Unit]("Build MMTk on Debug mode")
+  val mmtkBuildRelease = taskKey[Unit]("Build MMTk on Release mode")
 
   import sys.process.Process
   import sys.process.ProcessLogger
@@ -516,14 +517,37 @@ object Build {
       .withJUnitPlugin
       .dependsOn(scalalib, testInterface % "test")
       .settings(
+        scalacOptions ++= Seq(
+            "-deprecation:false",
+        ),
         // parentPath := (ThisBuild / baseDirectory).value.getParentFile.getAbsolutePath,
         basePath := root.base.getAbsolutePath(),
         parentPath := basePath.value + "/..",
       )
       .settings(
-        mmtkBuild := {
+        mmtkBuildDebug := {
           val s = streams.value
           val cmd = "cargo build"
+          val workingDirectory = new File(s"${parentPath.value}/mmtk-scala-native/mmtk")
+          val output = new StringBuilder
+          val error = new StringBuilder
+          val exitCode = Process(cmd, workingDirectory) ! ProcessLogger(
+            (out: String) => {
+              output append out
+              s.log.info(out)
+            },
+            (err: String) => {
+              error append err
+              s.log.info(err)
+            }
+          )
+          if (exitCode != 0) {
+            throw new RuntimeException("MMTk build failed with output: " + error.toString)
+          }
+        },
+        mmtkBuildRelease := {
+          val s = streams.value
+          val cmd = "cargo build --release"
           val workingDirectory = new File(s"${parentPath.value}/mmtk-scala-native/mmtk")
           val output = new StringBuilder
           val error = new StringBuilder
@@ -553,9 +577,10 @@ object Build {
             Seq("-lmmtk_scala_native")
           )
           .withGC(GC.experimental)
+          // .withMode(Mode.releaseFull)
           .withMultithreadingSupport(true)
         },
-        Compile / compile := (Compile / compile).dependsOn(mmtkBuild).value
+        Compile / compile := (Compile / compile).dependsOn(mmtkBuildDebug).value
       )
       .settings(
         envVars := Map(

@@ -16,14 +16,12 @@ void (*handlerFn)() = NULL;
 
 void WeakRefStack_Nullify(void) {
     visited = false;
-    Bytemap *bytemap = heap.bytemap;
     while (!Stack_IsEmpty(&weakRefStack)) {
         Object *object = Stack_Pop(&weakRefStack);
         int64_t fieldOffset = __weak_ref_field_offset;
         word_t *refObject = object->fields[fieldOffset];
         if (Heap_IsWordInHeap(&heap, refObject)) {
-            ObjectMeta *objectMeta = Bytemap_Get(bytemap, refObject);
-            if (!ObjectMeta_IsMarked(objectMeta)) {
+            if (!mmtk_is_reachable(refObject)) {
                 // WeakReferences should have the held referent
                 // field set to null if collected
                 object->fields[fieldOffset] = NULL;

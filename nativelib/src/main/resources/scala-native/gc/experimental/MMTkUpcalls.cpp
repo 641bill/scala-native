@@ -2,6 +2,7 @@
 
 #include "MMTkUpcalls.hpp"
 // #define DEBUG 1
+#define OFFSET_OF_MUTATOR_CONTEXT 480
 
 thread_local MMTk_GCThreadTLS *mmtk_gc_thread_tls;
 
@@ -11,15 +12,15 @@ thread_local MMTk_GCThreadTLS *mmtk_gc_thread_tls;
 // The actual thread synchronization mechanism is up to the VM, and MMTk does not make assumptions on that.
 // MMTk provides a callback function and expects the binding to use the callback for each mutator when it
 // is ready for stack scanning. Usually a stack can be scanned as soon as the thread stops in the yieldpoint.
-static void mmtk_stop_all_mutators(void *tls, MutatorClosure closure) {
+static void mmtk_stop_all_mutators(void *tls) {
 	#ifdef DEBUG
 	printf("mmtk_stop_all_mutators\n");
 	#endif
 	
-	// if (currentMutatorThread == NULL) {
-	// 	int stackBottom = 0;
-	// 	GCThread_init((Field_t *)&stackBottom);
-	// } 
+	if (currentMutatorThread == NULL) {
+		int stackBottom = 0;
+		GCThread_init((Field_t *)&stackBottom);
+	} 
 	// Print out the heap start and end, and the stack start and end
 	// printf("Heap start: %p\n", mmtk_starting_heap_address());
 	// printf("Heap end: %p\n", mmtk_last_heap_address());
@@ -27,13 +28,6 @@ static void mmtk_stop_all_mutators(void *tls, MutatorClosure closure) {
 	// printf("Stack top: %p\n", currentMutatorThread->stackTop);
 
 	Synchronizer_acquire();
-	// atomic_thread_fence(memory_order_seq_cst);
-
-	// MutatorThreadNode *head = mutatorThreads;
-	// MutatorThreads_foreach(mutatorThreads, node) {
-	// 	MutatorThread *thread = node->value;
-	// 	invoke_MutatorClosure(&closure, thread->mutatorContext);
-	// }
 }
 
 /// Resume all the mutator threads, the opposite of the above. When a GC is finished, MMTk calls this method.
@@ -268,6 +262,10 @@ MutatorThreadNode* mmtk_get_mutator_threads() {
 	// MutatorThreadNode *head = mutatorThreads;
 	// MutatorThreads_foreach(mutatorThreads, node) {
 	// 	printf("Mutator thread: %p\n", node->value);
+	// 	printf("mutator context %p\n", node->value->mutatorContext);
+	// 	printf("mutator context's tls is %p\n", node->value->mutatorContext->mutator_tls);
+	// 	printf("state's offset is %zu\n", offsetof(MutatorThread, state));
+	// 	printf("mutator context's offset is %zu\n", offsetof(MutatorThread, mutatorContext));
 	// }
 	return mutatorThreads;
 }
@@ -523,12 +521,23 @@ static void mmtk_init_synchronizer_thread() {
 		MutatorThread_switchState(currentMutatorThread, MutatorThreadState_Unmanaged);
 }
 
+static void sync_weak_ref_stack(void** stack, size_t len) {
+	for (size_t i = 0; i < len; i++) {
+		Object* obj = (Object*)stack[i];
+		Stack_Push(&weakRefStack, obj);
+	}
+}
+
 static void weak_ref_stack_nullify() {
 	WeakRefStack_Nullify();
 }
 
-static void weak_ref_stack_call_handlers () {
+static void weak_ref_stack_call_handlers() {
 	WeakRefStack_CallHandlers();
+}
+
+size_t get_mutatorContext_offset() {
+	return OFFSET_OF_MUTATOR_CONTEXT;
 }
 
 ScalaNative_Upcalls mmtk_upcalls = {
@@ -558,6 +567,7 @@ ScalaNative_Upcalls mmtk_upcalls = {
 	mmtk_scan_roots_in_mutator_thread,
 	mmtk_scan_vm_specific_roots,
 	mmtk_prepare_for_roots_re_scanning,
+	sync_weak_ref_stack,
 	weak_ref_stack_nullify,
 	weak_ref_stack_call_handlers,
 	// active_plan
@@ -568,6 +578,7 @@ ScalaNative_Upcalls mmtk_upcalls = {
 	mmtk_init_gc_worker_thread,
 	mmtk_get_gc_thread_tls,
 	mmtk_init_synchronizer_thread,
+	get_mutatorContext_offset,
 };
 
 #endif

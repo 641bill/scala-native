@@ -154,7 +154,7 @@ void scalanative_collect() {
 }
 
 INLINE void scalanative_register_weak_reference_handler(void *handler) {
-    WeakRefStack_SetHandler(handler);
+    mmtk_weak_ref_stack_set_handler(handler);
 }
 
 /* Get the minimum heap size */

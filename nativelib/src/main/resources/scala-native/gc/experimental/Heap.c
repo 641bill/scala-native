@@ -288,7 +288,7 @@ void Heap_Collect(Heap *heap, Stack *stack) {
     if (stats != NULL) {
         nullify_start_ns = scalanative_nano_time();
     }
-    WeakRefStack_Nullify();
+    // WeakRefStack_Nullify();
     if (stats != NULL) {
         sweep_start_ns = scalanative_nano_time();
     }
