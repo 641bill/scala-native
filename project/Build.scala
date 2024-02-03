@@ -573,19 +573,20 @@ object Build {
           )
           .withLinkingOptions(
             nativeConfig.value.linkingOptions ++ 
-            Seq(s"-L${parentPath.value}/mmtk-scala-native/mmtk/target/debug") ++
+            Seq(s"-L${parentPath.value}/mmtk-scala-native/mmtk/target/release") ++
             Seq("-lmmtk_scala_native")
           )
           .withGC(GC.experimental)
-          // .withMode(Mode.releaseFull)
+          .withMode(Mode.releaseFull)
           .withMultithreadingSupport(true)
+          .withIncrementalCompilation(false)
         },
-        Compile / compile := (Compile / compile).dependsOn(mmtkBuildDebug).value
+        Compile / compile := (Compile / compile).dependsOn(mmtkBuildRelease).value
       )
       .settings(
         envVars := Map(
           "LD_LIBRARY_PATH" -> (
-              s"${parentPath.value}/mmtk-scala-native/mmtk/target/debug:" +
+              s"${parentPath.value}/mmtk-scala-native/mmtk/target/release:" +
               s"$$LD_LIBRARY_PATH"
             )
         )

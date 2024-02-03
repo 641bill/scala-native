@@ -201,6 +201,7 @@ NO_SANITIZE void mmtk_mark_range(Heap *heap, Stack *stack, word_t **from,
 
 StackRange mmtk_get_stack_range(void* thread) {
 	MutatorThread* mutatorThread = static_cast<MutatorThread*>(thread);
+	// printf("first mutator thread: %p\n", mutatorThread);
 	word_t **stackBottom = mutatorThread->stackBottom;
 	/* At this point ALL threads are stopped and their stackTop is not NULL -
 		* that's the condition to exit Sychronizer_acquire However, for some
@@ -213,6 +214,9 @@ StackRange mmtk_get_stack_range(void* thread) {
 	do {
 			stackTop = mutatorThread->stackTop;
 	} while (stackTop == NULL);
+	// printf("second mutator thread: %p\n", mutatorThread);
+	// printf("stacktop = %p, stackbottom = %p\n", stackTop, stackBottom);
+	
 	StackRange range = {stackTop, stackBottom};
 	// printf("For thread: %p\n", thread);
 	// printf("Stack top: %p\n", stackTop);

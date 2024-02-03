@@ -29,6 +29,10 @@ object GC {
   def getInitHeapSize(): CSize = extern
   @name("scalanative_get_max_heapsize")
   def getMaxHeapSize(): CSize = extern
+  @name("scalanative_harness_begin")
+  def harnessBegin(): Unit = extern
+  @name("scalanative_harness_end")
+  def harnessEnd(): Unit = extern
 
   /*  Multithreading awareness for GC Every implementation of GC supported in
    *  ScalaNative needs to register a given thread The main thread is

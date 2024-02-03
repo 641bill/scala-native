@@ -90,41 +90,14 @@ void Heap_Init(Heap *heap, size_t minHeapSize, size_t maxHeapSize) {
         maxHeapSize = memoryLimit;
     }
 
-    // uint32_t maxNumberOfBlocks = maxHeapSize / SPACE_USED_PER_BLOCK;
-    // uint32_t initialBlockCount = minHeapSize / SPACE_USED_PER_BLOCK;
     heap->maxHeapSize = maxHeapSize;
-    // heap->blockCount = initialBlockCount;
-    // heap->maxBlockCount = maxNumberOfBlocks;
-
-    // // reserve space for block headers
-    // size_t blockMetaSpaceSize = maxNumberOfBlocks * sizeof(BlockMeta);
-    // word_t *blockMetaStart = Heap_mapAndAlign(blockMetaSpaceSize, WORD_SIZE);
-    // heap->blockMetaStart = blockMetaStart;
-    // heap->blockMetaEnd =
-    //     blockMetaStart + initialBlockCount * sizeof(BlockMeta) / WORD_SIZE;
-
-    // // reserve space for line headers
-    // size_t lineMetaSpaceSize =
-    //     (size_t)maxNumberOfBlocks * LINE_COUNT * LINE_METADATA_SIZE;
-    // word_t *lineMetaStart = Heap_mapAndAlign(lineMetaSpaceSize, WORD_SIZE);
-    // heap->lineMetaStart = lineMetaStart;
-    // assert(LINE_COUNT * LINE_SIZE == BLOCK_TOTAL_SIZE);
-    // assert(LINE_COUNT * LINE_METADATA_SIZE % WORD_SIZE == 0);
-    // heap->lineMetaEnd = lineMetaStart + initialBlockCount * LINE_COUNT *
-    //                                         LINE_METADATA_SIZE / WORD_SIZE;
-
-    // reserve space for bytemap
-    size_t bytemapSpaceSize =
-        maxHeapSize / ALLOCATION_ALIGNMENT + sizeof(Bytemap);
-    Bytemap *bytemap =
-        (Bytemap *)Heap_mapAndAlign(bytemapSpaceSize, ALLOCATION_ALIGNMENT);
-    heap->bytemap = bytemap;
 
     // Init heap for small objects
     word_t *heapStart = (word_t*)mmtk_starting_heap_address();
     heap->heapSize = minHeapSize;
     heap->heapStart = heapStart;
     heap->heapEnd = (word_t*)mmtk_last_heap_address();
+    mmtk_init(minHeapSize, maxHeapSize);
 
 #ifdef _WIN32
     // Commit memory chunks reserved using mapMemory
@@ -141,15 +114,6 @@ void Heap_Init(Heap *heap, size_t minHeapSize, size_t maxHeapSize) {
         Heap_exitWithOutOfMemory("commit memmory");
     }
 #endif // _WIN32
-
-    // BlockAllocator_Init(&blockAllocator, blockMetaStart, initialBlockCount);
-    Bytemap_Init(bytemap, heapStart, maxHeapSize);
-    char *statsFile = Settings_StatsFileName();
-    if (statsFile != NULL) {
-        heap->stats = malloc(sizeof(Stats));
-        Stats_Init(heap->stats, statsFile);
-    }
-    mutex_init(&heap->lock);
 }
 /**
  * Allocates large objects using the `LargeAllocator`.

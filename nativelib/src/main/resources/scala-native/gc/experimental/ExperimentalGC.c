@@ -29,15 +29,13 @@ void scalanative_afterexit() { Stats_OnExit(heap.stats); }
 
 void scalanative_init() {
     // Initialize the MMTk instance with the specified heap size
-    mmtk_init(Settings_MinHeapSize(), Settings_MaxHeapSize() - mmtk_get_bytes_in_page());
-    // mmtk_init(Settings_MinHeapSize(), Settings_MinHeapSize());
+    Heap_Init(&heap, Settings_MinHeapSize(), Settings_MinHeapSize());
 
     max_non_los_default_alloc_bytes = get_max_non_los_default_alloc_bytes();
     mmtk_vo_bit_log_region_size = get_vo_bit_log_region_size();
     mmtk_vo_bit_base_addr = get_vo_bit_base();
     immix_bump_ptr_offset = get_immix_bump_ptr_offset();
     
-    Heap_Init(&heap, Settings_MinHeapSize(), Settings_MaxHeapSize());
     scalanative_gc_init(&mmtk_upcalls);
     mmtk_init_binding(&mmtk_upcalls);
     Stack_Init(&stack, INITIAL_STACK_SIZE);
@@ -173,6 +171,14 @@ size_t scalanative_get_max_heapsize() {
     return Parse_Env_Or_Default("GC_MAXIMUM_HEAP_SIZE", Settings_MaxHeapSize() - mmtk_get_bytes_in_page());
 }
 
+void scalanative_harness_begin(void* _) {
+    mmtk_harness_begin(currentMutatorThread);
+}
+
+void scalanative_harness_end() {
+    mmtk_harness_end();
+}
+
 #ifdef SCALANATIVE_MULTITHREADING_ENABLED
 typedef void *RoutineArgs;
 typedef struct {
@@ -207,6 +213,7 @@ int scalanative_pthread_create(pthread_t *thread, pthread_attr_t *attr,
             (WrappedFunctionCallArgs *)malloc(sizeof(WrappedFunctionCallArgs));
     proxyArgs->fn = routine;
     proxyArgs->args = args;
+    printf("Creating thread %p\n", thread);
     return pthread_create(thread, attr,
                           (ThreadStartRoutine)&ProxyThreadStartRoutine,
                           (RoutineArgs)proxyArgs);

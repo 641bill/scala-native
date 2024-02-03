@@ -30,7 +30,7 @@ void scalanative_collect();
 void scalanative_afterexit() { Stats_OnExit(heap.stats); }
 
 NOINLINE void scalanative_init() {
-    Heap_Init(&heap, Settings_MinHeapSize(), Settings_MaxHeapSize());
+    Heap_Init(&heap, Settings_MinHeapSize(), Settings_MinHeapSize());
     Stack_Init(&stack, INITIAL_STACK_SIZE);
     Stack_Init(&weakRefStack, INITIAL_STACK_SIZE);
 #ifdef SCALANATIVE_MULTITHREADING_ENABLED
@@ -90,6 +90,10 @@ size_t scalanative_get_init_heapsize() { return Settings_MinHeapSize(); }
 size_t scalanative_get_max_heapsize() {
     return Parse_Env_Or_Default("GC_MAXIMUM_HEAP_SIZE", Heap_getMemoryLimit());
 }
+
+void scalanative_harness_begin(void* _) {}
+
+void scalanative_harness_end() {}
 
 #ifdef SCALANATIVE_MULTITHREADING_ENABLED
 typedef void *RoutineArgs;

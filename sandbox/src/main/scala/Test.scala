@@ -1,11 +1,16 @@
 import java.lang.Thread
 import scala.collection.mutable.ArrayBuffer
+import scala.scalanative.runtime.GC
 
 object Test {
   def main(args: Array[String]): Unit = {
+    // val arrayBufferStart = System.currentTimeMillis()
     // for (i <- 0 to 1000000) {
     //   val ab = ArrayBuffer(i, i + 1, i + 2)
     // }
+    // val arrayBufferEnd = System.currentTimeMillis()
+    // println("ArrayBuffer result: " + (arrayBufferEnd - arrayBufferStart) + "ms")
+
     // // Initialize a thread
     // val thread = new Thread {
     //   override def run(): Unit = {
@@ -44,20 +49,21 @@ object Test {
     // val bounceIterations = 42000
     // println(s"Running Bounce for $bounceIterations iterations")
     // val bounceStart = System.currentTimeMillis()
-    // for (i <- 0 to bounceIterations) {
+    // for (i <- 0 until bounceIterations) {
     //   val benchmarkResult1 = bounce.BounceBenchmark.run("100")
     // }
     // val bounceEnd = System.currentTimeMillis()
     // println("Bounce result: " + (bounceEnd - bounceStart) + "ms")
-    
+    GC.harnessBegin()
     val GCBenchIterations = 1
     println(s"Running GCBench for $GCBenchIterations iterations")
     val GCBenchStart = System.currentTimeMillis()
-    for (i <- 0 to GCBenchIterations) {
+    for (i <- 0 until GCBenchIterations) {
       val benchmarkResult2 = gcbench.GCBenchBenchmark.run("")
     }
     val GCBenchEnd = System.currentTimeMillis()
     println("GCBench result: " + (GCBenchEnd - GCBenchStart) + "ms")
+    GC.harnessEnd()
 
     // val iterations = 10
     // for (iter <- 0 until iterations) {

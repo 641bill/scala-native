@@ -28,20 +28,8 @@ void MutatorThread_init(Field_t *stackbottom) {
     self->thread = pthread_self();
 #endif
     MutatorThread_switchState(self, MutatorThreadState_Managed);
-    // Allocator_Init(&self->allocator, &blockAllocator, heap.bytemap,
-    //                heap.blockMetaStart, heap.heapStart);
-
-    // LargeAllocator_Init(&self->largeAllocator, &blockAllocator, heap.bytemap,
-    //                     heap.blockMetaStart, heap.heapStart);
-    // Allocator_Init(&self->allocator, &blockAllocator, heap.bytemap,
-    //                heap.blockMetaStart, heap.heapStart);
-
-    // LargeAllocator_Init(&self->largeAllocator, &blockAllocator, heap.bytemap,
-    //                     heap.blockMetaStart, heap.heapStart);
     MutatorThreads_add(self);
-    // Following init operations might trigger GC, needs to be executed after
-    // acknownleding the new thread in MutatorThreads_add
-    // Allocator_InitCursors(&self->allocator);
+    // printf("Thread %p inited and added\n", self);
 }
 
 void GCThread_init(Field_t *stackbottom) {

@@ -52,6 +52,27 @@ void Stats_OnExit(Stats *stats) {
             // there were some measurements not written in the last full batch.
             Stats_writeToFile(stats);
         }
+        // Add every number in the file and append it to the end of the file
+        FILE *outFile = stats->outFile;
+        fprintf(outFile, "\n");
+        uint64_t mark_time_ns = 0;
+        uint64_t nullify_time_ns = 0;
+        uint64_t sweep_time_ns = 0;
+        uint64_t collections = stats->collections;
+        uint64_t remainder2 = collections % STATS_MEASUREMENTS;
+        if (remainder2 == 0) {
+            remainder2 = STATS_MEASUREMENTS;
+        }
+        for (uint64_t i = 0; i < remainder2; i++) {
+            mark_time_ns += stats->mark_time_ns[i];
+            nullify_time_ns += stats->nullify_time_ns[i];
+            sweep_time_ns += stats->sweep_time_ns[i];
+        }
+        // Add all of them together
+        uint64_t total_time_ns = mark_time_ns + nullify_time_ns + sweep_time_ns;
+        uint64_t total_time_ms = total_time_ns / 1000000;
+        // Append to file
+        fprintf(outFile, "Total time (ms): %" PRIu64 "\n", total_time_ms);
         fclose(stats->outFile);
     }
 }
