@@ -43,18 +43,27 @@ void GC_Roots_RemoveByRange(GC_Roots *roots, AddressRange range) {
     GC_Root *current = roots->head;
     GC_Root *prev = NULL;
     while (current != NULL) {
-        if (AddressRange_Contains(range, current->range)) {
-            AddressRange current_range = current->range;
-            if (prev == NULL)
-                roots->head = current->next;
-            else
-                prev->next = current->next;
-            GC_Roots_Add_Range_Except(roots, current_range, range);
-
-            prev = current;
+        AddressRange currentRange = current->range;
+        if (AddressRange_Contains(range, currentRange)) {
             GC_Root *next = current->next;
+            if (prev == NULL)
+                roots->head = next;
+            else
+                prev->next = next;
             free(current);
             current = next;
+            continue;
+        }
+        if (AddressRange_Contains(currentRange, range)) {
+            GC_Root *next = current->next;
+            if (prev == NULL)
+                roots->head = next;
+            else
+                prev->next = next;
+            GC_Roots_Add_Range_Except(roots, currentRange, range);
+            free(current);
+            current = next;
+            continue;
         } else {
             prev = current;
             current = current->next;

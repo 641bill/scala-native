@@ -1,0 +1,419 @@
+# Rift Roadmap
+
+Status: revised from the active fork state, benchmark notes, handoff, and the
+literature-review comparison contract.
+
+Active worktree: `/Users/siyaoliu/rift/scala-native-rift`
+
+Branch: `feature/rift`
+
+Head at time of this revision: `ddbba577aecd4c0adc741cbf7085ee93548c46b4`
+
+## 1. Roadmap Principles
+
+The roadmap separates four questions:
+
+- Can the runtime path itself beat current SafeZone, improved SafeZone, and
+  heap on same-layout workloads?
+- Which effects come from runtime, topology, and layout?
+- Can real stream/dataflow workloads move dominant data operations into regions?
+- Can the safe API be justified by static capture checking and a mechanized
+  containment proof?
+
+The roadmap also keeps prior-work comparison anchors visible. Rift is not done
+when it beats old SafeZone on one benchmark. It must eventually explain its
+position relative to Broom, StreamFlex, Yak, Stancu-style static hybrid
+analysis, Tofte-Talpin/MLKit, Hallenberg-Elsman typed regions, and
+Reggio/Verona capabilities.
+
+## 2. Status Summary
+
+| Phase | Status | Evidence | Main remaining work |
+|---|---|---|---|
+| Phase 0: baseline and comparison contract | Mostly complete, not sealed | `sandbox/PHASE0_BASELINES.md`; literature review now read as design constraint. | Commit/provenance boundary, Commix gaps, pipeline remains surrogate. |
+| Phase 1: standalone allocator bootstrap | Done as provenance | `/Users/siyaoliu/rift/rift-bootstrap/bench/microbench/results.md`. | Do not continue active design there unless validating bootstrap artifacts. |
+| Phase 2: in-tree runtime/compiler path | Partially done | `RiftRuntime.c/h`, `RiftRegion`, plugin lowering, `RiftRegionTest`. | Header/API cleanup, broader tests, commit boundary, stats ABI decision. |
+| Phase 3: runtime-only evaluation | Done enough for current claim | GCBench and ListOfLists medians show Rift wins over heap and improved SafeZone. | Add Commix where relevant; avoid overclaiming pipeline. |
+| Phase 4: topology/layout decomposition | Done enough to move on | `PHASE4_LAYOUT.md`, `PHASE4_TOPOLOGY.md`, `PHASE4_EXIT.md`. | Carry safety finding into Phase 6; chunked layout still not clear Rift win vs improved SafeZone. |
+| Phase 5: application evidence | In progress, not complete | DEBS Q1/Q2 scaffold runs and outputs match on bounded real-data samples. | Region-heavy parser/Q1/Q2, medians, SafeZone/Commix modes, full-month scale. |
+| Phase 6: Broom/parallel-collections API evidence | Open | Only raw-array surrogate and amordo comparison note exist. | Build fair Rift-backed collection/operator API. |
+| Phase 7: capture-checked safe API | Open | Runtime kind constants exist; safety tests not implemented. | Positive/negative capture tests, safe `Scoped`/`Streaming` API, report gaps. |
+| Phase 8: native GC/region integration hardening | Open | Safety bug found for unrooted region-to-GC references. | Decide reject/root/scan strategy; test mixed references. |
+| Phase 9: Lean mechanization | Open | Design target only; older proof pack is not active in fork. | Core calculus and proofs without `sorry`. |
+| Phase 10: writing | Not started beyond notes | Handoff and result packs exist. | Paper/thesis narrative after evidence stabilizes. |
+
+Phase 0 is not "final." It is complete enough for GCBench and ListOfLists, but
+not for a final pipeline or application story.
+
+## 3. Phase 0: Baseline And Comparison Contract
+
+Goal: establish trustworthy local baselines and explicit prior-work comparison
+targets before making claims.
+
+Completed:
+
+- GCBench 5-run matrix: Immix, current SafeZone, improved SafeZone, Rift HPZone.
+- ListOfLists 5-run matrix: Immix, current SafeZone, improved SafeZone, Rift
+  HPZone.
+- GCBench topology rerun.
+- Cleaned raw-array pipeline surrogate.
+- Literature-review comparison contract covering Broom, StreamFlex, Yak,
+  Stancu et al., Tofte-Talpin/MLKit, Hallenberg-Elsman-Tofte,
+  Reggio/Verona, and Pony/Orca.
+
+Key local baseline medians:
+
+| Benchmark | Immix | Current SafeZone | Improved SafeZone | Rift HPZone |
+|---|---:|---:|---:|---:|
+| GCBench | 203.514 ms | 684.517 ms | 223.770 ms | 161.641 ms |
+| ListOfLists linked | 15085.511 ms | 138171.998 ms | 10132.854 ms | 6951.331 ms |
+
+Exit criteria:
+
+- Baseline commands are checked in.
+- Results state run counts and environment variables.
+- Surrogates are labeled as surrogates.
+- The comparison section in `DESIGN.md` stays visible in future docs.
+
+Remaining:
+
+- Add Commix where it is a meaningful comparison.
+- Stabilize current uncommitted work into a commit or patch boundary.
+- Do not treat the pipeline surrogate as a tracked-source reproduction.
+
+## 4. Phase 1: Standalone Allocator Bootstrap
+
+Goal: prove the slab allocator core before in-tree integration.
+
+Status: done as historical provenance, not active architecture.
+
+Evidence:
+
+- Old bootstrap tree: `/Users/siyaoliu/rift/rift-bootstrap`.
+- Recorded microbench results show Rift HPZone allocation around `2.1 ns`
+  p50 and close/free around `3000 ns` p50 for 100000 allocations.
+
+Do not redo:
+
+- Do not restart implementation from the standalone scaffold.
+- Use it only for provenance or focused allocator sanity checks.
+
+## 5. Phase 2: In-Tree Runtime And Compiler Path
+
+Goal: make Rift a real Scala Native runtime/compiler path.
+
+Completed or partially completed:
+
+- `nativelib/src/main/resources/scala-native/rift/RiftRuntime.c`
+- `nativelib/src/main/resources/scala-native/rift/RiftRuntime.h`
+- `nativelib/src/main/scala/scala/scalanative/memory/RiftRegion.scala`
+- `nativelib/src/main/scala/scala/scalanative/runtime/RiftAllocator.scala`
+- Scala 2/3 companion surface.
+- Compiler primitive and lowering for `region.alloc(new T(...))`.
+- `RiftRegionTest` recorded as passing `5/5`.
+- SafeZone baseline correction in `MemoryPool.c`, `Zone.c`, and
+  `GCRoots.c`.
+
+Exit criteria:
+
+- Full API/header consistency, including stats functions or an explicit choice
+  to keep them private.
+- Dedicated compiler-plugin regression tests.
+- Broader Scala Native test subset beyond `RiftRegionTest`.
+- No untracked implementation files for the core runtime/API.
+
+Risks:
+
+- Current code is uncommitted and untracked in important areas.
+- `origin` points at `https://github.com/amordo/scala-native.git`, not the
+  intended `641bill` fork.
+- `RiftRuntime.h` does not currently declare all stats functions used by Scala
+  externs.
+
+## 6. Phase 3: Runtime-Only Evaluation
+
+Goal: establish whether the runtime claim stands before relying on layout or
+library redesign.
+
+Completed enough:
+
+- GCBench: Rift HPZone `161.641 ms` vs heap `203.514 ms` and improved SafeZone
+  `223.770 ms`.
+- ListOfLists linked: Rift HPZone `6951.331 ms` vs heap `15085.511 ms` and
+  improved SafeZone `10132.854 ms`.
+
+Interpretation:
+
+- Same-layout runtime wins exist.
+- Old SafeZone pathologies reproduce in the current fork for linked one-region
+  shapes.
+- Improved SafeZone is much stronger and must remain a baseline.
+- The cleaned pipeline does not currently show Rift separation.
+
+Remaining:
+
+- Add Commix where supported.
+- Keep the runtime claim scoped to workloads where measurements support it.
+- Do not use layout-specialized results to prove same-layout runtime speed.
+
+## 7. Phase 4: Topology And Layout Decomposition
+
+Goal: separate allocator wins from topology wins and data-layout wins.
+
+Completed enough:
+
+- Linked, chunked, and flat ListOfLists layout study.
+- One-region, nested, and mixed rooted topology study.
+- Exit summary tying runtime, layout, topology, and safety findings together.
+
+Key results:
+
+| Mode | Linked ms | Chunked ms | Flat ms |
+|---|---:|---:|---:|
+| Immix heap | 15260.875 | 2636.480 | 1766.295 |
+| current SafeZone | 136016.922 | 4835.904 | 1735.453 |
+| improved SafeZone | 9824.936 | 2369.108 | 1743.161 |
+| Rift HPZone | 7278.150 | 2463.674 | 1515.091 |
+
+Key findings:
+
+- Layout is first-order for every runtime.
+- Rift still has a runtime win on linked allocation-heavy structures.
+- The flat Rift cliff was a runtime bug and was fixed.
+- The first chunked layout does not clearly beat improved SafeZone.
+- Mixed rooted heap-values is not a Rift win.
+- Unrooted region-to-GC references are unsafe because the GC does not scan Rift
+  regions.
+
+Exit criteria:
+
+- Phase 4 is complete enough to move to Phase 5.
+- The safety finding must be tested and designed around in Phase 7/8.
+
+## 8. Phase 5: Application Evidence And DEBS 2015
+
+Goal: produce real application-level evidence that region memory reduces the
+dominant allocation and GC costs in a streaming workload.
+
+Current status:
+
+- `bench/debs2015` scaffold exists.
+- Q1 and Q2 run simultaneously on sorted bounded real NYC taxi samples.
+- Heap, Rift HPZone, and Rift Streaming outputs match after stripping only the
+  measured latency column.
+- Instrumented runs report GC counters, RSS, and Rift counters.
+- A parser fast path now avoids `String.split`, per-row `Option` allocation,
+  and per-row `Trip` allocation in hot runners. This improves all modes, but it
+  is not yet region-heavy evidence because input strings, taxi/timestamp
+  strings, ranking objects, and outputs remain heap-based.
+- Q1 now uses a shared bucketed-window implementation for heap and Rift. Heap
+  allocates the same bucket-entry class with `new`; Rift allocates it with
+  `region.alloc` and closes the per-timestamp region at bucket eviction.
+
+Current limitation:
+
+- Current Rift DEBS region-allocates only Q1 bucket entries, using the same Q1
+  bucketed algorithm as heap.
+- Q2 is heap-only.
+- Parser, Q1 ranking, Q2 ranking, median structures, output arrays, and output
+  formatting remain heap-heavy.
+- Therefore current DEBS does not yet establish that Rift is faster at the
+  application level.
+
+Current provisional evidence:
+
+| Run | Heap | Rift HPZone | Rift Streaming |
+|---|---:|---:|---:|
+| 1M RunBoth elapsed | 21658.215 ms | 22314.989 ms | 22184.467 ms |
+| 1M instrumented elapsed | 22827.882 ms | 22366.285 ms | 22810.687 ms |
+| 1M instrumented GC time | 1051.752 ms | 1003.171 ms | 1012.489 ms |
+
+Immediate next step:
+
+- Preserve benchmark fairness before adding more region code. Heap and Rift
+  variants should be the same logical program with allocation/lifetime policy
+  as the variable, not separate hand-specialized algorithms.
+- Next, implement the same shared-backend shape for Q2 window entries and other
+  structured-lifetime data before optimizing ranking internals.
+
+Implementation substeps:
+
+- Treat input/parser cleanup as shared noise reduction only; it is not by itself
+  Rift evidence.
+- Keep Q1 heap and Rift algorithms aligned. Any future Q1 optimization must be
+  shared by both modes unless the only difference is allocation placement.
+- Implement region-shaped Q2 profit and empty-taxi windows with a heap backend
+  and a Rift backend over the same algorithm.
+- Only replace Q2 median/ranking data structures after the window lifetime
+  boundary is represented fairly for heap and Rift.
+- Use primitive keys and packed cell/route IDs only when the change is shared
+  across modes or needed to avoid unsafe region-to-GC references.
+- Keep heap roots explicit for any heap object referenced from region memory.
+- Rerun 100k and 1M instrumented matrices with medians after each change.
+- Add Commix and improved SafeZone modes where meaningful.
+- Scale to full-month joined/sorted data only after the bounded samples have a
+  stable region-heavy implementation.
+
+Exit criteria:
+
+- Both queries run simultaneously and correctly.
+- Results include medians for throughput, p50/p99/p99.9 latency, GC time, RSS,
+  and Rift operation time.
+- At least one Rift mode reduces GC time or tail latency for a reason traceable
+  to region-backed application data structures.
+- The writeup separates runtime-only, topology/layout, and application effects.
+
+Do not claim Phase 5 success until these criteria are met.
+
+## 9. Phase 6: Broom And Parallel-Collections API Evidence
+
+Goal: compare Rift against dataflow/parallel-collection systems at the API
+level, not only as raw arrays.
+
+Current status:
+
+- `sandbox/PIPELINE_PARCOLL_COMPARISON.md` records the amordo
+  `ZoneParVector` benchmark and the Rift raw-array surrogate.
+- The comparison is explicitly not apples-to-apples.
+
+Required work:
+
+- Build a `RiftParVector`, region-backed stage buffer, or equivalent
+  collection/operator API.
+- Reproduce the amordo pipeline shape using the Rift API, not raw arrays.
+- Compare heap `ParVector`, amordo `ZoneParVector`, SafeZone, and Rift under the
+  same logical API.
+- Track annotation burden and release/reset ergonomics.
+
+Exit criteria:
+
+- Rift has a fair Broom/parallel-collections comparison.
+- Results state whether wins come from allocator runtime, region release, or
+  lower-level array loops.
+
+## 10. Phase 7: Capture-Checked Safe API
+
+Goal: make `Scoped` and `Streaming` regions safe by construction rather than by
+convention.
+
+Required work:
+
+- Define user-facing safe APIs for scoped and streaming regions.
+- Add positive compile/run tests for for-loops, nested regions, and
+  higher-order code.
+- Add negative compile tests for return escape, closure capture escape,
+  cross-region leakage, use-after-reset, GC-to-region fields, and unrooted
+  region-to-GC ownership.
+- Create or update `REPORT_CAPTURE_CHECK.md` with exact checker behavior.
+- Decide whether current Scala 3 capture checking is enough or whether the fork
+  needs a small compiler extension.
+
+Exit criteria:
+
+- Positive cases compile and run.
+- Negative cases fail for capture/safety reasons, not incidental type errors.
+- Any checker limitation is documented and reflected in the design.
+
+Comparison obligation:
+
+- Show why the API is less restrictive than StreamFlex and Reggio but safer
+  than Broom and HPZone.
+- Count annotations and compare qualitatively to Stancu-style `@RegionScope`
+  and Reggio capability annotations.
+
+## 11. Phase 8: Native GC/Region Integration Hardening
+
+Goal: resolve mixed GC-region safety and native-runtime compatibility.
+
+Required decisions:
+
+- Should safe regions forbid owning region-to-GC references?
+- Should Rift expose explicit GC-root handles for heap values stored in regions?
+- Should region metadata be scanned by the GC?
+- Should typed-region metadata eventually support BIBOP-style layout or
+  tag-free scanning?
+
+Required tests:
+
+- Region-to-GC reference retained only by region memory must fail statically or
+  be kept alive by explicit root/scan machinery.
+- GC-to-region references through heap fields must fail for safe regions.
+- HPZone versions of these cases must be labeled unsafe/trusted.
+
+Exit criteria:
+
+- The mixed reference story is explicit in design, tests, and benchmarks.
+- Native/non-moving assumptions remain valid.
+- No copying collector is introduced into Scala Native's C interop path.
+
+## 12. Phase 9: Lean Mechanization
+
+Goal: mechanize the core safety story.
+
+Required model:
+
+- Syntax for functions, closures, allocation, region open, close, reset, and
+  capture sets.
+- Two-space store: GC heap plus region heaps.
+- Typing judgment with capture sets.
+- Operational semantics for allocation and close/reset.
+- A model of GC fallback sufficient to state containment.
+
+Required theorems:
+
+- Progress.
+- Preservation.
+- Containment.
+- Safe close/reset.
+
+Exit criteria:
+
+- Core theorems are proved without `sorry`.
+- The model covers at least one higher-order closure case, because that is where
+  the literature review identifies prior proof fragility.
+
+## 13. Phase 10: Writing
+
+Goal: turn the artifact into a defensible research narrative.
+
+Expected structure:
+
+- Literature gap and comparison contract.
+- Baseline correction and why old SafeZone numbers were incomplete.
+- In-tree runtime/compiler implementation.
+- Runtime-only evidence.
+- Topology/layout decomposition.
+- Application evidence from region-heavy DEBS and collection operators.
+- Capture-checking safety.
+- Lean proof.
+- Limitations and failure cases.
+
+Do not write the conclusion before Phase 5, Phase 7, and Phase 9 have real
+evidence.
+
+## 14. Immediate Safe Next Action
+
+After these docs, the safest technical next action is:
+
+1. Create a clean commit or patch boundary for the current dirty worktree after
+   user approval.
+2. Run a read-only allocation-pressure diagnosis for DEBS.
+3. Continue the fair-backend DEBS conversion: same logical query algorithm,
+   heap backend with `new`, Rift backend with `region.alloc` and region
+   close/reset at the same lifetime boundary.
+4. Rerun 100k and 1M instrumented medians.
+
+Do not move straight to new runtime micro-optimizations unless the DEBS
+diagnosis points there.
+
+## 15. Unsafe Assumptions To Avoid
+
+- Rift already has a DEBS application win.
+- SafeZone is solved or irrelevant.
+- Layout wins prove allocator wins.
+- The raw-array pipeline surrogate is a Broom or `ZoneParVector` replacement.
+- Region-to-GC references are safe just because region memory is live.
+- Full automatic region inference is realistic for all Scala code.
+- Reggio-style capabilities can be copied without paying annotation or topology
+  costs.
+- The active `origin` remote is the intended `641bill` fork.

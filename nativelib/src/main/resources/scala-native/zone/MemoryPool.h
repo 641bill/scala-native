@@ -18,7 +18,7 @@ typedef struct _MemoryPool {
     MemoryPage *page;
 } MemoryPool;
 
-#define MEMORYPOOL_PAGE_SIZE 8192
+#define MEMORYPOOL_DEFAULT_PAGE_SIZE 8192
 #define MEMORYPOOL_MIN_CHUNK_COUNT 4
 #define MEMORYPOOL_MAX_CHUNK_COUNT 512
 
@@ -29,6 +29,12 @@ typedef struct _MemoryPool {
  * @return MemoryPool* The handle of the new memory pool.
  */
 MemoryPool *MemoryPool_open();
+
+/** Returns the configured memory-pool page size. */
+size_t MemoryPool_page_size();
+
+/** Returns configured roots bookkeeping mode (SAFEZONE_ROOTS_MODE). */
+int MemoryPool_roots_mode();
 
 /** Borrow a single unused page, to be reclaimed later.
  *

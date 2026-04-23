@@ -5,6 +5,7 @@ import sbt._
 import sbt.nio.Keys.fileTreeView
 
 import java.io.File
+import java.nio.charset.StandardCharsets
 import java.util.Locale
 
 import scala.collection.mutable
@@ -26,6 +27,25 @@ import MyScalaNativePlugin.isGeneratingForIDE
 import ScriptedPlugin.autoImport._
 
 object Settings {
+  private def gitMetadataDir(base: java.nio.file.Path): java.nio.file.Path = {
+    import java.nio.file.Files
+    import java.nio.file.Path
+    import java.nio.file.Paths
+
+    val dotGit = base.resolve(".git")
+    if (Files.isDirectory(dotGit)) dotGit
+    else if (Files.isRegularFile(dotGit)) {
+      val contents =
+        new String(Files.readAllBytes(dotGit), StandardCharsets.UTF_8).trim
+      val prefix = "gitdir:"
+      if (contents.startsWith(prefix)) {
+        val gitdir = contents.stripPrefix(prefix).trim
+        val path = Paths.get(gitdir)
+        if (path.isAbsolute) path else base.resolve(path).normalize()
+      } else dotGit
+    } else dotGit
+  }
+
   lazy val fetchScalaSource = taskKey[File](
     "Fetches the scala source for the current scala version"
   )
@@ -56,7 +76,8 @@ object Settings {
     Global / onLoad ~= { prev =>
       if (!scala.util.Properties.isWin) {
         import java.nio.file._
-        val prePush = Paths.get(".git", "hooks", "pre-push")
+        val prePush =
+          gitMetadataDir(Paths.get(".")).resolve("hooks").resolve("pre-push")
         Files.createDirectories(prePush.getParent)
         Files.write(
           prePush,

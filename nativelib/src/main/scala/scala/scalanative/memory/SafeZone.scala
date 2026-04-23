@@ -8,9 +8,23 @@ import scala.scalanative.runtime.{RawPtr, RawSize, intrinsic}
  */
 private[scalanative] trait SafeZone {
 
+  def isOpen: Boolean
+
+  def isClosed: Boolean = !isOpen
+
+  def checkOpen(): Unit = {
+    if (!isOpen)
+      throw new IllegalStateException(s"Zone ${this} is already closed.")
+  }
+
+  private[scalanative] def close(): Unit
+
+  private[scalanative] def handle: RawPtr
+
   /** Placeholder for `allocImpl` method, which is used in the alloc: Int ->
    *  SafeZone -> Unit method in Arrays. Similarly, it's needed because the
    *  alloc method is used in the lowering phase.
    */
-  def allocImpl(cls: RawPtr, size: RawSize): RawPtr = intrinsic
+  private[scalanative] def allocImpl(cls: RawPtr, size: RawSize): RawPtr =
+    intrinsic
 }

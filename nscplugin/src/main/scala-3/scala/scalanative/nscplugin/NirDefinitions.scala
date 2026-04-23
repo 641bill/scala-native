@@ -101,6 +101,9 @@ final class NirDefinitions()(using ctx: Context) {
   @tu lazy val RuntimeSafeZoneAllocatorModuleRef = requiredModuleRef("scala.scalanative.runtime.SafeZoneAllocator")
   @tu lazy val RuntimeSafeZoneAllocatorModule = RuntimeSafeZoneAllocatorModuleRef.symbol
   @tu lazy val RuntimeSafeZoneAllocator_allocate = optional(RuntimeSafeZoneAllocatorModule.requiredMethod("allocate"))
+  @tu lazy val RuntimeRiftAllocatorModuleRef = requiredModuleRef("scala.scalanative.runtime.RiftAllocator")
+  @tu lazy val RuntimeRiftAllocatorModule = RuntimeRiftAllocatorModuleRef.symbol
+  @tu lazy val RuntimeRiftAllocator_allocate = optional(RuntimeRiftAllocatorModule.requiredMethod("allocate"))
 
   // Runtime intriniscs
   @tu lazy val IntrinsicMarker = RuntimePackageClass.requiredMethod("intrinsic")

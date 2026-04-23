@@ -89,7 +89,7 @@ trait NirGenExpr(using Context) {
       }
     }
 
-    object SafeZoneInstance extends Property.Key[nir.Val]
+    object AllocationZoneInstance extends Property.Key[nir.Val]
 
     def genApply(app: Apply): nir.Val = {
       given nir.SourcePosition = app.span.orElse(fallbackSourcePosition)
@@ -131,7 +131,7 @@ trait NirGenExpr(using Context) {
               genType(componentType.typeValue),
               length,
               unwind,
-              zone = app.getAttachment(SafeZoneInstance)
+              zone = app.getAttachment(AllocationZoneInstance)
             )
           else genApplyMethod(sym, statically = isStatic, qualifier, args)
         case _ =>
@@ -1126,6 +1126,7 @@ trait NirGenExpr(using Context) {
         case CFUNCPTR_FROM_FUNCTION       => genCFuncFromScalaFunction(app)
         case STACKALLOC                   => genStackalloc(app)
         case SAFEZONE_ALLOC               => genSafeZoneAlloc(app)
+        case RIFT_ALLOC                   => genRiftAlloc(app)
         case CQUOTE                       => genCQuoteOp(app)
         case CLASS_FIELD_RAWPTR           => genClassFieldRawPtr(app)
         case SIZE_OF                      => genSizeOf(app)
@@ -1220,7 +1221,7 @@ trait NirGenExpr(using Context) {
           clssym = sym,
           ctorsym = ctor,
           args = args,
-          zone = app.getAttachment(SafeZoneInstance)
+          zone = app.getAttachment(AllocationZoneInstance)
         )
       } else unsupported(s"unexpected new: $sym with targs ${tpe}")
 
@@ -2609,12 +2610,32 @@ trait NirGenExpr(using Context) {
           )
       }
       // Put the zone into the attachment of `new T(...)`.
-      if tree.hasAttachment(SafeZoneInstance) then
+      if tree.hasAttachment(AllocationZoneInstance) then
         report.warning(
-          s"Safe zone handle is already attached to ${tree}, which is unexpected.",
+          s"Allocation zone handle is already attached to ${tree}, which is unexpected.",
           tree.srcPos
         )
-      tree.putAttachment(SafeZoneInstance, genExpr(sz))
+      tree.putAttachment(AllocationZoneInstance, genExpr(sz))
+      genExpr(tree)
+    }
+
+    def genRiftAlloc(app: Apply): nir.Val = {
+      val Apply(_, List(region, tree)) = app
+      tree match {
+        case Apply(Select(New(_), nme.CONSTRUCTOR), _)          =>
+        case Apply(fun, _) if fun.symbol == defn.newArrayMethod =>
+        case _                                                  =>
+          report.error(
+            s"Unexpected tree in scala.scalanative.runtime.RiftAllocator.allocate: `${tree}`",
+            tree.srcPos
+          )
+      }
+      if tree.hasAttachment(AllocationZoneInstance) then
+        report.warning(
+          s"Allocation zone handle is already attached to ${tree}, which is unexpected.",
+          tree.srcPos
+        )
+      tree.putAttachment(AllocationZoneInstance, genExpr(region))
       genExpr(tree)
     }
 
