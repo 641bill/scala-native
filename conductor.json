@@ -1,0 +1,7 @@
+{
+  "scripts": {
+    "setup": "JAVA_HOME=\"$(cs java-home --jvm temurin:17)\" && export JAVA_HOME && export PATH=\"$JAVA_HOME/bin:$PATH\" && sbt -batch \"sandbox3_next/compile\" || true",
+    "run": "echo 'Use this workspace for implementation and benchmark runs.'",
+    "archive": "echo 'Archive complete.'"
+  }
+}
