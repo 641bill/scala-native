@@ -9,6 +9,25 @@ import scala.scalanative.memory.RiftRegion
 import scala.scalanative.runtime.{fromRawUSize, GC, RawSize, RiftAllocator}
 
 object Debs2015RunBothRunner {
+  final case class PhaseMetrics(
+      readNanos: Long,
+      parseNanos: Long,
+      q1ProcessNanos: Long,
+      q1OutputNanos: Long,
+      q2ProcessNanos: Long,
+      q2OutputNanos: Long,
+      closeNanos: Long
+  ) {
+    def trackedNanos: Long =
+      readNanos +
+        parseNanos +
+        q1ProcessNanos +
+        q1OutputNanos +
+        q2ProcessNanos +
+        q2OutputNanos +
+        closeNanos
+  }
+
   final case class RuntimeMetrics(
       gcCollections: Long,
       gcNanos: Long,
@@ -133,6 +152,7 @@ object Debs2015RunBothRunner {
       elapsedNanos: Long,
       q1LatencyMillis: Array[Long],
       q2LatencyMillis: Array[Long],
+      phases: PhaseMetrics,
       runtime: RuntimeMetrics
   ) {
     def elapsedMillis: Double = elapsedNanos.toDouble / 1000000.0
@@ -157,7 +177,7 @@ object Debs2015RunBothRunner {
     var runtimeEnd = runtimeStart
 
     val q1 = Debs2015Q1Runner.createEngine(q1Mode)
-    val q2 = new Q2Heap
+    val q2 = Debs2015Q2Runner.createEngine(q1Mode)
     val source = Source.fromFile(inputPath)
     val q1Writer = new BufferedWriter(new FileWriter(q1OutputPath))
     val q2Writer = new BufferedWriter(new FileWriter(q2OutputPath))
@@ -172,49 +192,81 @@ object Debs2015RunBothRunner {
     var invalid = 0L
     var q1Outputs = 0L
     var q2Outputs = 0L
+    var readNanos = 0L
+    var parseNanos = 0L
+    var q1ProcessNanos = 0L
+    var q1OutputNanos = 0L
+    var q2ProcessNanos = 0L
+    var q2OutputNanos = 0L
+    var closeNanos = 0L
     val started = System.nanoTime()
 
     try {
       val lines = source.getLines()
-      while (lines.hasNext) {
+      while ({
+        val hasNextStarted = System.nanoTime()
+        val hasNext = lines.hasNext
+        readNanos += System.nanoTime() - hasNextStarted
+        hasNext
+      }) {
         val readAt = System.nanoTime()
+        val readStarted = readAt
         val line = lines.next()
+        val readFinished = System.nanoTime()
+        readNanos += readFinished - readStarted
         events += 1L
 
-        if (Trip.parseInto(line, trip)) {
+        val parseStarted = System.nanoTime()
+        val parsedTrip = Trip.parseInto(line, trip)
+        val parseFinished = System.nanoTime()
+        parseNanos += parseFinished - parseStarted
+
+        if (parsedTrip) {
             parsed += 1L
 
+            val q1Started = System.nanoTime()
             val q1Current = q1.process(trip)
+            val q1Finished = System.nanoTime()
+            q1ProcessNanos += q1Finished - q1Started
             if (q1Current.nonEmpty && Q1Output.changed(previousQ1, q1Current)) {
-              val writeAt = System.nanoTime()
+              val q1OutputStarted = System.nanoTime()
+              val writeAt = q1OutputStarted
               val delayMillis = (writeAt - readAt) / 1000000L
               q1Writer.write(Q1Output.formatRow(trip, q1Current, delayMillis))
               q1Writer.newLine()
               q1Latencies += delayMillis
               q1Outputs += 1L
               previousQ1 = q1Current
+              q1OutputNanos += System.nanoTime() - q1OutputStarted
             }
 
+            val q2Started = System.nanoTime()
             val q2Current = q2.process(trip)
+            val q2Finished = System.nanoTime()
+            q2ProcessNanos += q2Finished - q2Started
             if (q2Current.nonEmpty && Q2Output.changed(previousQ2, q2Current)) {
-              val writeAt = System.nanoTime()
+              val q2OutputStarted = System.nanoTime()
+              val writeAt = q2OutputStarted
               val delayMillis = (writeAt - readAt) / 1000000L
               q2Writer.write(Q2Output.formatRow(trip, q2Current, delayMillis))
               q2Writer.newLine()
               q2Latencies += delayMillis
               q2Outputs += 1L
               previousQ2 = q2Current
+              q2OutputNanos += System.nanoTime() - q2OutputStarted
             }
         } else {
           invalid += 1L
         }
       }
     } finally {
+      val closeStarted = System.nanoTime()
       q2Writer.close()
       q1Writer.close()
       source.close()
       q2.close()
       q1.close()
+      closeNanos = System.nanoTime() - closeStarted
       runtimeEnd = RuntimeMetrics.capture(usesRift)
       if (usesRift) RiftRegion.shutdown()
     }
@@ -228,6 +280,15 @@ object Debs2015RunBothRunner {
       elapsedNanos = System.nanoTime() - started,
       q1LatencyMillis = q1Latencies.toArray,
       q2LatencyMillis = q2Latencies.toArray,
+      phases = PhaseMetrics(
+        readNanos = readNanos,
+        parseNanos = parseNanos,
+        q1ProcessNanos = q1ProcessNanos,
+        q1OutputNanos = q1OutputNanos,
+        q2ProcessNanos = q2ProcessNanos,
+        q2OutputNanos = q2OutputNanos,
+        closeNanos = closeNanos
+      ),
       runtime = RuntimeMetrics.since(runtimeStart, runtimeEnd)
     )
   }
@@ -244,6 +305,11 @@ object Debs2015RunBothRunner {
     val q1Sorted = metrics.q1LatencyMillis.clone()
     val q2Sorted = metrics.q2LatencyMillis.clone()
     val runtime = metrics.runtime
+    val phases = metrics.phases
+    val trackedNanos = phases.trackedNanos
+    val untrackedNanos =
+      if (metrics.elapsedNanos > trackedNanos) metrics.elapsedNanos - trackedNanos
+      else 0L
     scala.util.Sorting.quickSort(q1Sorted)
     scala.util.Sorting.quickSort(q2Sorted)
 
@@ -252,6 +318,15 @@ object Debs2015RunBothRunner {
         f"parsed=${metrics.parsed}%d invalid=${metrics.invalid}%d " +
         f"q1_outputs=${metrics.q1Outputs}%d q2_outputs=${metrics.q2Outputs}%d " +
         f"elapsed_ms=${metrics.elapsedMillis}%.3f throughput_eps=${metrics.throughputEventsPerSecond}%.3f " +
+        f"phase_read_ns=${phases.readNanos}%d " +
+        f"phase_parse_ns=${phases.parseNanos}%d " +
+        f"phase_q1_process_ns=${phases.q1ProcessNanos}%d " +
+        f"phase_q1_output_ns=${phases.q1OutputNanos}%d " +
+        f"phase_q2_process_ns=${phases.q2ProcessNanos}%d " +
+        f"phase_q2_output_ns=${phases.q2OutputNanos}%d " +
+        f"phase_close_ns=${phases.closeNanos}%d " +
+        f"phase_tracked_ns=${trackedNanos}%d " +
+        f"phase_untracked_ns=${untrackedNanos}%d " +
         f"q1_p50_ms=${percentile(q1Sorted, 0.50)}%d " +
         f"q1_p99_ms=${percentile(q1Sorted, 0.99)}%d " +
         f"q1_p999_ms=${percentile(q1Sorted, 0.999)}%d " +

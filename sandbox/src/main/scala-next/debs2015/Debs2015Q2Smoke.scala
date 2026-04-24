@@ -27,14 +27,28 @@ object Debs2015Q2SmokeData {
 }
 
 @main def Debs2015Q2Smoke(): Unit = {
-  val q2 = new Q2Heap
+  smoke("heap")
+  smoke("rift-hp")
+  smoke("rift-streaming")
+}
+
+private def smoke(mode: String): Unit = {
+  val usesRift = mode.startsWith("rift-")
+  if (usesRift) scala.scalanative.memory.RiftRegion.init(0)
+
+  val q2 = Debs2015Q2Runner.createEngine(mode)
   var latest = Array.empty[ProfitableArea]
 
-  Debs2015Q2SmokeData.lines.foreach { line =>
-    val trip = Trip.parse(line).getOrElse {
-      throw new IllegalArgumentException(s"failed to parse smoke line: $line")
+  try {
+    Debs2015Q2SmokeData.lines.foreach { line =>
+      val trip = Trip.parse(line).getOrElse {
+        throw new IllegalArgumentException(s"failed to parse smoke line: $line")
+      }
+      latest = q2.process(trip)
     }
-    latest = q2.process(trip)
+  } finally {
+    q2.close()
+    if (usesRift) scala.scalanative.memory.RiftRegion.shutdown()
   }
 
   if (latest.isEmpty)
@@ -48,6 +62,7 @@ object Debs2015Q2SmokeData {
 
   println(
     "DEBS2015_Q2_SMOKE " +
+      s"mode=$mode " +
       s"top=${top.cell.id} " +
       s"empty=${top.emptyTaxis} " +
       f"median=${top.medianProfit}%.2f " +

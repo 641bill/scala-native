@@ -5,6 +5,7 @@ import java.io.FileWriter
 
 import scala.collection.mutable
 import scala.io.Source
+import scala.scalanative.memory.RiftRegion
 
 object Debs2015Q2Runner {
   final case class Metrics(
@@ -22,8 +23,11 @@ object Debs2015Q2Runner {
       else events.toDouble * 1000000000.0 / elapsedNanos.toDouble
   }
 
-  def run(inputPath: String, outputPath: String): Metrics = {
-    val q2 = new Q2Heap
+  def run(inputPath: String, outputPath: String, mode: String): Metrics = {
+    val usesRift = mode.startsWith("rift-")
+    if (usesRift) RiftRegion.init(0)
+
+    val q2 = createEngine(mode)
     val source = Source.fromFile(inputPath)
     val writer = new BufferedWriter(new FileWriter(outputPath))
     val latencies = new mutable.ArrayBuffer[Long](1024)
@@ -65,6 +69,7 @@ object Debs2015Q2Runner {
       writer.close()
       source.close()
       q2.close()
+      if (usesRift) RiftRegion.shutdown()
     }
 
     Metrics(
@@ -76,6 +81,17 @@ object Debs2015Q2Runner {
       latencyMillis = latencies.toArray
     )
   }
+
+  private[debs2015] def createEngine(mode: String): Q2Engine =
+    mode match {
+      case "heap"           => new Q2Heap
+      case "rift-hp"        => new Q2RiftWindows(RiftRegion.HPZone)
+      case "rift-streaming" => new Q2RiftWindows(RiftRegion.Streaming)
+      case other =>
+        throw new IllegalArgumentException(
+          s"unknown Q2 mode '$other'; expected heap, rift-hp, or rift-streaming"
+        )
+    }
 
   def percentile(sorted: Array[Long], fraction: Double): Long = {
     if (sorted.isEmpty) 0L
@@ -99,7 +115,11 @@ object Debs2015Q2Runner {
   }
 }
 
-@main def Debs2015Q2Run(inputPath: String, outputPath: String): Unit = {
-  val metrics = Debs2015Q2Runner.run(inputPath, outputPath)
+@main def Debs2015Q2Run(
+    inputPath: String,
+    outputPath: String,
+    mode: String = "heap"
+): Unit = {
+  val metrics = Debs2015Q2Runner.run(inputPath, outputPath, mode)
   Debs2015Q2Runner.printMetrics(metrics)
 }

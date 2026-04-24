@@ -277,7 +277,7 @@ Completed and partially validated:
 
 - Implemented DEBS parser/grid/Q1/Q2 scaffold.
 - Added heap and Rift-bucket Q1 modes.
-- Added heap Q2 mode.
+- Added heap and Rift-window Q2 modes over the same bucketed algorithm.
 - Added RunBoth runner for simultaneous Q1 and Q2.
 - Added sample matrices and real-data join script.
 - Added direct-native instrumented matrix with RSS, GC stats, and Rift op counters.
@@ -300,8 +300,9 @@ Validation:
 
 Current limitation:
 
-- Q2 is still heap-only.
-- `Trip.parse` still allocates strings/arrays/`Trip` objects on the heap.
+- Q2 window entries are region-backed in Rift modes, but Q2 ranking, median,
+  and output objects remain heap-based.
+- `Trip.parse` still allocates line-derived strings on the heap.
 - Q1 still uses heap `HashMap`, `TreeSet`, `RankedRoute`, output arrays, and output formatting.
 - Therefore Rift DEBS still depends heavily on GC and does not yet provide strong application-level evidence.
 
@@ -630,7 +631,11 @@ Correctness:
 Caveats:
 
 - These DEBS rows are single-run application measurements, not medians.
-- Current Q2 is heap-only.
+- Q2 window entries, active profit values, and median scratch arrays are now
+  region-backed in Rift modes. The median scratch region now resets once per
+  processed trip instead of once per dirty-cell median recomputation.
+- Q2 ranking now stores packed primitive cell keys internally, but map/tree
+  metadata and output objects remain heap-heavy.
 - Most parser, ranking, output, and mutable collection work still allocates on the GC heap.
 - Current DEBS result is not yet strong application-level evidence that Rift is faster.
 
@@ -681,17 +686,25 @@ DEBS:
 
 - Q1/Q2 correctness is established for bounded sorted real-data samples up to 1M rows.
 - The first 100k heap attempt was dominated by rescans/sorts (`246360.864 ms`), then improved to about `2 s` after incremental ranking.
-- Current DEBS Rift modes only region-allocate Q1 bucket entries. Q2 and most app state remain heap-managed.
-- That explains why GC time remains about `1 s` on the 1M instrumented run across heap/Rift modes.
+- Current DEBS Rift modes region-allocate Q1 bucket entries and Q2 profit/empty-taxi window entries using the same bucketed algorithms as heap.
+- A 100k phase breakdown showed Q2 processing is the dominant measured phase
+  at roughly `48-50%` of elapsed time. Read+parse is about `22%`, Q2 output is
+  about `9%`, GC is about `4.5-5%`, and Rift region operations are about
+  `1.5-2.7%` depending on scratch-reset granularity.
+- Batching Q2 median scratch reset per processed trip reduced Rift resets from
+  `171197` to `87438` and Rift region-op time from about `51.5 ms` to about
+  `28 ms` on the 100k sample.
+- Most app state remains heap-managed, which explains why GC time remains similar across heap/Rift modes.
 - Current application-level evidence is incomplete: Rift HPZone was about `2%` faster than heap in one 1M instrumented single run, while earlier single runs had the opposite ordering. This is not stable enough for a headline.
 
 Why Rift DEBS still uses so much GC:
 
 - `Source.getLines()` and `Trip.parse` allocate per-line `String`/split arrays/`Trip` objects on the heap.
-- Q2 is entirely heap-based: queues, hash maps, `ProfitStats`, `ArrayBuffer`, sorted arrays for median recalculation, `TreeSet`, `ProfitableArea`.
+- Q2 window entries, active profit values, and median scratch arrays are now region-backed in Rift modes, but Q2 hash maps, `ProfitStats` control metadata, `TreeSet`, `ProfitableArea`, and taxi-id metadata remain heap-based.
 - Q1 Rift still uses heap `RouteCounter`, heap `HashMap`, heap `TreeSet`, heap `RankedRoute` outputs, and heap output arrays.
 - Output formatting allocates strings.
-- Rift currently removes only Q1 window-entry allocation from the GC heap; the dominant application data operations are not region-backed yet.
+- Rift currently removes Q1/Q2 window-entry allocation, Q2 active profit-value storage, and Q2 median scratch arrays from the GC heap; the dominant ranking, parser, and output operations are not region-backed yet.
+- Q2 primitive cell keys remove accidental `Cell`/cell-id string allocation from the shared hot path, but this is a boundary/noise cleanup, not a Rift-specific win.
 
 ## 7. Roadmap Status
 
@@ -704,7 +717,7 @@ Roadmap source: `/Users/siyaoliu/rift/Claude_output/ROADMAP.md`
 | Phase 2 in-tree runtime | Partially done | In-tree `RiftRuntime.c/h`, Scala facade, compiler lowering, `RiftRegionTest`, benchmark use. | Make API/header complete, run broader tests, decide stats ABI, clean up untracked state. |
 | Phase 3 runtime-only benchmarks | Done enough for current story | GCBench and ListOfLists runtime medians recorded; pipeline surrogate recorded. | Commix is not included. Pipeline provenance remains surrogate. |
 | Phase 4 topology/layout | Done enough to move on | `PHASE4_LAYOUT.md`, `PHASE4_TOPOLOGY.md`, `PHASE4_EXIT.md`. | Chunked layout still not a Rift win vs improved SafeZone. Mixed GC/region safety story needs Phase 6 tests. |
-| Phase 5 streaming operators and DEBS | In progress | DEBS Q1/Q2 run simultaneously on real data; outputs match; instrumentation added. | Region-backed Q2 and parser/operator data paths are open. Need medians, Commix, SafeZone comparison, full-month input, and stronger app-level evidence. |
+| Phase 5 streaming operators and DEBS | In progress | DEBS Q1/Q2 run simultaneously on real data; outputs match; instrumentation added; Q1 and Q2 window entries have shared heap/Rift backends; Q2 active profit values live in window entries; Q2 median scratch arrays are region-backed and reset per processed trip; Q2 ranking uses primitive cell keys internally. | Ranking/parser/output data paths are still heap-heavy. Q2 processing remains the dominant measured phase. Need medians, Commix, SafeZone comparison, full-month input, and stronger app-level evidence. |
 | Phase 6 capture checking | Open | Only design templates and early Rift API surface exist. | Implement positive/negative capture tests and fill `REPORT_CAPTURE_CHECK.md`. |
 | Phase 7 Lean mechanization | Open | Design pack has Lean stubs/templates. | Port or start proof work; prove without `sorry`. |
 | Phase 8 writing | Not started beyond notes | Result packs and this handoff exist. | Thesis/paper narrative after evidence stabilizes. |
@@ -823,12 +836,12 @@ Immediate next step:
 
 Next technical milestone:
 
-1. Design a DEBS "region-heavy" path before coding it. The goal should be to reduce GC pressure in the actual dominant data operations, not just Q1 window entries.
+1. Continue the DEBS "region-heavy" path with measurement first. The goal should be to reduce GC pressure in the actual dominant data operations, not just window entries.
 2. Start with a narrow measurement-driven plan:
-   - Add allocation counters or coarse heap allocation attribution around `Trip.parse`, Q1 ranking, Q2 windows, Q2 median/profit structures, and output formatting.
-   - Replace `Trip.parse` with a streaming parser that avoids `String.split` and per-event `Trip` allocation, or uses a reusable/region-backed event record.
-   - Implement a region-shaped Q2 window and profit/empty-taxi structures.
-   - Replace heap `HashMap`/`TreeSet` ranking paths where possible with primitive-key arrays, packed-cell maps, bucketed rankings, or reusable region-backed buffers.
+   - Add allocation counters or coarse heap allocation attribution around `Trip.parse`, taxi-id lookup/interning, Q1 ranking, Q2 ranking/median structures, and output formatting.
+   - Replace the current `Trip.parse` heap string boundary with a streaming/event parser that avoids per-row timestamp substrings and only interns durable taxi IDs as heap metadata.
+   - Treat the shared Q2 window/profit-value/backend, region-backed median scratch, per-trip scratch reset, and primitive Q2 cell keys as implemented.
+   - Replace heap `HashMap`/`TreeSet` ranking paths only where the change preserves the same logical query for heap and Rift, or where the only difference is allocation placement.
 3. Rerun 100k and 1M instrumented matrices with medians after each change.
 
 What should not be done yet:
@@ -871,21 +884,22 @@ What is stable enough:
 ## Read These First
 
 1. `docs/HANDOFF.md`
-2. `/Users/siyaoliu/rift/Claude_output/DESIGN.md`
-3. `/Users/siyaoliu/rift/Claude_output/ROADMAP.md`
-4. `/Users/siyaoliu/rift/Claude_output/CODEX.md`
-5. `sandbox/PHASE0_BASELINES.md`
-6. `sandbox/PHASE4_EXIT.md`
-7. `bench/debs2015/RESULTS.md`
+2. `DESIGN.md`
+3. `ROADMAP.md`
+4. `/Users/siyaoliu/rift/docs/Rift Literature Review.md`
+5. `/Users/siyaoliu/rift/Claude_output/CODEX.md`
+6. `sandbox/PHASE0_BASELINES.md`
+7. `sandbox/PHASE4_EXIT.md`
+8. `bench/debs2015/RESULTS.md`
 
 ## Safe Next Action
 
-Create a clean commit/patch boundary for the current worktree after reviewing the dirty state with the user. If continuing Phase 5 before committing, the safest technical action is a read-only allocation-pressure diagnosis for DEBS, focused on parser, Q1 ranking, Q2 windows/ranking/median structures, and output formatting.
+Create a clean commit/patch boundary for the current worktree after reviewing the dirty state with the user. If continuing Phase 5 before committing, the safest technical action is a measured parser/taxi-id boundary change: avoid per-row timestamp substrings and per-row taxi-id substring allocation while keeping the heap/Rift logical program identical.
 
 ## Unsafe Assumptions To Avoid
 
 - "Rift already has a DEBS application win." It does not yet.
-- "GC time should disappear because Q1 uses Rift." Q2, parsing, ranking, and output are still heap-heavy.
+- "GC time should disappear because Q1/Q2 windows use Rift." Parsing, ranking, output, and collection metadata are still heap-heavy. The current measurements show Q2 processing dominates total elapsed time more than GC or Rift bookkeeping.
 - "SafeZone is solved." Improved SafeZone is much better on some workloads, but current SafeZone pathologies and workload sensitivity still matter.
 - "Layout wins prove allocator wins." They are separate effects.
 - "The active remote is the intended 641bill fork." It is not currently configured that way.

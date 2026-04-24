@@ -8,7 +8,7 @@ object Q2Output {
       var same = true
       while (i < current.length && same) {
         same =
-          previous(i).cell == current(i).cell &&
+          previous(i).cellKey == current(i).cellKey &&
             previous(i).emptyTaxis == current(i).emptyTaxis &&
             previous(i).medianProfit == current(i).medianProfit &&
             previous(i).profitability == current(i).profitability
@@ -29,7 +29,7 @@ object Q2Output {
       builder.append(',')
       if (i < ranking.length) {
         val area = ranking(i)
-        builder.append(area.cell.id)
+        Q2Support.appendCellId(builder, area.cellKey)
         builder.append(',')
         builder.append(area.emptyTaxis)
         builder.append(',')

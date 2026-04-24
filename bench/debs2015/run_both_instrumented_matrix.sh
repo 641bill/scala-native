@@ -28,6 +28,15 @@ metric_keys=(
   q2_p99_ms
   q2_p999_ms
   q2_max_ms
+  phase_read_ns
+  phase_parse_ns
+  phase_q1_process_ns
+  phase_q1_output_ns
+  phase_q2_process_ns
+  phase_q2_output_ns
+  phase_close_ns
+  phase_tracked_ns
+  phase_untracked_ns
   gc_collections
   gc_time_ns
   rift_region_op_ns

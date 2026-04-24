@@ -209,14 +209,19 @@ Current status:
 - Q1 now uses a shared bucketed-window implementation for heap and Rift. Heap
   allocates the same bucket-entry class with `new`; Rift allocates it with
   `region.alloc` and closes the per-timestamp region at bucket eviction.
+- Q2 now uses the same shared-backend shape for profit-window and empty-taxi
+  window entries. Heap allocates the same entry classes with `new`; Rift
+  allocates them with `region.alloc` and closes each per-timestamp region at
+  window eviction.
 
 Current limitation:
 
-- Current Rift DEBS region-allocates only Q1 bucket entries, using the same Q1
-  bucketed algorithm as heap.
-- Q2 is heap-only.
-- Parser, Q1 ranking, Q2 ranking, median structures, output arrays, and output
-  formatting remain heap-heavy.
+- Current Rift DEBS region-allocates Q1 and Q2 window entries using the same
+  bucketed algorithms as heap.
+- Parser, Q1 ranking, output arrays, latency arrays, and output formatting
+  remain heap-heavy. Q2 median scratch arrays are region-backed in Rift modes
+  and now reset at the trip/operator boundary. Q2 ranking uses packed primitive
+  cell keys internally, but ranking metadata is still heap-managed.
 - Therefore current DEBS does not yet establish that Rift is faster at the
   application level.
 
@@ -227,14 +232,25 @@ Current provisional evidence:
 | 1M RunBoth elapsed | 21658.215 ms | 22314.989 ms | 22184.467 ms |
 | 1M instrumented elapsed | 22827.882 ms | 22366.285 ms | 22810.687 ms |
 | 1M instrumented GC time | 1051.752 ms | 1003.171 ms | 1012.489 ms |
+| 100k after Q2 windows, elapsed | 1837.501 ms | 1794.929 ms | 1843.627 ms |
+| 100k after Q2 windows, region objects | 0 | 294284 | 294284 |
+| 100k after Q2 profit values, elapsed | 1816.773 ms | 1791.195 ms | 1802.942 ms |
+| 100k after Q2 median scratch, elapsed | 1881.304 ms | 1920.875 ms | 1937.911 ms |
+| 100k after Q2 median scratch, region resets | 0 | 171197 | 171197 |
+| 100k after per-trip scratch reset, elapsed | 1748.744 ms | 1775.350 ms | 1768.716 ms |
+| 100k after per-trip scratch reset, region resets | 0 | 87438 | 87438 |
+| 100k after primitive Q2 ranking keys, elapsed | 1813.074 ms | 1863.806 ms | 1832.249 ms |
+| 100k phase share after primitive Q2 ranking keys, Q2 process | 48.6% | 48.8% | 48.9% |
 
 Immediate next step:
 
 - Preserve benchmark fairness before adding more region code. Heap and Rift
   variants should be the same logical program with allocation/lifetime policy
   as the variable, not separate hand-specialized algorithms.
-- Next, implement the same shared-backend shape for Q2 window entries and other
-  structured-lifetime data before optimizing ranking internals.
+- Next, remeasure with medians, then diagnose the Q2 processing phase and the
+  parser/taxi-id boundary. The Q2 median scratch experiment shows that
+  region-backed scratch must use operator/event-level lifetimes rather than
+  per-median resets.
 
 Implementation substeps:
 
@@ -242,10 +258,15 @@ Implementation substeps:
   Rift evidence.
 - Keep Q1 heap and Rift algorithms aligned. Any future Q1 optimization must be
   shared by both modes unless the only difference is allocation placement.
-- Implement region-shaped Q2 profit and empty-taxi windows with a heap backend
-  and a Rift backend over the same algorithm.
-- Only replace Q2 median/ranking data structures after the window lifetime
-  boundary is represented fairly for heap and Rift.
+- Q2 profit and empty-taxi windows now have heap and Rift backends over the
+  same algorithm.
+- Q2 active profit values now live in window entries instead of a heap
+  `ArrayBuffer`; Q2 median scratch arrays are region-backed in Rift modes and
+  reset once per processed trip.
+- Q2 ranking now uses primitive cell keys internally, but its map/tree metadata
+  remains heap-managed.
+- Only replace Q2 ranking data structures further after a read-only allocation
+  diagnosis shows they are the next dominant heap pressure source.
 - Use primitive keys and packed cell/route IDs only when the change is shared
   across modes or needed to avoid unsafe region-to-GC references.
 - Keep heap roots explicit for any heap object referenced from region memory.

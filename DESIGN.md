@@ -52,6 +52,9 @@ Current reliable evidence:
   explicit caveat that several results use uncommitted runtime changes.
 - DEBS correctness on bounded sorted samples is partially validated.
 - DEBS performance is provisional and not yet an application-level Rift win.
+  Current phase timers show Q2 processing is the dominant measured phase, while
+  GC and Rift region operations are both small shares of total elapsed time on
+  the 100k bounded sample.
 - The raw-array pipeline is a surrogate and must not be presented as a
   replacement for Broom-style or `ZoneParVector` collection evidence.
 
@@ -257,19 +260,30 @@ For DEBS 2015:
 - Current Q1 uses a shared bucketed-window implementation. Heap mode allocates
   the same `BucketWindowEntry` class on the GC heap; Rift modes allocate that
   class in per-timestamp regions and close the bucket region at eviction.
-- Current Q2 is heap-only.
+- Current Q2 uses a shared bucketed-window implementation for profit and
+  empty-taxi window entries. Heap mode allocates the same entry classes on the
+  GC heap; Rift modes allocate those entries in per-timestamp regions and close
+  each region at window eviction.
 - Parsing now avoids `String.split`, per-row `Option` allocation, and per-row
   `Trip` allocation in hot runners, but still uses `Source.getLines`, line
   strings, taxi/timestamp strings, and heap output formatting.
 - Q1 ranking still uses heap `HashMap`, `TreeSet`, `RankedRoute`, arrays, and
   output formatting.
-- Q2 uses heap queues, maps, `ProfitStats`, `ArrayBuffer`, sorted arrays,
-  `TreeSet`, `ProfitableArea`, and output formatting.
+- Q2 window queues now hold primitive-key entries in heap or Rift memory, and
+  active profit values are stored in those entries rather than duplicated in a
+  heap `ArrayBuffer`.
+- Q2 median sorting arrays are heap-allocated in heap mode and allocated in a
+  resettable scratch region in Rift modes. The current Rift version resets that
+  scratch region on every median recomputation, which is correct but likely too
+  fine-grained for final performance evidence.
+- Q2 still uses heap maps, `ProfitStats` control metadata, `TreeSet`,
+  `ProfitableArea`, taxi-id metadata, and output formatting.
 
 Therefore current DEBS does not yet exercise the region-heavy application
 design. It primarily proves correctness of the scaffold, demonstrates the
-intended fair-comparison shape for Q1 window entries, and shows where GC
-pressure remains.
+intended fair-comparison shape for Q1/Q2 window entries, and shows where GC
+pressure remains in ranking, parser, output paths, and overly fine-grained
+scratch-region management.
 
 For parallel collections:
 
@@ -336,6 +350,10 @@ Interpretation:
   evidence. A change is Phase-5 relevant only if it preserves the same logical
   benchmark for heap and Rift while moving structured-lifetime data into region
   memory or making that lifetime boundary explicit.
+- The current Q2 direction follows that boundary: timestamp-bucket window
+  entries and median scratch buffers are region-backed in Rift modes, while
+  long-lived maps/trees remain heap metadata. Primitive packed keys are used in
+  the shared logic to avoid accidental heap objects in the hot path.
 
 ## 11. Formal Model
 

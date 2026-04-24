@@ -188,9 +188,8 @@ Interpretation:
   cost. Q1 now keeps an incremental route ranking set, and Q2 keeps an
   incremental profitable-area ranking set plus cached per-cell medians.
 - On the 1M sample, single-run ordering is not stable enough for a headline
-  throughput claim. The robust finding so far is that Q2 is still heap-only,
-  GC time is about `1s` in every mode, and measured Rift region-operation time
-  is only about `9-10 ms`.
+  throughput claim. The robust finding so far is that GC time is similar across
+  modes because ranking, median, parser, and output paths remain heap-heavy.
 - These are still bounded-sample results. Full Phase 5 evidence needs larger
   samples, median instrumented reruns, and Commix/SafeZone comparison modes
   where meaningful.
@@ -344,7 +343,8 @@ Change:
 - Rift modes allocate `BucketWindowEntry` with `region.alloc` into a
   per-timestamp region and close that region when the bucket leaves the
   30-minute window.
-- Q1 ranking state remains heap-based in all modes. Q2 remains heap-only.
+- Q1 ranking state remains heap-based in all modes. Q2 was still heap-only at
+  this point; the next section records the Q2 window-backend conversion.
 
 Validation:
 
@@ -393,3 +393,391 @@ Interpretation:
 - Q2, ranking state, parser line strings, taxi/timestamp strings, latency
   arrays, and output formatting remain heap-based. Full DEBS medians and a
   fair Q2 backend are still required before making an application-level claim.
+
+## Fairness Pivot: Shared Q2 Window Entries
+
+Date: 2026-04-24
+
+Motivation:
+
+- Q2 previously used only heap queues for profit and empty-taxi windows, even
+  in Rift modes.
+- The fair Phase 5 comparison needs the same Q2 algorithm in heap and Rift
+  modes, with only allocation placement and bucket close policy changing.
+
+Change:
+
+- `Q2Heap` and `Q2RiftWindows` now share one bucketed-window implementation.
+- Heap mode allocates `ProfitEntry` and `EmptyEntry` with ordinary `new`.
+- Rift modes allocate the same entry classes with `region.alloc` into
+  per-timestamp regions and close those regions when each 15-minute profit
+  bucket or 30-minute empty-taxi bucket expires.
+- Region entries store primitive cell and taxi keys, not heap `Cell` or
+  `String` references. This preserves the no region-to-GC ownership rule.
+- Q2 ranking, `ProfitStats` control metadata, median sorting arrays,
+  `ProfitableArea` outputs, parser strings, latency arrays, and output
+  formatting remain heap-based.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Q2Smoke\")" \
+      run
+
+zsh bench/debs2015/run_both_sample_matrix.sh
+```
+
+Results:
+
+- `Debs2015Q2Smoke` compiled and ran successfully in `heap`, `rift-hp`, and
+  `rift-streaming` modes.
+- RunBoth sample matrix outputs match across heap, Rift HPZone, and Rift
+  Streaming.
+
+### 100k Instrumented After Shared Q2 Windows
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-shared-windows-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+These rows are single-run measurements, not medians.
+
+| Mode | Elapsed ms | Throughput events/s | GC collections | GC time ms | Rift op ms | Rift alloc objects | Rift opens/closes | Rift mmap bytes | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 1837.501 | 54421.745 | 8 | 90.119 | 0.000 | 0 | 0 / 0 | 0 | 289832960 |
+| Rift HPZone | 1794.929 | 55712.509 | 8 | 80.709 | 2.323 | 294284 | 4545 / 4545 | 2555904 | 292372480 |
+| Rift Streaming | 1843.627 | 54240.908 | 8 | 85.730 | 2.479 | 294284 | 4545 / 4545 | 2555904 | 292388864 |
+
+Interpretation:
+
+- The intended allocation-placement variable is now active for Q1 and Q2
+  window entries on the 100k sample.
+- Rift modes allocate about `294k` region objects, compared with about `98k`
+  when only Q1 bucket entries were region-backed.
+- This still is not Phase 5 success. GC time remains similar because Q2
+  ranking/median state, parser strings, output arrays, and formatting still
+  allocate on the heap.
+- The single-run ordering is not stable enough for a performance claim. This
+  rerun has HPZone slightly faster than heap while Streaming is slightly
+  slower; the previous run had the opposite ordering.
+
+## Q2 Profit State: Region Entries As Source Of Truth
+
+Date: 2026-04-24
+
+Motivation:
+
+- After the shared Q2 window change, Rift allocated Q2 window entries in
+  regions, but each active profit was still duplicated in a heap
+  `ArrayBuffer[Double]` inside `ProfitStats`.
+- That violated the intended data/control split: the actual stream data should
+  live in the window entries, while heap state should be limited to indexes and
+  scalar metadata when possible.
+
+Change:
+
+- `ProfitStats` now keeps only heap control metadata: list head, count, dirty
+  bit, and cached median.
+- Active profit values live in `ProfitEntry` objects. Heap mode allocates those
+  entries on the GC heap; Rift modes allocate the same entries in per-timestamp
+  regions.
+- `ProfitEntry` objects are linked into per-cell lists and unlinked before
+  their bucket region is closed.
+- Median recomputation still allocated a temporary heap `Array[Double]` for
+  sorting at this point. The next section records the scratch-region variant.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Q2Smoke\")" \
+      run
+
+zsh bench/debs2015/run_both_sample_matrix.sh
+```
+
+Results:
+
+- `Debs2015Q2Smoke` passed in `heap`, `rift-hp`, and `rift-streaming` modes.
+- RunBoth sample matrix outputs match across heap, Rift HPZone, and Rift
+  Streaming.
+
+### 100k Instrumented After Region-Backed Q2 Profit Values
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-region-profit-values-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+These rows are single-run measurements, not medians.
+
+| Mode | Elapsed ms | Throughput events/s | GC collections | GC time ms | Rift op ms | Rift alloc objects | Rift opens/closes | Rift mmap bytes | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 1816.773 | 55042.642 | 8 | 88.809 | 0.000 | 0 | 0 / 0 | 0 | 289816576 |
+| Rift HPZone | 1791.195 | 55828.658 | 8 | 82.747 | 2.421 | 294284 | 4545 / 4545 | 2555904 | 292372480 |
+| Rift Streaming | 1802.942 | 55464.905 | 8 | 83.438 | 2.676 | 294284 | 4545 / 4545 | 2555904 | 292356096 |
+
+Interpretation:
+
+- Q2 active profit values are no longer duplicated into a heap `ArrayBuffer`.
+- Region allocation counts are unchanged because the values already lived in
+  the same `ProfitEntry` objects; the change removes a heap-side copy and makes
+  the region entries the source of truth for Q2 profit data.
+- This still is not Phase 5 success. Median scratch arrays, ranking/output
+  objects, parser strings, latency arrays, and collection metadata remain
+  heap-based.
+
+## Q2 Median Scratch Arrays In Rift Scratch Region
+
+Date: 2026-04-24
+
+Motivation:
+
+- Q2 active profit values live in window entries, but median recomputation
+  still copied those values into a heap `Array[Double]` for sorting.
+- For the streaming data path, that temporary sort buffer is manipulated data
+  with a single-call lifetime, so Rift modes should allocate it in a scoped or
+  streaming scratch region.
+
+Change:
+
+- `Q2BucketedWindow` now opens one median scratch region in Rift modes.
+- `ProfitStats.medianProfit` allocates the temporary `Array[Double]` in that
+  scratch region for Rift modes, sorts it, caches the scalar median, and resets
+  the scratch region immediately.
+- Heap mode still uses an ordinary heap `Array[Double]` through the same median
+  logic.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Q2Smoke\")" \
+      run
+
+zsh bench/debs2015/run_both_sample_matrix.sh
+```
+
+Results:
+
+- `Debs2015Q2Smoke` passed in `heap`, `rift-hp`, and `rift-streaming` modes.
+- RunBoth sample matrix outputs match across heap, Rift HPZone, and Rift
+  Streaming.
+
+### 100k Instrumented After Region-Backed Q2 Median Scratch
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-region-median-scratch-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+These rows are single-run measurements, not medians.
+
+| Mode | Elapsed ms | Throughput events/s | GC collections | GC time ms | Rift op ms | Rift alloc objects | Rift resets | Rift opens/closes | Rift mmap bytes | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 1881.304 | 53154.619 | 8 | 89.754 | 0.000 | 0 | 0 | 0 / 0 | 0 | 289767424 |
+| Rift HPZone | 1920.875 | 52059.615 | 8 | 83.657 | 52.162 | 465481 | 171197 | 4546 / 4546 | 2588672 | 292405248 |
+| Rift Streaming | 1937.911 | 51601.955 | 8 | 83.435 | 52.375 | 465481 | 171197 | 4546 / 4546 | 2588672 | 292388864 |
+
+Interpretation:
+
+- The temporary Q2 median sort buffers are now region-allocated in Rift modes.
+- This moves more manipulated stream data out of the GC heap, but the current
+  implementation resets the scratch region for every median recomputation.
+  That adds about `171k` resets and about `52 ms` of Rift region-operation time
+  on the 100k sample.
+- This is still not Phase 5 success. It is a useful control point showing that
+  region placement alone is not enough; scratch-region use must be batched or
+  reused at the operator/event level to avoid high reset counts.
+- Remaining heap-heavy data paths include Q1/Q2 ranking objects, output arrays,
+  parser/input strings, latency arrays, and collection metadata.
+
+## RunBoth Phase Breakdown And Q2 Scratch Batching
+
+Date: 2026-04-24
+
+Motivation:
+
+- The 100k DEBS runs showed similar GC time across heap and Rift, and Rift
+  region-operation time was also small relative to total elapsed time.
+- The next question was where the elapsed time actually goes, so
+  `Debs2015RunBoth` now reports coarse phase timers for input read, parse, Q1
+  process/output, Q2 process/output, close, tracked, and untracked time.
+
+Change:
+
+- `Debs2015RunBothRunner` accumulates phase timings around the existing shared
+  logical program.
+- `run_both_instrumented_matrix.sh` records the new `phase_*` metrics.
+- Q2 median scratch arrays remain region-backed in Rift modes, but the scratch
+  region is reset once per processed trip instead of once per dirty-cell median
+  recomputation.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Q2Smoke\")" \
+      run
+
+zsh bench/debs2015/run_both_sample_matrix.sh
+```
+
+Results:
+
+- `Debs2015Q2Smoke` passed in `heap`, `rift-hp`, and `rift-streaming`.
+- RunBoth sample matrix outputs match across heap, Rift HPZone, and Rift
+  Streaming.
+
+### 100k Phase Breakdown Before Scratch Batching
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-phase-breakdown-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+These rows are single-run measurements, not medians.
+
+| Mode | Elapsed ms | Read % | Parse % | Q1 process % | Q1 output % | Q2 process % | Q2 output % | GC % | Rift op % | Rift resets |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 1857.565 | 15.8 | 7.0 | 13.2 | 4.3 | 48.4 | 9.2 | 4.8 | 0.0 | 0 |
+| Rift HPZone | 1897.927 | 15.4 | 6.9 | 14.5 | 3.3 | 48.2 | 9.5 | 4.5 | 2.7 | 171197 |
+| Rift Streaming | 1906.186 | 15.3 | 6.8 | 13.8 | 3.4 | 49.6 | 9.1 | 4.5 | 2.7 | 171197 |
+
+Interpretation:
+
+- Q2 processing is the dominant measured phase at roughly `48-50%` of elapsed
+  time.
+- Read plus parse is about `22%`; Q2 output is about `9%`.
+- GC time is about `4.5-4.8%`, and Rift region operations are about `2.7%`
+  before scratch batching. Therefore neither GC nor Rift bookkeeping alone
+  explains total elapsed time.
+
+### 100k Instrumented After Per-Trip Scratch Reset
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-scratch-per-trip-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+These rows are single-run measurements, not medians.
+
+| Mode | Elapsed ms | Q2 process ms | GC ms | Rift op ms | Rift reset ms | Rift resets | Region objects | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 1748.744 | 803.373 | 84.364 | 0.000 | 0.000 | 0 | 0 | 289816576 |
+| Rift HPZone | 1775.350 | 823.036 | 79.702 | 28.004 | 25.860 | 87438 | 465481 | 292421632 |
+| Rift Streaming | 1768.716 | 843.495 | 78.562 | 27.830 | 25.746 | 87438 | 465481 | 292438016 |
+
+Interpretation:
+
+- Batching scratch reset at the trip/operator boundary preserved output
+  equality and cut resets from `171197` to `87438`.
+- Rift region-operation time dropped from about `51.5 ms` to about `28 ms`.
+- Q2 processing remains the dominant phase. This means further Phase 5 work
+  should target Q2 data structures and parser/output allocation boundaries, not
+  only raw allocator tuning.
+
+## Q2 Primitive Cell Keys In Ranking Path
+
+Date: 2026-04-24
+
+Motivation:
+
+- Q2 ranking still allocated `Cell` objects and formatted cell-id strings in
+  the hot comparator/output path.
+- That is accidental heap noise, not part of the logical query. The data path
+  should keep packed primitive cell keys internally and format IDs only at the
+  output boundary.
+
+Change:
+
+- `ProfitableArea` now stores `cellKey: Int` internally and exposes `cell` only
+  as a compatibility accessor.
+- Q2 ranking tie-breaking compares packed cell keys with a no-allocation
+  decimal-lexicographic comparator equivalent to comparing `"east.south"`.
+- `Q2Output` compares `cellKey` and appends cell IDs directly into its
+  `StringBuilder`.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Q2Smoke\")" \
+      run
+
+zsh bench/debs2015/run_both_sample_matrix.sh
+```
+
+Results:
+
+- `Debs2015Q2Smoke` passed in `heap`, `rift-hp`, and `rift-streaming`.
+- RunBoth sample matrix outputs match across heap, Rift HPZone, and Rift
+  Streaming.
+
+### 100k Instrumented After Primitive Q2 Ranking Keys
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-primitive-rank-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+These rows are single-run measurements, not medians.
+
+| Mode | Elapsed ms | Q2 process ms | Q2 output ms | GC ms | Rift op ms | Rift resets | Region objects | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 1813.074 | 880.566 | 155.863 | 90.540 | 0.000 | 0 | 0 | 289816576 |
+| Rift HPZone | 1863.806 | 909.965 | 160.252 | 84.775 | 28.815 | 87438 | 465481 | 292421632 |
+| Rift Streaming | 1832.249 | 895.328 | 156.544 | 82.728 | 28.681 | 87438 | 465481 | 292405248 |
+
+Interpretation:
+
+- The primitive-key change is a fairness/noise cleanup and boundary tightening,
+  not by itself a Rift-specific win.
+- This single run does not show a stable elapsed-time improvement; variance is
+  visible across adjacent 100k runs. It should be kept because it removes
+  accidental heap allocation from the shared Q2 hot path and makes the
+  region/heap boundary cleaner.
+- The remaining highest-value work is a measured parser/taxi-id boundary and a
+  Q2 median/ranking data-structure diagnosis. Full Phase 5 claims still require
+  medians and larger inputs.
