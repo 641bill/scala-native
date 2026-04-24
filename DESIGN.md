@@ -52,9 +52,11 @@ Current reliable evidence:
   explicit caveat that several results use uncommitted runtime changes.
 - DEBS correctness on bounded sorted samples is partially validated.
 - DEBS performance is provisional and not yet an application-level Rift win.
-  Current phase timers show Q2 processing is the dominant measured phase, while
-  GC and Rift region operations are both small shares of total elapsed time on
-  the 100k bounded sample.
+  Current phase timers show Q2 processing is the dominant measured phase. With
+  the reusable ranking/result-array backend, Rift region-operation time is again
+  a small share of total elapsed time. The latest 1M 3-run median has Rift
+  HPZone faster than heap on the bounded sample, but SafeZone/Commix/full-scale
+  comparisons and RSS analysis remain open.
 - The raw-array pipeline is a surrogate and must not be presented as a
   replacement for Broom-style or `ZoneParVector` collection evidence.
 
@@ -73,9 +75,10 @@ framing:
 - Application evidence must allocate the application's dominant data operations
   in regions. Current DEBS region-allocates Q1/Q2 window entries, Q2 active
   profit values, Q2 median scratch, the RunBoth input buffer, and provisional
-  ranking/result objects in Rift modes. It still does not prove an
-  application-level win because ranking/result reset costs are visible and
-  control collections remain heap-managed.
+  ranking/result objects in Rift modes. It still does not prove a final
+  application-level win because the dataset is bounded, SafeZone/Commix modes
+  are missing, RSS is higher in the latest Rift runs, and control collections
+  remain heap-managed.
 - The literature-review target is broader than local baselines: Rift must be
   compared against Broom, StreamFlex, Yak, Stancu-style hybrid static analysis,
   the MLKit typed-region lineage, and Reggio/Verona-style capabilities.
@@ -184,8 +187,11 @@ Current runtime properties:
 - Region open, close, reset, raw allocation, and managed object allocation.
 - Slab resident counters and instrumentation counters.
 - Fresh mmapped slabs are treated as zero-filled.
-- Reused slabs are zeroed once when reacquired, not per object.
-- The reset path zeroes the retained first slab before reuse.
+- Reused slabs are not eagerly zeroed on acquire. Managed object and array
+  allocation zeroes the exact allocated object when the current slab is marked
+  non-zeroed.
+- The reset path keeps the retained first slab, resets the bump pointer, and
+  marks the slab non-zeroed instead of clearing the whole 32 KB slab.
 - Huge slabs avoid the synchronous `MAP_POPULATE`/`MADV_HUGEPAGE` path that
   caused a flat-layout regression.
 
@@ -295,28 +301,27 @@ For DEBS 2015:
   first seen.
 - Q1 ranking uses heap `HashMap`/`TreeSet` control metadata. In Rift modes,
   `RankedRoute`, `Route`, and `Cell` ranking objects are now allocated in a
-  run-lifetime region, and returned top-k arrays are allocated in a resettable
-  snapshot region.
+  run-lifetime region. Returned top-k arrays are cached by exact size and
+  reused, rather than allocated in a resettable per-event snapshot region.
 - Q2 window queues now hold primitive-key entries in heap or Rift memory, and
   active profit values are stored in those entries rather than duplicated in a
   heap `ArrayBuffer`.
 - Q2 median sorting arrays are heap-allocated in heap mode and allocated in a
-  resettable scratch region in Rift modes. The current Rift version resets that
-  scratch region on every median recomputation, which is correct but likely too
-  fine-grained for final performance evidence.
+  run-lifetime scratch region in Rift modes. The scratch array grows by
+  capacity and is reused rather than reset for each recomputation.
 - Q2 still uses heap maps, `ProfitStats` control metadata, `TreeSet`, taxi-id
   metadata, and latency arrays. In Rift modes, `ProfitableArea` ranking objects
-  are region-allocated, returned top-k arrays are allocated in a resettable
-  snapshot region, and output rows are written directly through shared
-  writer-based formatting rather than per-row `StringBuilder.toString`.
+  are region-allocated, returned top-k arrays are cached and reused, and output
+  rows are written directly through shared writer-based formatting rather than
+  per-row `StringBuilder.toString`.
 
 Therefore current DEBS exercises more of the region-heavy application design,
-but it is still not Phase 5 success. The newest ranking/result experiment
-reduces GC time and can reduce RSS at 1M, but it makes region reset/bookkeeping
-visible and slows elapsed time. The remaining pressure is in heap collection
-metadata, latency arrays, broader collection state, and the need for a
-lower-overhead region-backed top-k/result view rather than resetting a 32 KB
-snapshot slab on every processed event.
+but it is still not Phase 5 success. The newest 1M 3-run median with reusable
+ranking arrays reduces GC time and makes Rift region-operation time small again,
+but it increases RSS and is still bounded-sample evidence. The remaining
+pressure is in heap collection metadata, latency arrays, broader collection
+state, and the need for safe region-backed collections/control structures that
+preserve the heap logical program.
 
 For parallel collections:
 

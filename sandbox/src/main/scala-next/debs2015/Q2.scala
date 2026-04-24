@@ -11,10 +11,10 @@ import scala.scalanative.memory.RiftRegion
 
 final case class ProfitableArea(
     cellKey: Int,
-    emptyTaxis: Int,
-    medianProfit: Double,
-    profitability: Double,
-    latestSeq: Long
+    var emptyTaxis: Int,
+    var medianProfit: Double,
+    var profitability: Double,
+    var latestSeq: Long
 ) {
   def cell: Cell = Q2Support.cellFromKey(cellKey)
 }
@@ -46,57 +46,52 @@ private abstract class Q2BucketedWindow(
   private val taxiIds = new TaxiIds
   private val rankRegion =
     if (useRegions) RiftRegion.open(regionKind) else null
-  private val snapshotRegion =
-    if (useRegions) RiftRegion.open(regionKind) else null
   private val medianScratchRegion =
     if (useRegions) RiftRegion.open(regionKind) else null
-  private var medianScratchUsed = false
+  private val resultArrays = new Array[Array[ProfitableArea]](11)
+  private var medianScratch: Array[Double] = null
   private var currentProfitBucket: ProfitBucket = null
   private var currentEmptyBucket: EmptyBucket = null
   private var nextSeq = 0L
 
   override def process(trip: Trip): Array[ProfitableArea] = {
-    try {
-      evictProfitBefore(trip.dropoffSeconds - ProfitWindowSeconds)
-      evictEmptyBefore(trip.dropoffSeconds - EmptyWindowSeconds)
+    evictProfitBefore(trip.dropoffSeconds - ProfitWindowSeconds)
+    evictEmptyBefore(trip.dropoffSeconds - EmptyWindowSeconds)
 
-      val seq = nextSeq
-      nextSeq += 1L
-      val taxiKey = taxiIds.idFor(trip)
+    val seq = nextSeq
+    nextSeq += 1L
+    val taxiKey = taxiIds.idFor(trip)
 
-      // The current pickup means this taxi is no longer empty at its previous dropoff.
-      latestEmptyByTaxi.remove(taxiKey).foreach(removeEmpty)
+    // The current pickup means this taxi is no longer empty at its previous dropoff.
+    latestEmptyByTaxi.remove(taxiKey).foreach(removeEmpty)
 
-      if (trip.hasValidProfit) {
-        Grid.Q2.cell(trip.pickupLongitude, trip.pickupLatitude).foreach { pickupCell =>
-          val profit = trip.profit
-          val pickupKey = cellKey(pickupCell)
-          val bucket = profitBucketFor(trip.dropoffSeconds)
-          val entry = allocateProfitEntry(bucket, pickupKey, profit)
-          bucket.head = entry
-          profitsByCell
-            .getOrElseUpdate(pickupKey, new ProfitStats)
-            .add(entry)
-          latestByCell.update(pickupKey, seq)
-          updateRank(pickupKey)
-        }
-      }
-
-      Grid.Q2.cell(trip.dropoffLongitude, trip.dropoffLatitude).foreach { dropoffCell =>
-        val dropoffKey = cellKey(dropoffCell)
-        val bucket = emptyBucketFor(trip.dropoffSeconds)
-        val entry = allocateEmptyEntry(bucket, seq, taxiKey, dropoffKey)
+    if (trip.hasValidProfit) {
+      Grid.Q2.cell(trip.pickupLongitude, trip.pickupLatitude).foreach { pickupCell =>
+        val profit = trip.profit
+        val pickupKey = cellKey(pickupCell)
+        val bucket = profitBucketFor(trip.dropoffSeconds)
+        val entry = allocateProfitEntry(bucket, pickupKey, profit)
         bucket.head = entry
-        latestEmptyByTaxi.update(taxiKey, entry)
-        emptyCounts.update(dropoffKey, emptyCounts.getOrElse(dropoffKey, 0) + 1)
-        latestByCell.update(dropoffKey, seq)
-        updateRank(dropoffKey)
+        profitsByCell
+          .getOrElseUpdate(pickupKey, new ProfitStats)
+          .add(entry)
+        latestByCell.update(pickupKey, seq)
+        updateRank(pickupKey)
       }
-
-      top10()
-    } finally {
-      resetMedianScratchIfNeeded()
     }
+
+    Grid.Q2.cell(trip.dropoffLongitude, trip.dropoffLatitude).foreach { dropoffCell =>
+      val dropoffKey = cellKey(dropoffCell)
+      val bucket = emptyBucketFor(trip.dropoffSeconds)
+      val entry = allocateEmptyEntry(bucket, seq, taxiKey, dropoffKey)
+      bucket.head = entry
+      latestEmptyByTaxi.update(taxiKey, entry)
+      emptyCounts.update(dropoffKey, emptyCounts.getOrElse(dropoffKey, 0) + 1)
+      latestByCell.update(dropoffKey, seq)
+      updateRank(dropoffKey)
+    }
+
+    top10()
   }
 
   override def close(): Unit = {
@@ -114,7 +109,6 @@ private abstract class Q2BucketedWindow(
 
     if (useRegions) {
       medianScratchRegion.close()
-      snapshotRegion.close()
       rankRegion.close()
     }
     currentProfitBucket = null
@@ -165,34 +159,51 @@ private abstract class Q2BucketedWindow(
   }
 
   private def updateRank(cellKey: Int): Unit = {
-    rankByCell.remove(cellKey).foreach(rankedAreas.remove)
+    val existing = rankByCell.get(cellKey)
+    existing.foreach(rankedAreas.remove)
 
-    profitsByCell.get(cellKey).foreach { profits =>
-      val empty = emptyCounts.getOrElse(cellKey, 0)
-      if (empty > 0 && profits.nonEmpty) {
-        val median =
-          if (useRegions && profits.needsMedianScratch)
-            profits.medianProfitWithScratch(
-              allocateMedianScratch(profits.medianScratchSize)
-            )
-          else profits.medianProfitHeap
-        val area = allocateProfitableArea(
-          cellKey,
-          empty,
-          median,
-          median / empty.toDouble,
-          latestByCell.getOrElse(cellKey, 0L)
-        )
-        rankedAreas.add(area)
-        rankByCell.update(cellKey, area)
-      }
+    profitsByCell.get(cellKey) match {
+      case Some(profits) =>
+        val empty = emptyCounts.getOrElse(cellKey, 0)
+        if (empty > 0 && profits.nonEmpty) {
+          val median =
+            if (profits.needsMedianScratch)
+              profits.medianProfitWithScratch(
+                ensureMedianScratch(profits.medianScratchSize)
+              )
+            else profits.cachedMedianProfit
+          val area =
+            existing match {
+              case Some(current) =>
+                current.emptyTaxis = empty
+                current.medianProfit = median
+                current.profitability = median / empty.toDouble
+                current.latestSeq = latestByCell.getOrElse(cellKey, 0L)
+                current
+              case None =>
+                val created =
+                  allocateProfitableArea(
+                    cellKey,
+                    empty,
+                    median,
+                    median / empty.toDouble,
+                    latestByCell.getOrElse(cellKey, 0L)
+                  )
+                rankByCell.update(cellKey, created)
+                created
+            }
+          rankedAreas.add(area)
+        } else {
+          rankByCell.remove(cellKey)
+        }
+      case None =>
+        rankByCell.remove(cellKey)
     }
   }
 
   private def top10(): Array[ProfitableArea] = {
-    if (useRegions) snapshotRegion.reset()
     val size = math.min(10, rankedAreas.size())
-    val ranked = allocateResultArray(size)
+    val ranked = resultArray(size)
     val it = rankedAreas.iterator()
     var i = 0
     while (i < size && it.hasNext) {
@@ -245,11 +256,22 @@ private abstract class Q2BucketedWindow(
       bucket.region.alloc(new EmptyEntry(seq, taxiKey, cellKey, bucket.head))
     else new EmptyEntry(seq, taxiKey, cellKey, bucket.head)
 
-  private def allocateMedianScratch(count: Int): Array[Double] =
-    if (useRegions) {
-      medianScratchUsed = true
-      medianScratchRegion.alloc(new Array[Double](count))
-    } else new Array[Double](count)
+  private def ensureMedianScratch(count: Int): Array[Double] = {
+    if (medianScratch == null || medianScratch.length < count) {
+      val capacity = nextScratchCapacity(count)
+      medianScratch =
+        if (useRegions) medianScratchRegion.alloc(new Array[Double](capacity))
+        else new Array[Double](capacity)
+    }
+    medianScratch
+  }
+
+  private def nextScratchCapacity(count: Int): Int = {
+    var capacity = 16
+    while (capacity < count)
+      capacity *= 2
+    capacity
+  }
 
   private def allocateProfitableArea(
       cellKey: Int,
@@ -277,14 +299,17 @@ private abstract class Q2BucketedWindow(
         latestSeq
       )
 
-  private def allocateResultArray(size: Int): Array[ProfitableArea] =
-    if (useRegions) snapshotRegion.alloc(new Array[ProfitableArea](size))
-    else new Array[ProfitableArea](size)
-
-  private def resetMedianScratchIfNeeded(): Unit = {
-    if (useRegions && medianScratchUsed) {
-      medianScratchRegion.reset()
-      medianScratchUsed = false
+  private def resultArray(size: Int): Array[ProfitableArea] = {
+    if (size == 0) Array.empty[ProfitableArea]
+    else {
+      var result = resultArrays(size)
+      if (result == null) {
+        result =
+          if (useRegions) rankRegion.alloc(new Array[ProfitableArea](size))
+          else new Array[ProfitableArea](size)
+        resultArrays(size) = result
+      }
+      result
     }
   }
 
@@ -359,12 +384,7 @@ private abstract class Q2BucketedWindow(
     def needsMedianScratch: Boolean = dirty
     def medianScratchSize: Int = count
 
-    def medianProfitHeap: Double = {
-      if (dirty) {
-        computeMedian(new Array[Double](count))
-      }
-      cachedMedian
-    }
+    def cachedMedianProfit: Double = cachedMedian
 
     def medianProfitWithScratch(sorted: Array[Double]): Double = {
       if (dirty) computeMedian(sorted)
@@ -379,7 +399,7 @@ private abstract class Q2BucketedWindow(
         entry = entry.nextInCell
         i += 1
       }
-      scala.util.Sorting.quickSort(sorted)
+      java.util.Arrays.sort(sorted, 0, count)
       cachedMedian =
         if (count == 0) 0.0
         else if ((count & 1) == 1) sorted(count / 2)

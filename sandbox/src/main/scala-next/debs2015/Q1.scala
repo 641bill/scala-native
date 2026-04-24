@@ -12,7 +12,12 @@ final case class Route(start: Cell, end: Cell) {
   def id: String = s"${start.id}->${end.id}"
 }
 
-final case class RankedRoute(route: Route, count: Int, latestSeconds: Long, latestSeq: Long)
+final case class RankedRoute(
+    route: Route,
+    var count: Int,
+    var latestSeconds: Long,
+    var latestSeq: Long
+)
 
 trait Q1Engine {
   def process(trip: Trip): Array[RankedRoute]
@@ -160,8 +165,7 @@ object Q1Support {
     private val rankByKey = mutable.HashMap.empty[Long, RankedRoute]
     private val rankRegion =
       if (useRegions) RiftRegion.open(regionKind) else null
-    private val snapshotRegion =
-      if (useRegions) RiftRegion.open(regionKind) else null
+    private val resultArrays = new Array[Array[RankedRoute]](11)
 
     def increment(key: Long, latestSeconds: Long, latestSeq: Long): Unit = {
       val previous = counts.getOrElse(key, RouteState(0, 0L, -1L))
@@ -189,9 +193,8 @@ object Q1Support {
     }
 
     def top10(): Array[RankedRoute] = {
-      if (useRegions) snapshotRegion.reset()
       val size = math.min(10, rankedRoutes.size())
-      val result = allocateResultArray(size)
+      val result = resultArray(size)
       val it = rankedRoutes.iterator()
       var i = 0
       while (i < size && it.hasNext) {
@@ -205,23 +208,30 @@ object Q1Support {
       counts.clear()
       rankedRoutes.clear()
       rankByKey.clear()
-      if (useRegions) {
-        snapshotRegion.close()
-        rankRegion.close()
-      }
+      if (useRegions) rankRegion.close()
     }
 
     private def updateRank(key: Long, state: RouteState): Unit = {
-      removeRank(key)
       val ranked =
-        allocateRankedRoute(
-          key,
-          state.count,
-          state.latestSeconds,
-          state.latestSeq
-        )
+        rankByKey.get(key) match {
+          case Some(existing) =>
+            rankedRoutes.remove(existing)
+            existing.count = state.count
+            existing.latestSeconds = state.latestSeconds
+            existing.latestSeq = state.latestSeq
+            existing
+          case None =>
+            val created =
+              allocateRankedRoute(
+                key,
+                state.count,
+                state.latestSeconds,
+                state.latestSeq
+              )
+            rankByKey.update(key, created)
+            created
+        }
       rankedRoutes.add(ranked)
-      rankByKey.update(key, ranked)
     }
 
     private def removeRank(key: Long): Unit =
@@ -252,9 +262,19 @@ object Q1Support {
       } else Route(Cell(startEast, startSouth), Cell(endEast, endSouth))
     }
 
-    private def allocateResultArray(size: Int): Array[RankedRoute] =
-      if (useRegions) snapshotRegion.alloc(new Array[RankedRoute](size))
-      else new Array[RankedRoute](size)
+    private def resultArray(size: Int): Array[RankedRoute] = {
+      if (size == 0) Array.empty[RankedRoute]
+      else {
+        var result = resultArrays(size)
+        if (result == null) {
+          result =
+            if (useRegions) rankRegion.alloc(new Array[RankedRoute](size))
+            else new Array[RankedRoute](size)
+          resultArrays(size) = result
+        }
+        result
+      }
+    }
   }
 
   private[debs2015] def top10(

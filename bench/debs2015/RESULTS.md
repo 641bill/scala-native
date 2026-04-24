@@ -940,7 +940,7 @@ Interpretation:
   that the input/parser boundary is no longer the dominant allocation source,
   and Q2 process/output/ranking remain the next target.
 
-## Region Ranking And Output Allocation Experiments
+## Superseded Region Ranking And Snapshot Output Experiment
 
 Date: 2026-04-24
 
@@ -951,8 +951,8 @@ Changes:
   - Q1: `RankedRoute`, `Route`, and `Cell` objects in the ranking set.
   - Q2: `ProfitableArea` objects in the ranking set.
 - Heap mode still uses ordinary `new` through the same query algorithms.
-- Result arrays are allocated in a resettable snapshot region in Rift modes.
-  Runners keep only small heap primitive snapshots between outputs, so they do
+- Result arrays were allocated in a resettable snapshot region in Rift modes.
+  Runners kept only small heap primitive snapshots between outputs, so they did
   not retain region-backed arrays after the next `process` call.
 - Q1/Q2 output now writes rows directly to the `Writer` and uses shared
   fixed-decimal formatting instead of hot `StringBuilder.toString` rows and Q2
@@ -978,9 +978,8 @@ Results:
 - A first attempt used a run-lifetime region for result arrays as well as
   ranking objects. It reduced GC time but mmaped about `467 MB` at 1M and made
   Rift slower; that version is not the intended lifetime design.
-- The current code uses a resettable snapshot region for result arrays. This
-  avoids retaining every per-event result array, but reset overhead is now
-  visible.
+- This version used a resettable snapshot region for result arrays. It avoided
+  retaining every per-event result array, but reset overhead was too high.
 
 ### 100k Single Run With Snapshot Result Region
 
@@ -1024,10 +1023,109 @@ Interpretation:
   about `98 ms` at 1M for Rift HPZone in this single run.
 - It also reduces peak RSS below heap in the snapshot-region 1M run, but not at
   100k.
-- This is not a Phase 5 success yet. Region operations become the visible cost:
+- This was not a Phase 5 success. Region operations became the visible cost:
   about `934 ms` at 1M, dominated by nearly `2.9M` resets and snapshot/ranking
   allocation bookkeeping. Q1/Q2 process time also rises.
-- The next design step is not "move more tiny temporary arrays into reset-per
-  event regions." It is to define a lower-overhead region-backed top-k/result
-  view or collection API so output snapshots can be region-managed without
-  forcing a 32 KB slab reset on every processed event.
+- This result is superseded by the lower-overhead reusable ranking/result-array
+  backend below. Keep it as a diagnostic showing why reset-per-event result
+  regions are a bad lifetime shape for DEBS.
+
+## Reusable Ranking Arrays And Lazy-Zero Rift Backend
+
+Date: 2026-04-24
+
+Changes:
+
+- Q1 `RankedRoute` and Q2 `ProfitableArea` are now mutable ranking nodes.
+  Heap and Rift modes use the same `TreeSet` update algorithm: remove the node,
+  mutate scalar fields, and reinsert it.
+- Rift modes still allocate Q1 `RankedRoute`/`Route`/`Cell` and Q2
+  `ProfitableArea` objects in run-lifetime regions, but top-k result arrays are
+  now cached by exact size and reused instead of allocated in a resettable
+  per-event snapshot region.
+- Q2 median scratch is now a capacity-grown array reused for the operator
+  lifetime. It is heap-allocated in heap mode and region-allocated in Rift
+  modes.
+- `RiftRuntime.c` no longer eagerly zeroes reused slabs on acquire or zeroes the
+  retained first slab on reset. Reused slabs are marked non-zeroed, and managed
+  object/array allocation already zeroes the exact object payload when needed.
+  This preserves object initialization while avoiding slab-wide `memset` work
+  for small lifetime scopes.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Q2Smoke\")" \
+      run
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015RunBoth\")" \
+      nativeLink
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "tests3/testOnly scala.scalanative.memory.RiftRegionTest"
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_BINARY=/Users/siyaoliu/rift/scala-native-rift/sandbox/.3-next/target/scala-3.8.4-RC1-bin-20260402-44bbcdf-NIGHTLY/native/debs2015.Debs2015RunBoth \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-lazy-reset-sample \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_BINARY=/Users/siyaoliu/rift/scala-native-rift/sandbox/.3-next/target/scala-3.8.4-RC1-bin-20260402-44bbcdf-NIGHTLY/native/debs2015.Debs2015RunBoth \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-lazy-reset-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_BINARY=/Users/siyaoliu/rift/scala-native-rift/sandbox/.3-next/target/scala-3.8.4-RC1-bin-20260402-44bbcdf-NIGHTLY/native/debs2015.Debs2015RunBoth \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-lazy-reset-1000000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+Notes:
+
+- The sample, 100k, and 1M instrumented matrices all matched heap output after
+  stripping only the measured latency column.
+- `/usr/bin/time -l` needs to run outside the macOS sandbox to collect RSS.
+- A stale `Debs2015RunBoth` binary can silently preserve old reset behavior.
+  After changing Q1/Q2 or the C runtime, rebuild the RunBoth native binary
+  before benchmarking with `DEBS2015_BOTH_BUILD=0`.
+
+### 100k 3-Run Median With Reusable Ranking Arrays
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Region objects | Region resets | Rift mmap bytes | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 1286.990 | 61.087 | 196.563 | 55.925 | 789.440 | 54.458 | 0.000 | 0 | 0 | 0 | 205848576 |
+| Rift HPZone | 1262.091 | 35.098 | 193.392 | 63.255 | 773.109 | 61.605 | 1.430 | 561849 | 0 | 10141696 | 205094912 |
+| Rift Streaming | 1265.775 | 35.855 | 194.045 | 64.477 | 767.458 | 63.398 | 1.420 | 561849 | 0 | 10141696 | 205111296 |
+
+### 1M 3-Run Median With Reusable Ranking Arrays
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Region objects | Region resets | Rift mmap bytes | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 14633.019 | 513.199 | 2192.382 | 367.014 | 9768.249 | 456.305 | 0.000 | 0 | 0 | 0 | 813105152 |
+| Rift HPZone | 14234.470 | 457.726 | 2109.021 | 348.674 | 9538.889 | 426.264 | 13.003 | 5304781 | 0 | 67223552 | 876101632 |
+| Rift Streaming | 14392.097 | 478.912 | 2198.905 | 377.039 | 9570.330 | 486.997 | 14.166 | 5304781 | 0 | 67223552 | 876101632 |
+
+Interpretation:
+
+- The unacceptable `~950 ms` Rift operation overhead from the snapshot-region
+  experiment is gone in the current rebuilt binary. Median HPZone region
+  operation time at 1M is `13.003 ms`; Streaming is `14.166 ms`.
+- Rift HPZone is faster than heap in the 1M 3-run median and reduces median GC
+  time by about `55 ms`. This is promising application-level evidence, but it
+  is still not final because the dataset is bounded, Commix/SafeZone modes are
+  missing, and RSS is higher.
+- Peak RSS is higher for Rift in this run because run-lifetime ranking objects,
+  cached result arrays, and region slabs stay resident until close. That is a
+  tradeoff to measure, not a final success claim.
+- The remaining Phase 5 question is no longer reset overhead. It is whether
+  moving more dominant Q1/Q2 control and collection state into safe region
+  structures can reduce GC materially without growing RSS or diverging from the
+  heap logical program.

@@ -235,22 +235,10 @@ static scalanative_rift_slab *scalanative_rift_mmap_huge_slab(size_t need) {
 
 static scalanative_rift_slab *scalanative_rift_slab_acquire(void) {
     scalanative_rift_slab *slab = scalanative_rift_tls_pop();
-    if (slab != NULL) {
-        if (!scalanative_rift_slab_is_zeroed(slab)) {
-            memset(slab->data, 0, scalanative_rift_slab_usable_size(slab));
-            slab->flags |= SCALANATIVE_RIFT_SLAB_FLAG_ZEROED;
-        }
-        return slab;
-    }
+    if (slab != NULL) return slab;
 
     slab = scalanative_rift_pool_pop();
-    if (slab != NULL) {
-        if (!scalanative_rift_slab_is_zeroed(slab)) {
-            memset(slab->data, 0, scalanative_rift_slab_usable_size(slab));
-            slab->flags |= SCALANATIVE_RIFT_SLAB_FLAG_ZEROED;
-        }
-        return slab;
-    }
+    if (slab != NULL) return slab;
 
     return scalanative_rift_mmap_regular_slab();
 }
@@ -461,8 +449,7 @@ void scalanative_rift_region_reset(void *rawregion) {
 
     scalanative_rift_release_slab_chain(rest);
 
-    memset(first->data, 0, scalanative_rift_slab_usable_size(first));
-    first->flags |= SCALANATIVE_RIFT_SLAB_FLAG_ZEROED;
+    first->flags &= ~SCALANATIVE_RIFT_SLAB_FLAG_ZEROED;
 
     region->bump = first->data;
     region->end = first->data + scalanative_rift_slab_usable_size(first);
