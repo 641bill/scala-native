@@ -6,11 +6,11 @@ Active worktree: `/Users/siyaoliu/rift/scala-native-rift`
 
 Active branch: `feature/rift`
 
-Head commit at this update: the local `feature/rift` head after `Add DEBS region ranking snapshot experiment` (see `git log -1`)
+Head commit at this update: the local `feature/rift` head after the Q2 cell-table checkpoint (see `git log -1`)
 
-Status: active research fork. The Phase 5 input-boundary checkpoint and the
-Phase 5 ranking/result snapshot experiment are committed locally. The fork is
-ahead of `origin/feature/rift` unless pushed.
+Status: active research fork. The Phase 5 input-boundary checkpoint, reusable
+ranking backend, and Q2 bounded cell-table checkpoint are committed locally. The
+fork is ahead of `origin/feature/rift` unless pushed.
 
 ## 1. Project Objective
 
@@ -39,7 +39,8 @@ Use this worktree for active Rift work:
 
 - `/Users/siyaoliu/rift/scala-native-rift`
 - branch: `feature/rift`
-- current head at this handoff update: local `feature/rift` head after `Add DEBS region ranking snapshot experiment`
+- current head at this handoff update: local `feature/rift` head after the Q2
+  bounded cell-table checkpoint
 - `origin`: `git@github.com:641bill/scala-native.git`
 - `upstream`: `https://github.com/scala-native/scala-native.git`
 
@@ -58,8 +59,8 @@ Repo-layout quirks:
 
 - The worktree is a Git worktree; `.git` is a file pointing at the real metadata directory. `project/Settings.scala` was patched so generated hooks use the actual git metadata directory rather than assuming `.git/` is a directory.
 - The active branch contains committed Rift runtime/compiler/benchmark work,
-  the Phase 5 input-boundary checkpoint, and the Phase 5 ranking/result
-  snapshot experiment through the local `Add DEBS region ranking snapshot experiment` commit.
+  the Phase 5 input-boundary checkpoint, the reusable ranking backend, and the
+  Q2 bounded cell-table checkpoint.
 - Always inspect `git status --short --untracked-files=all` and `git diff --stat`
   before continuing.
 
@@ -638,13 +639,25 @@ Caveats:
   - 1M heap elapsed `17047.611 ms`, GC `684.338 ms`.
   - 1M Rift HPZone elapsed `17119.396 ms`, GC `640.062 ms`, Rift op `288.815 ms`.
   - 1M Rift Streaming elapsed `17210.458 ms`, GC `628.808 ms`, Rift op `288.920 ms`.
-- The later ranking/result-output experiment is single-run diagnostic evidence:
+- The first ranking/result-output experiment is single-run diagnostic evidence:
   - 1M heap elapsed `16363.012 ms`, GC `601.615 ms`, RSS `1148436480`.
   - 1M Rift HPZone elapsed `17243.387 ms`, GC `503.198 ms`, Rift op `933.640 ms`, RSS `1088684032`.
   - 1M Rift Streaming elapsed `17301.238 ms`, GC `529.115 ms`, Rift op `936.641 ms`, RSS `1088618496`.
 - Interpretation: region ranking/result objects reduce GC and can reduce RSS,
   but the current resettable snapshot-region design makes region operations
   visible enough to lose elapsed time. This is not Phase 5 success.
+- The reusable ranking backend fixed the reset shape:
+  - 1M heap median elapsed `14633.019 ms`, GC `513.199 ms`, RSS `813105152`.
+  - 1M Rift HPZone median elapsed `14234.470 ms`, GC `457.726 ms`, Rift op `13.003 ms`, RSS `876101632`.
+  - 1M Rift Streaming median elapsed `14392.097 ms`, GC `478.912 ms`, Rift op `14.166 ms`, RSS `876101632`.
+- The Q2 bounded cell-table checkpoint replaced boxed per-cell maps with fixed
+  arrays over the bounded Q2 grid key space. Heap and Rift use the same logical
+  layout; Rift allocates the arrays and `ProfitStats` in a run-lifetime region:
+  - 1M heap median elapsed `11471.085 ms`, GC `478.636 ms`, RSS `609730560`.
+  - 1M Rift HPZone median elapsed `11442.637 ms`, GC `419.658 ms`, Rift op `11.759 ms`, RSS `490766336`.
+  - 1M Rift Streaming median elapsed `11477.431 ms`, GC `428.339 ms`, Rift op `11.421 ms`, RSS `490799104`.
+  - Outputs matched on sample, 100k, and 1M matrices after stripping only the
+    measured latency column.
 
 ### Smoke Tests / Unit Tests / Compile Checks
 
@@ -655,6 +668,10 @@ Recorded as run:
 - 100k and 1M instrumented DEBS matrices run to completion and outputs match.
 - After the byte-reader change, 100k and 1M RunBoth matrices parsed all rows
   and matched outputs across heap, Rift HPZone, and Rift Streaming.
+- After the reusable ranking backend and Q2 cell-table checkpoint,
+  `Debs2015Q2Smoke` passed, `Debs2015RunBoth` native-linked, and sample/100k/1M
+  instrumented matrices matched outputs across heap, Rift HPZone, and Rift
+  Streaming.
 
 Not yet run or not recorded:
 
@@ -713,8 +730,18 @@ DEBS:
   reduced HPZone GC time from heap `601.615 ms` to `503.198 ms` and RSS from
   `1148436480` to `1088684032`, but elapsed time worsened because Rift op time
   reached `933.640 ms`.
-- Most app control state remains heap-managed, and the current region result
-  design is too reset-heavy for a headline win.
+- The reusable ranking-array backend fixed that lifetime shape: on the 1M
+  3-run median HPZone elapsed `14234.470 ms` vs heap `14633.019 ms`, with
+  HPZone Rift op `13.003 ms`.
+- The Q2 cell-table checkpoint moved bounded Q2 per-cell control tables out of
+  boxed `HashMap`s and into fixed arrays. In Rift modes those arrays and
+  `ProfitStats` are region-allocated. On the 1M 3-run median HPZone elapsed
+  `11442.637 ms` vs heap `11471.085 ms`, GC time fell from `478.636 ms` to
+  `419.658 ms`, and peak RSS fell from `609730560` to `490766336`.
+- Remaining app control state is still substantial, especially Q1 maps/trees,
+  Q2 `TreeSet`, taxi metadata, latency arrays, and any broader collection API
+  work. The current Rift elapsed win is small, so this is stronger evidence but
+  still not final Phase 5 success.
 
 Why Rift DEBS still uses so much GC:
 
@@ -722,19 +749,20 @@ Why Rift DEBS still uses so much GC:
   heap line `String` per row. Single-query Q1/Q2 runners still use the older
   file input path.
 - Q2 window entries, active profit values, median scratch arrays, ranking
-  `ProfitableArea` objects, and top-k result arrays are now region-backed in
-  Rift modes, but Q2 hash maps, `ProfitStats` control metadata, `TreeSet`, and
-  taxi-id metadata remain heap-based.
+  `ProfitableArea` objects, top-k result arrays, and bounded per-cell tables
+  are now region-backed in Rift modes. Q2 `TreeSet`, `latestEmptyByTaxi`,
+  taxi-id metadata, and latency arrays remain heap-based.
 - Q1 Rift still uses heap `RouteCounter`, heap `HashMap`, and heap `TreeSet`
   control metadata, but ranking `RankedRoute`/`Route`/`Cell` objects and top-k
   result arrays are region-backed in Rift modes.
 - Output formatting now writes directly to `Writer` through shared code; this
   removed much of the Q2 output allocation for heap and Rift alike.
 - Rift currently removes Q1/Q2 window-entry allocation, Q2 active profit-value
-  storage, Q2 median scratch arrays, RunBoth input bytes, ranking objects, and
-  top-k result arrays from the GC heap. The remaining heap pressure is control
-  metadata, latency arrays, and broader collections. The new bottleneck in
-  Rift modes is reset/bookkeeping overhead for fine-grained result snapshots.
+  storage, Q2 median scratch arrays, RunBoth input bytes, ranking objects,
+  top-k result arrays, and Q2 bounded cell tables from the GC heap. The
+  remaining heap pressure is Q1 maps/trees, Q2 tree/taxi metadata, latency
+  arrays, and broader collections. Fine-grained result-snapshot reset overhead
+  was fixed by the reusable ranking backend and should not be reintroduced.
 - Q2 primitive cell keys remove accidental `Cell`/cell-id string allocation from the shared hot path, but this is a boundary/noise cleanup, not a Rift-specific win.
 
 ## 7. Roadmap Status
@@ -748,7 +776,7 @@ Roadmap source: `/Users/siyaoliu/rift/Claude_output/ROADMAP.md`
 | Phase 2 in-tree runtime | Partially done | In-tree `RiftRuntime.c/h`, Scala facade, compiler lowering, `RiftRegionTest`, benchmark use. | Make API/header complete, run broader tests, decide stats ABI, clean up untracked state. |
 | Phase 3 runtime-only benchmarks | Done enough for current story | GCBench and ListOfLists runtime medians recorded; pipeline surrogate recorded. | Commix is not included. Pipeline provenance remains surrogate. |
 | Phase 4 topology/layout | Done enough to move on | `PHASE4_LAYOUT.md`, `PHASE4_TOPOLOGY.md`, `PHASE4_EXIT.md`. | Chunked layout still not a Rift win vs improved SafeZone. Mixed GC/region safety story needs Phase 6 tests. |
-| Phase 5 streaming operators and DEBS | In progress | DEBS Q1/Q2 run simultaneously on real data; outputs match; instrumentation added; Q1 and Q2 window entries have shared heap/Rift backends; Q2 active profit values live in window entries; Q2 median scratch arrays are region-backed and reset per processed trip; Q2 ranking uses primitive cell keys internally; RunBoth input bytes use a heap/Rift allocation-placement split; the ranking/result snapshot commit region-allocates Q1/Q2 ranking objects and top-k result arrays and adds direct output writing. | Current ranking/result region design reduces GC/RSS in places but slows elapsed time due reset/bookkeeping overhead. Need lower-overhead region-backed result/top-k view, medians after promising changes, Commix, SafeZone comparison, full-month input, and stronger app-level evidence. |
+| Phase 5 streaming operators and DEBS | In progress | DEBS Q1/Q2 run simultaneously on real data; outputs match; instrumentation added; Q1 and Q2 window entries have shared heap/Rift backends; Q2 active profit values live in window entries; Q2 median scratch arrays are region-backed and reused; Q2 ranking uses primitive cell keys internally; RunBoth input bytes use a heap/Rift allocation-placement split; the reusable ranking backend region-allocates Q1/Q2 ranking objects and top-k result arrays; Q2 bounded per-cell tables are fixed arrays and region-backed in Rift modes. | Current 1M HPZone median is only slightly faster than heap, though GC and RSS improve. Need Commix, SafeZone comparison, full-month input, remaining control/collection work, and safe API boundaries. |
 | Phase 6 capture checking | Open | Only design templates and early Rift API surface exist. | Implement positive/negative capture tests and fill `REPORT_CAPTURE_CHECK.md`. |
 | Phase 7 Lean mechanization | Open | Design pack has Lean stubs/templates. | Port or start proof work; prove without `sorry`. |
 | Phase 8 writing | Not started beyond notes | Result packs and this handoff exist. | Thesis/paper narrative after evidence stabilizes. |
@@ -852,8 +880,9 @@ Benchmarking uncertainties:
 
 Provenance risks:
 
-- The active branch has local commit boundaries through the local ranking/result snapshot commit, but this
-  branch is ahead of `origin/feature/rift` until pushed.
+- The active branch has local commit boundaries through the Q2 bounded
+  cell-table checkpoint, but this branch is ahead of `origin/feature/rift`
+  until pushed.
 - Several old worktrees are dirty and contain useful but obsolete artifacts;
   avoid mixing their outputs into active results without labeling provenance.
 
@@ -861,37 +890,37 @@ Docs needing possible revision:
 
 - `/Users/siyaoliu/rift/Claude_output/DESIGN.md` is now provenance, not the
   active design. The active `DESIGN.md` and `ROADMAP.md` have been revised
-  through the RunBoth region-backed input-buffer step.
+  through the Q2 bounded cell-table checkpoint.
 - `RiftRuntime.h` does not include the newest stats API used by Scala externs.
 
 ## 10. Exact Next Recommended Steps
 
 Immediate next step:
 
-1. Do not treat the `Add DEBS region ranking snapshot experiment` commit as Phase 5 success. Treat it as a diagnostic
-   ranking/result snapshot experiment that moved more ordinary Scala objects
-   into regions, reduced GC/RSS in places, and exposed reset/bookkeeping
-   overhead.
+1. Treat the Q2 bounded cell-table checkpoint as stronger but still incomplete
+   Phase 5 evidence. It moves more Q2 control/data state into region-backed
+   storage in Rift modes and improves GC/RSS, but the 1M elapsed win is small
+   and SafeZone/Commix/full-month/safety comparisons remain open.
 
 Next technical milestone:
 
 1. Continue the DEBS "region-heavy" path with measurement first. The goal should be to reduce GC pressure in the actual dominant data operations, not just window entries.
 2. Start with a narrow measurement-driven plan:
    - Add allocation counters or coarse heap allocation attribution around Q1
-     ranking, Q2 ranking/median structures, result arrays, latency arrays, and
+     ranking, remaining Q2 ranking/tree/taxi metadata, latency arrays, and
      output formatting.
    - Treat the RunBoth byte parser and region-backed input buffer as
      implemented. It avoids per-row line strings and only interns durable taxi
      IDs as heap metadata.
    - Treat the shared Q2 window/profit-value/backend, region-backed median
-     scratch, per-trip scratch reset, primitive Q2 cell keys, RunBoth input
-     buffer, region ranking objects, and direct output writing as implemented.
-   - Design a lower-overhead top-k/result view before adding more
-     reset-per-event region scratch paths. The current snapshot region adds
-     millions of resets at 1M rows.
-   - Replace heap `HashMap`/`TreeSet` control metadata only where the change
-     preserves the same logical query for heap and Rift, or where the only
-     difference is allocation placement.
+     scratch, primitive Q2 cell keys, RunBoth input buffer, region ranking
+     objects, reusable top-k arrays, Q2 bounded cell tables, and direct output
+     writing as implemented.
+   - Do not reintroduce reset-per-event result snapshots; the reusable top-k
+     arrays are the lower-overhead replacement.
+   - Replace remaining heap `HashMap`/`TreeSet` control metadata only where the
+     change preserves the same logical query for heap and Rift, or where the
+     only difference is allocation placement.
 3. Rerun 100k and 1M instrumented matrices with medians after each change.
 
 What should not be done yet:

@@ -37,17 +37,25 @@ private abstract class Q2BucketedWindow(
 
   private val profitBuckets = mutable.Queue.empty[ProfitBucket]
   private val emptyBuckets = mutable.Queue.empty[EmptyBucket]
-  private val profitsByCell = mutable.HashMap.empty[Int, ProfitStats]
-  private val emptyCounts = mutable.HashMap.empty[Int, Int]
-  private val latestByCell = mutable.HashMap.empty[Int, Long]
   private val latestEmptyByTaxi = mutable.HashMap.empty[Int, EmptyEntry]
   private val rankedAreas = new TreeSet[ProfitableArea](AreaOrdering)
-  private val rankByCell = mutable.HashMap.empty[Int, ProfitableArea]
   private val taxiIds = new TaxiIds
   private val rankRegion =
     if (useRegions) RiftRegion.open(regionKind) else null
   private val medianScratchRegion =
     if (useRegions) RiftRegion.open(regionKind) else null
+  private val profitStatsByCell =
+    if (useRegions) rankRegion.alloc(new Array[ProfitStats](CellKeyCapacity))
+    else new Array[ProfitStats](CellKeyCapacity)
+  private val emptyCounts =
+    if (useRegions) rankRegion.alloc(new Array[Int](CellKeyCapacity))
+    else new Array[Int](CellKeyCapacity)
+  private val latestByCell =
+    if (useRegions) rankRegion.alloc(new Array[Long](CellKeyCapacity))
+    else new Array[Long](CellKeyCapacity)
+  private val rankByCell =
+    if (useRegions) rankRegion.alloc(new Array[ProfitableArea](CellKeyCapacity))
+    else new Array[ProfitableArea](CellKeyCapacity)
   private val resultArrays = new Array[Array[ProfitableArea]](11)
   private var medianScratch: Array[Double] = null
   private var currentProfitBucket: ProfitBucket = null
@@ -72,10 +80,8 @@ private abstract class Q2BucketedWindow(
         val bucket = profitBucketFor(trip.dropoffSeconds)
         val entry = allocateProfitEntry(bucket, pickupKey, profit)
         bucket.head = entry
-        profitsByCell
-          .getOrElseUpdate(pickupKey, new ProfitStats)
-          .add(entry)
-        latestByCell.update(pickupKey, seq)
+        profitStatsOrCreate(pickupKey).add(entry)
+        updateLatest(pickupKey, seq)
         updateRank(pickupKey)
       }
     }
@@ -86,8 +92,8 @@ private abstract class Q2BucketedWindow(
       val entry = allocateEmptyEntry(bucket, seq, taxiKey, dropoffKey)
       bucket.head = entry
       latestEmptyByTaxi.update(taxiKey, entry)
-      emptyCounts.update(dropoffKey, emptyCounts.getOrElse(dropoffKey, 0) + 1)
-      latestByCell.update(dropoffKey, seq)
+      incrementEmpty(dropoffKey)
+      updateLatest(dropoffKey, seq)
       updateRank(dropoffKey)
     }
 
@@ -95,12 +101,9 @@ private abstract class Q2BucketedWindow(
   }
 
   override def close(): Unit = {
-    profitsByCell.clear()
-    emptyCounts.clear()
-    latestByCell.clear()
     latestEmptyByTaxi.clear()
     rankedAreas.clear()
-    rankByCell.clear()
+    clearCellTables()
 
     while (profitBuckets.nonEmpty)
       closeProfitBucket(profitBuckets.dequeue())
@@ -121,9 +124,10 @@ private abstract class Q2BucketedWindow(
       var expired = bucket.head
       while (expired != null) {
         val next = expired.bucketNext
-        profitsByCell.get(expired.cellKey).foreach { stats =>
+        val stats = profitStats(expired.cellKey)
+        if (stats != null) {
           stats.remove(expired)
-          if (stats.isEmpty) profitsByCell.remove(expired.cellKey)
+          if (stats.isEmpty) clearProfitStats(expired.cellKey)
           updateRank(expired.cellKey)
         }
         expired = next
@@ -152,52 +156,51 @@ private abstract class Q2BucketedWindow(
   }
 
   private def removeEmpty(entry: EmptyEntry): Unit = {
-    val previous = emptyCounts.getOrElse(entry.cellKey, 0)
-    if (previous <= 1) emptyCounts.remove(entry.cellKey)
-    else emptyCounts.update(entry.cellKey, previous - 1)
+    val previous = emptyCount(entry.cellKey)
+    if (previous <= 1) clearEmpty(entry.cellKey)
+    else updateEmpty(entry.cellKey, previous - 1)
     updateRank(entry.cellKey)
   }
 
   private def updateRank(cellKey: Int): Unit = {
-    val existing = rankByCell.get(cellKey)
-    existing.foreach(rankedAreas.remove)
+    val existing = rank(cellKey)
+    if (existing != null) rankedAreas.remove(existing)
 
-    profitsByCell.get(cellKey) match {
-      case Some(profits) =>
-        val empty = emptyCounts.getOrElse(cellKey, 0)
-        if (empty > 0 && profits.nonEmpty) {
-          val median =
-            if (profits.needsMedianScratch)
-              profits.medianProfitWithScratch(
-                ensureMedianScratch(profits.medianScratchSize)
+    val profits = profitStats(cellKey)
+    if (profits != null) {
+      val empty = emptyCount(cellKey)
+      if (empty > 0 && profits.nonEmpty) {
+        val median =
+          if (profits.needsMedianScratch)
+            profits.medianProfitWithScratch(
+              ensureMedianScratch(profits.medianScratchSize)
+            )
+          else profits.cachedMedianProfit
+        val area =
+          if (existing != null) {
+            existing.emptyTaxis = empty
+            existing.medianProfit = median
+            existing.profitability = median / empty.toDouble
+            existing.latestSeq = latest(cellKey)
+            existing
+          } else {
+            val created =
+              allocateProfitableArea(
+                cellKey,
+                empty,
+                median,
+                median / empty.toDouble,
+                latest(cellKey)
               )
-            else profits.cachedMedianProfit
-          val area =
-            existing match {
-              case Some(current) =>
-                current.emptyTaxis = empty
-                current.medianProfit = median
-                current.profitability = median / empty.toDouble
-                current.latestSeq = latestByCell.getOrElse(cellKey, 0L)
-                current
-              case None =>
-                val created =
-                  allocateProfitableArea(
-                    cellKey,
-                    empty,
-                    median,
-                    median / empty.toDouble,
-                    latestByCell.getOrElse(cellKey, 0L)
-                  )
-                rankByCell.update(cellKey, created)
-                created
-            }
-          rankedAreas.add(area)
-        } else {
-          rankByCell.remove(cellKey)
-        }
-      case None =>
-        rankByCell.remove(cellKey)
+            updateRankEntry(cellKey, created)
+            created
+          }
+        rankedAreas.add(area)
+      } else {
+        clearRank(cellKey)
+      }
+    } else {
+      clearRank(cellKey)
     }
   }
 
@@ -298,6 +301,63 @@ private abstract class Q2BucketedWindow(
         profitability,
         latestSeq
       )
+
+  private def allocateProfitStats(): ProfitStats =
+    if (useRegions) rankRegion.alloc(new ProfitStats)
+    else new ProfitStats
+
+  private def profitStats(cellKey: Int): ProfitStats =
+    profitStatsByCell(cellKey)
+
+  private def profitStatsOrCreate(cellKey: Int): ProfitStats = {
+    var stats = profitStatsByCell(cellKey)
+    if (stats == null) {
+      stats = allocateProfitStats()
+      profitStatsByCell(cellKey) = stats
+    }
+    stats
+  }
+
+  private def clearProfitStats(cellKey: Int): Unit =
+    profitStatsByCell(cellKey) = null
+
+  private def emptyCount(cellKey: Int): Int =
+    emptyCounts(cellKey)
+
+  private def incrementEmpty(cellKey: Int): Unit =
+    emptyCounts(cellKey) += 1
+
+  private def updateEmpty(cellKey: Int, count: Int): Unit =
+    emptyCounts(cellKey) = count
+
+  private def clearEmpty(cellKey: Int): Unit =
+    emptyCounts(cellKey) = 0
+
+  private def latest(cellKey: Int): Long =
+    latestByCell(cellKey)
+
+  private def updateLatest(cellKey: Int, seq: Long): Unit =
+    latestByCell(cellKey) = seq
+
+  private def rank(cellKey: Int): ProfitableArea =
+    rankByCell(cellKey)
+
+  private def updateRankEntry(cellKey: Int, area: ProfitableArea): Unit =
+    rankByCell(cellKey) = area
+
+  private def clearRank(cellKey: Int): Unit =
+    rankByCell(cellKey) = null
+
+  private def clearCellTables(): Unit = {
+    var i = 0
+    while (i < CellKeyCapacity) {
+      profitStatsByCell(i) = null
+      emptyCounts(i) = 0
+      latestByCell(i) = 0L
+      rankByCell(i) = null
+      i += 1
+    }
+  }
 
   private def resultArray(size: Int): Array[ProfitableArea] = {
     if (size == 0) Array.empty[ProfitableArea]
@@ -414,6 +474,7 @@ object Q2Support {
   private[debs2015] val EmptyWindowSeconds = 30L * 60L
   private val CellPartBits = 10
   private val CellPartMask = (1 << CellPartBits) - 1
+  private[debs2015] val CellKeyCapacity = (Grid.Q2.size + 1) << CellPartBits
 
   private[debs2015] val AreaOrdering: Comparator[ProfitableArea] =
     new Comparator[ProfitableArea] {

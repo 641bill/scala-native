@@ -51,12 +51,13 @@ Current reliable evidence:
 - Phase 4 topology and layout studies are validated enough to move on, with the
   explicit caveat that several results use uncommitted runtime changes.
 - DEBS correctness on bounded sorted samples is partially validated.
-- DEBS performance is provisional and not yet an application-level Rift win.
-  Current phase timers show Q2 processing is the dominant measured phase. With
-  the reusable ranking/result-array backend, Rift region-operation time is again
-  a small share of total elapsed time. The latest 1M 3-run median has Rift
-  HPZone faster than heap on the bounded sample, but SafeZone/Commix/full-scale
-  comparisons and RSS analysis remain open.
+- DEBS performance is provisional and not yet a final application-level Rift
+  win. Current phase timers show Q2 processing is the dominant measured phase.
+  With the reusable ranking/result-array backend and Q2 bounded cell tables,
+  Rift region-operation time is again a small share of total elapsed time. The
+  latest 1M 3-run median has Rift HPZone slightly faster than heap with lower
+  GC/RSS on the bounded sample, but SafeZone/Commix/full-scale comparisons and
+  safe API boundaries remain open.
 - The raw-array pipeline is a surrogate and must not be presented as a
   replacement for Broom-style or `ZoneParVector` collection evidence.
 
@@ -74,11 +75,11 @@ framing:
   from allocator effects.
 - Application evidence must allocate the application's dominant data operations
   in regions. Current DEBS region-allocates Q1/Q2 window entries, Q2 active
-  profit values, Q2 median scratch, the RunBoth input buffer, and provisional
-  ranking/result objects in Rift modes. It still does not prove a final
-  application-level win because the dataset is bounded, SafeZone/Commix modes
-  are missing, RSS is higher in the latest Rift runs, and control collections
-  remain heap-managed.
+  profit values, Q2 median scratch, the RunBoth input buffer, ranking/result
+  objects, and Q2 bounded cell tables in Rift modes. It still does not prove a
+  final application-level win because the dataset is bounded, SafeZone/Commix
+  modes are missing, and remaining Q1/Q2 control collections plus safety
+  boundaries are open.
 - The literature-review target is broader than local baselines: Rift must be
   compared against Broom, StreamFlex, Yak, Stancu-style hybrid static analysis,
   the MLKit typed-region lineage, and Reggio/Verona-style capabilities.
@@ -309,19 +310,25 @@ For DEBS 2015:
 - Q2 median sorting arrays are heap-allocated in heap mode and allocated in a
   run-lifetime scratch region in Rift modes. The scratch array grows by
   capacity and is reused rather than reset for each recomputation.
-- Q2 still uses heap maps, `ProfitStats` control metadata, `TreeSet`, taxi-id
-  metadata, and latency arrays. In Rift modes, `ProfitableArea` ranking objects
-  are region-allocated, returned top-k arrays are cached and reused, and output
-  rows are written directly through shared writer-based formatting rather than
+- Q2 replaced the boxed per-cell `HashMap` tables for active `ProfitStats`,
+  empty-taxi counts, latest sequence, and current ranked area with fixed arrays
+  over the benchmark's bounded cell key space. Heap allocates those arrays and
+  `ProfitStats` with `new`; Rift modes allocate them in the run-lifetime
+  ranking/control region.
+- Q2 still uses heap `TreeSet`, `latestEmptyByTaxi`, taxi-id metadata, and
+  latency arrays. In Rift modes, `ProfitableArea` ranking objects are
+  region-allocated, returned top-k arrays are cached and reused, and output rows
+  are written directly through shared writer-based formatting rather than
   per-row `StringBuilder.toString`.
 
 Therefore current DEBS exercises more of the region-heavy application design,
-but it is still not Phase 5 success. The newest 1M 3-run median with reusable
-ranking arrays reduces GC time and makes Rift region-operation time small again,
-but it increases RSS and is still bounded-sample evidence. The remaining
-pressure is in heap collection metadata, latency arrays, broader collection
-state, and the need for safe region-backed collections/control structures that
-preserve the heap logical program.
+but it is still not Phase 5 success. The newest 1M 3-run median with Q2 cell
+tables reduces GC time and peak RSS for Rift HPZone and keeps Rift
+region-operation time small, but the elapsed-time gap is small and the evidence
+is still bounded-sample. The remaining pressure is in heap collection metadata,
+latency arrays, broader collection state, SafeZone/Commix/full-scale
+comparisons, and the need for safe region-backed collections/control structures
+that preserve the heap logical program.
 
 For parallel collections:
 
@@ -376,22 +383,28 @@ DEBS status:
 | 1M RunBoth, elapsed | 21658.215 ms | 22314.989 ms | 22184.467 ms | Single-run, provisional |
 | 1M instrumented, elapsed | 22827.882 ms | 22366.285 ms | 22810.687 ms | Single-run, provisional |
 | 1M instrumented, GC time | 1051.752 ms | 1003.171 ms | 1012.489 ms | Single-run, provisional |
+| 1M after reusable ranking arrays, elapsed | 14633.019 ms | 14234.470 ms | 14392.097 ms | 3-run median, bounded sample |
+| 1M after reusable ranking arrays, GC time | 513.199 ms | 457.726 ms | 478.912 ms | 3-run median, bounded sample |
+| 1M after Q2 cell tables, elapsed | 11471.085 ms | 11442.637 ms | 11477.431 ms | 3-run median, bounded sample |
+| 1M after Q2 cell tables, GC time | 478.636 ms | 419.658 ms | 428.339 ms | 3-run median, bounded sample |
+| 1M after Q2 cell tables, peak RSS bytes | 609730560 | 490766336 | 490799104 | 3-run median, bounded sample |
 
 Interpretation:
 
 - Rift has credible same-layout runtime wins on GCBench and linked ListOfLists.
 - Improved SafeZone is a serious baseline.
 - Layout changes can dominate allocator changes and must be separated.
-- Current DEBS does not yet reduce GC time enough because most application data
-  operations remain heap-based.
+- Current DEBS now moves more application data operations into regions, but it
+  still does not reduce GC time enough to prove the final application claim.
 - DEBS changes that merely hand-optimize the heap query implementation are not
   evidence. A change is Phase-5 relevant only if it preserves the same logical
   benchmark for heap and Rift while moving structured-lifetime data into region
   memory or making that lifetime boundary explicit.
 - The current Q2 direction follows that boundary: timestamp-bucket window
-  entries and median scratch buffers are region-backed in Rift modes, while
-  long-lived maps/trees remain heap metadata. Primitive packed keys are used in
-  the shared logic to avoid accidental heap objects in the hot path.
+  entries, median scratch buffers, and bounded per-cell tables are
+  region-backed in Rift modes, while long-lived trees/taxi metadata remain heap
+  metadata. Primitive packed keys are used in the shared logic to avoid
+  accidental heap objects in the hot path.
 
 ## 11. Formal Model
 

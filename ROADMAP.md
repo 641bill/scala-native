@@ -35,7 +35,7 @@ Reggio/Verona capabilities.
 | Phase 2: in-tree runtime/compiler path | Partially done | `RiftRuntime.c/h`, `RiftRegion`, plugin lowering, `RiftRegionTest`. | Header/API cleanup, broader tests, commit boundary, stats ABI decision. |
 | Phase 3: runtime-only evaluation | Done enough for current claim | GCBench and ListOfLists medians show Rift wins over heap and improved SafeZone. | Add Commix where relevant; avoid overclaiming pipeline. |
 | Phase 4: topology/layout decomposition | Done enough to move on | `PHASE4_LAYOUT.md`, `PHASE4_TOPOLOGY.md`, `PHASE4_EXIT.md`. | Carry safety finding into Phase 6; chunked layout still not clear Rift win vs improved SafeZone. |
-| Phase 5: application evidence | In progress, not complete | DEBS Q1/Q2 scaffold runs and outputs match on bounded real-data samples; RunBoth uses a shared byte parser and region-backed input buffer; Rift modes now region-allocate Q1/Q2 window entries, Q2 median scratch, ranking objects, and reusable top-k result arrays. The current 1M 3-run median has Rift HPZone faster than heap with `13.003 ms` Rift op time. | Heap control collections, SafeZone/Commix modes, full-month scale, RSS tradeoff, safe API boundaries. |
+| Phase 5: application evidence | In progress, not complete | DEBS Q1/Q2 scaffold runs and outputs match on bounded real-data samples; RunBoth uses a shared byte parser and region-backed input buffer; Rift modes now region-allocate Q1/Q2 window entries, Q2 median scratch, ranking objects, reusable top-k result arrays, and Q2 bounded cell tables. The current 1M 3-run median after Q2 cell tables has Rift HPZone slightly faster than heap with lower GC/RSS and `11.759 ms` Rift op time. | Q1 maps/trees, Q2 TreeSet/taxi metadata/latency arrays, SafeZone/Commix modes, full-month scale, safe API boundaries. |
 | Phase 6: Broom/parallel-collections API evidence | Open | Only raw-array surrogate and amordo comparison note exist. | Build fair Rift-backed collection/operator API. |
 | Phase 7: capture-checked safe API | Open | Runtime kind constants exist; safety tests not implemented. | Positive/negative capture tests, safe `Scoped`/`Streaming` API, report gaps. |
 | Phase 8: native GC/region integration hardening | Open | Safety bug found for unrooted region-to-GC references. | Decide reject/root/scan strategy; test mixed references. |
@@ -216,9 +216,14 @@ Current limitation:
 
 - Current Rift DEBS region-allocates Q1 and Q2 window entries using the same
   bucketed algorithms as heap.
-- Q1/Q2 ranking control metadata still uses heap maps/trees, but Rift modes now
-  allocate Q1 `RankedRoute`/`Route`/`Cell` objects and Q2 `ProfitableArea`
-  objects in run-lifetime regions.
+- Q1 ranking control metadata still uses heap maps/trees, but Rift modes now
+  allocate Q1 `RankedRoute`/`Route`/`Cell` objects in run-lifetime regions.
+- Q2 replaced boxed per-cell `HashMap` tables for active profits, empty counts,
+  latest sequence, and current ranked area with fixed arrays over the bounded
+  grid key space. Heap allocates those arrays and `ProfitStats` with `new`;
+  Rift modes allocate them in the run-lifetime ranking/control region.
+- Q2 still uses heap `TreeSet`, `latestEmptyByTaxi`, taxi-id metadata, and
+  latency arrays.
 - Returned top-k arrays are cached by exact size and reused. In Rift modes the
   cached arrays are region-allocated; runners keep only heap primitive snapshots
   between outputs so region-backed arrays do not escape across `process` calls.
@@ -262,6 +267,14 @@ Current provisional evidence:
 | 1M 3-run median after reusable ranking arrays, GC time | 513.199 ms | 457.726 ms | 478.912 ms |
 | 1M 3-run median after reusable ranking arrays, Rift op time | 0.000 ms | 13.003 ms | 14.166 ms |
 | 1M 3-run median after reusable ranking arrays, peak RSS | 813105152 | 876101632 | 876101632 |
+| 100k 3-run median after Q2 cell tables, elapsed | 1037.748 ms | 997.997 ms | 983.928 ms |
+| 100k 3-run median after Q2 cell tables, GC time | 45.193 ms | 33.453 ms | 32.947 ms |
+| 100k 3-run median after Q2 cell tables, Rift op time | 0.000 ms | 1.745 ms | 1.349 ms |
+| 100k 3-run median after Q2 cell tables, peak RSS | 217137152 | 172113920 | 172097536 |
+| 1M 3-run median after Q2 cell tables, elapsed | 11471.085 ms | 11442.637 ms | 11477.431 ms |
+| 1M 3-run median after Q2 cell tables, GC time | 478.636 ms | 419.658 ms | 428.339 ms |
+| 1M 3-run median after Q2 cell tables, Rift op time | 0.000 ms | 11.759 ms | 11.421 ms |
+| 1M 3-run median after Q2 cell tables, peak RSS | 609730560 | 490766336 | 490799104 |
 
 Immediate next step:
 
@@ -277,6 +290,11 @@ Immediate next step:
   Rift region-operation time small again. The current 1M 3-run median has Rift
   HPZone faster than heap, but this remains bounded-sample evidence with an RSS
   tradeoff and missing SafeZone/Commix modes.
+- The Q2 cell-table step replaced boxed per-cell maps with a shared bounded
+  array layout. It improves both heap and Rift, and Rift modes place those
+  arrays and `ProfitStats` in a region. The 1M HPZone median is only slightly
+  faster than heap, but it reduces median GC by about `59 ms` and peak RSS by
+  about `119 MB` with low Rift operation time.
 - Next, continue moving dominant heap control/collection state only where the
   heap and Rift paths remain the same logical program and the lifetime boundary
   is explicit.
@@ -294,8 +312,12 @@ Implementation substeps:
   `ArrayBuffer`; Q2 median scratch arrays are region-backed in Rift modes and
   reused rather than reset per processed trip.
 - Q1/Q2 ranking objects now have a heap/Rift allocation-placement split, but
-  heap maps/trees remain the control metadata. This is trusted HPZone
-  benchmark code, not the final safe mixed-reference story.
+  Q1 heap maps/trees and Q2 heap `TreeSet` remain control metadata. This is
+  trusted HPZone benchmark code, not the final safe mixed-reference story.
+- Q2 bounded cell tables now have a heap/Rift allocation-placement split over
+  the same fixed-array layout. This is acceptable Phase 5 evidence because Q2's
+  grid key space is bounded by the benchmark and both modes use the same
+  logical structure.
 - Primitive keys and packed cell/route IDs remain acceptable only as shared
   noise cleanup or as temporary boundaries where mixed-reference safety is not
   implemented.
@@ -304,9 +326,9 @@ Implementation substeps:
   path and are not the source of Phase 5 input-buffer evidence.
 - Do not add more reset-per-event region scratch paths; the superseded
   snapshot-result experiment showed they can replace GC as the bottleneck.
-- Only replace Q2 ranking/control data structures further if the change keeps
-  heap and Rift on the same logical algorithm and uses a region lifetime that
-  can be reclaimed without excessive reset churn.
+- Only replace remaining Q2 ranking/control data structures further if the
+  change keeps heap and Rift on the same logical algorithm and uses a region
+  lifetime that can be reclaimed without excessive reset churn.
 - Use primitive keys and packed cell/route IDs only when the change is shared
   across modes or needed to avoid unsafe region-to-GC references.
 - Keep heap roots explicit for any heap object referenced from region memory.

@@ -1129,3 +1129,78 @@ Interpretation:
   moving more dominant Q1/Q2 control and collection state into safe region
   structures can reduce GC materially without growing RSS or diverging from the
   heap logical program.
+
+## Q2 Cell Tables For Bounded Control Metadata
+
+Date: 2026-04-24
+
+Changes:
+
+- Q2 replaced four boxed `mutable.HashMap[Int, ...]` cell tables with fixed
+  arrays indexed by the existing packed Q2 cell key:
+  - active `ProfitStats`
+  - empty-taxi counts
+  - latest sequence per cell
+  - current ranked `ProfitableArea`
+- Heap and Rift modes use the same logical table layout. Heap allocates the
+  arrays and `ProfitStats` with ordinary `new`; Rift modes allocate them in the
+  run-lifetime ranking/control region.
+- This is a bounded-domain control/data-structure change, not a
+  hand-specialized Rift-only benchmark. It removes boxed map operations from
+  both heap and Rift while preserving the allocation-placement split.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Q2Smoke\")" \
+      run
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015RunBoth\")" \
+      nativeLink
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_BINARY=/Users/siyaoliu/rift/scala-native-rift/sandbox/.3-next/target/scala-3.8.4-RC1-bin-20260402-44bbcdf-NIGHTLY/native/debs2015.Debs2015RunBoth \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-celltables-sample \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+The sample, 100k, and 1M instrumented matrices all matched heap output after
+stripping only the measured latency column.
+
+### 100k 3-Run Median With Q2 Cell Tables
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Region objects | Region resets | Rift mmap bytes | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 1037.748 | 45.193 | 184.481 | 62.231 | 549.354 | 47.715 | 0.000 | 0 | 0 | 0 | 217137152 |
+| Rift HPZone | 997.997 | 33.453 | 185.366 | 55.824 | 511.303 | 60.119 | 1.745 | 573277 | 0 | 27869184 | 172113920 |
+| Rift Streaming | 983.928 | 32.947 | 177.921 | 55.415 | 515.019 | 48.587 | 1.349 | 573277 | 0 | 27869184 | 172097536 |
+
+### 1M 3-Run Median With Q2 Cell Tables
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Region objects | Region resets | Rift mmap bytes | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 11471.085 | 478.636 | 1970.359 | 323.773 | 6978.174 | 379.032 | 0.000 | 0 | 0 | 0 | 609730560 |
+| Rift HPZone | 11442.637 | 419.658 | 1965.570 | 341.229 | 6853.565 | 420.838 | 11.759 | 5386213 | 0 | 87703552 | 490766336 |
+| Rift Streaming | 11477.431 | 428.339 | 1998.458 | 326.847 | 6895.311 | 398.340 | 11.421 | 5386213 | 0 | 87703552 | 490799104 |
+
+Interpretation:
+
+- The cell-table change is a large shared algorithm/data-structure improvement:
+  compared with the reusable ranking-array median, 1M heap elapsed drops from
+  `14633.019 ms` to `11471.085 ms`, and Rift HPZone drops from `14234.470 ms`
+  to `11442.637 ms`.
+- The Rift-vs-heap elapsed gap at 1M is now small, but HPZone still reduces
+  median GC time by about `59 ms` and peak RSS by about `119 MB` on this
+  bounded sample.
+- Rift region-operation time remains small: `11.759 ms` for HPZone and
+  `11.421 ms` for Streaming at 1M, with `0` resets.
+- This strengthens the application story by moving bounded Q2 control tables
+  into region-backed storage in Rift modes. It is still not final Phase 5
+  success because SafeZone/Commix/full-month comparisons and safe API
+  boundaries remain open.
