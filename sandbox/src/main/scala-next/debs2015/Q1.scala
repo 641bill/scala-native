@@ -117,6 +117,9 @@ object Q1Support {
   private[debs2015] val WindowSeconds = 30L * 60L
   private val RoutePartBits = 10
   private val RoutePartMask = (1L << RoutePartBits) - 1L
+  private val EmptyRouteKey = 0L
+  private val DeletedRouteKey = -1L
+  private val InitialRouteTableCapacity = 1024
 
   private[debs2015] final case class RouteState(
       count: Int,
@@ -142,6 +145,16 @@ object Q1Support {
       )
     )
 
+  private def hash(key: Long): Int = {
+    var x = key
+    x ^= x >>> 33
+    x *= 0xff51afd7ed558ccdL
+    x ^= x >>> 33
+    x *= 0xc4ceb9fe1a85ec53L
+    x ^= x >>> 33
+    x.toInt
+  }
+
   private val RankedRouteOrdering: Comparator[RankedRoute] =
     new Comparator[RankedRoute] {
       override def compare(left: RankedRoute, right: RankedRoute): Int = {
@@ -160,34 +173,51 @@ object Q1Support {
       useRegions: Boolean,
       regionKind: Int
   ) {
-    private val counts = mutable.HashMap.empty[Long, RouteState]
     private val rankedRoutes = new TreeSet[RankedRoute](RankedRouteOrdering)
-    private val rankByKey = mutable.HashMap.empty[Long, RankedRoute]
     private val rankRegion =
       if (useRegions) RiftRegion.open(regionKind) else null
+    private var keys = allocateLongArray(InitialRouteTableCapacity)
+    private var counts = allocateIntArray(InitialRouteTableCapacity)
+    private var latestSecondsBySlot = allocateLongArray(InitialRouteTableCapacity)
+    private var latestSeqBySlot = allocateLongArray(InitialRouteTableCapacity)
+    private var rankBySlot = allocateRankArray(InitialRouteTableCapacity)
     private val resultArrays = new Array[Array[RankedRoute]](11)
+    private var activeSize = 0
+    private var usedSize = 0
 
     def increment(key: Long, latestSeconds: Long, latestSeq: Long): Unit = {
-      val previous = counts.getOrElse(key, RouteState(0, 0L, -1L))
-      val next =
-        RouteState(
-          count = previous.count + 1,
-          latestSeconds = latestSeconds,
-          latestSeq = latestSeq
-        )
-      counts.update(key, next)
-      updateRank(key, next)
+      val slot = insertSlot(key)
+      if (keys(slot) == key) {
+        counts(slot) += 1
+        latestSecondsBySlot(slot) = latestSeconds
+        latestSeqBySlot(slot) = latestSeq
+        updateRank(slot)
+      } else {
+        if (keys(slot) == EmptyRouteKey) usedSize += 1
+        keys(slot) = key
+        counts(slot) = 1
+        latestSecondsBySlot(slot) = latestSeconds
+        latestSeqBySlot(slot) = latestSeq
+        activeSize += 1
+        updateRank(slot)
+      }
     }
 
     def decrement(key: Long): Unit = {
-      counts.get(key).foreach { previous =>
-        if (previous.count <= 1) {
-          counts.remove(key)
-          removeRank(key)
+      val slot = existingSlot(key)
+      if (slot >= 0) {
+        val ranked = rankBySlot(slot)
+        if (ranked != null) rankedRoutes.remove(ranked)
+
+        val nextCount = counts(slot) - 1
+        if (nextCount <= 0) {
+          deleteSlot(slot)
         } else {
-          val next = previous.copy(count = previous.count - 1)
-          counts.update(key, next)
-          updateRank(key, next)
+          counts(slot) = nextCount
+          if (ranked != null) {
+            ranked.count = nextCount
+            rankedRoutes.add(ranked)
+          }
         }
       }
     }
@@ -205,37 +235,39 @@ object Q1Support {
     }
 
     def close(): Unit = {
-      counts.clear()
+      clearTables()
       rankedRoutes.clear()
-      rankByKey.clear()
+      var i = 0
+      while (i < resultArrays.length) {
+        resultArrays(i) = null
+        i += 1
+      }
       if (useRegions) rankRegion.close()
     }
 
-    private def updateRank(key: Long, state: RouteState): Unit = {
+    private def updateRank(slot: Int): Unit = {
+      val existing = rankBySlot(slot)
+      if (existing != null) rankedRoutes.remove(existing)
+
       val ranked =
-        rankByKey.get(key) match {
-          case Some(existing) =>
-            rankedRoutes.remove(existing)
-            existing.count = state.count
-            existing.latestSeconds = state.latestSeconds
-            existing.latestSeq = state.latestSeq
-            existing
-          case None =>
-            val created =
-              allocateRankedRoute(
-                key,
-                state.count,
-                state.latestSeconds,
-                state.latestSeq
-              )
-            rankByKey.update(key, created)
-            created
+        if (existing != null) {
+          existing.count = counts(slot)
+          existing.latestSeconds = latestSecondsBySlot(slot)
+          existing.latestSeq = latestSeqBySlot(slot)
+          existing
+        } else {
+          val created =
+            allocateRankedRoute(
+              keys(slot),
+              counts(slot),
+              latestSecondsBySlot(slot),
+              latestSeqBySlot(slot)
+            )
+          rankBySlot(slot) = created
+          created
         }
       rankedRoutes.add(ranked)
     }
-
-    private def removeRank(key: Long): Unit =
-      rankByKey.remove(key).foreach(rankedRoutes.remove)
 
     private def allocateRankedRoute(
         key: Long,
@@ -274,6 +306,115 @@ object Q1Support {
         }
         result
       }
+    }
+
+    private def allocateLongArray(size: Int): Array[Long] =
+      if (useRegions) rankRegion.alloc(new Array[Long](size))
+      else new Array[Long](size)
+
+    private def allocateIntArray(size: Int): Array[Int] =
+      if (useRegions) rankRegion.alloc(new Array[Int](size))
+      else new Array[Int](size)
+
+    private def allocateRankArray(size: Int): Array[RankedRoute] =
+      if (useRegions) rankRegion.alloc(new Array[RankedRoute](size))
+      else new Array[RankedRoute](size)
+
+    private def insertSlot(key: Long): Int = {
+      if ((usedSize + 1) * 4 >= keys.length * 3) {
+        val compactOnly = activeSize * 2 < usedSize
+        if (compactOnly) rehash(keys.length)
+        else rehash(keys.length << 1)
+      }
+
+      val mask = keys.length - 1
+      var slot = hash(key) & mask
+      var firstDeleted = -1
+      while (true) {
+        val current = keys(slot)
+        if (current == key) return slot
+        if (current == EmptyRouteKey)
+          return if (firstDeleted >= 0) firstDeleted else slot
+        if (current == DeletedRouteKey && firstDeleted < 0)
+          firstDeleted = slot
+        slot = (slot + 1) & mask
+      }
+      slot
+    }
+
+    private def existingSlot(key: Long): Int = {
+      val mask = keys.length - 1
+      var slot = hash(key) & mask
+      while (true) {
+        val current = keys(slot)
+        if (current == key) return slot
+        if (current == EmptyRouteKey) return -1
+        slot = (slot + 1) & mask
+      }
+      -1
+    }
+
+    private def rehash(newCapacity: Int): Unit = {
+      val oldKeys = keys
+      val oldCounts = counts
+      val oldLatestSeconds = latestSecondsBySlot
+      val oldLatestSeq = latestSeqBySlot
+      val oldRanks = rankBySlot
+
+      keys = allocateLongArray(newCapacity)
+      counts = allocateIntArray(newCapacity)
+      latestSecondsBySlot = allocateLongArray(newCapacity)
+      latestSeqBySlot = allocateLongArray(newCapacity)
+      rankBySlot = allocateRankArray(newCapacity)
+      activeSize = 0
+      usedSize = 0
+
+      var i = 0
+      while (i < oldKeys.length) {
+        val key = oldKeys(i)
+        if (key != EmptyRouteKey && key != DeletedRouteKey) {
+          val slot = insertSlotWithoutRehash(key)
+          keys(slot) = key
+          counts(slot) = oldCounts(i)
+          latestSecondsBySlot(slot) = oldLatestSeconds(i)
+          latestSeqBySlot(slot) = oldLatestSeq(i)
+          rankBySlot(slot) = oldRanks(i)
+          activeSize += 1
+          usedSize += 1
+        }
+        i += 1
+      }
+    }
+
+    private def deleteSlot(slot: Int): Unit = {
+      keys(slot) = DeletedRouteKey
+      counts(slot) = 0
+      latestSecondsBySlot(slot) = 0L
+      latestSeqBySlot(slot) = 0L
+      rankBySlot(slot) = null
+      activeSize -= 1
+    }
+
+    private def insertSlotWithoutRehash(key: Long): Int = {
+      val mask = keys.length - 1
+      var slot = hash(key) & mask
+      while (keys(slot) != EmptyRouteKey)
+        slot = (slot + 1) & mask
+      slot
+    }
+
+    private def clearTables(): Unit = {
+      var i = 0
+      while (i < keys.length) {
+        keys(i) = EmptyRouteKey
+        counts(i) = 0
+        latestSecondsBySlot(i) = 0L
+        latestSeqBySlot(i) = 0L
+        rankBySlot(i) = null
+        i += 1
+      }
+      activeSize = 0
+      usedSize = 0
     }
   }
 

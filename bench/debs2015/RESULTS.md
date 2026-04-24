@@ -1204,3 +1204,79 @@ Interpretation:
   into region-backed storage in Rift modes. It is still not final Phase 5
   success because SafeZone/Commix/full-month comparisons and safe API
   boundaries remain open.
+
+## Q1 Primitive Route Table
+
+Date: 2026-04-24
+
+Changes:
+
+- Q1 replaced `mutable.HashMap[Long, RouteState]` and
+  `mutable.HashMap[Long, RankedRoute]` with a shared primitive open-addressed
+  route table.
+- Heap and Rift modes use the same route-table algorithm. Heap mode allocates
+  the backing arrays with ordinary `new`; Rift modes allocate the same arrays
+  in the run-lifetime ranking/control region.
+- The table uses cheap tombstone deletion and lazy compaction near high
+  occupancy. A backshift-deletion variant was rejected during this checkpoint
+  because expiration deletes made deletion maintenance visible in the 100k
+  run.
+- Q1 still uses a heap `TreeSet` for ranking order. This patch moves boxed map
+  state and `RouteState` churn out of the hot path; it does not finish the Q1
+  control-metadata story.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Q1Smoke\")" \
+      run
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015RunBoth\")" \
+      nativeLink
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_BINARY=/Users/siyaoliu/rift/scala-native-rift/sandbox/.3-next/target/scala-3.8.4-RC1-bin-20260402-44bbcdf-NIGHTLY/native/debs2015.Debs2015RunBoth \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q1table-lazycompact-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+The sample, 100k, and 1M instrumented matrices all matched heap output after
+stripping only the measured latency column.
+
+### 100k 3-Run Median With Q1 Primitive Route Table
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Region objects | Region resets | Rift mmap bytes | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 1067.019 | 46.067 | 149.216 | 67.843 | 603.133 | 52.221 | 0.000 | 0 | 0 | 0 | 217038848 |
+| Rift HPZone | 1031.787 | 31.820 | 143.182 | 70.204 | 563.016 | 50.947 | 1.911 | 573322 | 0 | 30572544 | 174833664 |
+| Rift Streaming | 1026.118 | 32.090 | 142.173 | 62.371 | 571.077 | 50.884 | 1.877 | 573322 | 0 | 30572544 | 174833664 |
+
+### 1M 3-Run Median With Q1 Primitive Route Table
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Region objects | Region resets | Rift mmap bytes | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 11957.721 | 463.555 | 1618.613 | 375.427 | 7628.967 | 406.993 | 0.000 | 0 | 0 | 0 | 433209344 |
+| Rift HPZone | 11659.223 | 397.162 | 1627.696 | 380.382 | 7277.400 | 451.454 | 15.102 | 5386268 | 0 | 96747520 | 381222912 |
+| Rift Streaming | 11739.195 | 398.268 | 1633.238 | 364.504 | 7374.528 | 422.975 | 15.164 | 5386268 | 0 | 96747520 | 381190144 |
+
+Interpretation:
+
+- This is a fair structural change: heap and Rift use the same primitive route
+  table, and only allocation placement differs for the backing arrays.
+- Q1 processing improves materially compared with the Q2-cell-table median
+  (`1M` heap Q1 process `1970.359 ms` -> `1618.613 ms`; HPZone
+  `1965.570 ms` -> `1627.696 ms`).
+- Median GC and RSS improve versus the Q2-cell-table checkpoint, especially in
+  Rift modes, but total elapsed is not a clean cross-checkpoint improvement
+  because Q2 processing remains dominant and moved in the opposite direction in
+  this run set.
+- The valid claim is narrower: the patch removes boxed Q1 route-table state
+  from the hot path and preserves low Rift operation time. It is not final
+  Phase 5 success.
