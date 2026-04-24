@@ -184,8 +184,8 @@ object Debs2015RunBothRunner {
     val q2Latencies = new mutable.ArrayBuffer[Long](1024)
     val trip = Trip.empty
 
-    var previousQ1 = Array.empty[RankedRoute]
-    var previousQ2 = Array.empty[ProfitableArea]
+    var previousQ1 = Q1Output.EmptySnapshot
+    var previousQ2 = Q2Output.EmptySnapshot
     var events = 0L
     var parsed = 0L
     var invalid = 0L
@@ -227,11 +227,11 @@ object Debs2015RunBothRunner {
               val q1OutputStarted = System.nanoTime()
               val writeAt = q1OutputStarted
               val delayMillis = (writeAt - readAt) / 1000000L
-              q1Writer.write(Q1Output.formatRow(trip, q1Current, delayMillis))
+              Q1Output.writeRow(q1Writer, trip, q1Current, delayMillis)
               q1Writer.newLine()
               q1Latencies += delayMillis
               q1Outputs += 1L
-              previousQ1 = q1Current
+              previousQ1 = Q1Output.snapshot(q1Current)
               q1OutputNanos += System.nanoTime() - q1OutputStarted
             }
 
@@ -243,11 +243,11 @@ object Debs2015RunBothRunner {
               val q2OutputStarted = System.nanoTime()
               val writeAt = q2OutputStarted
               val delayMillis = (writeAt - readAt) / 1000000L
-              q2Writer.write(Q2Output.formatRow(trip, q2Current, delayMillis))
+              Q2Output.writeRow(q2Writer, trip, q2Current, delayMillis)
               q2Writer.newLine()
               q2Latencies += delayMillis
               q2Outputs += 1L
-              previousQ2 = q2Current
+              previousQ2 = Q2Output.snapshot(q2Current)
               q2OutputNanos += System.nanoTime() - q2OutputStarted
             }
         } else {

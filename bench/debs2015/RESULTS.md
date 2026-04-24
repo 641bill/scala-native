@@ -888,3 +888,146 @@ Interpretation:
   collection state are still heap-managed.
 - The 1M single run shows Rift HPZone and Rift Streaming faster than heap, but
   this must be treated as provisional until median reruns confirm stability.
+
+## Region-Backed Input Buffer Median Rerun
+
+Date: 2026-04-24
+
+Command shape:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+for run in 1 2 3; do
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-region-input-median-100000/run-${run} \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+
+for run in 1 2 3; do
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-region-input-median-1000000/run-${run} \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+```
+
+All runs parsed all rows and the heap/Rift outputs matched after stripping only
+the measured latency column.
+
+### 100k Median After Region-Backed Input Buffer
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Region objects | Region resets | Rift mmap bytes | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 1591.907 | 61.845 | 246.749 | 67.512 | 923.195 | 159.414 | 0.000 | 0 | 0 | 0 | 273661952 |
+| Rift HPZone | 1621.480 | 59.031 | 244.521 | 80.168 | 950.705 | 155.630 | 29.024 | 465482 | 87438 | 3686400 | 238501888 |
+| Rift Streaming | 1635.015 | 60.308 | 249.894 | 70.616 | 953.593 | 170.553 | 29.648 | 465482 | 87438 | 3686400 | 239173632 |
+
+### 1M Median After Region-Backed Input Buffer
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Region objects | Region resets | Rift mmap bytes | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 17047.611 | 684.338 | 2630.878 | 466.648 | 10741.201 | 1388.926 | 0.000 | 0 | 0 | 0 | 1148403712 |
+| Rift HPZone | 17119.396 | 640.062 | 2784.165 | 441.880 | 10797.924 | 1306.058 | 288.815 | 4700055 | 894660 | 9519104 | 1157922816 |
+| Rift Streaming | 17210.458 | 628.808 | 2654.853 | 441.438 | 11013.298 | 1205.141 | 288.920 | 4700055 | 894660 | 9519104 | 1157922816 |
+
+Interpretation:
+
+- The single-run apparent 1M Rift win after the byte-reader change did not hold
+  as a median. At 1M, Rift reduces GC time by about `44-56 ms`, but region
+  operation time is about `289 ms`, and elapsed time is near parity to slower.
+- The robust finding is not "Rift is faster on DEBS." The robust finding is
+  that the input/parser boundary is no longer the dominant allocation source,
+  and Q2 process/output/ranking remain the next target.
+
+## Region Ranking And Output Allocation Experiments
+
+Date: 2026-04-24
+
+Changes:
+
+- Q1 and Q2 ranking objects are now ordinary Scala objects allocated in a
+  run-lifetime Rift region in Rift modes:
+  - Q1: `RankedRoute`, `Route`, and `Cell` objects in the ranking set.
+  - Q2: `ProfitableArea` objects in the ranking set.
+- Heap mode still uses ordinary `new` through the same query algorithms.
+- Result arrays are allocated in a resettable snapshot region in Rift modes.
+  Runners keep only small heap primitive snapshots between outputs, so they do
+  not retain region-backed arrays after the next `process` call.
+- Q1/Q2 output now writes rows directly to the `Writer` and uses shared
+  fixed-decimal formatting instead of hot `StringBuilder.toString` rows and Q2
+  `f""` formatting. This is a shared noise reduction, not a Rift-only change.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Q2Smoke\")" \
+      run
+
+zsh bench/debs2015/run_both_sample_matrix.sh
+```
+
+Results:
+
+- `Debs2015Q2Smoke` passed for `heap`, `rift-hp`, and `rift-streaming`.
+- RunBoth sample matrix outputs matched across heap, Rift HPZone, and Rift
+  Streaming.
+- A first attempt used a run-lifetime region for result arrays as well as
+  ranking objects. It reduced GC time but mmaped about `467 MB` at 1M and made
+  Rift slower; that version is not the intended lifetime design.
+- The current code uses a resettable snapshot region for result arrays. This
+  avoids retaining every per-event result array, but reset overhead is now
+  visible.
+
+### 100k Single Run With Snapshot Result Region
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-region-rank-output-snapshot-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Region objects | Region resets | Rift mmap bytes | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 1510.731 | 69.349 | 238.531 | 67.432 | 949.885 | 60.960 | 0.000 | 0 | 0 | 0 | 205881344 |
+| Rift HPZone | 1582.878 | 61.587 | 298.642 | 63.732 | 974.285 | 52.494 | 92.276 | 1512592 | 287438 | 29081600 | 234897408 |
+| Rift Streaming | 1646.102 | 61.395 | 301.537 | 77.975 | 1009.632 | 61.085 | 94.426 | 1512592 | 287438 | 29081600 | 234897408 |
+
+### 1M Single Run With Snapshot Result Region
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-region-rank-output-snapshot-1000000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Region objects | Region resets | Rift mmap bytes | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 16363.012 | 601.615 | 2665.909 | 374.220 | 10966.219 | 428.833 | 0.000 | 0 | 0 | 0 | 1148436480 |
+| Rift HPZone | 17243.387 | 503.198 | 3011.132 | 352.674 | 11537.931 | 416.090 | 933.640 | 15564420 | 2894660 | 275628032 | 1088684032 |
+| Rift Streaming | 17301.238 | 529.115 | 3067.009 | 359.010 | 11500.769 | 445.956 | 936.641 | 15564420 | 2894660 | 275628032 | 1088618496 |
+
+Interpretation:
+
+- Moving ranking objects and result arrays into regions does reduce GC time:
+  about `98 ms` at 1M for Rift HPZone in this single run.
+- It also reduces peak RSS below heap in the snapshot-region 1M run, but not at
+  100k.
+- This is not a Phase 5 success yet. Region operations become the visible cost:
+  about `934 ms` at 1M, dominated by nearly `2.9M` resets and snapshot/ranking
+  allocation bookkeeping. Q1/Q2 process time also rises.
+- The next design step is not "move more tiny temporary arrays into reset-per
+  event regions." It is to define a lower-overhead region-backed top-k/result
+  view or collection API so output snapshots can be region-managed without
+  forcing a 32 KB slab reset on every processed event.

@@ -1,5 +1,6 @@
 package debs2015
 
+import java.io.Writer
 import java.util.Comparator
 import java.util.TreeSet
 
@@ -43,6 +44,10 @@ private abstract class Q2BucketedWindow(
   private val rankedAreas = new TreeSet[ProfitableArea](AreaOrdering)
   private val rankByCell = mutable.HashMap.empty[Int, ProfitableArea]
   private val taxiIds = new TaxiIds
+  private val rankRegion =
+    if (useRegions) RiftRegion.open(regionKind) else null
+  private val snapshotRegion =
+    if (useRegions) RiftRegion.open(regionKind) else null
   private val medianScratchRegion =
     if (useRegions) RiftRegion.open(regionKind) else null
   private var medianScratchUsed = false
@@ -107,7 +112,11 @@ private abstract class Q2BucketedWindow(
     while (emptyBuckets.nonEmpty)
       closeEmptyBucket(emptyBuckets.dequeue())
 
-    if (useRegions) medianScratchRegion.close()
+    if (useRegions) {
+      medianScratchRegion.close()
+      snapshotRegion.close()
+      rankRegion.close()
+    }
     currentProfitBucket = null
     currentEmptyBucket = null
   }
@@ -167,12 +176,12 @@ private abstract class Q2BucketedWindow(
               allocateMedianScratch(profits.medianScratchSize)
             )
           else profits.medianProfitHeap
-        val area = ProfitableArea(
-          cellKey = cellKey,
-          emptyTaxis = empty,
-          medianProfit = median,
-          profitability = median / empty.toDouble,
-          latestSeq = latestByCell.getOrElse(cellKey, 0L)
+        val area = allocateProfitableArea(
+          cellKey,
+          empty,
+          median,
+          median / empty.toDouble,
+          latestByCell.getOrElse(cellKey, 0L)
         )
         rankedAreas.add(area)
         rankByCell.update(cellKey, area)
@@ -181,11 +190,16 @@ private abstract class Q2BucketedWindow(
   }
 
   private def top10(): Array[ProfitableArea] = {
-    val ranked = new mutable.ArrayBuffer[ProfitableArea](10)
+    if (useRegions) snapshotRegion.reset()
+    val size = math.min(10, rankedAreas.size())
+    val ranked = allocateResultArray(size)
     val it = rankedAreas.iterator()
-    while (ranked.length < 10 && it.hasNext)
-      ranked += it.next()
-    ranked.toArray
+    var i = 0
+    while (i < size && it.hasNext) {
+      ranked(i) = it.next()
+      i += 1
+    }
+    ranked
   }
 
   private def profitBucketFor(dropoffSeconds: Long): ProfitBucket = {
@@ -236,6 +250,36 @@ private abstract class Q2BucketedWindow(
       medianScratchUsed = true
       medianScratchRegion.alloc(new Array[Double](count))
     } else new Array[Double](count)
+
+  private def allocateProfitableArea(
+      cellKey: Int,
+      emptyTaxis: Int,
+      medianProfit: Double,
+      profitability: Double,
+      latestSeq: Long
+  ): ProfitableArea =
+    if (useRegions)
+      rankRegion.alloc(
+        new ProfitableArea(
+          cellKey,
+          emptyTaxis,
+          medianProfit,
+          profitability,
+          latestSeq
+        )
+      )
+    else
+      new ProfitableArea(
+        cellKey,
+        emptyTaxis,
+        medianProfit,
+        profitability,
+        latestSeq
+      )
+
+  private def allocateResultArray(size: Int): Array[ProfitableArea] =
+    if (useRegions) snapshotRegion.alloc(new Array[ProfitableArea](size))
+    else new Array[ProfitableArea](size)
 
   private def resetMedianScratchIfNeeded(): Unit = {
     if (useRegions && medianScratchUsed) {
@@ -377,6 +421,13 @@ object Q2Support {
     builder.append('.')
     builder.append(key & CellPartMask)
   }
+
+  private[debs2015] def writeCellId(writer: Writer, key: Int): Unit =
+    OutputSupport.writeCellId(
+      writer,
+      key >>> CellPartBits,
+      key & CellPartMask
+    )
 
   private def compareCellKeysById(left: Int, right: Int): Int = {
     val east = compareDecimalLex(left >>> CellPartBits, right >>> CellPartBits)

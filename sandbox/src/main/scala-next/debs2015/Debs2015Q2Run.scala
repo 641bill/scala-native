@@ -33,7 +33,7 @@ object Debs2015Q2Runner {
     val latencies = new mutable.ArrayBuffer[Long](1024)
     val trip = Trip.empty
 
-    var previous = Array.empty[ProfitableArea]
+    var previous = Q2Output.EmptySnapshot
     var events = 0L
     var parsed = 0L
     var outliersOrInvalid = 0L
@@ -55,11 +55,11 @@ object Debs2015Q2Runner {
             } else if (Q2Output.changed(previous, current)) {
               val writeAt = System.nanoTime()
               val delayMillis = (writeAt - readAt) / 1000000L
-              writer.write(Q2Output.formatRow(trip, current, delayMillis))
+              Q2Output.writeRow(writer, trip, current, delayMillis)
               writer.newLine()
               latencies += delayMillis
               outputs += 1L
-              previous = current
+              previous = Q2Output.snapshot(current)
             }
         } else {
           outliersOrInvalid += 1L

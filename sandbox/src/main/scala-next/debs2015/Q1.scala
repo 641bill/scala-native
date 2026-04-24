@@ -30,7 +30,7 @@ private abstract class Q1BucketedWindow(
   import Q1Support._
 
   private val buckets = mutable.Queue.empty[Bucket]
-  private val routes = new RouteCounter
+  private val routes = new RouteCounter(useRegions, regionKind)
   private var currentBucket: Bucket = null
   private var nextSeq = 0L
 
@@ -59,6 +59,7 @@ private abstract class Q1BucketedWindow(
       val bucket = buckets.dequeue()
       closeBucket(bucket)
     }
+    routes.close()
     currentBucket = null
   }
 
@@ -150,10 +151,17 @@ object Q1Support {
       }
     }
 
-  private[debs2015] final class RouteCounter {
+  private[debs2015] final class RouteCounter(
+      useRegions: Boolean,
+      regionKind: Int
+  ) {
     private val counts = mutable.HashMap.empty[Long, RouteState]
     private val rankedRoutes = new TreeSet[RankedRoute](RankedRouteOrdering)
     private val rankByKey = mutable.HashMap.empty[Long, RankedRoute]
+    private val rankRegion =
+      if (useRegions) RiftRegion.open(regionKind) else null
+    private val snapshotRegion =
+      if (useRegions) RiftRegion.open(regionKind) else null
 
     def increment(key: Long, latestSeconds: Long, latestSeq: Long): Unit = {
       val previous = counts.getOrElse(key, RouteState(0, 0L, -1L))
@@ -181,22 +189,72 @@ object Q1Support {
     }
 
     def top10(): Array[RankedRoute] = {
-      val result = new mutable.ArrayBuffer[RankedRoute](10)
+      if (useRegions) snapshotRegion.reset()
+      val size = math.min(10, rankedRoutes.size())
+      val result = allocateResultArray(size)
       val it = rankedRoutes.iterator()
-      while (result.length < 10 && it.hasNext)
-        result += it.next()
-      result.toArray
+      var i = 0
+      while (i < size && it.hasNext) {
+        result(i) = it.next()
+        i += 1
+      }
+      result
+    }
+
+    def close(): Unit = {
+      counts.clear()
+      rankedRoutes.clear()
+      rankByKey.clear()
+      if (useRegions) {
+        snapshotRegion.close()
+        rankRegion.close()
+      }
     }
 
     private def updateRank(key: Long, state: RouteState): Unit = {
       removeRank(key)
-      val ranked = RankedRoute(routeFromKey(key), state.count, state.latestSeconds, state.latestSeq)
+      val ranked =
+        allocateRankedRoute(
+          key,
+          state.count,
+          state.latestSeconds,
+          state.latestSeq
+        )
       rankedRoutes.add(ranked)
       rankByKey.update(key, ranked)
     }
 
     private def removeRank(key: Long): Unit =
       rankByKey.remove(key).foreach(rankedRoutes.remove)
+
+    private def allocateRankedRoute(
+        key: Long,
+        count: Int,
+        latestSeconds: Long,
+        latestSeq: Long
+    ): RankedRoute = {
+      val route = allocateRoute(key)
+      if (useRegions)
+        rankRegion.alloc(new RankedRoute(route, count, latestSeconds, latestSeq))
+      else new RankedRoute(route, count, latestSeconds, latestSeq)
+    }
+
+    private def allocateRoute(key: Long): Route = {
+      val startEast = ((key >>> 30) & RoutePartMask).toInt
+      val startSouth = ((key >>> 20) & RoutePartMask).toInt
+      val endEast = ((key >>> 10) & RoutePartMask).toInt
+      val endSouth = (key & RoutePartMask).toInt
+
+      if (useRegions) {
+        val start = rankRegion.alloc(new Cell(startEast, startSouth))
+        val end = rankRegion.alloc(new Cell(endEast, endSouth))
+        rankRegion.alloc(new Route(start, end))
+      } else Route(Cell(startEast, startSouth), Cell(endEast, endSouth))
+    }
+
+    private def allocateResultArray(size: Int): Array[RankedRoute] =
+      if (useRegions) snapshotRegion.alloc(new Array[RankedRoute](size))
+      else new Array[RankedRoute](size)
   }
 
   private[debs2015] def top10(

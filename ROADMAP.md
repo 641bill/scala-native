@@ -35,7 +35,7 @@ Reggio/Verona capabilities.
 | Phase 2: in-tree runtime/compiler path | Partially done | `RiftRuntime.c/h`, `RiftRegion`, plugin lowering, `RiftRegionTest`. | Header/API cleanup, broader tests, commit boundary, stats ABI decision. |
 | Phase 3: runtime-only evaluation | Done enough for current claim | GCBench and ListOfLists medians show Rift wins over heap and improved SafeZone. | Add Commix where relevant; avoid overclaiming pipeline. |
 | Phase 4: topology/layout decomposition | Done enough to move on | `PHASE4_LAYOUT.md`, `PHASE4_TOPOLOGY.md`, `PHASE4_EXIT.md`. | Carry safety finding into Phase 6; chunked layout still not clear Rift win vs improved SafeZone. |
-| Phase 5: application evidence | In progress, not complete | DEBS Q1/Q2 scaffold runs and outputs match on bounded real-data samples; RunBoth now uses a shared byte parser and region-backed input buffer in Rift modes. | Q2 ranking/output heap pressure, medians, SafeZone/Commix modes, full-month scale. |
+| Phase 5: application evidence | In progress, not complete | DEBS Q1/Q2 scaffold runs and outputs match on bounded real-data samples; RunBoth uses a shared byte parser and region-backed input buffer; Rift modes now region-allocate Q1/Q2 window entries, Q2 median scratch, ranking objects, and top-k result arrays. | Region result reset overhead, heap control collections, medians after ranking changes, SafeZone/Commix modes, full-month scale. |
 | Phase 6: Broom/parallel-collections API evidence | Open | Only raw-array surrogate and amordo comparison note exist. | Build fair Rift-backed collection/operator API. |
 | Phase 7: capture-checked safe API | Open | Runtime kind constants exist; safety tests not implemented. | Positive/negative capture tests, safe `Scoped`/`Streaming` API, report gaps. |
 | Phase 8: native GC/region integration hardening | Open | Safety bug found for unrooted region-to-GC references. | Decide reject/root/scan strategy; test mixed references. |
@@ -219,11 +219,16 @@ Current limitation:
 
 - Current Rift DEBS region-allocates Q1 and Q2 window entries using the same
   bucketed algorithms as heap.
-- Q1 ranking, Q2 ranking metadata, output arrays, latency arrays, and output
-  formatting remain heap-heavy. Q2 median scratch arrays are region-backed in
-  Rift modes and now reset at the trip/operator boundary. Q2 ranking uses
-  packed primitive cell keys internally, but ranking metadata is still
-  heap-managed.
+- Q1/Q2 ranking control metadata still uses heap maps/trees, but Rift modes now
+  allocate Q1 `RankedRoute`/`Route`/`Cell` objects and Q2 `ProfitableArea`
+  objects in run-lifetime regions.
+- Returned top-k arrays are allocated in resettable snapshot regions in Rift
+  modes. Runners keep only heap primitive snapshots between outputs so
+  region-backed arrays do not escape across `process` calls.
+- Output formatting now writes directly to `Writer` through shared code and
+  avoids hot per-row `StringBuilder.toString` and Q2 `f""` formatting.
+- Q2 median scratch arrays are region-backed in Rift modes and reset at the
+  trip/operator boundary. Q2 ranking uses packed primitive cell keys internally.
 - Therefore current DEBS does not yet establish that Rift is faster at the
   application level.
 
@@ -247,16 +252,27 @@ Current provisional evidence:
 | 100k after region-backed input buffer, read+parse share | 9.6% | 8.8% | 9.4% |
 | 1M after region-backed input buffer, elapsed | 18692.484 ms | 17789.410 ms | 17280.431 ms |
 | 1M after region-backed input buffer, GC time | 731.171 ms | 644.394 ms | 643.015 ms |
+| 1M median after region-backed input buffer, elapsed | 17047.611 ms | 17119.396 ms | 17210.458 ms |
+| 1M median after region-backed input buffer, GC time | 684.338 ms | 640.062 ms | 628.808 ms |
+| 1M single after region ranking/result snapshots, elapsed | 16363.012 ms | 17243.387 ms | 17301.238 ms |
+| 1M single after region ranking/result snapshots, GC time | 601.615 ms | 503.198 ms | 529.115 ms |
+| 1M single after region ranking/result snapshots, Rift op time | 0.000 ms | 933.640 ms | 936.641 ms |
+| 1M single after region ranking/result snapshots, peak RSS | 1148436480 | 1088684032 | 1088618496 |
 
 Immediate next step:
 
 - Preserve benchmark fairness before adding more region code. Heap and Rift
   variants should be the same logical program with allocation/lifetime policy
   as the variable, not separate hand-specialized algorithms.
-- Next, remeasure the current RunBoth state with medians, then diagnose the Q2
-  processing phase. The input/parser boundary is cleaner now; Q2 processing,
-  ranking metadata, and output formatting are the remaining dominant measured
-  paths.
+- The input-buffer median rerun is complete. The single-run Rift win after the
+  byte-reader change did not hold as a median: Rift reduced GC time, but region
+  operation time offset it.
+- The first ranking/result-region experiment is complete enough to guide the
+  next design step. It moved ordinary Scala ranking/result objects into Rift
+  regions and reduced GC/RSS in places, but the resettable top-k snapshot region
+  adds too much reset/bookkeeping overhead for a headline win.
+- Next, design a lower-overhead region-backed top-k/result view or collection
+  API before moving more tiny per-event objects into reset-per-event regions.
 
 Implementation substeps:
 
@@ -270,17 +286,27 @@ Implementation substeps:
 - Q2 active profit values now live in window entries instead of a heap
   `ArrayBuffer`; Q2 median scratch arrays are region-backed in Rift modes and
   reset once per processed trip.
-- Q2 ranking now uses primitive cell keys internally, but its map/tree metadata
-  remains heap-managed.
+- Q1/Q2 ranking objects now have a heap/Rift allocation-placement split, but
+  heap maps/trees remain the control metadata. This is trusted HPZone
+  benchmark code, not the final safe mixed-reference story.
+- Primitive keys and packed cell/route IDs remain acceptable only as shared
+  noise cleanup or as temporary boundaries where mixed-reference safety is not
+  implemented.
 - RunBoth input bytes now have a heap/Rift allocation-placement split over the
   same byte parser. Single-query Q1/Q2 runners still use the older file input
   path and are not the source of Phase 5 input-buffer evidence.
-- Only replace Q2 ranking data structures further after a read-only allocation
-  diagnosis shows they are the next dominant heap pressure source.
+- Do not add more reset-per-event region scratch paths without measuring reset
+  cost; the snapshot-result experiment shows region resets can replace GC as
+  the bottleneck.
+- Only replace Q2 ranking/control data structures further if the change keeps
+  heap and Rift on the same logical algorithm and uses a region lifetime that
+  can be reclaimed without excessive reset churn.
 - Use primitive keys and packed cell/route IDs only when the change is shared
   across modes or needed to avoid unsafe region-to-GC references.
 - Keep heap roots explicit for any heap object referenced from region memory.
-- Rerun 100k and 1M instrumented matrices with medians after each change.
+- Rerun 100k and 1M instrumented matrices with medians after each change that
+  looks promising in a single run. Single-run ranking/result numbers are
+  diagnostic only.
 - Add Commix and improved SafeZone modes where meaningful.
 - Scale to full-month joined/sorted data only after the bounded samples have a
   stable region-heavy implementation.

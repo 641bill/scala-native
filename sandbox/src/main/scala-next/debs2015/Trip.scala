@@ -1,5 +1,7 @@
 package debs2015
 
+import java.io.Writer
+
 final class Trip(
     private var sourceLine: String,
     private var sourceBytes: Array[Byte],
@@ -74,6 +76,12 @@ final class Trip(
   private[debs2015] def appendDropoffTimestamp(builder: StringBuilder): Unit =
     appendSlice(builder, dropoffTimestampStart, dropoffTimestampEnd)
 
+  private[debs2015] def writePickupTimestamp(writer: Writer): Unit =
+    writeSlice(writer, pickupTimestampStart, pickupTimestampEnd)
+
+  private[debs2015] def writeDropoffTimestamp(writer: Writer): Unit =
+    writeSlice(writer, dropoffTimestampStart, dropoffTimestampEnd)
+
   private[debs2015] def taxiIdHash: Int = {
     var hash = 0
     var i = taxiStart
@@ -102,6 +110,14 @@ final class Trip(
     var i = from
     while (i < until) {
       builder.append(charAt(i))
+      i += 1
+    }
+  }
+
+  private def writeSlice(writer: Writer, from: Int, until: Int): Unit = {
+    var i = from
+    while (i < until) {
+      writer.write(charAt(i).toInt)
       i += 1
     }
   }

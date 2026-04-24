@@ -46,11 +46,14 @@ private def smoke(mode: String): Unit = {
       }
       latest = q2.process(trip)
     }
+    validateAndPrint(mode, latest)
   } finally {
     q2.close()
     if (usesRift) scala.scalanative.memory.RiftRegion.shutdown()
   }
+}
 
+private def validateAndPrint(mode: String, latest: Array[ProfitableArea]): Unit = {
   if (latest.isEmpty)
     throw new IllegalStateException("Q2 smoke produced no profitable areas")
 
