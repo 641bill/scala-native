@@ -54,10 +54,11 @@ Current reliable evidence:
 - DEBS performance is provisional and not yet a final application-level Rift
   win. Current phase timers show Q2 processing is the dominant measured phase.
   With the reusable ranking/result-array backend, Q2 bounded cell tables, Q1
-  primitive route table, and Q2 latest-empty taxi table, Rift region-operation
-  time is again a small share of total elapsed time. The latest 1M 3-run median
-  has Rift HPZone faster than heap with lower GC/RSS on the bounded sample, but
-  SafeZone/Commix/full-scale comparisons and safe API boundaries remain open.
+  primitive route table, Q2 latest-empty taxi table, and Q2 array-backed ranking
+  index, Rift region-operation time is again a small share of total elapsed
+  time. The latest 1M 3-run median has Rift HPZone and Streaming faster than
+  heap with lower GC/RSS on the bounded sample, but SafeZone/Commix/full-scale
+  comparisons and safe API boundaries remain open.
 - The raw-array pipeline is a surrogate and must not be presented as a
   replacement for Broom-style or `ZoneParVector` collection evidence.
 
@@ -77,10 +78,11 @@ framing:
   in regions. Current DEBS region-allocates Q1/Q2 window entries, Q2 active
   profit values, Q2 median scratch, the RunBoth input buffer, ranking/result
   objects, Q2 bounded cell tables, Q1 primitive route-table arrays, and Q2
-  latest-empty taxi arrays in Rift modes. It still does not prove a final
-  application-level win because the dataset is bounded, SafeZone/Commix modes
-  are missing, and remaining Q1/Q2 control collections plus safety boundaries
-  are open.
+  latest-empty taxi arrays in Rift modes. It also replaces Q2's heap `TreeSet`
+  ranking index with a shared array-backed index whose arrays are region-backed
+  in Rift modes. It still does not prove a final application-level win because
+  the dataset is bounded, SafeZone/Commix modes are missing, and remaining Q1
+  control collections plus safety boundaries are open.
 - The literature-review target is broader than local baselines: Rift must be
   compared against Broom, StreamFlex, Yak, Stancu-style hybrid static analysis,
   the MLKit typed-region lineage, and Reggio/Verona-style capabilities.
@@ -323,20 +325,25 @@ For DEBS 2015:
 - Q2 replaced `latestEmptyByTaxi` with a growable dense array indexed by the
   existing `TaxiIds` integer key. Heap allocates the array with `new`; Rift
   modes allocate it in the run-lifetime ranking/control region.
-- Q2 still uses heap `TreeSet`, durable taxi-id metadata, and latency arrays.
+- Q2 replaced the heap `TreeSet` ranking index with a shared indexed binary
+  heap over `ProfitableArea` objects. Heap allocates the index arrays with
+  `new`; Rift modes allocate them in the run-lifetime ranking/control region.
   In Rift modes, `ProfitableArea` ranking objects are region-allocated,
   returned top-k arrays are cached and reused, and output rows are written
   directly through shared writer-based formatting rather than per-row
   `StringBuilder.toString`.
+- Q2 still leaves durable taxi-id metadata and latency arrays on the GC heap.
 
 Therefore current DEBS exercises more of the region-heavy application design,
 but it is still not Phase 5 success. The newest 1M 3-run median with the Q2
-latest-empty taxi table reduces GC time and peak RSS for Rift HPZone and keeps
-Rift region-operation time small, but Q2 remains the dominant phase and the
-evidence is still bounded-sample. The remaining pressure is in heap tree
-metadata, durable taxi-id metadata, latency arrays, broader collection state,
-SafeZone/Commix/full-scale comparisons, and the need for safe region-backed
-collections/control structures that preserve the heap logical program.
+array-backed ranking index has HPZone at `10808.901 ms` and Streaming at
+`10804.756 ms` versus heap at `11202.975 ms`. Rift operation time remains about
+`15 ms`, and Rift modes reduce GC time and peak RSS on the bounded sample. Q2
+still remains the dominant phase, and the evidence is still bounded-sample. The
+remaining pressure is in Q1 heap tree metadata, durable taxi-id metadata,
+latency arrays, broader collection state, SafeZone/Commix/full-scale
+comparisons, and the need for safe region-backed collections/control structures
+that preserve the heap logical program.
 
 For parallel collections:
 
@@ -402,6 +409,9 @@ DEBS status:
 | 1M after Q2 latest-empty taxi table, elapsed | 11649.547 ms | 11263.680 ms | 11188.144 ms | 3-run median, bounded sample |
 | 1M after Q2 latest-empty taxi table, GC time | 487.774 ms | 381.099 ms | 382.734 ms | 3-run median, bounded sample |
 | 1M after Q2 latest-empty taxi table, peak RSS bytes | 609304576 | 381501440 | 381501440 | 3-run median, bounded sample |
+| 1M after Q2 array-backed ranking, elapsed | 11202.975 ms | 10808.901 ms | 10804.756 ms | 3-run median, bounded sample |
+| 1M after Q2 array-backed ranking, GC time | 423.932 ms | 348.901 ms | 344.376 ms | 3-run median, bounded sample |
+| 1M after Q2 array-backed ranking, peak RSS bytes | 431718400 | 383631360 | 383631360 | 3-run median, bounded sample |
 
 Interpretation:
 
@@ -418,9 +428,11 @@ Interpretation:
 - The current Q1/Q2 direction follows that boundary: timestamp-bucket window
   entries, median scratch buffers, bounded Q2 per-cell tables, and Q1 route
   table arrays are region-backed in Rift modes, and Q2 latest-empty taxi state
-  uses a region-backed dense array. Long-lived trees and durable taxi-id
-  metadata remain heap metadata. Primitive packed keys are used in the shared
-  logic to avoid accidental heap objects in the hot path.
+  uses a region-backed dense array. Q2 ranking now uses a shared array-backed
+  index whose arrays are region-backed in Rift modes. Q1 ranking, durable
+  taxi-id metadata, and latency arrays remain heap metadata. Primitive packed
+  keys are used in the shared logic to avoid accidental heap objects in the hot
+  path.
 
 ## 11. Formal Model
 

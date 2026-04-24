@@ -1,8 +1,6 @@
 package debs2015
 
 import java.io.Writer
-import java.util.Comparator
-import java.util.TreeSet
 
 import scala.language.experimental.captureChecking
 
@@ -37,7 +35,6 @@ private abstract class Q2BucketedWindow(
 
   private val profitBuckets = mutable.Queue.empty[ProfitBucket]
   private val emptyBuckets = mutable.Queue.empty[EmptyBucket]
-  private val rankedAreas = new TreeSet[ProfitableArea](AreaOrdering)
   private val taxiIds = new TaxiIds
   private val rankRegion =
     if (useRegions) RiftRegion.open(regionKind) else null
@@ -55,12 +52,19 @@ private abstract class Q2BucketedWindow(
   private val rankByCell =
     if (useRegions) rankRegion.alloc(new Array[ProfitableArea](CellKeyCapacity))
     else new Array[ProfitableArea](CellKeyCapacity)
+  private val heapIndexByCell =
+    if (useRegions) rankRegion.alloc(new Array[Int](CellKeyCapacity))
+    else new Array[Int](CellKeyCapacity)
+  private var heapAreas = allocateAreaArray(InitialAreaRankCapacity)
+  private var heapCellKeys = allocateIntArray(InitialAreaRankCapacity)
+  private val topCandidateHeap = allocateIntArray(TopCandidateCapacity)
   private var latestEmptyByTaxi = allocateEmptyEntryArray(InitialTaxiTableCapacity)
   private val resultArrays = new Array[Array[ProfitableArea]](11)
   private var medianScratch: Array[Double] = null
   private var currentProfitBucket: ProfitBucket = null
   private var currentEmptyBucket: EmptyBucket = null
   private var nextSeq = 0L
+  private var heapSize = 0
 
   override def process(trip: Trip): Array[ProfitableArea] = {
     evictProfitBefore(trip.dropoffSeconds - ProfitWindowSeconds)
@@ -103,7 +107,7 @@ private abstract class Q2BucketedWindow(
 
   override def close(): Unit = {
     clearLatestEmpty()
-    rankedAreas.clear()
+    clearRankIndex()
     clearCellTables()
 
     while (profitBuckets.nonEmpty)
@@ -164,7 +168,6 @@ private abstract class Q2BucketedWindow(
 
   private def updateRank(cellKey: Int): Unit = {
     val existing = rank(cellKey)
-    if (existing != null) rankedAreas.remove(existing)
 
     val profits = profitStats(cellKey)
     if (profits != null) {
@@ -176,26 +179,24 @@ private abstract class Q2BucketedWindow(
               ensureMedianScratch(profits.medianScratchSize)
             )
           else profits.cachedMedianProfit
-        val area =
-          if (existing != null) {
-            existing.emptyTaxis = empty
-            existing.medianProfit = median
-            existing.profitability = median / empty.toDouble
-            existing.latestSeq = latest(cellKey)
-            existing
-          } else {
-            val created =
-              allocateProfitableArea(
-                cellKey,
-                empty,
-                median,
-                median / empty.toDouble,
-                latest(cellKey)
-              )
-            updateRankEntry(cellKey, created)
-            created
-          }
-        rankedAreas.add(area)
+        if (existing != null) {
+          existing.emptyTaxis = empty
+          existing.medianProfit = median
+          existing.profitability = median / empty.toDouble
+          existing.latestSeq = latest(cellKey)
+          fixRankHeap(cellKey)
+        } else {
+          val created =
+            allocateProfitableArea(
+              cellKey,
+              empty,
+              median,
+              median / empty.toDouble,
+              latest(cellKey)
+            )
+          updateRankEntry(cellKey, created)
+          addRankHeap(cellKey, created)
+        }
       } else {
         clearRank(cellKey)
       }
@@ -205,12 +206,31 @@ private abstract class Q2BucketedWindow(
   }
 
   private def top10(): Array[ProfitableArea] = {
-    val size = math.min(10, rankedAreas.size())
+    val size = math.min(10, heapSize)
     val ranked = resultArray(size)
-    val it = rankedAreas.iterator()
+    if (size == 0) return ranked
+
+    var candidateCount = 1
+    topCandidateHeap(0) = 0
     var i = 0
-    while (i < size && it.hasNext) {
-      ranked(i) = it.next()
+    while (i < size) {
+      val candidateSlot = bestCandidate(candidateCount)
+      val heapPosition = topCandidateHeap(candidateSlot)
+      candidateCount -= 1
+      topCandidateHeap(candidateSlot) = topCandidateHeap(candidateCount)
+
+      ranked(i) = heapAreas(heapPosition)
+
+      val left = (heapPosition << 1) + 1
+      if (left < heapSize) {
+        topCandidateHeap(candidateCount) = left
+        candidateCount += 1
+      }
+      val right = left + 1
+      if (right < heapSize) {
+        topCandidateHeap(candidateCount) = right
+        candidateCount += 1
+      }
       i += 1
     }
     ranked
@@ -310,6 +330,14 @@ private abstract class Q2BucketedWindow(
     if (useRegions) rankRegion.alloc(new Array[EmptyEntry](size))
     else new Array[EmptyEntry](size)
 
+  private def allocateAreaArray(size: Int): Array[ProfitableArea] =
+    if (useRegions) rankRegion.alloc(new Array[ProfitableArea](size))
+    else new Array[ProfitableArea](size)
+
+  private def allocateIntArray(size: Int): Array[Int] =
+    if (useRegions) rankRegion.alloc(new Array[Int](size))
+    else new Array[Int](size)
+
   private def profitStats(cellKey: Int): ProfitStats =
     profitStatsByCell(cellKey)
 
@@ -349,8 +377,10 @@ private abstract class Q2BucketedWindow(
   private def updateRankEntry(cellKey: Int, area: ProfitableArea): Unit =
     rankByCell(cellKey) = area
 
-  private def clearRank(cellKey: Int): Unit =
+  private def clearRank(cellKey: Int): Unit = {
+    removeRankHeap(cellKey)
     rankByCell(cellKey) = null
+  }
 
   private def latestEmpty(taxiKey: Int): EmptyEntry =
     if (taxiKey < latestEmptyByTaxi.length) latestEmptyByTaxi(taxiKey)
@@ -414,6 +444,124 @@ private abstract class Q2BucketedWindow(
       }
       result
     }
+  }
+
+  private def addRankHeap(cellKey: Int, area: ProfitableArea): Unit = {
+    ensureRankCapacity(heapSize + 1)
+    val index = heapSize
+    heapSize += 1
+    heapAreas(index) = area
+    heapCellKeys(index) = cellKey
+    heapIndexByCell(cellKey) = index + 1
+    siftRankUp(index)
+  }
+
+  private def removeRankHeap(cellKey: Int): Unit = {
+    val index = rankHeapIndex(cellKey)
+    if (index < 0) return
+
+    val last = heapSize - 1
+    heapIndexByCell(cellKey) = 0
+    if (index != last) {
+      heapAreas(index) = heapAreas(last)
+      heapCellKeys(index) = heapCellKeys(last)
+      heapIndexByCell(heapCellKeys(index)) = index + 1
+    }
+    heapAreas(last) = null
+    heapCellKeys(last) = 0
+    heapSize = last
+
+    if (index < heapSize)
+      fixRankHeapAt(index)
+  }
+
+  private def fixRankHeap(cellKey: Int): Unit = {
+    val index = rankHeapIndex(cellKey)
+    if (index >= 0) fixRankHeapAt(index)
+  }
+
+  private def fixRankHeapAt(index: Int): Unit = {
+    if (index > 0 && betterHeapIndex(index, (index - 1) >>> 1))
+      siftRankUp(index)
+    else siftRankDown(index)
+  }
+
+  private def siftRankUp(start: Int): Unit = {
+    var child = start
+    while (child > 0) {
+      val parent = (child - 1) >>> 1
+      if (!betterHeapIndex(child, parent)) return
+      swapRankHeap(child, parent)
+      child = parent
+    }
+  }
+
+  private def siftRankDown(start: Int): Unit = {
+    var parent = start
+    while (true) {
+      val left = (parent << 1) + 1
+      if (left >= heapSize) return
+      val right = left + 1
+      var best = left
+      if (right < heapSize && betterHeapIndex(right, left))
+        best = right
+      if (!betterHeapIndex(best, parent)) return
+      swapRankHeap(parent, best)
+      parent = best
+    }
+  }
+
+  private def swapRankHeap(left: Int, right: Int): Unit = {
+    val leftArea = heapAreas(left)
+    val leftCellKey = heapCellKeys(left)
+    heapAreas(left) = heapAreas(right)
+    heapCellKeys(left) = heapCellKeys(right)
+    heapAreas(right) = leftArea
+    heapCellKeys(right) = leftCellKey
+    heapIndexByCell(heapCellKeys(left)) = left + 1
+    heapIndexByCell(heapCellKeys(right)) = right + 1
+  }
+
+  private def bestCandidate(candidateCount: Int): Int = {
+    var best = 0
+    var i = 1
+    while (i < candidateCount) {
+      if (betterHeapIndex(topCandidateHeap(i), topCandidateHeap(best)))
+        best = i
+      i += 1
+    }
+    best
+  }
+
+  private def betterHeapIndex(leftIndex: Int, rightIndex: Int): Boolean =
+    compareAreas(heapAreas(leftIndex), heapAreas(rightIndex)) < 0
+
+  private def rankHeapIndex(cellKey: Int): Int =
+    heapIndexByCell(cellKey) - 1
+
+  private def ensureRankCapacity(required: Int): Unit =
+    if (required > heapAreas.length) {
+      var capacity = heapAreas.length
+      while (required > capacity)
+        capacity *= 2
+
+      val expandedAreas = allocateAreaArray(capacity)
+      val expandedCellKeys = allocateIntArray(capacity)
+      Array.copy(heapAreas, 0, expandedAreas, 0, heapSize)
+      Array.copy(heapCellKeys, 0, expandedCellKeys, 0, heapSize)
+      heapAreas = expandedAreas
+      heapCellKeys = expandedCellKeys
+    }
+
+  private def clearRankIndex(): Unit = {
+    var i = 0
+    while (i < heapSize) {
+      heapIndexByCell(heapCellKeys(i)) = 0
+      heapAreas(i) = null
+      heapCellKeys(i) = 0
+      i += 1
+    }
+    heapSize = 0
   }
 
   private def closeProfitBucket(bucket: ProfitBucket): Unit = {
@@ -518,21 +666,22 @@ object Q2Support {
   private val CellPartBits = 10
   private val CellPartMask = (1 << CellPartBits) - 1
   private[debs2015] val InitialTaxiTableCapacity = 4096
+  private[debs2015] val InitialAreaRankCapacity = 1024
+  private[debs2015] val TopCandidateCapacity = 24
   private[debs2015] val CellKeyCapacity = (Grid.Q2.size + 1) << CellPartBits
 
-  private[debs2015] val AreaOrdering: Comparator[ProfitableArea] =
-    new Comparator[ProfitableArea] {
-      override def compare(left: ProfitableArea, right: ProfitableArea): Int = {
-        if (left eq right) 0
-        else {
-          val byProfitability =
-            java.lang.Double.compare(right.profitability, left.profitability)
-          if (byProfitability != 0) byProfitability
-          else if (left.latestSeq != right.latestSeq)
-            java.lang.Long.compare(right.latestSeq, left.latestSeq)
-          else compareCellKeysById(left.cellKey, right.cellKey)
-        }
-      }
+  private[debs2015] def compareAreas(
+      left: ProfitableArea,
+      right: ProfitableArea
+  ): Int =
+    if (left eq right) 0
+    else {
+      val byProfitability =
+        java.lang.Double.compare(right.profitability, left.profitability)
+      if (byProfitability != 0) byProfitability
+      else if (left.latestSeq != right.latestSeq)
+        java.lang.Long.compare(right.latestSeq, left.latestSeq)
+      else compareCellKeysById(left.cellKey, right.cellKey)
     }
 
   private[debs2015] def cellKey(cell: Cell): Int =

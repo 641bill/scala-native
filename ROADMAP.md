@@ -35,7 +35,7 @@ Reggio/Verona capabilities.
 | Phase 2: in-tree runtime/compiler path | Partially done | `RiftRuntime.c/h`, `RiftRegion`, plugin lowering, `RiftRegionTest`. | Header/API cleanup, broader tests, commit boundary, stats ABI decision. |
 | Phase 3: runtime-only evaluation | Done enough for current claim | GCBench and ListOfLists medians show Rift wins over heap and improved SafeZone. | Add Commix where relevant; avoid overclaiming pipeline. |
 | Phase 4: topology/layout decomposition | Done enough to move on | `PHASE4_LAYOUT.md`, `PHASE4_TOPOLOGY.md`, `PHASE4_EXIT.md`. | Carry safety finding into Phase 6; chunked layout still not clear Rift win vs improved SafeZone. |
-| Phase 5: application evidence | In progress, not complete | DEBS Q1/Q2 scaffold runs and outputs match on bounded real-data samples; RunBoth uses a shared byte parser and region-backed input buffer; Rift modes now region-allocate Q1/Q2 window entries, Q2 median scratch, ranking objects, reusable top-k result arrays, Q2 bounded cell tables, Q1 primitive route-table arrays, and Q2 latest-empty taxi arrays. The current 1M 3-run median after the Q2 taxi table has Rift HPZone `385.867 ms` faster than heap with lower GC/RSS and `14.536 ms` Rift op time. | Q1/Q2 TreeSet, durable taxi-id metadata, latency arrays, SafeZone/Commix modes, full-month scale, safe API boundaries. |
+| Phase 5: application evidence | In progress, not complete | DEBS Q1/Q2 scaffold runs and outputs match on bounded real-data samples; RunBoth uses a shared byte parser and region-backed input buffer; Rift modes now region-allocate Q1/Q2 window entries, Q2 median scratch, ranking objects, reusable top-k result arrays, Q2 bounded cell tables, Q1 primitive route-table arrays, Q2 latest-empty taxi arrays, and Q2 ranking-index arrays. The current 1M 3-run median after the Q2 array-backed ranking step has Rift HPZone `394.074 ms` faster than heap with lower GC/RSS and `14.861 ms` Rift op time. | Q1 TreeSet, durable taxi-id metadata, latency arrays, SafeZone/Commix modes, full-month scale, safe API boundaries. |
 | Phase 6: Broom/parallel-collections API evidence | Open | Only raw-array surrogate and amordo comparison note exist. | Build fair Rift-backed collection/operator API. |
 | Phase 7: capture-checked safe API | Open | Runtime kind constants exist; safety tests not implemented. | Positive/negative capture tests, safe `Scoped`/`Streaming` API, report gaps. |
 | Phase 8: native GC/region integration hardening | Open | Safety bug found for unrooted region-to-GC references. | Decide reject/root/scan strategy; test mixed references. |
@@ -228,7 +228,10 @@ Current limitation:
 - Q2 replaced `latestEmptyByTaxi` with a growable dense array indexed by the
   existing `TaxiIds` integer key. Heap allocates the array with `new`; Rift
   modes allocate it in the run-lifetime ranking/control region.
-- Q2 still uses heap `TreeSet`, durable taxi-id metadata, and latency arrays.
+- Q2 replaced the heap `TreeSet` ranking index with a shared indexed binary
+  heap over `ProfitableArea` objects. Heap allocates the index arrays with
+  `new`; Rift modes allocate them in the run-lifetime ranking/control region.
+- Q2 still uses heap durable taxi-id metadata and latency arrays.
 - Returned top-k arrays are cached by exact size and reused. In Rift modes the
   cached arrays are region-allocated; runners keep only heap primitive snapshots
   between outputs so region-backed arrays do not escape across `process` calls.
@@ -296,6 +299,14 @@ Current provisional evidence:
 | 1M 3-run median after Q2 latest-empty taxi table, GC time | 487.774 ms | 381.099 ms | 382.734 ms |
 | 1M 3-run median after Q2 latest-empty taxi table, Rift op time | 0.000 ms | 14.536 ms | 14.991 ms |
 | 1M 3-run median after Q2 latest-empty taxi table, peak RSS | 609304576 | 381501440 | 381501440 |
+| 100k 3-run median after Q2 array-backed ranking, elapsed | 1005.710 ms | 965.099 ms | 947.514 ms |
+| 100k 3-run median after Q2 array-backed ranking, GC time | 45.375 ms | 30.805 ms | 30.700 ms |
+| 100k 3-run median after Q2 array-backed ranking, Rift op time | 0.000 ms | 1.981 ms | 1.932 ms |
+| 100k 3-run median after Q2 array-backed ranking, peak RSS | 216858624 | 176029696 | 176013312 |
+| 1M 3-run median after Q2 array-backed ranking, elapsed | 11202.975 ms | 10808.901 ms | 10804.756 ms |
+| 1M 3-run median after Q2 array-backed ranking, GC time | 423.932 ms | 348.901 ms | 344.376 ms |
+| 1M 3-run median after Q2 array-backed ranking, Rift op time | 0.000 ms | 14.861 ms | 14.684 ms |
+| 1M 3-run median after Q2 array-backed ranking, peak RSS | 431718400 | 383631360 | 383631360 |
 
 Immediate next step:
 
@@ -324,6 +335,12 @@ Immediate next step:
   array over existing taxi IDs. It improves Q2 processing and gives the
   strongest bounded-sample DEBS result so far, while keeping Rift operation time
   around `15 ms` at 1M.
+- The Q2 array-backed ranking step replaced Java `TreeSet` ranking nodes with a
+  shared indexed heap over ordinary `ProfitableArea` objects. Heap and Rift use
+  the same ranking algorithm; Rift modes allocate the ranking index arrays in
+  the run-lifetime ranking/control region. This is now the strongest
+  bounded-sample DEBS result so far, with 1M HPZone `394.074 ms` faster than
+  heap and Rift operation time still around `15 ms`.
 - Next, continue moving dominant heap control/collection state only where the
   heap and Rift paths remain the same logical program and the lifetime boundary
   is explicit.
@@ -352,6 +369,9 @@ Implementation substeps:
 - Q2 latest-empty taxi state now has a heap/Rift allocation-placement split over
   the same growable dense-array layout. Durable taxi-id interning remains heap
   metadata.
+- Q2 ranking now has a heap/Rift allocation-placement split over the same
+  indexed-heap layout. The ranked values are ordinary `ProfitableArea` Scala
+  objects; the ranking index arrays are region-backed in Rift modes.
 - Primitive keys and packed cell/route IDs remain acceptable only as shared
   noise cleanup or as temporary boundaries where mixed-reference safety is not
   implemented.
@@ -360,9 +380,11 @@ Implementation substeps:
   path and are not the source of Phase 5 input-buffer evidence.
 - Do not add more reset-per-event region scratch paths; the superseded
   snapshot-result experiment showed they can replace GC as the bottleneck.
-- Only replace remaining Q2 ranking/control data structures further if the
+- Only replace remaining Q1 ranking/control data structures further if the
   change keeps heap and Rift on the same logical algorithm and uses a region
-  lifetime that can be reclaimed without excessive reset churn.
+  lifetime that can be reclaimed without excessive reset churn. An uncommitted
+  Q1 indexed-heap ranking attempt preserved correctness but regressed Q1
+  processing, so do not repeat that design unchanged.
 - Use primitive keys and packed cell/route IDs only when the change is shared
   across modes or needed to avoid unsafe region-to-GC references.
 - Keep heap roots explicit for any heap object referenced from region memory.

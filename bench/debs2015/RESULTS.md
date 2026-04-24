@@ -1349,3 +1349,97 @@ Interpretation:
 - This is still not final Phase 5 success. SafeZone/Commix/full-month controls
   and the static safety story for heap references to region entries remain
   open.
+
+## Q2 Array-Backed Ranking
+
+Date: 2026-04-24
+
+Changes:
+
+- Q2 replaced the heap `java.util.TreeSet[ProfitableArea]` ranking index with a
+  shared indexed binary heap over `ProfitableArea` objects.
+- Heap and Rift modes use the same ranking algorithm. Heap mode allocates the
+  heap/index arrays with ordinary `new`; Rift modes allocate those arrays in
+  the run-lifetime ranking/control region.
+- `ProfitableArea` remains an ordinary Scala object. In Rift modes those
+  ranking objects were already region-allocated; this change also moves the
+  ranking index arrays out of the GC heap and removes Java tree-node allocation.
+- The cell-to-heap index table uses zero as the empty marker, so construction
+  does not fill the full bounded Q2 cell-key array with `-1`.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Q2Smoke\")" \
+      run
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015RunBoth\")" \
+      nativeLink
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2rankheap2-sample \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+for i in 1 2 3; do
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2rankheap2-100000-run${i} \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+
+for i in 1 2 3; do
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2rankheap2-1000000-run${i} \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+```
+
+The sample, 100k, and 1M instrumented matrices all matched heap output after
+stripping only the measured latency column.
+
+### 100k 3-Run Median With Q2 Array-Backed Ranking
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Region objects | Region resets | Rift mmap bytes | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 1005.710 | 45.375 | 170.420 | 60.831 | 514.494 | 59.849 | 0.000 | 0 | 0 | 0 | 216858624 |
+| Rift HPZone | 965.099 | 30.805 | 146.223 | 63.046 | 488.345 | 63.123 | 1.981 | 573328 | 0 | 33210368 | 176029696 |
+| Rift Streaming | 947.514 | 30.700 | 147.621 | 74.937 | 481.715 | 51.620 | 1.932 | 573328 | 0 | 33210368 | 176013312 |
+
+### 1M 3-Run Median With Q2 Array-Backed Ranking
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Region objects | Region resets | Rift mmap bytes | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 11202.975 | 423.932 | 1657.542 | 380.362 | 6761.082 | 450.613 | 0.000 | 0 | 0 | 0 | 431718400 |
+| Rift HPZone | 10808.901 | 348.901 | 1634.977 | 383.865 | 6430.000 | 432.656 | 14.861 | 5386275 | 0 | 99532800 | 383631360 |
+| Rift Streaming | 10804.756 | 344.376 | 1607.291 | 379.125 | 6462.097 | 422.689 | 14.684 | 5386275 | 0 | 99532800 | 383631360 |
+
+Interpretation:
+
+- This is the strongest bounded-sample DEBS checkpoint so far. On the 1M
+  median, HPZone is `394.074 ms` faster than heap, and Streaming is
+  `398.219 ms` faster than heap.
+- The change reduces Q2 processing on both heap and Rift compared with the
+  Q2 latest-empty taxi-table checkpoint, and it removes Java `TreeSet` node
+  allocation from the Q2 ranking path.
+- Rift GC time drops by about `75 ms` for HPZone and about `80 ms` for
+  Streaming versus heap at 1M. Peak RSS is about `48 MB` lower for Rift modes
+  in this run set.
+- Rift operation time remains small: about `15 ms` at 1M with `0` resets.
+- This still is not final Phase 5 success. Q1 ranking still uses a heap
+  `TreeSet`; durable taxi-id metadata, latency arrays, SafeZone/Commix modes,
+  full-month scale, and safe API boundaries remain open.
+
+Rejected side experiment:
+
+- An uncommitted Q1 indexed-heap ranking replacement was tested before this Q2
+  checkpoint. It preserved output correctness, but it materially increased Q1
+  processing time (`100k` single-run heap Q1 process rose to about `224 ms`;
+  `1M` single-run heap Q1 process rose to about `2108 ms`). It was backed out
+  and should not be repeated without a different design.
