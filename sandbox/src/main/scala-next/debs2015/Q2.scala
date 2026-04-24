@@ -57,7 +57,7 @@ private abstract class Q2BucketedWindow(
 
       val seq = nextSeq
       nextSeq += 1L
-      val taxiKey = taxiIds.idFor(trip.taxiId)
+      val taxiKey = taxiIds.idFor(trip)
 
       // The current pickup means this taxi is no longer empty at its previous dropoff.
       latestEmptyByTaxi.remove(taxiKey).foreach(removeEmpty)
@@ -411,18 +411,29 @@ object Q2Support {
   }
 
   private[debs2015] final class TaxiIds {
-    private val ids = mutable.HashMap.empty[String, Int]
+    private val ids = mutable.HashMap.empty[Int, TaxiIdEntry]
     private var nextId = 0
 
-    def idFor(taxiId: String): Int =
-      ids.get(taxiId) match {
-        case Some(id) => id
-        case None =>
-          val id = nextId
-          nextId += 1
-          ids.update(taxiId, id)
-          id
+    def idFor(trip: Trip): Int = {
+      val hash = trip.taxiIdHash
+      var entry = ids.getOrElse(hash, null)
+      while (entry != null) {
+        if (trip.taxiIdEquals(entry.taxiId))
+          return entry.id
+        entry = entry.next
       }
+
+      val id = nextId
+      nextId += 1
+      ids.update(hash, new TaxiIdEntry(trip.taxiId, id, ids.getOrElse(hash, null)))
+      id
+    }
   }
+
+  private final class TaxiIdEntry(
+      val taxiId: String,
+      val id: Int,
+      val next: TaxiIdEntry
+  )
 
 }

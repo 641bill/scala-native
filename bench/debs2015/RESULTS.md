@@ -781,3 +781,110 @@ Interpretation:
 - The remaining highest-value work is a measured parser/taxi-id boundary and a
   Q2 median/ranking data-structure diagnosis. Full Phase 5 claims still require
   medians and larger inputs.
+
+## RunBoth Region-Backed Input Buffer And Byte Parser
+
+Date: 2026-04-24
+
+Motivation:
+
+- The previous parser work removed `String.split`, per-row `Option`, and
+  per-row `Trip` allocation, but `Source.getLines()` still allocated one heap
+  `String` per input row.
+- For the intended heap/Rift comparison, stream input bytes have a structured
+  run/operator lifetime. Heap mode should use an ordinary heap buffer; Rift
+  modes should be able to place the same buffer in region memory while keeping
+  the Q1/Q2 logical program unchanged.
+
+Change:
+
+- `Debs2015RunBoth` now uses `CsvLineReader` instead of `Source.getLines()`.
+- Heap mode allocates the CSV buffer as `new Array[Byte]`.
+- Rift HPZone and Rift Streaming allocate the same CSV buffer with
+  `region.alloc(new Array[Byte](...))` in a run-lifetime region closed at the
+  end of the input scan.
+- `Trip` can now parse either string slices or byte slices. RunBoth parses the
+  reusable `Trip` directly from byte slices and avoids per-row line strings,
+  timestamp substrings, and taxi-id substrings. Durable taxi IDs are still
+  interned as heap metadata only when first seen.
+- The first byte-parser 100k run produced `invalid=3`; those rows used
+  scientific notation in coordinate fields. The byte parser was fixed to parse
+  `E`/`e` exponents, after which the 100k and 1M runs parsed all rows.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Q2Smoke\")" \
+      run
+
+zsh bench/debs2015/run_both_sample_matrix.sh
+```
+
+Results:
+
+- `Debs2015Q2Smoke` passed in `heap`, `rift-hp`, and `rift-streaming`.
+- RunBoth sample matrix outputs match across heap, Rift HPZone, and Rift
+  Streaming.
+- 100k and 1M instrumented matrices parsed all rows and output comparisons
+  matched across modes.
+
+### 100k Instrumented After Region-Backed Input Buffer
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-region-input-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+These rows are single-run measurements, not medians.
+
+| Mode | Elapsed ms | Throughput events/s | Read ms | Parse ms | Q2 process ms | GC ms | Rift op ms | Region objects | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 1557.171 | 64219.023 | 42.270 | 107.611 | 897.935 | 60.805 | 0.000 | 0 | 273645568 |
+| Rift HPZone | 1703.600 | 58699.235 | 41.091 | 109.454 | 985.149 | 60.293 | 29.121 | 465482 | 238534656 |
+| Rift Streaming | 1591.372 | 62838.873 | 40.476 | 109.614 | 910.766 | 59.293 | 28.482 | 465482 | 238665728 |
+
+### 1M Instrumented After Region-Backed Input Buffer
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-region-input-1000000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+These rows are single-run measurements, not medians.
+
+| Mode | Elapsed ms | Throughput events/s | Read ms | Parse ms | Q2 process ms | GC ms | Rift op ms | Region objects | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 18692.484 | 53497.439 | 440.898 | 1126.119 | 11856.488 | 731.171 | 0.000 | 0 | 1147895808 |
+| Rift HPZone | 17789.410 | 56213.218 | 423.321 | 1109.615 | 11192.911 | 644.394 | 291.402 | 4700055 | 1157398528 |
+| Rift Streaming | 17280.431 | 57868.927 | 415.302 | 1100.768 | 11058.619 | 643.015 | 286.841 | 4700055 | 1157955584 |
+
+Interpretation:
+
+- This is the first DEBS input-path step where Rift places a stream data buffer
+  in region memory. It is still not a final application-level claim because the
+  rows are single-run measurements and Q2 ranking/metadata/output remain
+  heap-heavy.
+- The shared byte reader is a fair benchmark change: heap and Rift run the same
+  parser and query code; the allocation-placement difference is the input
+  buffer lifetime.
+- Read plus parse is now roughly `9-10%` of 100k elapsed, down from about
+  `22%` in the earlier 100k phase breakdown. The main remaining measured phase
+  is Q2 processing: about `57-64%` of elapsed time in these runs.
+- GC time is lower than the earlier line-string runs, but it is still similar
+  across modes because ranking metadata, output formatting, latency arrays, and
+  collection state are still heap-managed.
+- The 1M single run shows Rift HPZone and Rift Streaming faster than heap, but
+  this must be treated as provisional until median reruns confirm stability.

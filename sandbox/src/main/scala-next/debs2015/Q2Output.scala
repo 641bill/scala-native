@@ -20,9 +20,9 @@ object Q2Output {
 
   def formatRow(trip: Trip, ranking: Array[ProfitableArea], delayMillis: Long): String = {
     val builder = new StringBuilder(384)
-    builder.append(trip.pickupTimestamp)
+    trip.appendPickupTimestamp(builder)
     builder.append(',')
-    builder.append(trip.dropoffTimestamp)
+    trip.appendDropoffTimestamp(builder)
 
     var i = 0
     while (i < 10) {

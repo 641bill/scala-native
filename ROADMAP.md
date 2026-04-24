@@ -35,7 +35,7 @@ Reggio/Verona capabilities.
 | Phase 2: in-tree runtime/compiler path | Partially done | `RiftRuntime.c/h`, `RiftRegion`, plugin lowering, `RiftRegionTest`. | Header/API cleanup, broader tests, commit boundary, stats ABI decision. |
 | Phase 3: runtime-only evaluation | Done enough for current claim | GCBench and ListOfLists medians show Rift wins over heap and improved SafeZone. | Add Commix where relevant; avoid overclaiming pipeline. |
 | Phase 4: topology/layout decomposition | Done enough to move on | `PHASE4_LAYOUT.md`, `PHASE4_TOPOLOGY.md`, `PHASE4_EXIT.md`. | Carry safety finding into Phase 6; chunked layout still not clear Rift win vs improved SafeZone. |
-| Phase 5: application evidence | In progress, not complete | DEBS Q1/Q2 scaffold runs and outputs match on bounded real-data samples. | Region-heavy parser/Q1/Q2, medians, SafeZone/Commix modes, full-month scale. |
+| Phase 5: application evidence | In progress, not complete | DEBS Q1/Q2 scaffold runs and outputs match on bounded real-data samples; RunBoth now uses a shared byte parser and region-backed input buffer in Rift modes. | Q2 ranking/output heap pressure, medians, SafeZone/Commix modes, full-month scale. |
 | Phase 6: Broom/parallel-collections API evidence | Open | Only raw-array surrogate and amordo comparison note exist. | Build fair Rift-backed collection/operator API. |
 | Phase 7: capture-checked safe API | Open | Runtime kind constants exist; safety tests not implemented. | Positive/negative capture tests, safe `Scoped`/`Streaming` API, report gaps. |
 | Phase 8: native GC/region integration hardening | Open | Safety bug found for unrooted region-to-GC references. | Decide reject/root/scan strategy; test mixed references. |
@@ -202,10 +202,11 @@ Current status:
 - Heap, Rift HPZone, and Rift Streaming outputs match after stripping only the
   measured latency column.
 - Instrumented runs report GC counters, RSS, and Rift counters.
-- A parser fast path now avoids `String.split`, per-row `Option` allocation,
-  and per-row `Trip` allocation in hot runners. This improves all modes, but it
-  is not yet region-heavy evidence because input strings, taxi/timestamp
-  strings, ranking objects, and outputs remain heap-based.
+- The RunBoth hot path now uses a shared byte parser. Heap mode uses a heap
+  input byte buffer; Rift modes allocate the same run-lifetime input buffer in
+  a region. The parser avoids `String.split`, per-row `Option`, per-row `Trip`,
+  per-row line strings, and per-row taxi/timestamp substrings in the RunBoth
+  path.
 - Q1 now uses a shared bucketed-window implementation for heap and Rift. Heap
   allocates the same bucket-entry class with `new`; Rift allocates it with
   `region.alloc` and closes the per-timestamp region at bucket eviction.
@@ -218,10 +219,11 @@ Current limitation:
 
 - Current Rift DEBS region-allocates Q1 and Q2 window entries using the same
   bucketed algorithms as heap.
-- Parser, Q1 ranking, output arrays, latency arrays, and output formatting
-  remain heap-heavy. Q2 median scratch arrays are region-backed in Rift modes
-  and now reset at the trip/operator boundary. Q2 ranking uses packed primitive
-  cell keys internally, but ranking metadata is still heap-managed.
+- Q1 ranking, Q2 ranking metadata, output arrays, latency arrays, and output
+  formatting remain heap-heavy. Q2 median scratch arrays are region-backed in
+  Rift modes and now reset at the trip/operator boundary. Q2 ranking uses
+  packed primitive cell keys internally, but ranking metadata is still
+  heap-managed.
 - Therefore current DEBS does not yet establish that Rift is faster at the
   application level.
 
@@ -241,21 +243,26 @@ Current provisional evidence:
 | 100k after per-trip scratch reset, region resets | 0 | 87438 | 87438 |
 | 100k after primitive Q2 ranking keys, elapsed | 1813.074 ms | 1863.806 ms | 1832.249 ms |
 | 100k phase share after primitive Q2 ranking keys, Q2 process | 48.6% | 48.8% | 48.9% |
+| 100k after region-backed input buffer, elapsed | 1557.171 ms | 1703.600 ms | 1591.372 ms |
+| 100k after region-backed input buffer, read+parse share | 9.6% | 8.8% | 9.4% |
+| 1M after region-backed input buffer, elapsed | 18692.484 ms | 17789.410 ms | 17280.431 ms |
+| 1M after region-backed input buffer, GC time | 731.171 ms | 644.394 ms | 643.015 ms |
 
 Immediate next step:
 
 - Preserve benchmark fairness before adding more region code. Heap and Rift
   variants should be the same logical program with allocation/lifetime policy
   as the variable, not separate hand-specialized algorithms.
-- Next, remeasure with medians, then diagnose the Q2 processing phase and the
-  parser/taxi-id boundary. The Q2 median scratch experiment shows that
-  region-backed scratch must use operator/event-level lifetimes rather than
-  per-median resets.
+- Next, remeasure the current RunBoth state with medians, then diagnose the Q2
+  processing phase. The input/parser boundary is cleaner now; Q2 processing,
+  ranking metadata, and output formatting are the remaining dominant measured
+  paths.
 
 Implementation substeps:
 
-- Treat input/parser cleanup as shared noise reduction only; it is not by itself
-  Rift evidence.
+- Treat input/parser cleanup as shared noise reduction unless the only
+  allocation-placement difference is explicit, as with the current heap input
+  buffer vs Rift region input buffer.
 - Keep Q1 heap and Rift algorithms aligned. Any future Q1 optimization must be
   shared by both modes unless the only difference is allocation placement.
 - Q2 profit and empty-taxi windows now have heap and Rift backends over the
@@ -265,6 +272,9 @@ Implementation substeps:
   reset once per processed trip.
 - Q2 ranking now uses primitive cell keys internally, but its map/tree metadata
   remains heap-managed.
+- RunBoth input bytes now have a heap/Rift allocation-placement split over the
+  same byte parser. Single-query Q1/Q2 runners still use the older file input
+  path and are not the source of Phase 5 input-buffer evidence.
 - Only replace Q2 ranking data structures further after a read-only allocation
   diagnosis shows they are the next dominant heap pressure source.
 - Use primitive keys and packed cell/route IDs only when the change is shared

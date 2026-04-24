@@ -264,9 +264,12 @@ For DEBS 2015:
   empty-taxi window entries. Heap mode allocates the same entry classes on the
   GC heap; Rift modes allocate those entries in per-timestamp regions and close
   each region at window eviction.
-- Parsing now avoids `String.split`, per-row `Option` allocation, and per-row
-  `Trip` allocation in hot runners, but still uses `Source.getLines`, line
-  strings, taxi/timestamp strings, and heap output formatting.
+- RunBoth parsing now uses a shared byte parser. Heap mode allocates the input
+  byte buffer on the GC heap; Rift modes allocate the same run-lifetime input
+  buffer in a region. The hot RunBoth path avoids `String.split`, per-row
+  `Option`, per-row `Trip`, per-row line strings, and per-row taxi/timestamp
+  substrings. Durable taxi IDs remain heap metadata and are interned only when
+  first seen.
 - Q1 ranking still uses heap `HashMap`, `TreeSet`, `RankedRoute`, arrays, and
   output formatting.
 - Q2 window queues now hold primitive-key entries in heap or Rift memory, and
@@ -277,13 +280,14 @@ For DEBS 2015:
   scratch region on every median recomputation, which is correct but likely too
   fine-grained for final performance evidence.
 - Q2 still uses heap maps, `ProfitStats` control metadata, `TreeSet`,
-  `ProfitableArea`, taxi-id metadata, and output formatting.
+  `ProfitableArea`, taxi-id metadata, latency arrays, result arrays, and output
+  formatting.
 
-Therefore current DEBS does not yet exercise the region-heavy application
-design. It primarily proves correctness of the scaffold, demonstrates the
-intended fair-comparison shape for Q1/Q2 window entries, and shows where GC
-pressure remains in ranking, parser, output paths, and overly fine-grained
-scratch-region management.
+Therefore current DEBS still does not fully exercise the region-heavy
+application design, but it is closer: Q1/Q2 window entries, Q2 active profit
+data, Q2 median scratch, and RunBoth input bytes now have explicit heap/Rift
+placement boundaries. The remaining pressure is in ranking metadata,
+result/output objects, latency arrays, and broader collection state.
 
 For parallel collections:
 

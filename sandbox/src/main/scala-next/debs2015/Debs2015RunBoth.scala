@@ -4,7 +4,6 @@ import java.io.BufferedWriter
 import java.io.FileWriter
 
 import scala.collection.mutable
-import scala.io.Source
 import scala.scalanative.memory.RiftRegion
 import scala.scalanative.runtime.{fromRawUSize, GC, RawSize, RiftAllocator}
 
@@ -178,7 +177,7 @@ object Debs2015RunBothRunner {
 
     val q1 = Debs2015Q1Runner.createEngine(q1Mode)
     val q2 = Debs2015Q2Runner.createEngine(q1Mode)
-    val source = Source.fromFile(inputPath)
+    val source = new CsvLineReader(inputPath, q1Mode)
     val q1Writer = new BufferedWriter(new FileWriter(q1OutputPath))
     val q2Writer = new BufferedWriter(new FileWriter(q2OutputPath))
     val q1Latencies = new mutable.ArrayBuffer[Long](1024)
@@ -202,22 +201,18 @@ object Debs2015RunBothRunner {
     val started = System.nanoTime()
 
     try {
-      val lines = source.getLines()
       while ({
-        val hasNextStarted = System.nanoTime()
-        val hasNext = lines.hasNext
-        readNanos += System.nanoTime() - hasNextStarted
+        val readStarted = System.nanoTime()
+        val hasNext = source.nextLine()
+        readNanos += System.nanoTime() - readStarted
         hasNext
       }) {
         val readAt = System.nanoTime()
-        val readStarted = readAt
-        val line = lines.next()
-        val readFinished = System.nanoTime()
-        readNanos += readFinished - readStarted
         events += 1L
 
         val parseStarted = System.nanoTime()
-        val parsedTrip = Trip.parseInto(line, trip)
+        val parsedTrip =
+          Trip.parseInto(source.bytes, source.lineStart, source.lineEnd, trip)
         val parseFinished = System.nanoTime()
         parseNanos += parseFinished - parseStarted
 
