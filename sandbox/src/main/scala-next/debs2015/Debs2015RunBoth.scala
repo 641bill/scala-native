@@ -152,7 +152,8 @@ object Debs2015RunBothRunner {
       q1LatencyMillis: Array[Long],
       q2LatencyMillis: Array[Long],
       phases: PhaseMetrics,
-      runtime: RuntimeMetrics
+      runtime: RuntimeMetrics,
+      counters: Debs2015Counters.Snapshot
   ) {
     def elapsedMillis: Double = elapsedNanos.toDouble / 1000000.0
 
@@ -172,6 +173,8 @@ object Debs2015RunBothRunner {
       RiftRegion.init(0)
       RiftAllocator.Impl.statsReset()
     }
+    Debs2015Counters.reset()
+    val counterStart = Debs2015Counters.snapshot()
     val runtimeStart = RuntimeMetrics.capture(usesRift)
     var runtimeEnd = runtimeStart
 
@@ -230,6 +233,7 @@ object Debs2015RunBothRunner {
               Q1Output.writeRow(q1Writer, trip, q1Current, delayMillis)
               q1Writer.newLine()
               q1Latencies += delayMillis
+              Debs2015Counters.recordQ1LatencyAppend()
               q1Outputs += 1L
               previousQ1 = Q1Output.snapshot(q1Current)
               q1OutputNanos += System.nanoTime() - q1OutputStarted
@@ -246,6 +250,7 @@ object Debs2015RunBothRunner {
               Q2Output.writeRow(q2Writer, trip, q2Current, delayMillis)
               q2Writer.newLine()
               q2Latencies += delayMillis
+              Debs2015Counters.recordQ2LatencyAppend()
               q2Outputs += 1L
               previousQ2 = Q2Output.snapshot(q2Current)
               q2OutputNanos += System.nanoTime() - q2OutputStarted
@@ -284,7 +289,8 @@ object Debs2015RunBothRunner {
         q2OutputNanos = q2OutputNanos,
         closeNanos = closeNanos
       ),
-      runtime = RuntimeMetrics.since(runtimeStart, runtimeEnd)
+      runtime = RuntimeMetrics.since(runtimeStart, runtimeEnd),
+      counters = Debs2015Counters.snapshot().since(counterStart)
     )
   }
 
@@ -301,6 +307,7 @@ object Debs2015RunBothRunner {
     val q2Sorted = metrics.q2LatencyMillis.clone()
     val runtime = metrics.runtime
     val phases = metrics.phases
+    val counters = metrics.counters
     val trackedNanos = phases.trackedNanos
     val untrackedNanos =
       if (metrics.elapsedNanos > trackedNanos) metrics.elapsedNanos - trackedNanos
@@ -348,7 +355,38 @@ object Debs2015RunBothRunner {
         f"rift_tls_reuse_total=${runtime.riftTlsReuseTotal}%d " +
         f"rift_pool_reuse_total=${runtime.riftPoolReuseTotal}%d " +
         f"rift_pool_slabs=${runtime.riftPoolSlabs}%d " +
-        f"rift_pool_bytes=${runtime.riftPoolBytes}%d"
+        f"rift_pool_bytes=${runtime.riftPoolBytes}%d " +
+        f"diag_grid_q1_calls=${counters.gridQ1Calls}%d " +
+        f"diag_grid_q1_hits=${counters.gridQ1Hits}%d " +
+        f"diag_grid_q2_calls=${counters.gridQ2Calls}%d " +
+        f"diag_grid_q2_hits=${counters.gridQ2Hits}%d " +
+        f"diag_q1_rank_adds=${counters.q1RankAdds}%d " +
+        f"diag_q1_rank_removes=${counters.q1RankRemoves}%d " +
+        f"diag_q1_rank_created=${counters.q1RankCreated}%d " +
+        f"diag_q1_top10_calls=${counters.q1Top10Calls}%d " +
+        f"diag_q1_result_array_allocs=${counters.q1ResultArrayAllocs}%d " +
+        f"diag_q1_result_array_slots=${counters.q1ResultArraySlots}%d " +
+        f"diag_q2_rank_adds=${counters.q2RankAdds}%d " +
+        f"diag_q2_rank_removes=${counters.q2RankRemoves}%d " +
+        f"diag_q2_rank_fixes=${counters.q2RankFixes}%d " +
+        f"diag_q2_rank_created=${counters.q2RankCreated}%d " +
+        f"diag_q2_top10_calls=${counters.q2Top10Calls}%d " +
+        f"diag_q2_result_array_allocs=${counters.q2ResultArrayAllocs}%d " +
+        f"diag_q2_result_array_slots=${counters.q2ResultArraySlots}%d " +
+        f"diag_q2_median_computes=${counters.q2MedianComputes}%d " +
+        f"diag_q2_median_values_sorted=${counters.q2MedianValuesSorted}%d " +
+        f"diag_q1_snapshot_allocs=${counters.q1SnapshotAllocs}%d " +
+        f"diag_q1_snapshot_slots=${counters.q1SnapshotSlots}%d " +
+        f"diag_q2_snapshot_allocs=${counters.q2SnapshotAllocs}%d " +
+        f"diag_q2_snapshot_array_allocs=${counters.q2SnapshotArrayAllocs}%d " +
+        f"diag_q2_snapshot_slots=${counters.q2SnapshotSlots}%d " +
+        f"diag_q1_latency_appends=${counters.q1LatencyAppends}%d " +
+        f"diag_q2_latency_appends=${counters.q2LatencyAppends}%d " +
+        f"diag_taxi_lookups=${counters.taxiLookups}%d " +
+        f"diag_taxi_hits=${counters.taxiHits}%d " +
+        f"diag_taxi_misses=${counters.taxiMisses}%d " +
+        f"diag_taxi_entries_scanned=${counters.taxiEntriesScanned}%d " +
+        f"diag_taxi_entries_created=${counters.taxiEntriesCreated}%d"
     )
   }
 }

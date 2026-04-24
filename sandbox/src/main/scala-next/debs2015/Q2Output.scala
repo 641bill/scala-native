@@ -48,6 +48,7 @@ object Q2Output {
   }
 
   def snapshot(ranking: Array[ProfitableArea]): Snapshot = {
+    Debs2015Counters.recordQ2Snapshot(ranking.length)
     val cellKeys = new Array[Int](ranking.length)
     val emptyTaxis = new Array[Int](ranking.length)
     val medianProfits = new Array[Double](ranking.length)

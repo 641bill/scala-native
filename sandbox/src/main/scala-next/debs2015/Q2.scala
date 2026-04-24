@@ -79,9 +79,10 @@ private abstract class Q2BucketedWindow(
     if (previousEmpty != null) removeEmpty(previousEmpty)
 
     if (trip.hasValidProfit) {
-      Grid.Q2.cell(trip.pickupLongitude, trip.pickupLatitude).foreach { pickupCell =>
+      val pickupKey =
+        Grid.Q2.cellKeyOrZero(trip.pickupLongitude, trip.pickupLatitude)
+      if (pickupKey != 0) {
         val profit = trip.profit
-        val pickupKey = cellKey(pickupCell)
         val bucket = profitBucketFor(trip.dropoffSeconds)
         val entry = allocateProfitEntry(bucket, pickupKey, profit)
         bucket.head = entry
@@ -91,8 +92,9 @@ private abstract class Q2BucketedWindow(
       }
     }
 
-    Grid.Q2.cell(trip.dropoffLongitude, trip.dropoffLatitude).foreach { dropoffCell =>
-      val dropoffKey = cellKey(dropoffCell)
+    val dropoffKey =
+      Grid.Q2.cellKeyOrZero(trip.dropoffLongitude, trip.dropoffLatitude)
+    if (dropoffKey != 0) {
       val bucket = emptyBucketFor(trip.dropoffSeconds)
       val entry = allocateEmptyEntry(bucket, seq, taxiKey, dropoffKey)
       bucket.head = entry
@@ -206,6 +208,7 @@ private abstract class Q2BucketedWindow(
   }
 
   private def top10(): Array[ProfitableArea] = {
+    Debs2015Counters.recordQ2Top10()
     val size = math.min(10, heapSize)
     val ranked = resultArray(size)
     if (size == 0) return ranked
@@ -303,8 +306,19 @@ private abstract class Q2BucketedWindow(
       profitability: Double,
       latestSeq: Long
   ): ProfitableArea =
-    if (useRegions)
-      rankRegion.alloc(
+    {
+      val area =
+        if (useRegions)
+          rankRegion.alloc(
+            new ProfitableArea(
+              cellKey,
+              emptyTaxis,
+              medianProfit,
+              profitability,
+              latestSeq
+            )
+          )
+        else
         new ProfitableArea(
           cellKey,
           emptyTaxis,
@@ -312,15 +326,9 @@ private abstract class Q2BucketedWindow(
           profitability,
           latestSeq
         )
-      )
-    else
-      new ProfitableArea(
-        cellKey,
-        emptyTaxis,
-        medianProfit,
-        profitability,
-        latestSeq
-      )
+      Debs2015Counters.recordQ2RankCreated()
+      area
+    }
 
   private def allocateProfitStats(): ProfitStats =
     if (useRegions) rankRegion.alloc(new ProfitStats)
@@ -441,6 +449,7 @@ private abstract class Q2BucketedWindow(
           if (useRegions) rankRegion.alloc(new Array[ProfitableArea](size))
           else new Array[ProfitableArea](size)
         resultArrays(size) = result
+        Debs2015Counters.recordQ2ResultArrayAlloc(size)
       }
       result
     }
@@ -453,6 +462,7 @@ private abstract class Q2BucketedWindow(
     heapAreas(index) = area
     heapCellKeys(index) = cellKey
     heapIndexByCell(cellKey) = index + 1
+    Debs2015Counters.recordQ2RankAdd()
     siftRankUp(index)
   }
 
@@ -460,6 +470,7 @@ private abstract class Q2BucketedWindow(
     val index = rankHeapIndex(cellKey)
     if (index < 0) return
 
+    Debs2015Counters.recordQ2RankRemove()
     val last = heapSize - 1
     heapIndexByCell(cellKey) = 0
     if (index != last) {
@@ -477,7 +488,10 @@ private abstract class Q2BucketedWindow(
 
   private def fixRankHeap(cellKey: Int): Unit = {
     val index = rankHeapIndex(cellKey)
-    if (index >= 0) fixRankHeapAt(index)
+    if (index >= 0) {
+      Debs2015Counters.recordQ2RankFix()
+      fixRankHeapAt(index)
+    }
   }
 
   private def fixRankHeapAt(index: Int): Unit = {
@@ -643,6 +657,7 @@ private abstract class Q2BucketedWindow(
     }
 
     private def computeMedian(sorted: Array[Double]): Unit = {
+      Debs2015Counters.recordQ2MedianCompute(count)
       var entry = head
       var i = 0
       while (entry != null) {
@@ -740,16 +755,22 @@ object Q2Support {
     private var nextId = 0
 
     def idFor(trip: Trip): Int = {
+      Debs2015Counters.recordTaxiLookup()
       val hash = trip.taxiIdHash
       var entry = ids.getOrElse(hash, null)
       while (entry != null) {
-        if (trip.taxiIdEquals(entry.taxiId))
+        Debs2015Counters.recordTaxiEntryScan()
+        if (trip.taxiIdEquals(entry.taxiId)) {
+          Debs2015Counters.recordTaxiHit()
           return entry.id
+        }
         entry = entry.next
       }
 
       val id = nextId
       nextId += 1
+      Debs2015Counters.recordTaxiMiss()
+      Debs2015Counters.recordTaxiEntryCreated()
       ids.update(hash, new TaxiIdEntry(trip.taxiId, id, ids.getOrElse(hash, null)))
       id
     }

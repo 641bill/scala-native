@@ -1443,3 +1443,133 @@ Rejected side experiment:
   processing time (`100k` single-run heap Q1 process rose to about `224 ms`;
   `1M` single-run heap Q1 process rose to about `2108 ms`). It was backed out
   and should not be repeated without a different design.
+
+## RunBoth Heap-Churn Diagnostics And Packed Grid Cell Keys
+
+Date: 2026-04-25
+
+Purpose:
+
+- Add low-overhead counters for the remaining suspected heap/control paths
+  before doing another data-structure rewrite.
+- Remove the hot temporary `Option[Cell]` / `Cell` allocation path in Q1/Q2 by
+  adding a shared packed `Grid.cellKeyOrZero` helper. This applies to heap and
+  Rift modes equally; it is accidental allocation removal, not a Rift-only
+  benchmark specialization.
+
+Changed instrumentation:
+
+- `Debs2015RunBoth` now emits `diag_*` counters in `DEBS2015_RUNBOTH_RESULT`.
+- The instrumented matrix script records the new fields in `summary.tsv`.
+- Counters cover grid calls/hits, Q1 ranking updates, Q2 ranking updates,
+  Q2 median recomputation, output snapshots, latency appends, and taxi-id
+  lookup/intern activity.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile
+
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-10000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-cellkey-10000 \
+  zsh bench/debs2015/run_both_sample_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-cellkey-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-cellkey-1000000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+for i in 1 2 3; do
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-cellkey-100000-run${i} \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+
+for i in 1 2 3; do
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-cellkey-1000000-run${i} \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+```
+
+All sample, 100k, 1M, and median-rerun matrix outputs matched after stripping only the
+measured latency column.
+
+### Pre-Cell-Key 1M Diagnostic Counters
+
+This row was gathered after adding diagnostics and before switching Q1/Q2 to
+`Grid.cellKeyOrZero`. It is a single-run diagnostic, not a median.
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q2 process ms | Grid calls / hits | Q1 rank add/remove | Q2 rank fixes | Q2 median computes | Q2 values sorted | Taxi misses | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 11853.215 | 420.998 | 1755.047 | 7257.464 | 3981885 / 3923963 | 1385875 / 1385870 | 3252279 | 1757976 | 19156244 | 9244 | 609665024 |
+| Rift HPZone | 12227.943 | 412.319 | 2039.186 | 7141.753 | 3981885 / 3923963 | 1385875 / 1385870 | 3252279 | 1757976 | 19156244 | 9244 | 383025152 |
+| Rift Streaming | 11480.581 | 355.576 | 1821.644 | 6805.569 | 3981885 / 3923963 | 1385875 / 1385870 | 3252279 | 1757976 | 19156244 | 9244 | 383025152 |
+
+Interpretation:
+
+- Output snapshots and taxi-id metadata are not the dominant counters at 1M.
+- The hottest remaining allocation/noise source was grid lookup: about `3.9M`
+  successful cell lookups, previously creating temporary `Some(Cell)`/`Cell`
+  objects before packing cell IDs.
+- The dominant processing signal remains Q2 median/ranking work:
+  `1.76M` median recomputations, `19.16M` values sorted, and `3.25M` rank-heap
+  fixes.
+
+### Packed Cell-Key 100k Diagnostic
+
+Single-run diagnostic after replacing hot Q1/Q2 grid use with
+`Grid.cellKeyOrZero`.
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q2 process ms | Q2 median computes | Q2 values sorted | Rift op ms | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 904.682 | 21.671 | 120.788 | 475.180 | 171197 | 1365087 | 0.000 | 207667200 |
+| Rift HPZone | 909.360 | 17.536 | 127.240 | 471.635 | 171197 | 1365087 | 1.851 | 172851200 |
+| Rift Streaming | 950.545 | 17.993 | 142.159 | 486.864 | 171197 | 1365087 | 1.942 | 172916736 |
+
+### Packed Cell-Key 100k 3-Run Median
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q2 process ms | Q2 rank fixes | Q2 median computes | Q2 values sorted | Rift op ms | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 1015.327 | 25.319 | 144.820 | 529.717 | 312906 | 171197 | 1365087 | 0.000 | 207667200 |
+| Rift HPZone | 944.513 | 18.366 | 142.511 | 476.838 | 312906 | 171197 | 1365087 | 2.528 | 172916736 |
+| Rift Streaming | 919.782 | 17.883 | 136.554 | 469.416 | 312906 | 171197 | 1365087 | 2.260 | 172900352 |
+
+### Packed Cell-Key 1M Diagnostic
+
+Single-run diagnostic after replacing hot Q1/Q2 grid use with
+`Grid.cellKeyOrZero`.
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q2 process ms | Q2 median computes | Q2 values sorted | Rift op ms | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 11377.011 | 398.359 | 1605.176 | 6950.836 | 1757976 | 19156244 | 0.000 | 431783936 |
+| Rift HPZone | 11484.136 | 384.130 | 1645.314 | 7039.925 | 1757976 | 19156244 | 17.230 | 383008768 |
+| Rift Streaming | 10996.388 | 353.959 | 1585.959 | 6682.096 | 1757976 | 19156244 | 17.904 | 383041536 |
+
+### Packed Cell-Key 1M 3-Run Median
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q2 process ms | Q2 rank fixes | Q2 median computes | Q2 values sorted | Rift op ms | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 10969.616 | 383.827 | 1432.781 | 6760.217 | 3252279 | 1757976 | 19156244 | 0.000 | 431767552 |
+| Rift HPZone | 10770.260 | 349.488 | 1494.196 | 6565.218 | 3252279 | 1757976 | 19156244 | 15.016 | 352665600 |
+| Rift Streaming | 10665.729 | 334.689 | 1470.182 | 6452.297 | 3252279 | 1757976 | 19156244 | 14.873 | 368214016 |
+
+Interpretation:
+
+- Packed cell keys preserve output correctness and remove a large temporary
+  object path shared by heap and Rift.
+- The 3-run medians now supersede the single-run packed-cell diagnostics for
+  this checkpoint. The pre-cell-key diagnostic table remains useful only for
+  explaining why the helper was added.
+- The next Phase 5 target is not another parser/input tweak. Q2 process still
+  dominates: median maintenance and rank updates are now the largest measured
+  work. Any next Q2 change must preserve the same logical query for heap and
+  Rift, with allocation placement/lifetime policy as the experimental variable.

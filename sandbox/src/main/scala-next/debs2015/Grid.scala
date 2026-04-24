@@ -16,18 +16,29 @@ final class Grid private (
   private val halfLongitudeStep = longitudeStep / 2.0
 
   def cell(longitude: Double, latitude: Double): Option[Cell] = {
+    val key = cellKeyOrZero(longitude, latitude)
+    if (key != 0)
+      Some(Cell(key >>> Grid.CellPartBits, key & Grid.CellPartMask))
+    else None
+  }
+
+  def cellKeyOrZero(longitude: Double, latitude: Double): Int = {
     val east =
       math.floor((longitude - (OriginLongitude - halfLongitudeStep)) / longitudeStep).toInt + 1
     val south =
       math.floor(((OriginLatitude + halfLatitudeStep) - latitude) / latitudeStep).toInt + 1
 
-    if (east >= 1 && east <= size && south >= 1 && south <= size)
-      Some(Cell(east, south))
-    else None
+    val hit = east >= 1 && east <= size && south >= 1 && south <= size
+    Debs2015Counters.recordGridCell(name, hit)
+    if (hit) (east << Grid.CellPartBits) | south
+    else 0
   }
 }
 
 object Grid {
+  private[debs2015] val CellPartBits = 10
+  private[debs2015] val CellPartMask = (1 << CellPartBits) - 1
+
   val OriginLatitude = 41.474937
   val OriginLongitude = -74.913585
 

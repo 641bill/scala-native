@@ -32,6 +32,7 @@ object Q1Output {
   }
 
   def snapshot(ranking: Array[RankedRoute]): Array[Long] = {
+    Debs2015Counters.recordQ1Snapshot(ranking.length)
     val result = new Array[Long](ranking.length)
     var i = 0
     while (i < ranking.length) {

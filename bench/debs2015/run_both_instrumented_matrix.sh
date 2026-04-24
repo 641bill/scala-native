@@ -56,6 +56,37 @@ metric_keys=(
   rift_pool_reuse_total
   rift_pool_slabs
   rift_pool_bytes
+  diag_grid_q1_calls
+  diag_grid_q1_hits
+  diag_grid_q2_calls
+  diag_grid_q2_hits
+  diag_q1_rank_adds
+  diag_q1_rank_removes
+  diag_q1_rank_created
+  diag_q1_top10_calls
+  diag_q1_result_array_allocs
+  diag_q1_result_array_slots
+  diag_q2_rank_adds
+  diag_q2_rank_removes
+  diag_q2_rank_fixes
+  diag_q2_rank_created
+  diag_q2_top10_calls
+  diag_q2_result_array_allocs
+  diag_q2_result_array_slots
+  diag_q2_median_computes
+  diag_q2_median_values_sorted
+  diag_q1_snapshot_allocs
+  diag_q1_snapshot_slots
+  diag_q2_snapshot_allocs
+  diag_q2_snapshot_array_allocs
+  diag_q2_snapshot_slots
+  diag_q1_latency_appends
+  diag_q2_latency_appends
+  diag_taxi_lookups
+  diag_taxi_hits
+  diag_taxi_misses
+  diag_taxi_entries_scanned
+  diag_taxi_entries_created
 )
 
 export ENABLE_EXPERIMENTAL_COMPILER=1

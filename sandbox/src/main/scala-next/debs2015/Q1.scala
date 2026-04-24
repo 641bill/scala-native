@@ -42,18 +42,19 @@ private abstract class Q1BucketedWindow(
   override def process(trip: Trip): Array[RankedRoute] = {
     evictBefore(trip.dropoffSeconds - WindowSeconds)
 
-    val maybeRouteKey =
-      for {
-        start <- Grid.Q1.cell(trip.pickupLongitude, trip.pickupLatitude)
-        end <- Grid.Q1.cell(trip.dropoffLongitude, trip.dropoffLatitude)
-      } yield routeKey(start, end)
-
-    maybeRouteKey.foreach { key =>
-      val seq = nextSeq
-      nextSeq += 1L
-      val bucket = bucketFor(trip.dropoffSeconds)
-      bucket.head = allocateEntry(bucket, key)
-      routes.increment(key, trip.dropoffSeconds, seq)
+    val startKey =
+      Grid.Q1.cellKeyOrZero(trip.pickupLongitude, trip.pickupLatitude)
+    if (startKey != 0) {
+      val endKey =
+        Grid.Q1.cellKeyOrZero(trip.dropoffLongitude, trip.dropoffLatitude)
+      if (endKey != 0) {
+        val key = routeKey(startKey, endKey)
+        val seq = nextSeq
+        nextSeq += 1L
+        val bucket = bucketFor(trip.dropoffSeconds)
+        bucket.head = allocateEntry(bucket, key)
+        routes.increment(key, trip.dropoffSeconds, seq)
+      }
     }
 
     routes.top10()
@@ -133,6 +134,9 @@ object Q1Support {
       (end.east.toLong << 10) |
       end.south.toLong
 
+  private[debs2015] def routeKey(startKey: Int, endKey: Int): Long =
+    (startKey.toLong << (RoutePartBits * 2)) | endKey.toLong
+
   private[debs2015] def routeFromKey(key: Long): Route =
     Route(
       Cell(
@@ -207,7 +211,8 @@ object Q1Support {
       val slot = existingSlot(key)
       if (slot >= 0) {
         val ranked = rankBySlot(slot)
-        if (ranked != null) rankedRoutes.remove(ranked)
+        if (ranked != null && rankedRoutes.remove(ranked))
+          Debs2015Counters.recordQ1RankRemove()
 
         val nextCount = counts(slot) - 1
         if (nextCount <= 0) {
@@ -216,13 +221,15 @@ object Q1Support {
           counts(slot) = nextCount
           if (ranked != null) {
             ranked.count = nextCount
-            rankedRoutes.add(ranked)
+            if (rankedRoutes.add(ranked))
+              Debs2015Counters.recordQ1RankAdd()
           }
         }
       }
     }
 
     def top10(): Array[RankedRoute] = {
+      Debs2015Counters.recordQ1Top10()
       val size = math.min(10, rankedRoutes.size())
       val result = resultArray(size)
       val it = rankedRoutes.iterator()
@@ -247,7 +254,8 @@ object Q1Support {
 
     private def updateRank(slot: Int): Unit = {
       val existing = rankBySlot(slot)
-      if (existing != null) rankedRoutes.remove(existing)
+      if (existing != null && rankedRoutes.remove(existing))
+        Debs2015Counters.recordQ1RankRemove()
 
       val ranked =
         if (existing != null) {
@@ -266,7 +274,8 @@ object Q1Support {
           rankBySlot(slot) = created
           created
         }
-      rankedRoutes.add(ranked)
+      if (rankedRoutes.add(ranked))
+        Debs2015Counters.recordQ1RankAdd()
     }
 
     private def allocateRankedRoute(
@@ -276,9 +285,12 @@ object Q1Support {
         latestSeq: Long
     ): RankedRoute = {
       val route = allocateRoute(key)
-      if (useRegions)
-        rankRegion.alloc(new RankedRoute(route, count, latestSeconds, latestSeq))
-      else new RankedRoute(route, count, latestSeconds, latestSeq)
+      val ranked =
+        if (useRegions)
+          rankRegion.alloc(new RankedRoute(route, count, latestSeconds, latestSeq))
+        else new RankedRoute(route, count, latestSeconds, latestSeq)
+      Debs2015Counters.recordQ1RankCreated()
+      ranked
     }
 
     private def allocateRoute(key: Long): Route = {
@@ -303,6 +315,7 @@ object Q1Support {
             if (useRegions) rankRegion.alloc(new Array[RankedRoute](size))
             else new Array[RankedRoute](size)
           resultArrays(size) = result
+          Debs2015Counters.recordQ1ResultArrayAlloc(size)
         }
         result
       }
