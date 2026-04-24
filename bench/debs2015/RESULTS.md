@@ -1280,3 +1280,72 @@ Interpretation:
 - The valid claim is narrower: the patch removes boxed Q1 route-table state
   from the hot path and preserves low Rift operation time. It is not final
   Phase 5 success.
+
+## Q2 Latest-Empty Taxi Table
+
+Date: 2026-04-24
+
+Changes:
+
+- Q2 replaced `mutable.HashMap[Int, EmptyEntry]` for latest empty-taxi state
+  with a growable dense array indexed by the existing `TaxiIds` integer key.
+- Heap and Rift modes use the same logical structure. Heap mode allocates the
+  array with ordinary `new`; Rift modes allocate the same array in the
+  run-lifetime ranking/control region.
+- Durable taxi-id string interning remains heap metadata. The array only tracks
+  the latest active empty-window entry for each taxi.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Q2Smoke\")" \
+      run
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015RunBoth\")" \
+      nativeLink
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_BINARY=/Users/siyaoliu/rift/scala-native-rift/sandbox/.3-next/target/scala-3.8.4-RC1-bin-20260402-44bbcdf-NIGHTLY/native/debs2015.Debs2015RunBoth \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2taxiarray-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+The 100k and 1M instrumented matrices all matched heap output after stripping
+only the measured latency column.
+
+### 100k 3-Run Median With Q2 Latest-Empty Taxi Table
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Region objects | Region resets | Rift mmap bytes | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 1072.361 | 47.078 | 156.147 | 70.102 | 589.466 | 57.379 | 0.000 | 0 | 0 | 0 | 217071616 |
+| Rift HPZone | 1005.303 | 31.095 | 144.338 | 65.305 | 536.047 | 54.093 | 2.161 | 573324 | 0 | 30703616 | 174964736 |
+| Rift Streaming | 996.131 | 31.187 | 147.592 | 63.525 | 534.269 | 56.636 | 2.136 | 573324 | 0 | 30703616 | 174964736 |
+
+### 1M 3-Run Median With Q2 Latest-Empty Taxi Table
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Region objects | Region resets | Rift mmap bytes | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 11649.547 | 487.774 | 1566.073 | 401.445 | 7240.096 | 456.895 | 0.000 | 0 | 0 | 0 | 609304576 |
+| Rift HPZone | 11263.680 | 381.099 | 1538.659 | 371.771 | 6941.270 | 408.753 | 14.536 | 5386271 | 0 | 97026048 | 381501440 |
+| Rift Streaming | 11188.144 | 382.734 | 1544.227 | 368.389 | 6886.643 | 406.135 | 14.991 | 5386271 | 0 | 97026048 | 381501440 |
+
+Interpretation:
+
+- This is a fair allocation-placement change: the taxi state was already keyed
+  by dense integer IDs, and both heap and Rift use the same growable-array
+  structure.
+- The change improves Q2 processing and strengthens the bounded-sample Rift
+  result. On the 1M median, HPZone is `385.867 ms` faster than heap, and
+  Streaming is `461.403 ms` faster than heap.
+- Rift GC time drops by about `106 ms` vs heap at 1M, and peak RSS is about
+  `228 MB` lower for both Rift modes in this run set.
+- This is still not final Phase 5 success. SafeZone/Commix/full-month controls
+  and the static safety story for heap references to region entries remain
+  open.

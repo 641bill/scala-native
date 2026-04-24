@@ -37,7 +37,6 @@ private abstract class Q2BucketedWindow(
 
   private val profitBuckets = mutable.Queue.empty[ProfitBucket]
   private val emptyBuckets = mutable.Queue.empty[EmptyBucket]
-  private val latestEmptyByTaxi = mutable.HashMap.empty[Int, EmptyEntry]
   private val rankedAreas = new TreeSet[ProfitableArea](AreaOrdering)
   private val taxiIds = new TaxiIds
   private val rankRegion =
@@ -56,6 +55,7 @@ private abstract class Q2BucketedWindow(
   private val rankByCell =
     if (useRegions) rankRegion.alloc(new Array[ProfitableArea](CellKeyCapacity))
     else new Array[ProfitableArea](CellKeyCapacity)
+  private var latestEmptyByTaxi = allocateEmptyEntryArray(InitialTaxiTableCapacity)
   private val resultArrays = new Array[Array[ProfitableArea]](11)
   private var medianScratch: Array[Double] = null
   private var currentProfitBucket: ProfitBucket = null
@@ -71,7 +71,8 @@ private abstract class Q2BucketedWindow(
     val taxiKey = taxiIds.idFor(trip)
 
     // The current pickup means this taxi is no longer empty at its previous dropoff.
-    latestEmptyByTaxi.remove(taxiKey).foreach(removeEmpty)
+    val previousEmpty = removeLatestEmpty(taxiKey)
+    if (previousEmpty != null) removeEmpty(previousEmpty)
 
     if (trip.hasValidProfit) {
       Grid.Q2.cell(trip.pickupLongitude, trip.pickupLatitude).foreach { pickupCell =>
@@ -91,7 +92,7 @@ private abstract class Q2BucketedWindow(
       val bucket = emptyBucketFor(trip.dropoffSeconds)
       val entry = allocateEmptyEntry(bucket, seq, taxiKey, dropoffKey)
       bucket.head = entry
-      latestEmptyByTaxi.update(taxiKey, entry)
+      updateLatestEmpty(taxiKey, entry)
       incrementEmpty(dropoffKey)
       updateLatest(dropoffKey, seq)
       updateRank(dropoffKey)
@@ -101,7 +102,7 @@ private abstract class Q2BucketedWindow(
   }
 
   override def close(): Unit = {
-    latestEmptyByTaxi.clear()
+    clearLatestEmpty()
     rankedAreas.clear()
     clearCellTables()
 
@@ -142,11 +143,10 @@ private abstract class Q2BucketedWindow(
       val bucket = emptyBuckets.dequeue()
       var expired = bucket.head
       while (expired != null) {
-        latestEmptyByTaxi.get(expired.taxiKey).foreach { latest =>
-          if (latest.seq == expired.seq) {
-            latestEmptyByTaxi.remove(expired.taxiKey)
-            removeEmpty(expired)
-          }
+        val latest = latestEmpty(expired.taxiKey)
+        if (latest != null && latest.seq == expired.seq) {
+          clearLatestEmpty(expired.taxiKey)
+          removeEmpty(expired)
         }
         expired = expired.next
       }
@@ -306,6 +306,10 @@ private abstract class Q2BucketedWindow(
     if (useRegions) rankRegion.alloc(new ProfitStats)
     else new ProfitStats
 
+  private def allocateEmptyEntryArray(size: Int): Array[EmptyEntry] =
+    if (useRegions) rankRegion.alloc(new Array[EmptyEntry](size))
+    else new Array[EmptyEntry](size)
+
   private def profitStats(cellKey: Int): ProfitStats =
     profitStatsByCell(cellKey)
 
@@ -347,6 +351,45 @@ private abstract class Q2BucketedWindow(
 
   private def clearRank(cellKey: Int): Unit =
     rankByCell(cellKey) = null
+
+  private def latestEmpty(taxiKey: Int): EmptyEntry =
+    if (taxiKey < latestEmptyByTaxi.length) latestEmptyByTaxi(taxiKey)
+    else null
+
+  private def updateLatestEmpty(taxiKey: Int, entry: EmptyEntry): Unit = {
+    ensureTaxiCapacity(taxiKey)
+    latestEmptyByTaxi(taxiKey) = entry
+  }
+
+  private def removeLatestEmpty(taxiKey: Int): EmptyEntry =
+    if (taxiKey < latestEmptyByTaxi.length) {
+      val entry = latestEmptyByTaxi(taxiKey)
+      latestEmptyByTaxi(taxiKey) = null
+      entry
+    } else null
+
+  private def clearLatestEmpty(taxiKey: Int): Unit =
+    if (taxiKey < latestEmptyByTaxi.length)
+      latestEmptyByTaxi(taxiKey) = null
+
+  private def ensureTaxiCapacity(taxiKey: Int): Unit =
+    if (taxiKey >= latestEmptyByTaxi.length) {
+      var capacity = latestEmptyByTaxi.length
+      while (taxiKey >= capacity)
+        capacity *= 2
+
+      val expanded = allocateEmptyEntryArray(capacity)
+      Array.copy(latestEmptyByTaxi, 0, expanded, 0, latestEmptyByTaxi.length)
+      latestEmptyByTaxi = expanded
+    }
+
+  private def clearLatestEmpty(): Unit = {
+    var i = 0
+    while (i < latestEmptyByTaxi.length) {
+      latestEmptyByTaxi(i) = null
+      i += 1
+    }
+  }
 
   private def clearCellTables(): Unit = {
     var i = 0
@@ -474,6 +517,7 @@ object Q2Support {
   private[debs2015] val EmptyWindowSeconds = 30L * 60L
   private val CellPartBits = 10
   private val CellPartMask = (1 << CellPartBits) - 1
+  private[debs2015] val InitialTaxiTableCapacity = 4096
   private[debs2015] val CellKeyCapacity = (Grid.Q2.size + 1) << CellPartBits
 
   private[debs2015] val AreaOrdering: Comparator[ProfitableArea] =
