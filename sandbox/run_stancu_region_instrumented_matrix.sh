@@ -43,7 +43,7 @@ read_max_rss_bytes() {
 }
 
 write_summary_header() {
-  printf "label\tmode\tmedian_ms\tmedian_gc_ms\tmedian_rift_op_ms\tmedian_rift_slow_alloc_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tlogical_region_objects\tdurable_control_slots\tcandidate_region_object_bp\texplicit_region_boundaries\tescaped_region_objects\tchecksum\tmax_rss_bytes\n" > "${summary}"
+  printf "label\tmode\tmedian_ms\tmedian_gc_ms\tmedian_rift_op_ms\tmedian_rift_slow_alloc_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tlogical_region_objects\tdurable_control_slots\tcandidate_region_object_bp\ttransactions_per_region\texplicit_region_boundaries\tescaped_region_objects\tchecksum\tmax_rss_bytes\n" > "${summary}"
 }
 
 write_result_row() {
@@ -63,7 +63,7 @@ write_result_row() {
       fields[${key}]=${value}
     fi
   done
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "${label}" \
     "${mode}" \
     "${fields[median_ms]-}" \
@@ -77,6 +77,7 @@ write_result_row() {
     "${fields[logical_region_objects]-}" \
     "${fields[durable_control_slots]-}" \
     "${fields[candidate_region_object_bp]-}" \
+    "${fields[transactions_per_region]-}" \
     "${fields[explicit_region_boundaries]-}" \
     "${fields[escaped_region_objects]-}" \
     "${fields[checksum]-}" \

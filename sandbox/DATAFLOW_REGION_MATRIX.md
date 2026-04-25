@@ -160,6 +160,45 @@ Caveats:
 - The benchmark uses trusted `HPZone`/`Streaming` APIs. It does not prove the
   future capture-checked safe API.
 
+## Post Allocation-Counter Fix Verification, 10 Epochs x 100k Documents
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+DATAFLOW_BENCHMARK_RUNS=3 DATAFLOW_WARMUPS=1 \
+DATAFLOW_OUTPUT_DIR=/tmp/dataflow-region-instrumented-fixed \
+  zsh sandbox/run_dataflow_region_instrumented_matrix.sh
+```
+
+This rerun was taken after moving Rift allocation counters out of the
+per-object atomic hot path and flushing counts at region reset/close.
+
+| Operator | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Median region objects | Peak RSS bytes |
+|---|---|---:|---:|---:|---:|---:|
+| SELECT | heap | 28.398 | 7.131 | 0.000 | 0 | 40042496 |
+| SELECT | current SafeZone | 26.413 | 0.000 | 0.000 | 0 | 47038464 |
+| SELECT | improved SafeZone | 23.600 | 0.000 | 0.000 | 0 | 47005696 |
+| SELECT | Rift HPZone | 21.614 | 0.000 | 0.051 | 1124990 | 46891008 |
+| SELECT | Rift Streaming | 24.445 | 0.000 | 0.046 | 1124990 | 46874624 |
+| AGGREGATE | heap | 59.906 | 19.908 | 0.000 | 0 | 40042496 |
+| AGGREGATE | current SafeZone | 51.568 | 0.000 | 0.000 | 0 | 47038464 |
+| AGGREGATE | improved SafeZone | 43.216 | 0.000 | 0.000 | 0 | 47005696 |
+| AGGREGATE | Rift HPZone | 41.870 | 0.000 | 0.273 | 1627152 | 46891008 |
+| AGGREGATE | Rift Streaming | 48.003 | 0.000 | 0.320 | 1627152 | 46874624 |
+| JOIN | heap | 28.347 | 7.415 | 0.000 | 0 | 40042496 |
+| JOIN | current SafeZone | 27.032 | 0.000 | 0.000 | 0 | 47038464 |
+| JOIN | improved SafeZone | 24.079 | 0.000 | 0.000 | 0 | 47005696 |
+| JOIN | Rift HPZone | 21.481 | 0.000 | 0.075 | 1078279 | 46891008 |
+| JOIN | Rift Streaming | 36.120 | 0.000 | 0.046 | 1078279 | 46874624 |
+
+Interpretation:
+
+- HPZone now beats heap and improved SafeZone on all three local Broom-style
+  operators in this rerun.
+- Streaming is not consistently good on this run; keep HPZone and Streaming
+  claims separate.
+
 ## Provisional Broom-Scale Single Run, 40 Epochs x 500k Documents
 
 Command:

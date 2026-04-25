@@ -182,3 +182,41 @@ Caveats:
   scheduler/queuing delay in a periodic real-time runtime.
 - The harness uses trusted `HPZone`/`Streaming` APIs. It does not prove the
   future safe capture-checked API.
+
+## Post Allocation-Counter Fix Pressure Verification
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+STREAMFLEX_BENCHMARK_RUNS=3 STREAMFLEX_WARMUPS=1 \
+STREAMFLEX_EVENTS=1000000 STREAMFLEX_OBJECTS_PER_EVENT=8 \
+STREAMFLEX_LATENCY_EVENTS=50000 STREAMFLEX_LATENCY_OBJECTS_PER_EVENT=64 \
+STREAMFLEX_PERIOD_NS=80000 \
+STREAMFLEX_OUTPUT_DIR=/tmp/streamflex-region-pressure-fixed \
+  zsh sandbox/run_streamflex_region_instrumented_matrix.sh
+```
+
+This rerun was taken after moving Rift allocation counters out of the
+per-object atomic hot path and flushing counts at region reset/close.
+
+| Workload | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | p99 ns | p999 ns | Max ns | Deadline misses | Peak RSS bytes |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| throughput | heap | 634.472 | 141.804 | 0.000 |  |  |  |  | 7962624 |
+| throughput | current SafeZone | 409.749 | 0.000 | 0.000 |  |  |  |  | 8192000 |
+| throughput | improved SafeZone | 412.827 | 0.000 | 0.000 |  |  |  |  | 8192000 |
+| throughput | Rift HPZone | 331.740 | 0.000 | 1.237 |  |  |  |  | 8192000 |
+| throughput | Rift Streaming | 329.896 | 0.000 | 0.835 |  |  |  |  | 12615680 |
+| latency | heap | 169.331 | 29.931 | 0.000 | 2792 | 327625 | 467958 | 89 | 7962624 |
+| latency | current SafeZone | 174.989 | 0.757 | 0.000 | 3542 | 8166 | 299042 | 1 | 8192000 |
+| latency | improved SafeZone | 181.317 | 0.827 | 0.000 | 4250 | 13625 | 310084 | 6 | 8192000 |
+| latency | Rift HPZone | 143.955 | 0.525 | 2.927 | 3250 | 3625 | 247500 | 1 | 8192000 |
+| latency | Rift Streaming | 157.792 | 0.496 | 1.106 | 3541 | 6917 | 28209 | 0 | 12615680 |
+
+Interpretation:
+
+- This is now the strongest StreamFlex-style result: Rift throughput is about
+  `330 ms` versus heap `634 ms`, and faster than both SafeZone modes.
+- Streaming keeps zero deadline misses and a much smaller max latency than heap.
+- HPZone has one deadline miss in this rerun, so the safest latency claim is
+  about Streaming.

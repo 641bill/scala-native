@@ -36,6 +36,7 @@ them in Scala Native SafeZone; Rift modes allocate them with `region.alloc`.
 |---|---:|
 | `STANCU_TRANSACTIONS` | `200000` |
 | `STANCU_ITEMS_PER_TX` | `8` |
+| `STANCU_TX_PER_REGION` | `64` |
 | `STANCU_WAREHOUSES` | `64` |
 | `STANCU_PRODUCTS` | `4096` |
 | `STANCU_WARMUPS` | `1` |
@@ -54,7 +55,8 @@ Smoke:
 
 ```sh
 cd /Users/siyaoliu/rift/scala-native-rift
-STANCU_TRANSACTIONS=2000 STANCU_BENCHMARK_RUNS=1 STANCU_WARMUPS=0 \
+STANCU_TRANSACTIONS=2000 STANCU_TX_PER_REGION=64 \
+STANCU_BENCHMARK_RUNS=1 STANCU_WARMUPS=0 \
   zsh sandbox/run_stancu_region_instrumented_matrix.sh
 ```
 
@@ -63,6 +65,7 @@ Local median:
 ```sh
 cd /Users/siyaoliu/rift/scala-native-rift
 STANCU_BUILD=0 STANCU_BENCHMARK_RUNS=3 STANCU_WARMUPS=1 \
+STANCU_TX_PER_REGION=64 \
 STANCU_OUTPUT_DIR=/tmp/stancu-region-instrumented \
   zsh sandbox/run_stancu_region_instrumented_matrix.sh
 ```
@@ -87,7 +90,7 @@ STANCU_OUTPUT_DIR=/tmp/stancu-region-instrumented \
   zsh sandbox/run_stancu_region_instrumented_matrix.sh
 
 STANCU_BUILD=0 STANCU_BENCHMARK_RUNS=3 STANCU_WARMUPS=1 \
-STANCU_TRANSACTIONS=1000000 \
+STANCU_TRANSACTIONS=1000000 STANCU_TX_PER_REGION=64 \
 STANCU_OUTPUT_DIR=/tmp/stancu-region-pressure \
   zsh sandbox/run_stancu_region_instrumented_matrix.sh
 ```
@@ -95,12 +98,13 @@ STANCU_OUTPUT_DIR=/tmp/stancu-region-pressure \
 The smoke run rebuilt and native-linked the benchmark successfully. All
 heap/SafeZone/Rift checksums matched.
 
-## Native-Only Local 3-Run Median, Default Configuration
+## Native-Only Local 3-Run Median, Batched Boundary And Fixed Counters
 
 Configuration:
 
 - `STANCU_TRANSACTIONS=200000`
 - `STANCU_ITEMS_PER_TX=8`
+- `STANCU_TX_PER_REGION=64`
 - `STANCU_WAREHOUSES=64`
 - `STANCU_PRODUCTS=4096`
 - `STANCU_BENCHMARK_RUNS=3`
@@ -108,27 +112,28 @@ Configuration:
 
 | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Logical region objects | Durable control slots | Region-candidate objects | Explicit boundaries | Escaped objects | Peak RSS bytes |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| heap | 43.180 | 4.785 | 0.000 | 1800000 | 4224 | 99.76% | 1 | 0 | 7946240 |
-| current SafeZone | 57.125 | 1.495 | 0.000 | 1800000 | 4224 | 99.76% | 1 | 0 | 7979008 |
-| improved SafeZone | 57.782 | 1.481 | 0.000 | 1800000 | 4224 | 99.76% | 1 | 0 | 7979008 |
-| Rift HPZone | 65.729 | 0.545 | 10.413 | 1800000 | 4224 | 99.76% | 1 | 0 | 7979008 |
-| Rift Streaming | 51.769 | 0.000 | 3.243 | 1800000 | 4224 | 99.76% | 1 | 0 | 7962624 |
+| heap | 43.871 | 4.483 | 0.000 | 1800000 | 4224 | 99.76% | 1 | 0 | 7962624 |
+| current SafeZone | 37.313 | 0.000 | 0.000 | 1800000 | 4224 | 99.76% | 1 | 0 | 8011776 |
+| improved SafeZone | 34.412 | 0.000 | 0.000 | 1800000 | 4224 | 99.76% | 1 | 0 | 8011776 |
+| Rift HPZone | 40.308 | 0.000 | 0.186 | 1800000 | 4224 | 99.76% | 1 | 0 | 8011776 |
+| Rift Streaming | 40.126 | 0.000 | 0.063 | 1800000 | 4224 | 99.76% | 1 | 0 | 7979008 |
 
 Interpretation:
 
-- The accounting story is strong but the performance story is not: `99.76%` of
-  logical objects are region candidates, yet heap is fastest.
-- Per-transaction regions are too fine-grained for HPZone here:
-  `200000` opens/closes produce `10.413 ms` median region-op time.
-- Streaming reduces region-op time by using one open/close and `199999` resets,
-  but still does not beat heap at this size.
+- Coarsening the boundary to 64 transactions per region fixes the default
+  Stancu result for Rift: HPZone and Streaming now beat heap and remove
+  measured GC.
+- The previous per-transaction boundary was too fine-grained. It paid
+  `200000` opens/closes or resets on this default run.
+- Improved SafeZone remains the fastest mode at this size.
 
-## Transaction-Pressure 3-Run Median
+## Transaction-Pressure 3-Run Median, Batched Boundary And Fixed Counters
 
 Configuration:
 
 - `STANCU_TRANSACTIONS=1000000`
 - `STANCU_ITEMS_PER_TX=8`
+- `STANCU_TX_PER_REGION=64`
 - `STANCU_WAREHOUSES=64`
 - `STANCU_PRODUCTS=4096`
 - `STANCU_BENCHMARK_RUNS=3`
@@ -136,21 +141,48 @@ Configuration:
 
 | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Logical region objects | Durable control slots | Region-candidate objects | Explicit boundaries | Escaped objects | Peak RSS bytes |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| heap | 217.335 | 23.743 | 0.000 | 9000000 | 4224 | 99.95% | 1 | 0 | 7946240 |
-| current SafeZone | 281.234 | 8.013 | 0.000 | 9000000 | 4224 | 99.95% | 1 | 0 | 7995392 |
-| improved SafeZone | 286.893 | 7.261 | 0.000 | 9000000 | 4224 | 99.95% | 1 | 0 | 7995392 |
-| Rift HPZone | 332.947 | 2.483 | 53.415 | 9000000 | 4224 | 99.95% | 1 | 0 | 7979008 |
-| Rift Streaming | 262.075 | 0.000 | 16.300 | 9000000 | 4224 | 99.95% | 1 | 0 | 7962624 |
+| heap | 223.611 | 23.924 | 0.000 | 9000000 | 4224 | 99.95% | 1 | 0 | 7946240 |
+| current SafeZone | 173.976 | 0.307 | 0.000 | 9000000 | 4224 | 99.95% | 1 | 0 | 8028160 |
+| improved SafeZone | 174.620 | 0.315 | 0.000 | 9000000 | 4224 | 99.95% | 1 | 0 | 8011776 |
+| Rift HPZone | 201.447 | 0.000 | 0.772 | 9000000 | 4224 | 99.95% | 1 | 0 | 7979008 |
+| Rift Streaming | 199.438 | 0.000 | 0.317 | 9000000 | 4224 | 99.95% | 1 | 0 | 7979008 |
 
 Interpretation:
 
-- At one million transactions, almost every logical object is a region
-  candidate and Rift removes nearly all measured heap GC.
-- Heap is still fastest. The GC savings are smaller than the cost of the
-  current per-transaction region/reset boundary.
-- This is an important negative result: "high region-candidate fraction" is not
-  sufficient evidence. The lifetime boundary and reset/open frequency must also
-  be appropriate.
+- At one million transactions, Rift now shows the expected direction:
+  `199.438 ms` Streaming and `201.447 ms` HPZone versus heap `223.611 ms`.
+- Removing per-object atomic allocation-counter increments from the Rift
+  runtime was necessary for this small-object workload; the earlier
+  instrumentation distorted elapsed time.
+- Improved/current SafeZone remain stronger on this transaction-shaped local
+  probe.
+
+## Heavier Object Mix, Batched Boundary And Fixed Counters
+
+Configuration:
+
+- `STANCU_TRANSACTIONS=500000`
+- `STANCU_ITEMS_PER_TX=32`
+- `STANCU_TX_PER_REGION=64`
+- `STANCU_WAREHOUSES=64`
+- `STANCU_PRODUCTS=4096`
+- `STANCU_BENCHMARK_RUNS=3`
+- `STANCU_WARMUPS=1`
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Logical region objects | Region-candidate objects | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|
+| heap | 387.420 | 40.579 | 0.000 | 16500000 | 99.97% | 7962624 |
+| current SafeZone | 333.532 | 0.000 | 0.000 | 16500000 | 99.97% | 8077312 |
+| improved SafeZone | 328.298 | 0.000 | 0.000 | 16500000 | 99.97% | 8060928 |
+| Rift HPZone | 364.288 | 0.000 | 1.077 | 16500000 | 99.97% | 8093696 |
+| Rift Streaming | 341.879 | 0.000 | 0.588 | 16500000 | 99.97% | 8060928 |
+
+Interpretation:
+
+- The heavier mix confirms the fix: Rift Streaming is `11.8%` faster than heap
+  while removing measured GC.
+- Improved SafeZone is still faster than Rift, so this is a Rift-vs-heap win,
+  not a Rift-vs-improved-SafeZone win.
 
 Caveats:
 
@@ -158,5 +190,6 @@ Caveats:
   small transaction-shaped local accounting probe.
 - `explicit_region_boundaries=1` means one logical allocation-placement site in
   the benchmark, not a real source annotation count produced by the compiler.
-- The current harness does not yet test coarser transaction batches, compiler
-  inference, or capture-check rejection cases.
+- The current harness uses manual accounting. It does not yet provide
+  compiler-produced annotation counts, region-freed byte accounting, or
+  capture-check rejection cases.

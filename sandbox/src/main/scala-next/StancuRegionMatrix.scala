@@ -35,6 +35,7 @@ object StancuRegionConfig {
 
   val transactions: Int = envInt("STANCU_TRANSACTIONS", 200000)
   val itemsPerTransaction: Int = envInt("STANCU_ITEMS_PER_TX", 8)
+  val transactionsPerRegion: Int = envInt("STANCU_TX_PER_REGION", 64)
   val warehouses: Int = envInt("STANCU_WAREHOUSES", 64)
   val products: Int = envInt("STANCU_PRODUCTS", 4096)
   val benchmarkRuns: Int = envInt("STANCU_BENCHMARK_RUNS", 3)
@@ -135,7 +136,7 @@ object StancuRegionMatrixHelpers {
       if (streaming) RiftRegion.Streaming else RiftRegion.HPZone
     private var streamRegion: RiftRegion = null
 
-    def beginTransaction(): RiftRegion =
+    def beginTransactionBatch(): RiftRegion =
       if (!usesRift) null
       else if (streaming) {
         if (streamRegion == null) streamRegion = RiftRegion.open(kind)
@@ -145,7 +146,7 @@ object StancuRegionMatrixHelpers {
         RiftRegion.open(kind)
       }
 
-    def endTransaction(region: RiftRegion): Unit =
+    def endTransactionBatch(region: RiftRegion): Unit =
       if (usesRift && !streaming) region.close()
 
     def finish(): Unit =
@@ -229,33 +230,36 @@ object StancuRegionMatrixHelpers {
     var tx = 0
     try {
       while (tx < cfg.transactions) {
-        val region = mode.beginTransaction()
-        val warehouse = mix(tx + 13) % cfg.warehouses
-        val customer = mix(tx + 101) & 0xffff
-        var lines: TxLine = null
-        var total = 0L
-        var item = 0
-        while (item < cfg.itemsPerTransaction) {
-          val seed = mix(tx * 104729 + item * 8191)
-          val product = seed % cfg.products
-          val quantity = (mix(seed + 19) & 3) + 1
-          val price = 100 + (mix(seed + 23) % 10000)
-          total += quantity.toLong * price.toLong
-          lines = mode.allocLine(region, product, quantity, price, lines)
-          item += 1
-        }
-        val order =
-          mode.allocOrder(region, tx, warehouse, customer, total, lines)
+        val region = mode.beginTransactionBatch()
+        val batchEnd = math.min(cfg.transactions, tx + cfg.transactionsPerRegion)
+        while (tx < batchEnd) {
+          val warehouse = mix(tx + 13) % cfg.warehouses
+          val customer = mix(tx + 101) & 0xffff
+          var lines: TxLine = null
+          var total = 0L
+          var item = 0
+          while (item < cfg.itemsPerTransaction) {
+            val seed = mix(tx * 104729 + item * 8191)
+            val product = seed % cfg.products
+            val quantity = (mix(seed + 19) & 3) + 1
+            val price = 100 + (mix(seed + 23) % 10000)
+            total += quantity.toLong * price.toLong
+            lines = mode.allocLine(region, product, quantity, price, lines)
+            item += 1
+          }
+          val order =
+            mode.allocOrder(region, tx, warehouse, customer, total, lines)
 
-        var line = order.lines
-        while (line != null) {
-          stock(line.product) -= line.quantity
-          line = line.next
+          var line = order.lines
+          while (line != null) {
+            stock(line.product) -= line.quantity
+            line = line.next
+          }
+          revenue(order.warehouse) += order.totalCents
+          customers(order.warehouse) ^= order.customer.toLong + order.id.toLong
+          tx += 1
         }
-        revenue(order.warehouse) += order.totalCents
-        customers(order.warehouse) ^= order.customer.toLong + order.id.toLong
-        mode.endTransaction(region)
-        tx += 1
+        mode.endTransactionBatch(region)
       }
     } finally mode.finish()
 
@@ -272,7 +276,8 @@ object StancuRegionMatrixHelpers {
 
     var tx = 0
     while (tx < cfg.transactions) {
-      val currentTx = tx
+      val batchStart = tx
+      val batchEnd = math.min(cfg.transactions, tx + cfg.transactionsPerRegion)
       SafeZone { sz ?=>
         final class SZLine(
             val product: Int,
@@ -288,37 +293,41 @@ object StancuRegionMatrixHelpers {
             val lines: SZLine^{sz}
         )
 
-        val warehouse = mix(currentTx + 13) % cfg.warehouses
-        val customer = mix(currentTx + 101) & 0xffff
-        var lines: SZLine^{sz} = null
-        var total = 0L
-        var item = 0
-        while (item < cfg.itemsPerTransaction) {
-          val seed = mix(currentTx * 104729 + item * 8191)
-          val product = seed % cfg.products
-          val quantity = (mix(seed + 19) & 3) + 1
-          val price = 100 + (mix(seed + 23) % 10000)
-          total += quantity.toLong * price.toLong
-          lines = SafeZoneAllocator.allocate(
+        var currentTx = batchStart
+        while (currentTx < batchEnd) {
+          val warehouse = mix(currentTx + 13) % cfg.warehouses
+          val customer = mix(currentTx + 101) & 0xffff
+          var lines: SZLine^{sz} = null
+          var total = 0L
+          var item = 0
+          while (item < cfg.itemsPerTransaction) {
+            val seed = mix(currentTx * 104729 + item * 8191)
+            val product = seed % cfg.products
+            val quantity = (mix(seed + 19) & 3) + 1
+            val price = 100 + (mix(seed + 23) % 10000)
+            total += quantity.toLong * price.toLong
+            lines = SafeZoneAllocator.allocate(
+              sz,
+              new SZLine(product, quantity, price, lines)
+            )
+            item += 1
+          }
+          val order = SafeZoneAllocator.allocate(
             sz,
-            new SZLine(product, quantity, price, lines)
+            new SZOrder(currentTx, warehouse, customer, total, lines)
           )
-          item += 1
-        }
-        val order = SafeZoneAllocator.allocate(
-          sz,
-          new SZOrder(currentTx, warehouse, customer, total, lines)
-        )
 
-        var line = order.lines
-        while (line != null) {
-          stock(line.product) -= line.quantity
-          line = line.next
+          var line = order.lines
+          while (line != null) {
+            stock(line.product) -= line.quantity
+            line = line.next
+          }
+          revenue(order.warehouse) += order.totalCents
+          customers(order.warehouse) ^= order.customer.toLong + order.id.toLong
+          currentTx += 1
         }
-        revenue(order.warehouse) += order.totalCents
-        customers(order.warehouse) ^= order.customer.toLong + order.id.toLong
       }
-      tx += 1
+      tx = batchEnd
     }
 
     val checksum = checksumState(stock, revenue, customers)
@@ -433,6 +442,7 @@ object StancuRegionMatrixHelpers {
         f"logical_region_objects=${logicalRegionObjects()}%d " +
         f"durable_control_slots=${durableControlSlots()}%d " +
         f"candidate_region_object_bp=${candidateBasisPoints()}%d " +
+        f"transactions_per_region=${cfg.transactionsPerRegion}%d " +
         f"explicit_region_boundaries=1 " +
         f"escaped_region_objects=0 " +
         f"checksum=$expected%d"
@@ -443,7 +453,7 @@ object StancuRegionMatrixHelpers {
     val cfg = StancuRegionConfig
     val rootsMode = sys.env.getOrElse("SAFEZONE_ROOTS_MODE", "0")
     println(
-      s"CONFIG mode=$mode runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} transactions=${cfg.transactions} items_per_tx=${cfg.itemsPerTransaction} warehouses=${cfg.warehouses} products=${cfg.products} safezone_roots_mode=$rootsMode"
+      s"CONFIG mode=$mode runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} transactions=${cfg.transactions} items_per_tx=${cfg.itemsPerTransaction} tx_per_region=${cfg.transactionsPerRegion} warehouses=${cfg.warehouses} products=${cfg.products} safezone_roots_mode=$rootsMode"
     )
   }
 

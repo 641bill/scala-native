@@ -179,3 +179,41 @@ Caveats:
   to Yak's distributed JVM results.
 - The harness uses trusted `HPZone`/`Streaming` APIs. It does not prove the
   future safe capture-checked API.
+
+## Post Allocation-Counter Fix Pressure Verification
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+YAK_BENCHMARK_RUNS=3 YAK_WARMUPS=1 \
+YAK_EPOCHS=40 YAK_RECORDS_PER_EPOCH=250000 \
+YAK_MESSAGES_PER_EPOCH=250000 \
+YAK_OUTPUT_DIR=/tmp/yak-region-pressure-fixed \
+  zsh sandbox/run_yak_region_instrumented_matrix.sh
+```
+
+This rerun was taken after moving Rift allocation counters out of the
+per-object atomic hot path and flushing counts at region reset/close.
+
+| Workload | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Logical data objects | Control slots | Peak RSS bytes |
+|---|---|---:|---:|---:|---:|---:|---:|
+| wordcount | heap | 243.522 | 32.850 | 0.000 | 10000000 | 65536 | 75071488 |
+| wordcount | current SafeZone | 228.260 | 0.000 | 0.000 | 10000000 | 65536 | 83197952 |
+| wordcount | improved SafeZone | 194.933 | 0.000 | 0.000 | 10000000 | 65536 | 83214336 |
+| wordcount | Rift HPZone | 224.415 | 0.000 | 0.346 | 10000000 | 65536 | 83083264 |
+| wordcount | Rift Streaming | 199.156 | 0.000 | 0.258 | 10000000 | 65536 | 83066880 |
+| graphstep | heap | 240.890 | 38.498 | 0.000 | 10000000 | 100000 | 75071488 |
+| graphstep | current SafeZone | 273.608 | 0.000 | 0.000 | 10000000 | 100000 | 83197952 |
+| graphstep | improved SafeZone | 203.729 | 0.000 | 0.000 | 10000000 | 100000 | 83214336 |
+| graphstep | Rift HPZone | 213.454 | 0.000 | 0.409 | 10000000 | 100000 | 83083264 |
+| graphstep | Rift Streaming | 209.528 | 0.000 | 0.408 | 10000000 | 100000 | 83066880 |
+
+Interpretation:
+
+- Streaming is now close to improved SafeZone on Yak-style pressure: `199.156 ms`
+  vs `194.933 ms` for wordcount and `209.528 ms` vs `203.729 ms` for graphstep.
+- Rift still removes measured heap GC and beats heap on both workloads.
+- Improved SafeZone remains the strongest baseline, so this is good
+  Rift-vs-heap evidence and near-parity with improved SafeZone, not a clean
+  Rift-over-SafeZone result.

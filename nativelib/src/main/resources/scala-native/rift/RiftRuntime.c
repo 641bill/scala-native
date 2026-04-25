@@ -37,6 +37,9 @@ typedef struct scalanative_rift_region {
     uint8_t *end;
     scalanative_rift_slab *current;
     scalanative_rift_slab *head;
+    size_t alloc_raw_count;
+    size_t alloc_object_count;
+    size_t alloc_slow_count;
     uint32_t kind;
     uint32_t slab_count;
 } scalanative_rift_region;
@@ -258,6 +261,26 @@ static void scalanative_rift_region_append_slab(
     region->slab_count++;
 }
 
+static void scalanative_rift_region_flush_alloc_stats(
+    scalanative_rift_region *region) {
+    if (region->alloc_raw_count != 0) {
+        scalanative_rift_stats_add(&scalanative_rift_stats_alloc_raw_total_value,
+                                   region->alloc_raw_count);
+        region->alloc_raw_count = 0;
+    }
+    if (region->alloc_object_count != 0) {
+        scalanative_rift_stats_add(
+            &scalanative_rift_stats_alloc_object_total_value,
+            region->alloc_object_count);
+        region->alloc_object_count = 0;
+    }
+    if (region->alloc_slow_count != 0) {
+        scalanative_rift_stats_add(&scalanative_rift_stats_alloc_slow_total_value,
+                                   region->alloc_slow_count);
+        region->alloc_slow_count = 0;
+    }
+}
+
 static void scalanative_rift_release_slab_chain(
     scalanative_rift_slab *head) {
     scalanative_rift_slab *regular_head = NULL;
@@ -308,8 +331,7 @@ static void *scalanative_rift_region_alloc_slow(
     uintptr_t n;
     uint64_t start_ns = scalanative_rift_now_ns();
 
-    scalanative_rift_stats_add(&scalanative_rift_stats_alloc_slow_total_value,
-                               1);
+    region->alloc_slow_count++;
     align = scalanative_rift_normalize_align(align);
     if (size > SCALANATIVE_RIFT_SLAB_DATA_SIZE) {
         slab = scalanative_rift_mmap_huge_slab(size + align);
@@ -421,6 +443,7 @@ void scalanative_rift_region_close(void *rawregion) {
 
     if (region == NULL) return;
     start_ns = scalanative_rift_now_ns();
+    scalanative_rift_region_flush_alloc_stats(region);
     scalanative_rift_release_slab_chain(region->head);
     free(region);
     scalanative_rift_stats_add(&scalanative_rift_stats_region_close_total_value,
@@ -443,6 +466,7 @@ void scalanative_rift_region_reset(void *rawregion) {
     if (region == NULL || region->head == NULL) return;
 
     start_ns = scalanative_rift_now_ns();
+    scalanative_rift_region_flush_alloc_stats(region);
     first = region->head;
     rest = first->next;
     first->next = NULL;
@@ -474,8 +498,7 @@ void *scalanative_rift_region_alloc_raw(void *rawregion, size_t size,
     uintptr_t n;
 
     if (region == NULL) return NULL;
-    scalanative_rift_stats_add(&scalanative_rift_stats_alloc_raw_total_value,
-                               1);
+    region->alloc_raw_count++;
 
     align = scalanative_rift_normalize_align(align);
     mask = (uintptr_t)align - 1u;
@@ -496,8 +519,7 @@ void *scalanative_rift_region_alloc(void *rawregion, void *info, size_t size) {
         rawregion, size, sizeof(void *));
     if (current == NULL) return NULL;
 
-    scalanative_rift_stats_add(
-        &scalanative_rift_stats_alloc_object_total_value, 1);
+    region->alloc_object_count++;
     if (region == NULL || region->current == NULL ||
         !scalanative_rift_slab_is_zeroed(region->current)) {
         memset(current, 0, size);
