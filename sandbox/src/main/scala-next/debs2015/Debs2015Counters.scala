@@ -21,6 +21,10 @@ object Debs2015Counters {
       q2ResultArraySlots: Long,
       q2MedianComputes: Long,
       q2MedianValuesSorted: Long,
+      q2MedianReads: Long,
+      q2MedianHeapAdds: Long,
+      q2MedianHeapRemoves: Long,
+      q2MedianRebalances: Long,
       q1SnapshotAllocs: Long,
       q1SnapshotSlots: Long,
       q2SnapshotAllocs: Long,
@@ -55,6 +59,10 @@ object Debs2015Counters {
         q2ResultArraySlots - start.q2ResultArraySlots,
         q2MedianComputes - start.q2MedianComputes,
         q2MedianValuesSorted - start.q2MedianValuesSorted,
+        q2MedianReads - start.q2MedianReads,
+        q2MedianHeapAdds - start.q2MedianHeapAdds,
+        q2MedianHeapRemoves - start.q2MedianHeapRemoves,
+        q2MedianRebalances - start.q2MedianRebalances,
         q1SnapshotAllocs - start.q1SnapshotAllocs,
         q1SnapshotSlots - start.q1SnapshotSlots,
         q2SnapshotAllocs - start.q2SnapshotAllocs,
@@ -75,7 +83,8 @@ object Debs2015Counters {
       0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
       0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
       0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
-      0L, 0L, 0L, 0L, 0L, 0L, 0L
+      0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
+      0L, 0L, 0L
     )
 
   private var gridQ1Calls = 0L
@@ -97,6 +106,10 @@ object Debs2015Counters {
   private var q2ResultArraySlots = 0L
   private var q2MedianComputes = 0L
   private var q2MedianValuesSorted = 0L
+  private var q2MedianReads = 0L
+  private var q2MedianHeapAdds = 0L
+  private var q2MedianHeapRemoves = 0L
+  private var q2MedianRebalances = 0L
   private var q1SnapshotAllocs = 0L
   private var q1SnapshotSlots = 0L
   private var q2SnapshotAllocs = 0L
@@ -130,6 +143,10 @@ object Debs2015Counters {
     q2ResultArraySlots = 0L
     q2MedianComputes = 0L
     q2MedianValuesSorted = 0L
+    q2MedianReads = 0L
+    q2MedianHeapAdds = 0L
+    q2MedianHeapRemoves = 0L
+    q2MedianRebalances = 0L
     q1SnapshotAllocs = 0L
     q1SnapshotSlots = 0L
     q2SnapshotAllocs = 0L
@@ -165,6 +182,10 @@ object Debs2015Counters {
       q2ResultArraySlots,
       q2MedianComputes,
       q2MedianValuesSorted,
+      q2MedianReads,
+      q2MedianHeapAdds,
+      q2MedianHeapRemoves,
+      q2MedianRebalances,
       q1SnapshotAllocs,
       q1SnapshotSlots,
       q2SnapshotAllocs,
@@ -229,6 +250,18 @@ object Debs2015Counters {
     q2MedianComputes += 1L
     q2MedianValuesSorted += size.toLong
   }
+
+  def recordQ2MedianRead(): Unit =
+    q2MedianReads += 1L
+
+  def recordQ2MedianHeapAdd(): Unit =
+    q2MedianHeapAdds += 1L
+
+  def recordQ2MedianHeapRemove(): Unit =
+    q2MedianHeapRemoves += 1L
+
+  def recordQ2MedianRebalance(): Unit =
+    q2MedianRebalances += 1L
 
   def recordQ1Snapshot(size: Int): Unit = {
     q1SnapshotAllocs += 1L

@@ -384,6 +384,10 @@ object Debs2015RunBothRunner {
         f"diag_q2_result_array_slots=${counters.q2ResultArraySlots}%d " +
         f"diag_q2_median_computes=${counters.q2MedianComputes}%d " +
         f"diag_q2_median_values_sorted=${counters.q2MedianValuesSorted}%d " +
+        f"diag_q2_median_reads=${counters.q2MedianReads}%d " +
+        f"diag_q2_median_heap_adds=${counters.q2MedianHeapAdds}%d " +
+        f"diag_q2_median_heap_removes=${counters.q2MedianHeapRemoves}%d " +
+        f"diag_q2_median_rebalances=${counters.q2MedianRebalances}%d " +
         f"diag_q1_snapshot_allocs=${counters.q1SnapshotAllocs}%d " +
         f"diag_q1_snapshot_slots=${counters.q1SnapshotSlots}%d " +
         f"diag_q2_snapshot_allocs=${counters.q2SnapshotAllocs}%d " +

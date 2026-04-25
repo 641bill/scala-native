@@ -38,8 +38,6 @@ private abstract class Q2BucketedWindow(
   private val rankRegion =
     if (useRegions) RiftRegion.open(regionKind) else null
   private val taxiIds = new TaxiIds(useRegions, rankRegion)
-  private val medianScratchRegion =
-    if (useRegions) RiftRegion.open(regionKind) else null
   private val profitStatsByCell =
     if (useRegions) rankRegion.alloc(new Array[ProfitStats](CellKeyCapacity))
     else new Array[ProfitStats](CellKeyCapacity)
@@ -60,7 +58,6 @@ private abstract class Q2BucketedWindow(
   private val topCandidateHeap = allocateIntArray(TopCandidateCapacity)
   private var latestEmptyByTaxi = allocateEmptyEntryArray(InitialTaxiTableCapacity)
   private val resultArrays = new Array[Array[ProfitableArea]](11)
-  private var medianScratch: Array[Double] = null
   private var currentProfitBucket: ProfitBucket = null
   private var currentEmptyBucket: EmptyBucket = null
   private var nextSeq = 0L
@@ -119,7 +116,6 @@ private abstract class Q2BucketedWindow(
       closeEmptyBucket(emptyBuckets.dequeue())
 
     if (useRegions) {
-      medianScratchRegion.close()
       rankRegion.close()
     }
     currentProfitBucket = null
@@ -135,7 +131,6 @@ private abstract class Q2BucketedWindow(
         val stats = profitStats(expired.cellKey)
         if (stats != null) {
           stats.remove(expired)
-          if (stats.isEmpty) clearProfitStats(expired.cellKey)
           updateRank(expired.cellKey)
         }
         expired = next
@@ -176,12 +171,7 @@ private abstract class Q2BucketedWindow(
     if (profits != null) {
       val empty = emptyCount(cellKey)
       if (empty > 0 && profits.nonEmpty) {
-        val median =
-          if (profits.needsMedianScratch)
-            profits.medianProfitWithScratch(
-              ensureMedianScratch(profits.medianScratchSize)
-            )
-          else profits.cachedMedianProfit
+        val median = profits.medianProfit
         if (existing != null) {
           existing.emptyTaxis = empty
           existing.medianProfit = median
@@ -283,23 +273,6 @@ private abstract class Q2BucketedWindow(
       bucket.region.alloc(new EmptyEntry(seq, taxiKey, cellKey, bucket.head))
     else new EmptyEntry(seq, taxiKey, cellKey, bucket.head)
 
-  private def ensureMedianScratch(count: Int): Array[Double] = {
-    if (medianScratch == null || medianScratch.length < count) {
-      val capacity = nextScratchCapacity(count)
-      medianScratch =
-        if (useRegions) medianScratchRegion.alloc(new Array[Double](capacity))
-        else new Array[Double](capacity)
-    }
-    medianScratch
-  }
-
-  private def nextScratchCapacity(count: Int): Int = {
-    var capacity = 16
-    while (capacity < count)
-      capacity *= 2
-    capacity
-  }
-
   private def allocateProfitableArea(
       cellKey: Int,
       emptyTaxis: Int,
@@ -332,8 +305,8 @@ private abstract class Q2BucketedWindow(
     }
 
   private def allocateProfitStats(): ProfitStats =
-    if (useRegions) rankRegion.alloc(new ProfitStats)
-    else new ProfitStats
+    if (useRegions) rankRegion.alloc(new ProfitStats(useRegions, rankRegion))
+    else new ProfitStats(useRegions = false, null)
 
   private def allocateEmptyEntryArray(size: Int): Array[EmptyEntry] =
     if (useRegions) rankRegion.alloc(new Array[EmptyEntry](size))
@@ -358,9 +331,6 @@ private abstract class Q2BucketedWindow(
     }
     stats
   }
-
-  private def clearProfitStats(cellKey: Int): Unit =
-    profitStatsByCell(cellKey) = null
 
   private def emptyCount(cellKey: Int): Int =
     emptyCounts(cellKey)
@@ -606,8 +576,8 @@ private abstract class Q2BucketedWindow(
       val profit: Double,
       val bucketNext: ProfitEntry
   ) {
-    var nextInCell: ProfitEntry = null
-    var previousInCell: ProfitEntry = null
+    var medianHeap: Int = NoMedianHeap
+    var medianIndex: Int = -1
   }
 
   private final class EmptyEntry(
@@ -617,62 +587,218 @@ private abstract class Q2BucketedWindow(
       val next: EmptyEntry
   )
 
-  private final class ProfitStats {
-    private var head: ProfitEntry = null
+  // lower is a max-heap and upper is a min-heap; entries carry their heap/index
+  // so window eviction can remove them without scanning a cell list.
+  private final class ProfitStats(
+      useRegions: Boolean,
+      region: RiftRegion
+  ) {
+    private var lower = allocateEntryArray(InitialMedianHeapCapacity)
+    private var upper = allocateEntryArray(InitialMedianHeapCapacity)
+    private var lowerSize = 0
+    private var upperSize = 0
     private var count = 0
-    private var dirty = true
-    private var cachedMedian = 0.0
 
     def nonEmpty: Boolean = count > 0
-    def isEmpty: Boolean = count == 0
 
     def add(entry: ProfitEntry): Unit = {
-      entry.nextInCell = head
-      entry.previousInCell = null
-      if (head != null) head.previousInCell = entry
-      head = entry
       count += 1
-      dirty = true
+      if (lowerSize == 0 || compareProfit(entry, lower(0)) <= 0)
+        insertLower(entry)
+      else insertUpper(entry)
+      rebalance()
+      Debs2015Counters.recordQ2MedianHeapAdd()
     }
 
     def remove(entry: ProfitEntry): Unit = {
-      val previous = entry.previousInCell
-      val next = entry.nextInCell
-      if (previous == null) head = next
-      else previous.nextInCell = next
-      if (next != null) next.previousInCell = previous
-      entry.previousInCell = null
-      entry.nextInCell = null
+      if (entry.medianHeap == LowerMedianHeap)
+        removeLowerAt(entry.medianIndex)
+      else if (entry.medianHeap == UpperMedianHeap)
+        removeUpperAt(entry.medianIndex)
       count -= 1
-      dirty = true
+      rebalance()
+      Debs2015Counters.recordQ2MedianHeapRemove()
     }
 
-    def needsMedianScratch: Boolean = dirty
-    def medianScratchSize: Int = count
-
-    def cachedMedianProfit: Double = cachedMedian
-
-    def medianProfitWithScratch(sorted: Array[Double]): Double = {
-      if (dirty) computeMedian(sorted)
-      cachedMedian
+    def medianProfit: Double = {
+      Debs2015Counters.recordQ2MedianRead()
+      if (count == 0) 0.0
+      else if ((count & 1) == 1) lower(0).profit
+      else (lower(0).profit + upper(0).profit) / 2.0
     }
 
-    private def computeMedian(sorted: Array[Double]): Unit = {
-      Debs2015Counters.recordQ2MedianCompute(count)
-      var entry = head
-      var i = 0
-      while (entry != null) {
-        sorted(i) = entry.profit
-        entry = entry.nextInCell
-        i += 1
+    private def insertLower(entry: ProfitEntry): Unit = {
+      ensureLowerCapacity(lowerSize + 1)
+      lower(lowerSize) = entry
+      entry.medianHeap = LowerMedianHeap
+      entry.medianIndex = lowerSize
+      lowerSize += 1
+      siftLowerUp(entry.medianIndex)
+    }
+
+    private def insertUpper(entry: ProfitEntry): Unit = {
+      ensureUpperCapacity(upperSize + 1)
+      upper(upperSize) = entry
+      entry.medianHeap = UpperMedianHeap
+      entry.medianIndex = upperSize
+      upperSize += 1
+      siftUpperUp(entry.medianIndex)
+    }
+
+    private def rebalance(): Unit = {
+      while (lowerSize > upperSize + 1) {
+        val moved = removeLowerAt(0)
+        insertUpper(moved)
+        Debs2015Counters.recordQ2MedianRebalance()
       }
-      java.util.Arrays.sort(sorted, 0, count)
-      cachedMedian =
-        if (count == 0) 0.0
-        else if ((count & 1) == 1) sorted(count / 2)
-        else (sorted(count / 2 - 1) + sorted(count / 2)) / 2.0
-      dirty = false
+      while (upperSize > lowerSize) {
+        val moved = removeUpperAt(0)
+        insertLower(moved)
+        Debs2015Counters.recordQ2MedianRebalance()
+      }
     }
+
+    private def removeLowerAt(index: Int): ProfitEntry = {
+      val removed = lower(index)
+      val last = lowerSize - 1
+      lowerSize = last
+      if (index != last) {
+        val moved = lower(last)
+        lower(last) = null
+        lower(index) = moved
+        moved.medianIndex = index
+        fixLowerAt(index)
+      } else {
+        lower(last) = null
+      }
+      removed.medianHeap = NoMedianHeap
+      removed.medianIndex = -1
+      removed
+    }
+
+    private def removeUpperAt(index: Int): ProfitEntry = {
+      val removed = upper(index)
+      val last = upperSize - 1
+      upperSize = last
+      if (index != last) {
+        val moved = upper(last)
+        upper(last) = null
+        upper(index) = moved
+        moved.medianIndex = index
+        fixUpperAt(index)
+      } else {
+        upper(last) = null
+      }
+      removed.medianHeap = NoMedianHeap
+      removed.medianIndex = -1
+      removed
+    }
+
+    private def fixLowerAt(index: Int): Unit = {
+      val moved = siftLowerUp(index)
+      siftLowerDown(moved)
+    }
+
+    private def fixUpperAt(index: Int): Unit = {
+      val moved = siftUpperUp(index)
+      siftUpperDown(moved)
+    }
+
+    private def siftLowerUp(start: Int): Int = {
+      var child = start
+      while (child > 0) {
+        val parent = (child - 1) >>> 1
+        if (compareProfit(lower(child), lower(parent)) <= 0) return child
+        swapLower(child, parent)
+        child = parent
+      }
+      child
+    }
+
+    private def siftLowerDown(start: Int): Unit = {
+      var parent = start
+      while (true) {
+        val left = (parent << 1) + 1
+        if (left >= lowerSize) return
+        val right = left + 1
+        var best = left
+        if (right < lowerSize && compareProfit(lower(right), lower(left)) > 0)
+          best = right
+        if (compareProfit(lower(best), lower(parent)) <= 0) return
+        swapLower(parent, best)
+        parent = best
+      }
+    }
+
+    private def siftUpperUp(start: Int): Int = {
+      var child = start
+      while (child > 0) {
+        val parent = (child - 1) >>> 1
+        if (compareProfit(upper(child), upper(parent)) >= 0) return child
+        swapUpper(child, parent)
+        child = parent
+      }
+      child
+    }
+
+    private def siftUpperDown(start: Int): Unit = {
+      var parent = start
+      while (true) {
+        val left = (parent << 1) + 1
+        if (left >= upperSize) return
+        val right = left + 1
+        var best = left
+        if (right < upperSize && compareProfit(upper(right), upper(left)) < 0)
+          best = right
+        if (compareProfit(upper(best), upper(parent)) >= 0) return
+        swapUpper(parent, best)
+        parent = best
+      }
+    }
+
+    private def swapLower(left: Int, right: Int): Unit = {
+      val tmp = lower(left)
+      lower(left) = lower(right)
+      lower(right) = tmp
+      lower(left).medianIndex = left
+      lower(right).medianIndex = right
+    }
+
+    private def swapUpper(left: Int, right: Int): Unit = {
+      val tmp = upper(left)
+      upper(left) = upper(right)
+      upper(right) = tmp
+      upper(left).medianIndex = left
+      upper(right).medianIndex = right
+    }
+
+    private def ensureLowerCapacity(required: Int): Unit =
+      if (required > lower.length) {
+        val expanded = allocateEntryArray(nextCapacity(required, lower.length))
+        Array.copy(lower, 0, expanded, 0, lowerSize)
+        lower = expanded
+      }
+
+    private def ensureUpperCapacity(required: Int): Unit =
+      if (required > upper.length) {
+        val expanded = allocateEntryArray(nextCapacity(required, upper.length))
+        Array.copy(upper, 0, expanded, 0, upperSize)
+        upper = expanded
+      }
+
+    private def nextCapacity(required: Int, current: Int): Int = {
+      var capacity = current
+      while (required > capacity)
+        capacity *= 2
+      capacity
+    }
+
+    private def allocateEntryArray(size: Int): Array[ProfitEntry] =
+      if (useRegions) region.alloc(new Array[ProfitEntry](size))
+      else new Array[ProfitEntry](size)
+
+    private def compareProfit(left: ProfitEntry, right: ProfitEntry): Int =
+      java.lang.Double.compare(left.profit, right.profit)
   }
 }
 
@@ -684,8 +810,12 @@ object Q2Support {
   private[debs2015] val InitialTaxiTableCapacity = 4096
   private[debs2015] val InitialTaxiIdTableCapacity = 4096
   private[debs2015] val InitialAreaRankCapacity = 1024
+  private[debs2015] val InitialMedianHeapCapacity = 8
   private[debs2015] val TopCandidateCapacity = 24
   private[debs2015] val CellKeyCapacity = (Grid.Q2.size + 1) << CellPartBits
+  private[debs2015] val NoMedianHeap = 0
+  private[debs2015] val LowerMedianHeap = 1
+  private[debs2015] val UpperMedianHeap = 2
 
   private[debs2015] def compareAreas(
       left: ProfitableArea,

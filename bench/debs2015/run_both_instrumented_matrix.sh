@@ -75,6 +75,10 @@ metric_keys=(
   diag_q2_result_array_slots
   diag_q2_median_computes
   diag_q2_median_values_sorted
+  diag_q2_median_reads
+  diag_q2_median_heap_adds
+  diag_q2_median_heap_removes
+  diag_q2_median_rebalances
   diag_q1_snapshot_allocs
   diag_q1_snapshot_slots
   diag_q2_snapshot_allocs
