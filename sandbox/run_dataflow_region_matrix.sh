@@ -26,5 +26,7 @@ run_mode() {
 cd "${repo_dir}"
 
 run_mode "Immix heap" "heap"
+SAFEZONE_ROOTS_MODE=0 run_mode "Current SafeZone" "safezone"
+SAFEZONE_ROOTS_MODE=1 run_mode "Improved SafeZone" "safezone"
 run_mode "Rift HPZone" "rift-hp"
 run_mode "Rift Streaming" "rift-streaming"

@@ -17,6 +17,9 @@ Heap and Rift variants use the same logical programs:
 
 - `heap`: ordinary `new` for document, selected-output, aggregate-entry,
   author-entry, join-output, and table-array objects.
+- `safezone`: the same logical object graph allocated in Scala Native
+  `SafeZone`; run as current SafeZone with `SAFEZONE_ROOTS_MODE=0` and improved
+  SafeZone with `SAFEZONE_ROOTS_MODE=1`.
 - `rift-hp`: the same classes allocated with `region.alloc`, using one region
   per epoch.
 - `rift-streaming`: the same classes allocated with `region.alloc`, using a
@@ -61,6 +64,15 @@ DATAFLOW_BENCHMARK_RUNS=3 DATAFLOW_WARMUPS=1 \
   zsh sandbox/run_dataflow_region_matrix.sh
 ```
 
+Native-only instrumented median run with peak RSS:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+DATAFLOW_BUILD=0 DATAFLOW_BENCHMARK_RUNS=3 DATAFLOW_WARMUPS=1 \
+DATAFLOW_OUTPUT_DIR=/tmp/dataflow-region-instrumented-100k \
+  zsh sandbox/run_dataflow_region_instrumented_matrix.sh
+```
+
 Broom-scale methodology run, subject to local runtime feasibility:
 
 ```sh
@@ -71,8 +83,8 @@ DATAFLOW_EPOCHS=40 DATAFLOW_DOCS_PER_EPOCH=500000 DATAFLOW_BENCHMARK_RUNS=3 DATA
 
 ## Result Status
 
-Smoke and local medians have been recorded. These are local methodology
-reproduction numbers, not exact Broom/Naiad numbers.
+Smoke, local medians, and native-only instrumented RSS runs have been recorded.
+These are local methodology reproduction numbers, not exact Broom/Naiad numbers.
 
 Validation commands run on 2026-04-25:
 
@@ -85,6 +97,10 @@ DATAFLOW_EPOCHS=2 DATAFLOW_DOCS_PER_EPOCH=1000 DATAFLOW_BENCHMARK_RUNS=1 DATAFLO
 
 DATAFLOW_BENCHMARK_RUNS=3 DATAFLOW_WARMUPS=1 \
   zsh sandbox/run_dataflow_region_matrix.sh
+
+DATAFLOW_BUILD=0 DATAFLOW_BENCHMARK_RUNS=3 DATAFLOW_WARMUPS=1 \
+DATAFLOW_OUTPUT_DIR=/tmp/dataflow-region-instrumented-100k \
+  zsh sandbox/run_dataflow_region_instrumented_matrix.sh
 ```
 
 The first smoke run rebuilt under the script's Java 17 setup and emitted a JVM
@@ -92,7 +108,7 @@ code-cache warning during sbt compilation. The native binaries still linked and
 ran to completion. The local median run reused the built binary and completed
 normally.
 
-## Local 3-Run Median, 10 Epochs x 100k Documents
+## Native-Only Local 3-Run Median, 10 Epochs x 100k Documents
 
 Configuration:
 
@@ -105,17 +121,23 @@ Configuration:
 - `DATAFLOW_BENCHMARK_RUNS=3`
 - `DATAFLOW_WARMUPS=1`
 
-| Operator | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Median region objects | Checksum |
+| Operator | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Median region objects | Peak RSS bytes |
 |---|---|---:|---:|---:|---:|---:|
-| SELECT | heap | 29.100 | 7.134 | 0.000 | 0 | 131080080920 |
-| SELECT | Rift HPZone | 23.549 | 0.000 | 0.055 | 1124990 | 131080080920 |
-| SELECT | Rift Streaming | 23.466 | 0.000 | 0.043 | 1124990 | 131080080920 |
-| AGGREGATE | heap | 61.204 | 20.346 | 0.000 | 0 | 163835709480 |
-| AGGREGATE | Rift HPZone | 43.812 | 0.000 | 0.236 | 1627152 | 163835709480 |
-| AGGREGATE | Rift Streaming | 43.934 | 0.000 | 0.254 | 1627152 | 163835709480 |
-| JOIN | heap | 28.548 | 7.249 | 0.000 | 0 | 193232836790 |
-| JOIN | Rift HPZone | 23.043 | 0.000 | 0.043 | 1078279 | 193232836790 |
-| JOIN | Rift Streaming | 23.330 | 0.000 | 0.040 | 1078279 | 193232836790 |
+| SELECT | heap | 26.760 | 6.554 | 0.000 | 0 | 40026112 |
+| SELECT | current SafeZone | 26.599 | 0.000 | 0.000 | 0 | 47005696 |
+| SELECT | improved SafeZone | 24.035 | 0.000 | 0.000 | 0 | 47005696 |
+| SELECT | Rift HPZone | 22.934 | 0.000 | 0.052 | 1124990 | 46891008 |
+| SELECT | Rift Streaming | 22.958 | 0.000 | 0.044 | 1124990 | 46858240 |
+| AGGREGATE | heap | 57.705 | 19.240 | 0.000 | 0 | 40026112 |
+| AGGREGATE | current SafeZone | 49.599 | 0.000 | 0.000 | 0 | 47005696 |
+| AGGREGATE | improved SafeZone | 41.426 | 0.000 | 0.000 | 0 | 47005696 |
+| AGGREGATE | Rift HPZone | 43.046 | 0.000 | 0.198 | 1627152 | 46891008 |
+| AGGREGATE | Rift Streaming | 42.802 | 0.000 | 0.232 | 1627152 | 46858240 |
+| JOIN | heap | 28.189 | 7.084 | 0.000 | 0 | 40026112 |
+| JOIN | current SafeZone | 26.705 | 0.000 | 0.000 | 0 | 47005696 |
+| JOIN | improved SafeZone | 22.789 | 0.000 | 0.000 | 0 | 47005696 |
+| JOIN | Rift HPZone | 22.554 | 0.000 | 0.036 | 1078279 | 46891008 |
+| JOIN | Rift Streaming | 23.025 | 0.000 | 0.038 | 1078279 | 46858240 |
 
 Interpretation:
 
@@ -123,15 +145,16 @@ Interpretation:
   placed in regions and measured against the same heap program.
 - The local controlled workload shows material GC reduction because the data
   objects are intentionally epoch-local and allocation-heavy.
-- Rift operation time is small in this benchmark: below 0.3 ms median for each
-  operator at the 1M-document local scale.
-- HPZone and Streaming are close at this scale. Streaming trades ten
+- Improved SafeZone is now a strong baseline: it is faster than heap on all
+  three operators and roughly tied with Rift on this local scale.
+- Rift HPZone and Streaming are close at this scale. Streaming trades ten
   open/close pairs for one open/close plus nine resets.
+- Rift operation time is small in this benchmark: below 0.25 ms median for each
+  operator at the 1M-document local scale.
 
 Caveats:
 
 - This is a Broom-style methodology reproduction, not exact Naiad/Broom.
-- SafeZone modes are not implemented in this harness yet.
 - The default local size is smaller than the Broom paper's reported
   40-epoch, 500k-600k document-per-epoch vertex experiment.
 - The benchmark uses trusted `HPZone`/`Streaming` APIs. It does not prove the
@@ -145,6 +168,11 @@ Command:
 cd /Users/siyaoliu/rift/scala-native-rift
 DATAFLOW_EPOCHS=40 DATAFLOW_DOCS_PER_EPOCH=500000 DATAFLOW_BENCHMARK_RUNS=1 DATAFLOW_WARMUPS=0 \
   zsh sandbox/run_dataflow_region_matrix.sh
+
+DATAFLOW_BUILD=0 DATAFLOW_EPOCHS=40 DATAFLOW_DOCS_PER_EPOCH=500000 \
+DATAFLOW_BENCHMARK_RUNS=1 DATAFLOW_WARMUPS=0 \
+DATAFLOW_OUTPUT_DIR=/tmp/dataflow-region-instrumented-broom-scale \
+  zsh sandbox/run_dataflow_region_instrumented_matrix.sh
 ```
 
 Configuration:
@@ -158,17 +186,23 @@ Configuration:
 - `DATAFLOW_BENCHMARK_RUNS=1`
 - `DATAFLOW_WARMUPS=0`
 
-| Operator | Mode | Elapsed ms | GC ms | Rift op ms | Region objects | Checksum |
+| Operator | Mode | Elapsed ms | GC ms | Rift op ms | Region objects | Peak RSS bytes |
 |---|---|---:|---:|---:|---:|---:|
-| SELECT | heap | 1193.248 | 440.094 | 0.000 | 0 | 25069572096852 |
-| SELECT | Rift HPZone | 471.136 | 0.000 | 2.378 | 22500066 | 25069572096852 |
-| SELECT | Rift Streaming | 475.792 | 0.000 | 2.211 | 22500066 | 25069572096852 |
-| AGGREGATE | heap | 906.687 | 263.886 | 0.000 | 0 | 2912068017281 |
-| AGGREGATE | Rift HPZone | 688.029 | 0.000 | 2.956 | 22621480 | 2912068017281 |
-| AGGREGATE | Rift Streaming | 700.530 | 0.000 | 4.881 | 22621480 | 2912068017281 |
-| JOIN | heap | 587.596 | 163.944 | 0.000 | 0 | 15930819206750 |
-| JOIN | Rift HPZone | 492.409 | 0.000 | 1.105 | 21563289 | 15930819206750 |
-| JOIN | Rift Streaming | 455.895 | 0.000 | 1.013 | 21563289 | 15930819206750 |
+| SELECT | heap | 623.761 | 207.058 | 0.000 | 0 | 290504704 |
+| SELECT | current SafeZone | 766.753 | 0.000 | 0.000 | 0 | 226590720 |
+| SELECT | improved SafeZone | 463.303 | 0.000 | 0.000 | 0 | 226607104 |
+| SELECT | Rift HPZone | 451.041 | 0.000 | 2.109 | 22500066 | 226361344 |
+| SELECT | Rift Streaming | 452.422 | 0.000 | 1.848 | 22500066 | 226344960 |
+| AGGREGATE | heap | 859.726 | 269.652 | 0.000 | 0 | 290504704 |
+| AGGREGATE | current SafeZone | 924.995 | 0.000 | 0.000 | 0 | 226590720 |
+| AGGREGATE | improved SafeZone | 618.133 | 0.000 | 0.000 | 0 | 226607104 |
+| AGGREGATE | Rift HPZone | 620.342 | 0.000 | 2.048 | 22621480 | 226361344 |
+| AGGREGATE | Rift Streaming | 630.151 | 0.000 | 2.112 | 22621480 | 226344960 |
+| JOIN | heap | 602.540 | 184.929 | 0.000 | 0 | 290504704 |
+| JOIN | current SafeZone | 748.152 | 0.000 | 0.000 | 0 | 226590720 |
+| JOIN | improved SafeZone | 470.770 | 0.000 | 0.000 | 0 | 226607104 |
+| JOIN | Rift HPZone | 447.803 | 0.000 | 0.968 | 21563289 | 226361344 |
+| JOIN | Rift Streaming | 448.956 | 0.000 | 0.867 | 21563289 | 226344960 |
 
 Interpretation:
 
@@ -179,3 +213,6 @@ Interpretation:
   headline median.
 - The result suggests this harness is sensitive to GC when the object volume is
   raised to the paper-scale input shape.
+- Improved SafeZone is again a strong baseline; Rift is slightly faster on
+  SELECT and JOIN in this single run, while improved SafeZone is slightly faster
+  on AGGREGATE.

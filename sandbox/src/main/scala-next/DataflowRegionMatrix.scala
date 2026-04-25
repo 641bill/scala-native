@@ -1,7 +1,14 @@
 import scala.language.experimental.captureChecking
 
-import scala.scalanative.memory.RiftRegion
-import scala.scalanative.runtime.{fromRawUSize, GC, RawSize, RiftAllocator}
+import scala.scalanative.memory.{RiftRegion, SafeZone}
+import scala.scalanative.memory.SafeZone._
+import scala.scalanative.runtime.{
+  fromRawUSize,
+  GC,
+  RawSize,
+  RiftAllocator,
+  SafeZoneAllocator
+}
 
 object DataflowRegionConfig {
   private def parsePositiveInt(value: String): Option[Int] =
@@ -269,6 +276,242 @@ object DataflowRegionMatrixHelpers {
   private def authorKey(epoch: Int, author: Int): Int =
     mix(epoch * 8191 + author * 131) % DataflowRegionConfig.authorKeySpace
 
+  def runSafeZoneSelect(): Long = {
+    val cfg = DataflowRegionConfig
+    var total = 0L
+    var epoch = 0
+    while (epoch < cfg.epochs) {
+      total += SafeZone { sz ?=>
+        final class SZDocument(
+            val docId: Int,
+            val key: Int,
+            val authorKey: Int,
+            val value: Int,
+            val next: SZDocument^{sz}
+        )
+        final class SZSelectedRecord(
+            val docId: Int,
+            val key: Int,
+            val score: Long,
+            val next: SZSelectedRecord^{sz}
+        )
+
+        var docs: SZDocument^{sz} = null
+        var i = 0
+        while (i < cfg.docsPerEpoch) {
+          val seed = mix(epoch * 1000003 + i)
+          val key = seed % cfg.keySpace
+          val author = mix(seed + 17) % cfg.authorKeySpace
+          val value = mix(seed + 31) & 0xffff
+          val docId = epoch * cfg.docsPerEpoch + i
+          docs = SafeZoneAllocator.allocate(
+            sz,
+            new SZDocument(docId, key, author, value, docs)
+          )
+          i += 1
+        }
+
+        var selected: SZSelectedRecord^{sz} = null
+        var cursor = docs
+        while (cursor != null) {
+          if ((cursor.value % cfg.selectModulo) == 0) {
+            val score =
+              cursor.value.toLong * 31L + cursor.key.toLong + cursor.authorKey
+            selected = SafeZoneAllocator.allocate(
+              sz,
+              new SZSelectedRecord(cursor.docId, cursor.key, score, selected)
+            )
+          }
+          cursor = cursor.next
+        }
+
+        var epochTotal = 0L
+        var out = selected
+        while (out != null) {
+          epochTotal += out.score ^ out.docId.toLong ^ out.key.toLong
+          out = out.next
+        }
+        epochTotal
+      }
+      epoch += 1
+    }
+
+    checksumSink = total
+    total
+  }
+
+  def runSafeZoneAggregate(): Long = {
+    val cfg = DataflowRegionConfig
+    val tableSize = nextPowerOfTwo(cfg.keySpace * 2)
+    val tableMask = tableSize - 1
+    var total = 0L
+    var epoch = 0
+    while (epoch < cfg.epochs) {
+      total += SafeZone { sz ?=>
+        final class SZDocument(
+            val docId: Int,
+            val key: Int,
+            val authorKey: Int,
+            val value: Int,
+            val next: SZDocument^{sz}
+        )
+        final class SZAggregateEntry(
+            val key: Int,
+            var count: Int,
+            var sum: Long,
+            val next: SZAggregateEntry^{sz}
+        )
+
+        var docs: SZDocument^{sz} = null
+        var i = 0
+        while (i < cfg.docsPerEpoch) {
+          val seed = mix(epoch * 1000003 + i)
+          val key = seed % cfg.keySpace
+          val author = mix(seed + 17) % cfg.authorKeySpace
+          val value = mix(seed + 31) & 0xffff
+          val docId = epoch * cfg.docsPerEpoch + i
+          docs = SafeZoneAllocator.allocate(
+            sz,
+            new SZDocument(docId, key, author, value, docs)
+          )
+          i += 1
+        }
+
+        val table = SafeZoneAllocator.allocate(
+          sz,
+          new Array[SZAggregateEntry^{sz}](tableSize)
+        )
+        var cursor = docs
+        while (cursor != null) {
+          val key = cursor.key
+          val bucket = mix(key) & tableMask
+          var entry: SZAggregateEntry^{sz} = table(bucket)
+          var found: SZAggregateEntry^{sz} = null
+          while (entry != null && found == null) {
+            if (entry.key == key) found = entry
+            entry = entry.next
+          }
+          if (found == null) {
+            found = SafeZoneAllocator.allocate(
+              sz,
+              new SZAggregateEntry(key, 0, 0L, table(bucket))
+            )
+            table(bucket) = found
+          }
+          found.count += 1
+          found.sum += cursor.value.toLong
+          cursor = cursor.next
+        }
+
+        var epochTotal = 0L
+        i = 0
+        while (i < table.length) {
+          var entry: SZAggregateEntry^{sz} = table(i)
+          while (entry != null) {
+            epochTotal += entry.sum ^ (entry.count.toLong << 17) ^ entry.key.toLong
+            entry = entry.next
+          }
+          i += 1
+        }
+        epochTotal
+      }
+      epoch += 1
+    }
+
+    checksumSink = total
+    total
+  }
+
+  def runSafeZoneJoin(): Long = {
+    val cfg = DataflowRegionConfig
+    val tableSize = nextPowerOfTwo(cfg.authorKeySpace * 2)
+    val tableMask = tableSize - 1
+    var total = 0L
+    var epoch = 0
+    while (epoch < cfg.epochs) {
+      total += SafeZone { sz ?=>
+        final class SZDocument(
+            val docId: Int,
+            val key: Int,
+            val authorKey: Int,
+            val value: Int,
+            val next: SZDocument^{sz}
+        )
+        final class SZAuthorEntry(
+            val authorKey: Int,
+            val weight: Int,
+            val next: SZAuthorEntry^{sz}
+        )
+        final class SZJoinedRecord(
+            val docId: Int,
+            val authorKey: Int,
+            val score: Long,
+            val next: SZJoinedRecord^{sz}
+        )
+
+        val authors = SafeZoneAllocator.allocate(
+          sz,
+          new Array[SZAuthorEntry^{sz}](tableSize)
+        )
+        var a = 0
+        while (a < cfg.authorsPerEpoch) {
+          val key = authorKey(epoch, a)
+          val bucket = mix(key) & tableMask
+          authors(bucket) = SafeZoneAllocator.allocate(
+            sz,
+            new SZAuthorEntry(key, (a + 1) * 7, authors(bucket))
+          )
+          a += 1
+        }
+
+        var docs: SZDocument^{sz} = null
+        var i = 0
+        while (i < cfg.docsPerEpoch) {
+          val seed = mix(epoch * 1000003 + i)
+          val key = seed % cfg.keySpace
+          val author = mix(seed + 17) % cfg.authorKeySpace
+          val value = mix(seed + 31) & 0xffff
+          val docId = epoch * cfg.docsPerEpoch + i
+          docs = SafeZoneAllocator.allocate(
+            sz,
+            new SZDocument(docId, key, author, value, docs)
+          )
+          i += 1
+        }
+
+        var joined: SZJoinedRecord^{sz} = null
+        var cursor = docs
+        while (cursor != null) {
+          val bucket = mix(cursor.authorKey) & tableMask
+          var author: SZAuthorEntry^{sz} = authors(bucket)
+          while (author != null) {
+            if (author.authorKey == cursor.authorKey) {
+              val score = cursor.value.toLong * author.weight.toLong + cursor.key
+              joined = SafeZoneAllocator.allocate(
+                sz,
+                new SZJoinedRecord(cursor.docId, cursor.authorKey, score, joined)
+              )
+            }
+            author = author.next
+          }
+          cursor = cursor.next
+        }
+
+        var epochTotal = 0L
+        var out = joined
+        while (out != null) {
+          epochTotal += out.score ^ out.docId.toLong ^ out.authorKey.toLong
+          out = out.next
+        }
+        epochTotal
+      }
+      epoch += 1
+    }
+
+    checksumSink = total
+    total
+  }
+
   def runSelect(modeName: String): Long = {
     val cfg = DataflowRegionConfig
     val mode = new ModeState(modeName)
@@ -423,9 +666,15 @@ object DataflowRegionMatrixHelpers {
 
   private def runOperator(operator: String, mode: String): Long =
     operator match {
-      case "select"    => runSelect(mode)
-      case "aggregate" => runAggregate(mode)
-      case "join"      => runJoin(mode)
+      case "select" =>
+        if (mode == "safezone") runSafeZoneSelect()
+        else runSelect(mode)
+      case "aggregate" =>
+        if (mode == "safezone") runSafeZoneAggregate()
+        else runAggregate(mode)
+      case "join" =>
+        if (mode == "safezone") runSafeZoneJoin()
+        else runJoin(mode)
       case other =>
         throw new IllegalArgumentException(
           s"unknown dataflow operator '$other'; expected select, aggregate, join, or all"
@@ -534,17 +783,19 @@ object DataflowRegionMatrixHelpers {
 
   def printConfig(mode: String, operator: String): Unit = {
     val cfg = DataflowRegionConfig
+    val rootsMode = sys.env.getOrElse("SAFEZONE_ROOTS_MODE", "0")
+    val pageSize = sys.env.getOrElse("SAFEZONE_PAGE_SIZE", "default")
     println(
-      s"CONFIG mode=$mode operator=$operator runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} epochs=${cfg.epochs} docs_per_epoch=${cfg.docsPerEpoch} authors_per_epoch=${cfg.authorsPerEpoch} key_space=${cfg.keySpace} author_key_space=${cfg.authorKeySpace} select_modulo=${cfg.selectModulo}"
+      s"CONFIG mode=$mode operator=$operator runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} epochs=${cfg.epochs} docs_per_epoch=${cfg.docsPerEpoch} authors_per_epoch=${cfg.authorsPerEpoch} key_space=${cfg.keySpace} author_key_space=${cfg.authorKeySpace} select_modulo=${cfg.selectModulo} safezone_roots_mode=$rootsMode safezone_page_size=$pageSize"
     )
   }
 
   def validateMode(mode: String): Unit =
     mode match {
-      case "heap" | "rift-hp" | "rift-streaming" => ()
+      case "heap" | "safezone" | "rift-hp" | "rift-streaming" => ()
       case other =>
         throw new IllegalArgumentException(
-          s"unknown dataflow mode '$other'; expected heap, rift-hp, or rift-streaming"
+          s"unknown dataflow mode '$other'; expected heap, safezone, rift-hp, or rift-streaming"
         )
     }
 }
