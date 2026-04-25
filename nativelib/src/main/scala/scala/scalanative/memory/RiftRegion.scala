@@ -56,12 +56,23 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   def shutdown(): Unit =
     RiftAllocator.Impl.shutdown()
 
+  /** Opens a low-level trusted Rift region.
+   *
+   *  This API is used by HPZone benchmarks and existing experiments. It does
+   *  not enforce capture-checked non-escape, closure-capture, or mixed
+   *  GC/region reference rules. The future safe APIs live in the Scala-next
+   *  `scoped` and `streaming` boundary.
+   */
   def open(kind: Int = HPZone): RiftRegion = {
     val handle = RiftAllocator.Impl.open(kind)
     if (handle == null)
       throw new OutOfMemoryError("failed to open Rift region")
     new MemoryRiftRegion(handle)
   }
+
+  /** Alias for `open` that makes the trust boundary explicit at call sites. */
+  def trustedOpen(kind: Int = HPZone): RiftRegion =
+    open(kind)
 
   private final class MemoryRiftRegion(
       private[scalanative] override val handle: RawPtr)
