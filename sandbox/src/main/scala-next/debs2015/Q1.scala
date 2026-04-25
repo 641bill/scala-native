@@ -1,8 +1,5 @@
 package debs2015
 
-import java.util.Comparator
-import java.util.TreeSet
-
 import scala.language.experimental.captureChecking
 
 import scala.collection.mutable
@@ -121,6 +118,8 @@ object Q1Support {
   private val EmptyRouteKey = 0L
   private val DeletedRouteKey = -1L
   private val InitialRouteTableCapacity = 1024
+  private val InitialRouteRankCapacity = 1024
+  private val TopCandidateCapacity = 24
 
   private[debs2015] final case class RouteState(
       count: Int,
@@ -159,25 +158,10 @@ object Q1Support {
     x.toInt
   }
 
-  private val RankedRouteOrdering: Comparator[RankedRoute] =
-    new Comparator[RankedRoute] {
-      override def compare(left: RankedRoute, right: RankedRoute): Int = {
-        if (left eq right) 0
-        else if (left.count != right.count)
-          java.lang.Integer.compare(right.count, left.count)
-        else if (left.latestSeconds != right.latestSeconds)
-          java.lang.Long.compare(right.latestSeconds, left.latestSeconds)
-        else if (left.latestSeq != right.latestSeq)
-          java.lang.Long.compare(right.latestSeq, left.latestSeq)
-        else left.route.id.compareTo(right.route.id)
-      }
-    }
-
   private[debs2015] final class RouteCounter(
       useRegions: Boolean,
       regionKind: Int
   ) {
-    private val rankedRoutes = new TreeSet[RankedRoute](RankedRouteOrdering)
     private val rankRegion =
       if (useRegions) RiftRegion.open(regionKind) else null
     private var keys = allocateLongArray(InitialRouteTableCapacity)
@@ -185,9 +169,14 @@ object Q1Support {
     private var latestSecondsBySlot = allocateLongArray(InitialRouteTableCapacity)
     private var latestSeqBySlot = allocateLongArray(InitialRouteTableCapacity)
     private var rankBySlot = allocateRankArray(InitialRouteTableCapacity)
+    private var rankIndexBySlot = allocateIntArray(InitialRouteTableCapacity)
+    private var heapRanks = allocateRankArray(InitialRouteRankCapacity)
+    private var heapSlots = allocateIntArray(InitialRouteRankCapacity)
+    private val topCandidateHeap = allocateIntArray(TopCandidateCapacity)
     private val resultArrays = new Array[Array[RankedRoute]](11)
     private var activeSize = 0
     private var usedSize = 0
+    private var heapSize = 0
 
     def increment(key: Long, latestSeconds: Long, latestSeq: Long): Unit = {
       val slot = insertSlot(key)
@@ -211,18 +200,16 @@ object Q1Support {
       val slot = existingSlot(key)
       if (slot >= 0) {
         val ranked = rankBySlot(slot)
-        if (ranked != null && rankedRoutes.remove(ranked))
-          Debs2015Counters.recordQ1RankRemove()
-
         val nextCount = counts(slot) - 1
         if (nextCount <= 0) {
+          if (ranked != null)
+            removeRankHeap(slot)
           deleteSlot(slot)
         } else {
           counts(slot) = nextCount
           if (ranked != null) {
             ranked.count = nextCount
-            if (rankedRoutes.add(ranked))
-              Debs2015Counters.recordQ1RankAdd()
+            fixRankHeap(slot)
           }
         }
       }
@@ -230,20 +217,39 @@ object Q1Support {
 
     def top10(): Array[RankedRoute] = {
       Debs2015Counters.recordQ1Top10()
-      val size = math.min(10, rankedRoutes.size())
+      val size = math.min(10, heapSize)
       val result = resultArray(size)
-      val it = rankedRoutes.iterator()
+      if (size == 0) return result
+
+      var candidateCount = 1
+      topCandidateHeap(0) = 0
       var i = 0
-      while (i < size && it.hasNext) {
-        result(i) = it.next()
+      while (i < size) {
+        val candidateSlot = bestCandidate(candidateCount)
+        val heapPosition = topCandidateHeap(candidateSlot)
+        candidateCount -= 1
+        topCandidateHeap(candidateSlot) = topCandidateHeap(candidateCount)
+
+        result(i) = heapRanks(heapPosition)
+
+        val left = (heapPosition << 1) + 1
+        if (left < heapSize) {
+          topCandidateHeap(candidateCount) = left
+          candidateCount += 1
+        }
+        val right = left + 1
+        if (right < heapSize) {
+          topCandidateHeap(candidateCount) = right
+          candidateCount += 1
+        }
         i += 1
       }
       result
     }
 
     def close(): Unit = {
+      clearRankIndex()
       clearTables()
-      rankedRoutes.clear()
       var i = 0
       while (i < resultArrays.length) {
         resultArrays(i) = null
@@ -254,8 +260,6 @@ object Q1Support {
 
     private def updateRank(slot: Int): Unit = {
       val existing = rankBySlot(slot)
-      if (existing != null && rankedRoutes.remove(existing))
-        Debs2015Counters.recordQ1RankRemove()
 
       val ranked =
         if (existing != null) {
@@ -272,10 +276,11 @@ object Q1Support {
               latestSeqBySlot(slot)
             )
           rankBySlot(slot) = created
+          addRankHeap(slot, created)
           created
         }
-      if (rankedRoutes.add(ranked))
-        Debs2015Counters.recordQ1RankAdd()
+      if (existing != null)
+        fixRankHeap(slot)
     }
 
     private def allocateRankedRoute(
@@ -333,6 +338,139 @@ object Q1Support {
       if (useRegions) rankRegion.alloc(new Array[RankedRoute](size))
       else new Array[RankedRoute](size)
 
+    private def addRankHeap(slot: Int, ranked: RankedRoute): Unit = {
+      ensureRankCapacity(heapSize + 1)
+      val index = heapSize
+      heapSize += 1
+      heapRanks(index) = ranked
+      heapSlots(index) = slot
+      rankIndexBySlot(slot) = index + 1
+      siftRankUp(index)
+      Debs2015Counters.recordQ1RankAdd()
+    }
+
+    private def removeRankHeap(slot: Int): Unit = {
+      val index = rankHeapIndex(slot)
+      if (index < 0) return
+
+      val last = heapSize - 1
+      rankIndexBySlot(slot) = 0
+      if (index != last) {
+        heapRanks(index) = heapRanks(last)
+        heapSlots(index) = heapSlots(last)
+        rankIndexBySlot(heapSlots(index)) = index + 1
+      }
+      heapRanks(last) = null
+      heapSlots(last) = 0
+      heapSize = last
+      if (index < heapSize)
+        fixRankHeapAt(index)
+      Debs2015Counters.recordQ1RankRemove()
+    }
+
+    private def fixRankHeap(slot: Int): Unit = {
+      val index = rankHeapIndex(slot)
+      if (index >= 0)
+        fixRankHeapAt(index)
+    }
+
+    private def fixRankHeapAt(index: Int): Unit = {
+      val moved = siftRankUp(index)
+      siftRankDown(moved)
+    }
+
+    private def siftRankUp(start: Int): Int = {
+      var child = start
+      while (child > 0) {
+        val parent = (child - 1) >>> 1
+        if (!betterHeapIndex(child, parent)) return child
+        swapRankHeap(child, parent)
+        child = parent
+      }
+      child
+    }
+
+    private def siftRankDown(start: Int): Unit = {
+      var parent = start
+      while (true) {
+        val left = (parent << 1) + 1
+        if (left >= heapSize) return
+        val right = left + 1
+        var best = left
+        if (right < heapSize && betterHeapIndex(right, left))
+          best = right
+        if (!betterHeapIndex(best, parent)) return
+        swapRankHeap(parent, best)
+        parent = best
+      }
+    }
+
+    private def swapRankHeap(left: Int, right: Int): Unit = {
+      val leftRank = heapRanks(left)
+      val leftSlot = heapSlots(left)
+      heapRanks(left) = heapRanks(right)
+      heapSlots(left) = heapSlots(right)
+      heapRanks(right) = leftRank
+      heapSlots(right) = leftSlot
+      rankIndexBySlot(heapSlots(left)) = left + 1
+      rankIndexBySlot(heapSlots(right)) = right + 1
+    }
+
+    private def bestCandidate(candidateCount: Int): Int = {
+      var best = 0
+      var i = 1
+      while (i < candidateCount) {
+        if (betterHeapIndex(topCandidateHeap(i), topCandidateHeap(best)))
+          best = i
+        i += 1
+      }
+      best
+    }
+
+    private def betterHeapIndex(leftIndex: Int, rightIndex: Int): Boolean =
+      compareHeapEntries(leftIndex, rightIndex) < 0
+
+    private def compareHeapEntries(leftIndex: Int, rightIndex: Int): Int = {
+      val left = heapRanks(leftIndex)
+      val right = heapRanks(rightIndex)
+      if (left eq right) 0
+      else if (left.count != right.count)
+        java.lang.Integer.compare(right.count, left.count)
+      else if (left.latestSeconds != right.latestSeconds)
+        java.lang.Long.compare(right.latestSeconds, left.latestSeconds)
+      else if (left.latestSeq != right.latestSeq)
+        java.lang.Long.compare(right.latestSeq, left.latestSeq)
+      else compareRouteKeysById(keys(heapSlots(leftIndex)), keys(heapSlots(rightIndex)))
+    }
+
+    private def rankHeapIndex(slot: Int): Int =
+      rankIndexBySlot(slot) - 1
+
+    private def ensureRankCapacity(required: Int): Unit =
+      if (required > heapRanks.length) {
+        var capacity = heapRanks.length
+        while (required > capacity)
+          capacity *= 2
+
+        val expandedRanks = allocateRankArray(capacity)
+        val expandedSlots = allocateIntArray(capacity)
+        Array.copy(heapRanks, 0, expandedRanks, 0, heapSize)
+        Array.copy(heapSlots, 0, expandedSlots, 0, heapSize)
+        heapRanks = expandedRanks
+        heapSlots = expandedSlots
+      }
+
+    private def clearRankIndex(): Unit = {
+      var i = 0
+      while (i < heapSize) {
+        rankIndexBySlot(heapSlots(i)) = 0
+        heapRanks(i) = null
+        heapSlots(i) = 0
+        i += 1
+      }
+      heapSize = 0
+    }
+
     private def insertSlot(key: Long): Int = {
       if ((usedSize + 1) * 4 >= keys.length * 3) {
         val compactOnly = activeSize * 2 < usedSize
@@ -373,12 +511,14 @@ object Q1Support {
       val oldLatestSeconds = latestSecondsBySlot
       val oldLatestSeq = latestSeqBySlot
       val oldRanks = rankBySlot
+      val oldRankIndexes = rankIndexBySlot
 
       keys = allocateLongArray(newCapacity)
       counts = allocateIntArray(newCapacity)
       latestSecondsBySlot = allocateLongArray(newCapacity)
       latestSeqBySlot = allocateLongArray(newCapacity)
       rankBySlot = allocateRankArray(newCapacity)
+      rankIndexBySlot = allocateIntArray(newCapacity)
       activeSize = 0
       usedSize = 0
 
@@ -392,6 +532,11 @@ object Q1Support {
           latestSecondsBySlot(slot) = oldLatestSeconds(i)
           latestSeqBySlot(slot) = oldLatestSeq(i)
           rankBySlot(slot) = oldRanks(i)
+          val rankIndex = oldRankIndexes(i)
+          if (rankIndex != 0) {
+            rankIndexBySlot(slot) = rankIndex
+            heapSlots(rankIndex - 1) = slot
+          }
           activeSize += 1
           usedSize += 1
         }
@@ -405,6 +550,7 @@ object Q1Support {
       latestSecondsBySlot(slot) = 0L
       latestSeqBySlot(slot) = 0L
       rankBySlot(slot) = null
+      rankIndexBySlot(slot) = 0
       activeSize -= 1
     }
 
@@ -424,11 +570,64 @@ object Q1Support {
         latestSecondsBySlot(i) = 0L
         latestSeqBySlot(i) = 0L
         rankBySlot(i) = null
+        rankIndexBySlot(i) = 0
         i += 1
       }
       activeSize = 0
       usedSize = 0
     }
+  }
+
+  private def compareRouteKeysById(left: Long, right: Long): Int = {
+    val startEast = compareDecimalLex(
+      ((left >>> 30) & RoutePartMask).toInt,
+      ((right >>> 30) & RoutePartMask).toInt
+    )
+    if (startEast != 0) startEast
+    else {
+      val startSouth = compareDecimalLex(
+        ((left >>> 20) & RoutePartMask).toInt,
+        ((right >>> 20) & RoutePartMask).toInt
+      )
+      if (startSouth != 0) startSouth
+      else {
+        val endEast = compareDecimalLex(
+          ((left >>> 10) & RoutePartMask).toInt,
+          ((right >>> 10) & RoutePartMask).toInt
+        )
+        if (endEast != 0) endEast
+        else compareDecimalLex(
+          (left & RoutePartMask).toInt,
+          (right & RoutePartMask).toInt
+        )
+      }
+    }
+  }
+
+  private def compareDecimalLex(left: Int, right: Int): Int = {
+    if (left == right) 0
+    else {
+      var leftDivisor = highestPowerOf10(left)
+      var rightDivisor = highestPowerOf10(right)
+      while (leftDivisor > 0 && rightDivisor > 0) {
+        val leftDigit = (left / leftDivisor) % 10
+        val rightDigit = (right / rightDivisor) % 10
+        if (leftDigit != rightDigit)
+          return java.lang.Integer.compare(leftDigit, rightDigit)
+        leftDivisor /= 10
+        rightDivisor /= 10
+      }
+      if (leftDivisor == 0 && rightDivisor == 0) 0
+      else if (leftDivisor == 0) -1
+      else 1
+    }
+  }
+
+  private def highestPowerOf10(value: Int): Int = {
+    var divisor = 1
+    while (value / divisor >= 10)
+      divisor *= 10
+    divisor
   }
 
   private[debs2015] def top10(

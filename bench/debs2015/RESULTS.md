@@ -1432,17 +1432,16 @@ Interpretation:
   Streaming versus heap at 1M. Peak RSS is about `48 MB` lower for Rift modes
   in this run set.
 - Rift operation time remains small: about `15 ms` at 1M with `0` resets.
-- This still is not final Phase 5 success. Q1 ranking still uses a heap
-  `TreeSet`; durable taxi-id metadata, latency arrays, SafeZone/Commix modes,
-  full-month scale, and safe API boundaries remain open.
+- This still is not final Phase 5 success. At this checkpoint, Q1 ranking,
+  durable taxi-id metadata, latency arrays, SafeZone/Commix modes, full-month
+  scale, and safe API boundaries remained open.
 
-Rejected side experiment:
+Superseded side note:
 
-- An uncommitted Q1 indexed-heap ranking replacement was tested before this Q2
-  checkpoint. It preserved output correctness, but it materially increased Q1
-  processing time (`100k` single-run heap Q1 process rose to about `224 ms`;
-  `1M` single-run heap Q1 process rose to about `2108 ms`). It was backed out
-  and should not be repeated without a different design.
+- An earlier uncommitted Q1 indexed-heap ranking replacement preserved output
+  correctness but regressed Q1 processing. It was not kept. The later Q1
+  indexed-ranking checkpoint below is a different measured implementation and
+  supersedes this warning.
 
 ## RunBoth Heap-Churn Diagnostics And Packed Grid Cell Keys
 
@@ -1573,3 +1572,169 @@ Interpretation:
   dominates: median maintenance and rank updates are now the largest measured
   work. Any next Q2 change must preserve the same logical query for heap and
   Rift, with allocation placement/lifetime policy as the experimental variable.
+
+## Q2 Taxi-ID Table With Heap/Rift Allocation Placement
+
+Date: 2026-04-25
+
+Purpose:
+
+- Move another structured-lifetime Q2 data path out of ad hoc heap metadata.
+- Replace the heap `mutable.HashMap[Int, TaxiIdEntry]` plus durable taxi-id
+  `String` values with a shared hash table that stores taxi IDs as byte arrays.
+- Keep heap and Rift on the same logical table: heap uses ordinary `new` for
+  the table, entries, and taxi-id byte copies; Rift allocates the same table,
+  entries, and byte arrays in the Q2 run-lifetime ranking/control region.
+- Avoid unscanned region-to-GC references by not storing heap `String` objects
+  inside region entries.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Q1Smoke\")" run
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Q2Smoke\")" run
+
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-taxi-region-sample \
+  zsh bench/debs2015/run_both_sample_matrix.sh
+
+for i in 1 2 3; do
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-taxi-region-median-100000/run-${i} \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+
+for i in 1 2 3; do
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-taxi-region-median-1000000/run-${i} \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+```
+
+`Debs2015Q1Smoke`, `Debs2015Q2Smoke`, sample RunBoth, 100k medians, and 1M
+medians all matched heap/Rift outputs after stripping only the measured latency
+column.
+
+### Taxi-ID Table 100k 3-Run Median
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q2 process ms | Q2 output ms | Rift op ms | Rift alloc objects | Taxi misses | Taxi entry scans | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 793.461 | 18.122 | 98.323 | 404.781 | 44.358 | 0.000 | 0 | 6444 | 125219 | 199983104 |
+| Rift HPZone | 787.594 | 23.902 | 99.861 | 393.280 | 47.565 | 1.443 | 586219 | 6444 | 125219 | 69402624 |
+| Rift Streaming | 785.273 | 19.621 | 97.949 | 391.787 | 43.413 | 1.421 | 586219 | 6444 | 125219 | 69402624 |
+
+### Taxi-ID Table 1M 3-Run Median
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q2 process ms | Q2 output ms | Rift op ms | Rift alloc objects | Taxi misses | Taxi entry scans | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 9876.359 | 376.602 | 1172.605 | 6052.167 | 436.103 | 0.000 | 0 | 9244 | 1246099 | 431751168 |
+| Rift HPZone | 9676.525 | 358.127 | 1154.971 | 5897.306 | 382.232 | 13.216 | 5404766 | 9244 | 1246099 | 169312256 |
+| Rift Streaming | 9667.365 | 270.482 | 1193.662 | 5883.429 | 375.936 | 13.915 | 5404766 | 9244 | 1246099 | 169295872 |
+
+Interpretation:
+
+- This is a fair shared-data-shape change. Heap and Rift use the same taxi-id
+  table; the experimental variable is allocation placement for table arrays,
+  entries, and taxi-id byte copies.
+- The change removes durable taxi-id `String` materialization from both modes,
+  so cross-checkpoint elapsed improvements are not pure Rift effects.
+- Within the checkpoint, Rift still wins on 1M bounded-sample medians and cuts
+  peak RSS sharply: heap `431751168` bytes vs about `169 MB` for both Rift
+  modes.
+- Streaming shows the strongest GC-time result at 1M: `270.482 ms` vs heap
+  `376.602 ms`.
+- Q2 processing still dominates: 1M median Q2 process time is `6052.167 ms`
+  for heap and `5883.429 ms` for Streaming. The next useful Phase 5 work is
+  still median/rank maintenance or a safe collection/control API, not parser
+  cleanup.
+
+## Q1 Indexed Ranking With Heap/Rift Allocation Placement
+
+Date: 2026-04-25
+
+Purpose:
+
+- Move Q1 ranking-index metadata out of Java `TreeSet` nodes.
+- Keep heap and Rift on the same logical rank-maintenance structure: heap uses
+  ordinary `new` arrays, while Rift allocates the same heap arrays and
+  slot-index arrays in the Q1 run-lifetime ranking/control region.
+- Continue using ordinary Scala `RankedRoute`, `Route`, and `Cell` objects;
+  the Rift path allocates those objects in the same ranking/control region.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Q1Smoke\")" run
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Q2Smoke\")" run
+
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q1-indexed-sample \
+  zsh bench/debs2015/run_both_sample_matrix.sh
+
+for i in 1 2 3; do
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q1-indexed-median-100000/run-${i} \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+
+for i in 1 2 3; do
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q1-indexed-median-1000000/run-${i} \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+```
+
+`Debs2015Q1Smoke`, `Debs2015Q2Smoke`, sample RunBoth, 100k medians, and 1M
+medians all matched heap/Rift outputs after stripping only the measured latency
+column.
+
+### Q1 Indexed Ranking 100k 3-Run Median
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Rift alloc objects | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 903.449 | 19.414 | 146.858 | 57.487 | 446.249 | 53.939 | 0.000 | 0 | 184090624 |
+| Rift HPZone | 874.280 | 18.821 | 141.575 | 60.185 | 425.737 | 53.619 | 1.820 | 586237 | 43024384 |
+| Rift Streaming | 863.219 | 18.578 | 140.475 | 56.244 | 418.070 | 50.923 | 1.778 | 586237 | 43024384 |
+
+### Q1 Indexed Ranking 1M 3-Run Median
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Rift alloc objects | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 9746.536 | 312.151 | 1369.716 | 336.080 | 5811.892 | 374.661 | 0.000 | 0 | 431669248 |
+| Rift HPZone | 9441.064 | 320.025 | 1307.938 | 311.925 | 5599.931 | 362.853 | 10.528 | 5404786 | 108445696 |
+| Rift Streaming | 9442.026 | 306.311 | 1306.795 | 312.877 | 5595.953 | 359.654 | 10.094 | 5404786 | 108969984 |
+
+Interpretation:
+
+- This is a fair shared-data-shape change for Q1 ranking. Heap and Rift use the
+  same indexed ranking heap; the experimental variable is allocation placement
+  for the arrays and the ranking object graph.
+- The change also improves heap versus the previous Q2 taxi-id checkpoint, so
+  cross-checkpoint elapsed improvements are not pure Rift effects.
+- Within the checkpoint, Rift still wins on elapsed time at both 100k and 1M.
+  The largest effect is memory footprint: 1M peak RSS drops from `431669248`
+  bytes in heap mode to about `108-109 MB` in Rift modes.
+- GC time is mixed: Streaming is lower than heap at 1M, HPZone is slightly
+  higher. The stronger evidence is that more stream/ranking state is now
+  region-resident without increasing Rift operation time materially.
+- Q2 process time remains the dominant bottleneck, so the next Phase 5 target
+  should still be Q2 median/rank maintenance or the safe region-backed
+  collection/control API.

@@ -92,6 +92,18 @@ final class Trip(
     hash
   }
 
+  private[debs2015] def taxiIdLength: Int =
+    taxiEnd - taxiStart
+
+  private[debs2015] def copyTaxiIdTo(target: Array[Byte]): Unit = {
+    val len = taxiIdLength
+    var i = 0
+    while (i < len) {
+      target(i) = (charAt(taxiStart + i).toInt & 0xff).toByte
+      i += 1
+    }
+  }
+
   private[debs2015] def taxiIdEquals(value: String): Boolean = {
     val len = taxiEnd - taxiStart
     if (value.length != len) false
@@ -100,6 +112,21 @@ final class Trip(
       var same = true
       while (i < len && same) {
         same = charAt(taxiStart + i) == value.charAt(i)
+        i += 1
+      }
+      same
+    }
+  }
+
+  private[debs2015] def taxiIdEquals(value: Array[Byte]): Boolean = {
+    val len = taxiIdLength
+    if (value.length != len) false
+    else {
+      var i = 0
+      var same = true
+      while (i < len && same) {
+        same =
+          ((charAt(taxiStart + i).toInt & 0xff).toByte == value(i))
         i += 1
       }
       same

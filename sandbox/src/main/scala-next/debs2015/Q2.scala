@@ -35,9 +35,9 @@ private abstract class Q2BucketedWindow(
 
   private val profitBuckets = mutable.Queue.empty[ProfitBucket]
   private val emptyBuckets = mutable.Queue.empty[EmptyBucket]
-  private val taxiIds = new TaxiIds
   private val rankRegion =
     if (useRegions) RiftRegion.open(regionKind) else null
+  private val taxiIds = new TaxiIds(useRegions, rankRegion)
   private val medianScratchRegion =
     if (useRegions) RiftRegion.open(regionKind) else null
   private val profitStatsByCell =
@@ -108,6 +108,7 @@ private abstract class Q2BucketedWindow(
   }
 
   override def close(): Unit = {
+    taxiIds.clear()
     clearLatestEmpty()
     clearRankIndex()
     clearCellTables()
@@ -681,6 +682,7 @@ object Q2Support {
   private val CellPartBits = 10
   private val CellPartMask = (1 << CellPartBits) - 1
   private[debs2015] val InitialTaxiTableCapacity = 4096
+  private[debs2015] val InitialTaxiIdTableCapacity = 4096
   private[debs2015] val InitialAreaRankCapacity = 1024
   private[debs2015] val TopCandidateCapacity = 24
   private[debs2015] val CellKeyCapacity = (Grid.Q2.size + 1) << CellPartBits
@@ -750,36 +752,99 @@ object Q2Support {
     divisor
   }
 
-  private[debs2015] final class TaxiIds {
-    private val ids = mutable.HashMap.empty[Int, TaxiIdEntry]
+  private[debs2015] final class TaxiIds(
+      useRegions: Boolean,
+      region: RiftRegion
+  ) {
+    private var buckets = allocateEntryArray(InitialTaxiIdTableCapacity)
     private var nextId = 0
 
     def idFor(trip: Trip): Int = {
       Debs2015Counters.recordTaxiLookup()
       val hash = trip.taxiIdHash
-      var entry = ids.getOrElse(hash, null)
+      var bucket = bucketIndex(hash)
+      var entry = buckets(bucket)
       while (entry != null) {
         Debs2015Counters.recordTaxiEntryScan()
-        if (trip.taxiIdEquals(entry.taxiId)) {
+        if (entry.hash == hash && trip.taxiIdEquals(entry.taxiId)) {
           Debs2015Counters.recordTaxiHit()
           return entry.id
         }
         entry = entry.next
       }
 
+      if ((nextId + 1) * 4 >= buckets.length * 3) {
+        grow()
+        bucket = bucketIndex(hash)
+      }
       val id = nextId
       nextId += 1
       Debs2015Counters.recordTaxiMiss()
       Debs2015Counters.recordTaxiEntryCreated()
-      ids.update(hash, new TaxiIdEntry(trip.taxiId, id, ids.getOrElse(hash, null)))
+      val taxiId = allocateTaxiId(trip)
+      buckets(bucket) = allocateEntry(hash, taxiId, id, buckets(bucket))
       id
     }
+
+    def clear(): Unit = {
+      var i = 0
+      while (i < buckets.length) {
+        buckets(i) = null
+        i += 1
+      }
+      buckets = null
+      nextId = 0
+    }
+
+    private def grow(): Unit = {
+      val oldBuckets = buckets
+      buckets = allocateEntryArray(oldBuckets.length << 1)
+
+      var i = 0
+      while (i < oldBuckets.length) {
+        var entry = oldBuckets(i)
+        while (entry != null) {
+          val next = entry.next
+          val bucket = bucketIndex(entry.hash)
+          entry.next = buckets(bucket)
+          buckets(bucket) = entry
+          entry = next
+        }
+        oldBuckets(i) = null
+        i += 1
+      }
+    }
+
+    private def bucketIndex(hash: Int): Int =
+      hash & (buckets.length - 1)
+
+    private def allocateEntryArray(size: Int): Array[TaxiIdEntry] =
+      if (useRegions) region.alloc(new Array[TaxiIdEntry](size))
+      else new Array[TaxiIdEntry](size)
+
+    private def allocateTaxiId(trip: Trip): Array[Byte] = {
+      val bytes =
+        if (useRegions) region.alloc(new Array[Byte](trip.taxiIdLength))
+        else new Array[Byte](trip.taxiIdLength)
+      trip.copyTaxiIdTo(bytes)
+      bytes
+    }
+
+    private def allocateEntry(
+        hash: Int,
+        taxiId: Array[Byte],
+        id: Int,
+        next: TaxiIdEntry
+    ): TaxiIdEntry =
+      if (useRegions) region.alloc(new TaxiIdEntry(hash, taxiId, id, next))
+      else new TaxiIdEntry(hash, taxiId, id, next)
   }
 
   private final class TaxiIdEntry(
-      val taxiId: String,
+      val hash: Int,
+      val taxiId: Array[Byte],
       val id: Int,
-      val next: TaxiIdEntry
+      var next: TaxiIdEntry
   )
 
 }
