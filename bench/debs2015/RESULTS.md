@@ -1738,3 +1738,74 @@ Interpretation:
 - Q2 process time remains the dominant bottleneck, so the next Phase 5 target
   should still be Q2 median/rank maintenance or the safe region-backed
   collection/control API.
+
+## RunBoth Output Snapshots With Heap/Rift Allocation Placement
+
+Date: 2026-04-25
+
+Purpose:
+
+- Move another RunBoth stream-output state path into Rift regions.
+- Keep the snapshot logic shared: heap uses ordinary `new` for Q1/Q2 previous
+  output snapshots; Rift allocates the same Q1/Q2 snapshot arrays and Q2
+  `Snapshot` objects in a run-lifetime snapshot region.
+- Preserve the existing writer-based output path and the same changed-output
+  logic.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile
+
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-region-snapshots-sample \
+  zsh bench/debs2015/run_both_sample_matrix.sh
+
+for i in 1 2 3; do
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-region-snapshots-median-100000/run-${i} \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+
+for i in 1 2 3; do
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-region-snapshots-median-1000000/run-${i} \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+```
+
+Compile, sample RunBoth, 100k medians, and 1M medians all matched heap/Rift
+outputs after stripping only the measured latency column.
+
+### Region Snapshot 100k 3-Run Median
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Rift alloc objects | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 829.612 | 18.383 | 133.139 | 53.505 | 406.670 | 50.021 | 0.000 | 0 | 184107008 |
+| Rift HPZone | 811.389 | 18.242 | 129.597 | 54.135 | 393.350 | 46.312 | 1.615 | 608409 | 44613632 |
+| Rift Streaming | 815.476 | 20.286 | 130.665 | 57.026 | 393.740 | 46.427 | 1.604 | 608409 | 44597248 |
+
+### Region Snapshot 1M 3-Run Median
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Rift alloc objects | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 8983.464 | 290.712 | 1253.609 | 288.575 | 5393.901 | 323.657 | 0.000 | 0 | 431652864 |
+| Rift HPZone | 8815.087 | 292.155 | 1209.080 | 289.984 | 5221.554 | 337.780 | 10.053 | 5561840 | 119865344 |
+| Rift Streaming | 8836.488 | 296.305 | 1216.835 | 290.024 | 5233.309 | 349.659 | 10.061 | 5561840 | 119898112 |
+
+Interpretation:
+
+- This is a valid allocation-placement checkpoint, not a headline performance
+  win. It moves Q1/Q2 previous-output snapshots into a run-lifetime region in
+  Rift modes while keeping the heap and Rift logical output path shared.
+- GC time is not materially better at 1M; it is slightly higher in the Rift
+  medians. This confirms that output snapshots are not the dominant remaining
+  GC source.
+- Peak Rift RSS rises versus the Q1 indexed-ranking checkpoint because the
+  snapshots now remain in the run-lifetime snapshot region until close. That is
+  expected for this lifetime shape.
+- Q2 processing remains the main bottleneck. The next useful work is still Q2
+  median/rank maintenance or a safe region-backed collection/control API, not
+  further output snapshot tuning.

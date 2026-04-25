@@ -55,11 +55,11 @@ Current reliable evidence:
   win. Current phase timers show Q2 processing is the dominant measured phase.
   With the reusable ranking/result-array backend, Q2 bounded cell tables, Q1
   primitive route table, Q1 indexed ranking, Q2 latest-empty taxi table, Q2
-  array-backed ranking index, and Q2 taxi-id table, Rift region-operation time
-  is again a small
+  array-backed ranking index, Q2 taxi-id table, and RunBoth output snapshots,
+  Rift region-operation time is again a small
   share of total elapsed time. The latest 1M 3-run median has heap at
-  `9746.536 ms`, HPZone at `9441.064 ms`, and Streaming at `9442.026 ms`;
-  Streaming GC is `306.311 ms` versus heap `312.151 ms`, with much lower Rift
+  `8983.464 ms`, HPZone at `8815.087 ms`, and Streaming at `8836.488 ms`;
+  GC time is roughly flat rather than materially improved, with much lower Rift
   RSS on the bounded sample. SafeZone/Commix/full-scale comparisons and safe
   API boundaries remain open.
 - The raw-array pipeline is a surrogate and must not be presented as a
@@ -342,16 +342,20 @@ For DEBS 2015:
   run-lifetime ranking/control region. Region entries store primitive hashes
   and byte arrays rather than heap `String` references, because HPZone memory
   is not scanned by the GC in v1.
+- RunBoth previous-output snapshots now have a heap/Rift allocation-placement
+  split. Heap mode allocates Q1/Q2 snapshot arrays with `new`; Rift modes
+  allocate the same arrays and Q2 `Snapshot` objects in a run-lifetime snapshot
+  region. This is a placement checkpoint, not a dominant bottleneck fix.
 - Q2 still leaves latency arrays on the GC heap.
 
 Therefore current DEBS exercises more of the region-heavy application design,
-but it is still not Phase 5 success. The newest 1M 3-run median with the Q1
-indexed-ranking step has HPZone at `9441.064 ms` and Streaming at
-`9442.026 ms` versus heap at `9746.536 ms`. Rift operation time remains about
-`10-11 ms`; Streaming GC is `306.311 ms` versus heap `312.151 ms`, while HPZone
-GC is slightly higher at `320.025 ms`. Rift modes reduce peak RSS from
-`431669248` bytes to about `108-109 MB` on the bounded sample. Q2 still remains
-the dominant phase, and the evidence is still bounded-sample. The remaining
+but it is still not Phase 5 success. The newest 1M 3-run median with
+region-backed output snapshots has HPZone at `8815.087 ms` and Streaming at
+`8836.488 ms` versus heap at `8983.464 ms`. Rift operation time remains about
+`10 ms`, but GC time is not materially better: heap is `290.712 ms`, HPZone is
+`292.155 ms`, and Streaming is `296.305 ms`. Rift modes reduce peak RSS from
+`431652864` bytes to about `120 MB` on the bounded sample. Q2 still remains the
+dominant phase, and the evidence is still bounded-sample. The remaining
 pressure is in latency arrays, broader collection state, SafeZone/Commix/full-scale
 comparisons, and the need for safe region-backed collections/control structures
 that preserve the heap logical program.
@@ -429,6 +433,9 @@ DEBS status:
 | 1M after Q1 indexed ranking, elapsed | 9746.536 ms | 9441.064 ms | 9442.026 ms | 3-run median, bounded sample |
 | 1M after Q1 indexed ranking, GC time | 312.151 ms | 320.025 ms | 306.311 ms | 3-run median, bounded sample |
 | 1M after Q1 indexed ranking, peak RSS bytes | 431669248 | 108445696 | 108969984 | 3-run median, bounded sample |
+| 1M after output snapshots, elapsed | 8983.464 ms | 8815.087 ms | 8836.488 ms | 3-run median, bounded sample |
+| 1M after output snapshots, GC time | 290.712 ms | 292.155 ms | 296.305 ms | 3-run median, bounded sample |
+| 1M after output snapshots, peak RSS bytes | 431652864 | 119865344 | 119898112 | 3-run median, bounded sample |
 
 Interpretation:
 
@@ -450,8 +457,9 @@ Interpretation:
   uses a shared byte-backed table whose table, entries, and copied taxi-id bytes
   are region-backed in Rift modes. Q1 ranking now uses a shared indexed heap
   whose arrays and ordinary Scala ranking objects are region-backed in Rift
-  modes. Latency arrays remain heap metadata. Primitive packed keys are used in
-  the shared logic to avoid accidental heap objects in the hot path.
+  modes. RunBoth output snapshots are also region-backed in Rift modes. Latency
+  arrays remain heap metadata. Primitive packed keys are used in the shared
+  logic to avoid accidental heap objects in the hot path.
 
 ## 11. Formal Model
 

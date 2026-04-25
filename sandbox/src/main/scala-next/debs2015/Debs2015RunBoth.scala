@@ -181,6 +181,8 @@ object Debs2015RunBothRunner {
     val q1 = Debs2015Q1Runner.createEngine(q1Mode)
     val q2 = Debs2015Q2Runner.createEngine(q1Mode)
     val source = new CsvLineReader(inputPath, q1Mode)
+    val snapshotRegion =
+      if (usesRift) RiftRegion.open(regionKindForMode(q1Mode)) else null
     val q1Writer = new BufferedWriter(new FileWriter(q1OutputPath))
     val q2Writer = new BufferedWriter(new FileWriter(q2OutputPath))
     val q1Latencies = new mutable.ArrayBuffer[Long](1024)
@@ -235,7 +237,7 @@ object Debs2015RunBothRunner {
               q1Latencies += delayMillis
               Debs2015Counters.recordQ1LatencyAppend()
               q1Outputs += 1L
-              previousQ1 = Q1Output.snapshot(q1Current)
+              previousQ1 = Q1Output.snapshot(q1Current, snapshotRegion)
               q1OutputNanos += System.nanoTime() - q1OutputStarted
             }
 
@@ -252,7 +254,7 @@ object Debs2015RunBothRunner {
               q2Latencies += delayMillis
               Debs2015Counters.recordQ2LatencyAppend()
               q2Outputs += 1L
-              previousQ2 = Q2Output.snapshot(q2Current)
+              previousQ2 = Q2Output.snapshot(q2Current, snapshotRegion)
               q2OutputNanos += System.nanoTime() - q2OutputStarted
             }
         } else {
@@ -266,6 +268,7 @@ object Debs2015RunBothRunner {
       source.close()
       q2.close()
       q1.close()
+      if (snapshotRegion != null) snapshotRegion.close()
       closeNanos = System.nanoTime() - closeStarted
       runtimeEnd = RuntimeMetrics.capture(usesRift)
       if (usesRift) RiftRegion.shutdown()
@@ -293,6 +296,12 @@ object Debs2015RunBothRunner {
       counters = Debs2015Counters.snapshot().since(counterStart)
     )
   }
+
+  private def regionKindForMode(mode: String): Int =
+    mode match {
+      case "rift-streaming" => RiftRegion.Streaming
+      case _                => RiftRegion.HPZone
+    }
 
   private def percentile(sorted: Array[Long], fraction: Double): Long = {
     if (sorted.isEmpty) 0L

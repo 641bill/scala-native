@@ -2,6 +2,10 @@ package debs2015
 
 import java.io.Writer
 
+import scala.language.experimental.captureChecking
+
+import scala.scalanative.memory.RiftRegion
+
 object Q2Output {
   final class Snapshot(
       val cellKeys: Array[Int],
@@ -47,12 +51,15 @@ object Q2Output {
     }
   }
 
-  def snapshot(ranking: Array[ProfitableArea]): Snapshot = {
+  def snapshot(ranking: Array[ProfitableArea]): Snapshot =
+    snapshot(ranking, null)
+
+  def snapshot(ranking: Array[ProfitableArea], region: RiftRegion): Snapshot = {
     Debs2015Counters.recordQ2Snapshot(ranking.length)
-    val cellKeys = new Array[Int](ranking.length)
-    val emptyTaxis = new Array[Int](ranking.length)
-    val medianProfits = new Array[Double](ranking.length)
-    val profitabilities = new Array[Double](ranking.length)
+    val cellKeys = allocateIntArray(ranking.length, region)
+    val emptyTaxis = allocateIntArray(ranking.length, region)
+    val medianProfits = allocateDoubleArray(ranking.length, region)
+    val profitabilities = allocateDoubleArray(ranking.length, region)
     var i = 0
     while (i < ranking.length) {
       val area = ranking(i)
@@ -62,8 +69,19 @@ object Q2Output {
       profitabilities(i) = area.profitability
       i += 1
     }
-    new Snapshot(cellKeys, emptyTaxis, medianProfits, profitabilities)
+    if (region == null)
+      new Snapshot(cellKeys, emptyTaxis, medianProfits, profitabilities)
+    else
+      region.alloc(new Snapshot(cellKeys, emptyTaxis, medianProfits, profitabilities))
   }
+
+  private def allocateIntArray(size: Int, region: RiftRegion): Array[Int] =
+    if (region == null) new Array[Int](size)
+    else region.alloc(new Array[Int](size))
+
+  private def allocateDoubleArray(size: Int, region: RiftRegion): Array[Double] =
+    if (region == null) new Array[Double](size)
+    else region.alloc(new Array[Double](size))
 
   def formatRow(trip: Trip, ranking: Array[ProfitableArea], delayMillis: Long): String = {
     val builder = new StringBuilder(384)

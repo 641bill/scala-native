@@ -35,7 +35,7 @@ Reggio/Verona capabilities.
 | Phase 2: in-tree runtime/compiler path | Partially done | `RiftRuntime.c/h`, `RiftRegion`, plugin lowering, `RiftRegionTest`. | Header/API cleanup, broader tests, commit boundary, stats ABI decision. |
 | Phase 3: runtime-only evaluation | Done enough for current claim | GCBench and ListOfLists medians show Rift wins over heap and improved SafeZone. | Add Commix where relevant; avoid overclaiming pipeline. |
 | Phase 4: topology/layout decomposition | Done enough to move on | `PHASE4_LAYOUT.md`, `PHASE4_TOPOLOGY.md`, `PHASE4_EXIT.md`. | Carry safety finding into Phase 6; chunked layout still not clear Rift win vs improved SafeZone. |
-| Phase 5: application evidence | In progress, not complete | DEBS Q1/Q2 scaffold runs and outputs match on bounded real-data samples; RunBoth uses a shared byte parser and region-backed input buffer; Rift modes now region-allocate Q1/Q2 window entries, Q2 median scratch, ranking objects, reusable top-k result arrays, Q2 bounded cell tables, Q1 primitive route-table arrays, Q1 ranking-index arrays, Q2 latest-empty taxi arrays, Q2 ranking-index arrays, and Q2 taxi-id table entries/bytes. The current 1M 3-run median after the Q1 indexed-ranking step is heap `9746.536 ms`, HPZone `9441.064 ms`, and Streaming `9442.026 ms`, with Streaming GC `306.311 ms` vs heap `312.151 ms` and Rift RSS around `108-109 MB`. | Latency arrays, SafeZone/Commix modes, full-month scale, safe API boundaries, Q2 median/rank bottleneck. |
+| Phase 5: application evidence | In progress, not complete | DEBS Q1/Q2 scaffold runs and outputs match on bounded real-data samples; RunBoth uses a shared byte parser and region-backed input buffer; Rift modes now region-allocate Q1/Q2 window entries, Q2 median scratch, ranking objects, reusable top-k result arrays, Q2 bounded cell tables, Q1 primitive route-table arrays, Q1 ranking-index arrays, Q2 latest-empty taxi arrays, Q2 ranking-index arrays, Q2 taxi-id table entries/bytes, and RunBoth output snapshots. The current 1M 3-run median after the output-snapshot placement step is heap `8983.464 ms`, HPZone `8815.087 ms`, and Streaming `8836.488 ms`; GC time is not materially improved, and Rift RSS is around `120 MB`. | Latency arrays, SafeZone/Commix modes, full-month scale, safe API boundaries, Q2 median/rank bottleneck. |
 | Phase 6: Broom/parallel-collections API evidence | Open | Only raw-array surrogate and amordo comparison note exist. | Build fair Rift-backed collection/operator API. |
 | Phase 7: capture-checked safe API | Open | Runtime kind constants exist; safety tests not implemented. | Positive/negative capture tests, safe `Scoped`/`Streaming` API, report gaps. |
 | Phase 8: native GC/region integration hardening | Open | Safety bug found for unrooted region-to-GC references. | Decide reject/root/scan strategy; test mixed references. |
@@ -240,8 +240,9 @@ Current limitation:
   references in Rift entries.
 - Q2 still uses heap latency arrays.
 - Returned top-k arrays are cached by exact size and reused. In Rift modes the
-  cached arrays are region-allocated; runners keep only heap primitive snapshots
-  between outputs so region-backed arrays do not escape across `process` calls.
+  cached arrays are region-allocated; RunBoth previous-output snapshots also
+  have a heap/Rift allocation-placement split, with Rift snapshots allocated in
+  a run-lifetime snapshot region.
 - Output formatting now writes directly to `Writer` through shared code and
   avoids hot per-row `StringBuilder.toString` and Q2 `f""` formatting.
 - Q2 median scratch arrays are region-backed in Rift modes and reused with
@@ -330,6 +331,14 @@ Current provisional evidence:
 | 1M 3-run median after Q1 indexed ranking, GC time | 312.151 ms | 320.025 ms | 306.311 ms |
 | 1M 3-run median after Q1 indexed ranking, Rift op time | 0.000 ms | 10.528 ms | 10.094 ms |
 | 1M 3-run median after Q1 indexed ranking, peak RSS | 431669248 | 108445696 | 108969984 |
+| 100k 3-run median after output snapshots, elapsed | 829.612 ms | 811.389 ms | 815.476 ms |
+| 100k 3-run median after output snapshots, GC time | 18.383 ms | 18.242 ms | 20.286 ms |
+| 100k 3-run median after output snapshots, Rift op time | 0.000 ms | 1.615 ms | 1.604 ms |
+| 100k 3-run median after output snapshots, peak RSS | 184107008 | 44613632 | 44597248 |
+| 1M 3-run median after output snapshots, elapsed | 8983.464 ms | 8815.087 ms | 8836.488 ms |
+| 1M 3-run median after output snapshots, GC time | 290.712 ms | 292.155 ms | 296.305 ms |
+| 1M 3-run median after output snapshots, Rift op time | 0.000 ms | 10.053 ms | 10.061 ms |
+| 1M 3-run median after output snapshots, peak RSS | 431652864 | 119865344 | 119898112 |
 
 Immediate next step:
 
@@ -379,6 +388,12 @@ Immediate next step:
   `9442.026 ms`; peak RSS drops from `431669248` bytes to about `108-109 MB`
   in Rift modes. GC time is mixed: Streaming is slightly below heap, HPZone is
   slightly above heap.
+- The output-snapshot placement step moved Q1/Q2 previous-output snapshots into
+  a run-lifetime region in Rift modes while keeping the changed-output logic
+  shared. It is valid placement evidence but not a clean GC-time win: 1M
+  medians are heap `8983.464 ms`, HPZone `8815.087 ms`, and Streaming
+  `8836.488 ms`, with GC roughly flat/slightly higher in Rift and RSS around
+  `120 MB`.
 - Next, continue moving dominant heap control/collection state only where the
   heap and Rift paths remain the same logical program and the lifetime boundary
   is explicit.

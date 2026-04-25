@@ -2,6 +2,10 @@ package debs2015
 
 import java.io.Writer
 
+import scala.language.experimental.captureChecking
+
+import scala.scalanative.memory.RiftRegion
+
 object Q1Output {
   val EmptySnapshot: Array[Long] = Array.emptyLongArray
 
@@ -31,9 +35,14 @@ object Q1Output {
     }
   }
 
-  def snapshot(ranking: Array[RankedRoute]): Array[Long] = {
+  def snapshot(ranking: Array[RankedRoute]): Array[Long] =
+    snapshot(ranking, null)
+
+  def snapshot(ranking: Array[RankedRoute], region: RiftRegion): Array[Long] = {
     Debs2015Counters.recordQ1Snapshot(ranking.length)
-    val result = new Array[Long](ranking.length)
+    val result =
+      if (region == null) new Array[Long](ranking.length)
+      else region.alloc(new Array[Long](ranking.length))
     var i = 0
     while (i < ranking.length) {
       result(i) = routeKey(ranking(i))
