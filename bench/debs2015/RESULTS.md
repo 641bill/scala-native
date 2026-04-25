@@ -1809,3 +1809,62 @@ Interpretation:
 - Q2 processing remains the main bottleneck. The next useful work is still Q2
   median/rank maintenance or a safe region-backed collection/control API, not
   further output snapshot tuning.
+
+## JVM Same-Input GC Probe
+
+Date: 2026-04-25
+
+Purpose:
+
+- Check whether a normal managed JVM automatically spends large time in GC on
+  the same bounded DEBS CSV inputs.
+- Use the same joined/sorted CSV files as RunBoth, but do not claim exact DEBS
+  Q1/Q2 equivalence. This Java probe intentionally measures per-row object
+  churn and bounded 30-minute window retention over the same input.
+- Distinguish "dataset is large" from "live heap is large enough to make GC the
+  bottleneck."
+
+Harness:
+
+- `bench/debs2015/jvm/DebsJvmGcProbe.java`
+- `churn` mode parses each row into JVM objects and drops them immediately.
+- `window` mode keeps a 30-minute object window plus a taxi-id map.
+- GC counters come from `GarbageCollectorMXBean`.
+
+Commands:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+javac -d /tmp/debs-jvm-probe bench/debs2015/jvm/DebsJvmGcProbe.java
+
+java -cp /tmp/debs-jvm-probe DebsJvmGcProbe /tmp/debs2015-month1-1000000.csv churn
+java -cp /tmp/debs-jvm-probe DebsJvmGcProbe /tmp/debs2015-month1-1000000.csv window
+java -Xms64m -Xmx64m -cp /tmp/debs-jvm-probe DebsJvmGcProbe /tmp/debs2015-month1-1000000.csv window
+java -Xms16m -Xmx16m -cp /tmp/debs-jvm-probe DebsJvmGcProbe /tmp/debs2015-month1-1000000.csv window
+java -Xms8m -Xmx8m -cp /tmp/debs-jvm-probe DebsJvmGcProbe /tmp/debs2015-month1-1000000.csv window
+```
+
+Single-run local results:
+
+| Input | JVM heap | Mode | Elapsed ms | GC collections | GC ms | Heap used bytes | Max window | Taxi IDs |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| 100k | default | churn | 128.297 | 1 | 0 | 140941912 | 0 | 0 |
+| 100k | default | window | 148.206 | 1 | 1 | 144665408 | 6473 | 6444 |
+| 1M | default | churn | 558.514 | 8 | 3 | 211152784 | 0 | 0 |
+| 1M | default | window | 532.061 | 8 | 6 | 126348456 | 9301 | 9244 |
+| 1M | 64 MB | churn | 456.300 | 48 | 9 | 7734144 | 0 | 0 |
+| 1M | 64 MB | window | 549.432 | 50 | 34 | 3333200 | 9301 | 9244 |
+| 1M | 16 MB | window | 633.831 | 350 | 119 | 3859088 | 9301 | 9244 |
+| 1M | 8 MB | window | 1864.021 | 1109 | 1322 | 4358976 | 9301 | 9244 |
+
+Interpretation:
+
+- A large input file does not by itself imply large GC time. In this streaming
+  shape, the live set is bounded by the 30-minute window and taxi-id table.
+- With the default JVM heap, even object-heavy parsing over 1M rows reports only
+  a few milliseconds of GC. This matches the Scala Native DEBS observation that
+  parsing/output/median CPU can dominate while GC remains secondary.
+- GC becomes the bottleneck when heap headroom is constrained. At `-Xmx8m`, the
+  same 1M window probe spends `1322 ms` in GC out of `1864 ms` elapsed.
+- This is a probe, not a full JVM DEBS baseline. A fair JVM Q1/Q2 comparison
+  would need the same query logic ported or generated for the JVM.
