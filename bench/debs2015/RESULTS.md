@@ -1998,3 +1998,92 @@ Interpretation:
 - Q2 rank fixes remain about `3.25M` at 1M. The next measured Q2 target should
   be rank-maintenance cost and output-phase variance, not reintroducing
   per-event scratch regions.
+
+## JVM RunBoth Cross-check
+
+Date: 2026-04-25
+
+Purpose:
+
+- Replace the earlier same-input JVM probe with a fairer JVM cross-check that
+  runs the same logical RunBoth shape: byte-buffer CSV input, Q1 route ranking,
+  Q2 profitability ranking, changed-output snapshots, and Q1/Q2 output files.
+- Preserve the key comparison caveat: this is a Java/JVM port, not the same
+  Scala source compiled by both backends. Elapsed JVM-vs-Scala-Native numbers
+  include JIT/backend/code-shape differences. The GC counters are the main
+  reason for this check.
+
+Harness:
+
+- `bench/debs2015/jvm/DebsJvmRunBoth.java`
+- GC counters come from `GarbageCollectorMXBean`.
+
+Commands:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift-jvm-comparison
+javac -d /tmp/debs-jvm-runboth bench/debs2015/jvm/DebsJvmRunBoth.java
+
+java -cp /tmp/debs-jvm-runboth DebsJvmRunBoth \
+  bench/debs2015/sample_both.csv \
+  /tmp/debs-jvm-runboth-sample/q1.out \
+  /tmp/debs-jvm-runboth-sample/q2.out
+
+java -cp /tmp/debs-jvm-runboth DebsJvmRunBoth \
+  /tmp/debs2015-month1-100000.csv \
+  /tmp/debs-jvm-runboth-100000/q1.out \
+  /tmp/debs-jvm-runboth-100000/q2.out
+
+java -cp /tmp/debs-jvm-runboth DebsJvmRunBoth \
+  /tmp/debs2015-month1-1000000.csv \
+  /tmp/debs-jvm-runboth-1000000/q1.out \
+  /tmp/debs-jvm-runboth-1000000/q2.out
+
+java -Xms64m -Xmx64m -cp /tmp/debs-jvm-runboth DebsJvmRunBoth \
+  /tmp/debs2015-month1-1000000.csv \
+  /tmp/debs-jvm-runboth-1000000-xmx64m/q1.out \
+  /tmp/debs-jvm-runboth-1000000-xmx64m/q2.out
+
+java -Xms32m -Xmx32m -cp /tmp/debs-jvm-runboth DebsJvmRunBoth \
+  /tmp/debs2015-month1-1000000.csv \
+  /tmp/debs-jvm-runboth-1000000-xmx32m/q1.out \
+  /tmp/debs-jvm-runboth-1000000-xmx32m/q2.out
+```
+
+Correctness checks:
+
+- Sample output matched native heap after stripping only the measured latency
+  column.
+- 100k output matched native heap after stripping only the measured latency
+  column: Q1 `5942` rows, Q2 `3246` rows.
+- 1M output matched native heap after stripping only the measured latency
+  column: Q1 `32209` rows, Q2 `24969` rows.
+
+Single-run local results:
+
+| Input | Runtime / heap | Elapsed ms | GC collections | GC ms | Q1 process ms | Q2 process ms | Q1 output ms | Q2 output ms | Heap used bytes |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| sample | JVM default | 6.833 | 0 | 0 | 0.265 | 1.296 | 0.041 | 0.072 | 30411856 |
+| 100k | JVM default | 243.645 | 0 | 0 | 44.061 | 101.694 | 13.743 | 10.802 | 67111936 |
+| 100k | Scala Native heap | 1065.696 | 5 | 23.101 | 181.112 | 508.613 | 64.913 | 77.647 | n/a |
+| 1M | JVM default | 1525.857 | 2 | 2 | 422.430 | 662.385 | 40.016 | 49.174 | 55945184 |
+| 1M | JVM 64 MB | 1420.590 | 8 | 5 | 301.610 | 666.697 | 43.272 | 58.998 | 39230656 |
+| 1M | JVM 32 MB | 1511.132 | 84 | 28 | 424.841 | 639.594 | 40.880 | 47.755 | 26273800 |
+| 1M | JVM 16 MB | failed | n/a | n/a | n/a | n/a | n/a | n/a | `OutOfMemoryError` during Q2 engine initialization |
+| 1M | Scala Native heap | 10361.643 | 15 | 340.698 | 1588.808 | 6193.386 | 341.279 | 360.115 | n/a |
+
+Interpretation:
+
+- The earlier Java numbers were fast because they were only a same-input GC
+  probe, not full DEBS RunBoth. This cross-check includes Q1/Q2 ranking and
+  output and therefore is a better control.
+- The JVM still spends little time in GC on the full 1M RunBoth workload unless
+  heap headroom is constrained. At 32 MB, GC rises to `28 ms`; at 16 MB the
+  current full harness cannot initialize Q2's fixed arrays.
+- The JVM elapsed time is much lower than Scala Native heap in this local
+  single-run comparison, but that is not a Rift-vs-GC result. It reflects
+  backend/JIT and Java-port differences as well as memory management.
+- For Rift, this reinforces the current DEBS finding: the remaining bottleneck
+  is mostly Q2 processing and output/formatting CPU, not GC alone. Region work
+  still matters for footprint and bounded-lifetime placement, but DEBS is not
+  currently a benchmark where GC tracing time dominates under roomy heaps.
