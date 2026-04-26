@@ -39,6 +39,9 @@ object YakRegionConfig {
   val vertices: Int = envInt("YAK_VERTICES", 100000)
   val messagesPerEpoch: Int = envInt("YAK_MESSAGES_PER_EPOCH", 100000)
   val sortRecordsPerEpoch: Int = envInt("YAK_SORT_RECORDS_PER_EPOCH", 20000)
+  val graphChiSubintervals: Int = envInt("YAK_GRAPHCHI_SUBINTERVALS", 16)
+  val graphChiEdgesPerSubinterval: Int =
+    envInt("YAK_GRAPHCHI_EDGES_PER_SUBINTERVAL", 5000)
   val escapeModulo: Int = envInt("YAK_ESCAPE_MODULO", 1000)
   val scratchSlots: Int = envInt("YAK_SCRATCH_SLOTS", 128)
   val benchmarkRuns: Int = envInt("YAK_BENCHMARK_RUNS", 3)
@@ -71,6 +74,13 @@ object YakRegionMatrixHelpers {
       val weight: Int,
       val keep: Boolean,
       val next: WordRecord
+  )
+
+  private final class EdgeUpdate(
+      val src: Int,
+      val dst: Int,
+      val delta: Int,
+      val next: EdgeUpdate
   )
 
   private final class PromoChild(
@@ -120,6 +130,14 @@ object YakRegionMatrixHelpers {
         next: WordRecord
     ): WordRecord =
       epoch.alloc(new WordRecord(key, weight, keep, next))
+
+    def allocEdgeUpdate(
+        src: Int,
+        dst: Int,
+        delta: Int,
+        next: EdgeUpdate
+    ): EdgeUpdate =
+      epoch.alloc(new EdgeUpdate(src, dst, delta, next))
 
     def allocPromoChild(marker: Int, weight: Int): PromoChild =
       epoch.alloc(new PromoChild(marker, weight))
@@ -292,6 +310,17 @@ object YakRegionMatrixHelpers {
       if (runtimeSafe) runtimeEpoch.allocWordRecord(key, weight, keep, next)
       else if (usesRift) region.alloc(new WordRecord(key, weight, keep, next))
       else new WordRecord(key, weight, keep, next)
+
+    def allocEdgeUpdate(
+        region: RiftRegion,
+        src: Int,
+        dst: Int,
+        delta: Int,
+        next: EdgeUpdate
+    ): EdgeUpdate =
+      if (runtimeSafe) runtimeEpoch.allocEdgeUpdate(src, dst, delta, next)
+      else if (usesRift) region.alloc(new EdgeUpdate(src, dst, delta, next))
+      else new EdgeUpdate(src, dst, delta, next)
 
     def allocPromoChild(
         region: RiftRegion,
@@ -527,6 +556,63 @@ object YakRegionMatrixHelpers {
       }
     } finally mode.finish()
     val checksum = checksumLongs(globalCounts) ^ topChecksum
+    checksumSink = checksum
+    checksum
+  }
+
+  def runHeapOrRiftGraphChi(modeName: String): Long = {
+    val cfg = YakRegionConfig
+    val mode = new ModeState(modeName)
+    val values = new Array[Long](cfg.vertices)
+    var vertex = 0
+    while (vertex < values.length) {
+      values(vertex) = mix(vertex + 71).toLong & 0xffffL
+      vertex += 1
+    }
+
+    var epoch = 0
+    try {
+      while (epoch < cfg.epochs) {
+        var subinterval = 0
+        while (subinterval < cfg.graphChiSubintervals) {
+          val region = mode.beginEpoch()
+          val start =
+            ((subinterval.toLong * cfg.vertices.toLong) /
+              cfg.graphChiSubintervals.toLong).toInt
+          val end =
+            (((subinterval + 1).toLong * cfg.vertices.toLong) /
+              cfg.graphChiSubintervals.toLong).toInt
+          val width = math.max(1, end - start)
+
+          var updates: EdgeUpdate = null
+          var edge = 0
+          while (edge < cfg.graphChiEdgesPerSubinterval) {
+            val seed =
+              mix(epoch * 1000003 + subinterval * 9176 + edge * 37)
+            val src = mix(seed + 11) % cfg.vertices
+            val dst = start + (mix(seed + 23) % width)
+            val delta = (mix(seed + epoch + subinterval) & 31) - 15
+            updates = mode.allocEdgeUpdate(region, src, dst, delta, updates)
+            edge += 1
+          }
+
+          var current = updates
+          while (current != null) {
+            val contribution =
+              (values(current.src) + current.delta.toLong + subinterval) &
+                0xffL
+            values(current.dst) =
+              (values(current.dst) + contribution) & 0xffffffffL
+            current = current.next
+          }
+
+          mode.endEpoch(region)
+          subinterval += 1
+        }
+        epoch += 1
+      }
+    } finally mode.finish()
+    val checksum = checksumLongs(values)
     checksumSink = checksum
     checksum
   }
@@ -877,6 +963,71 @@ object YakRegionMatrixHelpers {
     checksum
   }
 
+  def runSafeZoneGraphChi(): Long = {
+    val cfg = YakRegionConfig
+    val values = new Array[Long](cfg.vertices)
+    var vertex = 0
+    while (vertex < values.length) {
+      values(vertex) = mix(vertex + 71).toLong & 0xffffL
+      vertex += 1
+    }
+
+    var epoch = 0
+    while (epoch < cfg.epochs) {
+      val currentEpoch = epoch
+      var subinterval = 0
+      while (subinterval < cfg.graphChiSubintervals) {
+        val currentSubinterval = subinterval
+        SafeZone { sz ?=>
+          final class SZEdgeUpdate(
+              val src: Int,
+              val dst: Int,
+              val delta: Int,
+              val next: SZEdgeUpdate^{sz}
+          )
+
+          val start =
+            ((currentSubinterval.toLong * cfg.vertices.toLong) /
+              cfg.graphChiSubintervals.toLong).toInt
+          val end =
+            (((currentSubinterval + 1).toLong * cfg.vertices.toLong) /
+              cfg.graphChiSubintervals.toLong).toInt
+          val width = math.max(1, end - start)
+
+          var updates: SZEdgeUpdate^{sz} = null
+          var edge = 0
+          while (edge < cfg.graphChiEdgesPerSubinterval) {
+            val seed =
+              mix(currentEpoch * 1000003 + currentSubinterval * 9176 + edge * 37)
+            val src = mix(seed + 11) % cfg.vertices
+            val dst = start + (mix(seed + 23) % width)
+            val delta = (mix(seed + currentEpoch + currentSubinterval) & 31) - 15
+            updates = SafeZoneAllocator.allocate(
+              sz,
+              new SZEdgeUpdate(src, dst, delta, updates)
+            )
+            edge += 1
+          }
+
+          var current = updates
+          while (current != null) {
+            val contribution =
+              (values(current.src) + current.delta.toLong + currentSubinterval) &
+                0xffL
+            values(current.dst) =
+              (values(current.dst) + contribution) & 0xffffffffL
+            current = current.next
+          }
+        }
+        subinterval += 1
+      }
+      epoch += 1
+    }
+    val checksum = checksumLongs(values)
+    checksumSink = checksum
+    checksum
+  }
+
   private def medianDouble(values: Array[Double]): Double = {
     val sorted = values.clone()
     scala.util.Sorting.quickSort(sorted)
@@ -913,6 +1064,11 @@ object YakRegionMatrixHelpers {
           if (mode == "safezone") runSafeZoneTopWord()
           else runHeapOrRiftTopWord(mode)
         new WorkloadResult(checksum, 0L, 0L, 0L)
+      case "graphchi" =>
+        val checksum =
+          if (mode == "safezone") runSafeZoneGraphChi()
+          else runHeapOrRiftGraphChi(mode)
+        new WorkloadResult(checksum, 0L, 0L, 0L)
       case "promotion" =>
         if (mode == "safezone")
           throw new IllegalArgumentException(
@@ -921,7 +1077,7 @@ object YakRegionMatrixHelpers {
         else runHeapOrRuntimePromotion(mode)
       case other =>
         throw new IllegalArgumentException(
-          s"unknown Yak workload '$other'; expected wordcount, graphstep, sort, topword, or promotion"
+          s"unknown Yak workload '$other'; expected wordcount, graphstep, sort, topword, graphchi, or promotion"
         )
     }
 
@@ -932,6 +1088,9 @@ object YakRegionMatrixHelpers {
       case "graphstep" => cfg.epochs.toLong * cfg.messagesPerEpoch.toLong
       case "sort" => cfg.epochs.toLong * cfg.sortRecordsPerEpoch.toLong
       case "topword" => cfg.epochs.toLong * cfg.recordsPerEpoch.toLong
+      case "graphchi" =>
+        cfg.epochs.toLong * cfg.graphChiSubintervals.toLong *
+          cfg.graphChiEdgesPerSubinterval.toLong
       case "promotion" => cfg.epochs.toLong * cfg.recordsPerEpoch.toLong * 2L
       case _           => 0L
     }
@@ -944,6 +1103,7 @@ object YakRegionMatrixHelpers {
       case "graphstep" => cfg.vertices.toLong
       case "sort"      => cfg.keySpace.toLong
       case "topword"   => cfg.keySpace.toLong * 3L
+      case "graphchi"  => cfg.vertices.toLong
       case "promotion" => cfg.keySpace.toLong + cfg.scratchSlots.toLong
       case _           => 0L
     }
@@ -1044,7 +1204,7 @@ object YakRegionMatrixHelpers {
     val cfg = YakRegionConfig
     val rootsMode = sys.env.getOrElse("SAFEZONE_ROOTS_MODE", "0")
     println(
-      s"CONFIG mode=$mode workload=$workload runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} epochs=${cfg.epochs} records_per_epoch=${cfg.recordsPerEpoch} key_space=${cfg.keySpace} vertices=${cfg.vertices} messages_per_epoch=${cfg.messagesPerEpoch} sort_records_per_epoch=${cfg.sortRecordsPerEpoch} escape_modulo=${cfg.escapeModulo} scratch_slots=${cfg.scratchSlots} safezone_roots_mode=$rootsMode"
+      s"CONFIG mode=$mode workload=$workload runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} epochs=${cfg.epochs} records_per_epoch=${cfg.recordsPerEpoch} key_space=${cfg.keySpace} vertices=${cfg.vertices} messages_per_epoch=${cfg.messagesPerEpoch} sort_records_per_epoch=${cfg.sortRecordsPerEpoch} graphchi_subintervals=${cfg.graphChiSubintervals} graphchi_edges_per_subinterval=${cfg.graphChiEdgesPerSubinterval} escape_modulo=${cfg.escapeModulo} scratch_slots=${cfg.scratchSlots} safezone_roots_mode=$rootsMode"
     )
   }
 
@@ -1076,11 +1236,13 @@ object YakRegionMatrixHelpers {
         YakRegionMatrixHelpers.runBenchmark(mode, "graphstep")
         YakRegionMatrixHelpers.runBenchmark(mode, "sort")
         YakRegionMatrixHelpers.runBenchmark(mode, "topword")
-      case "wordcount" | "graphstep" | "sort" | "topword" | "promotion" =>
+        YakRegionMatrixHelpers.runBenchmark(mode, "graphchi")
+      case "wordcount" | "graphstep" | "sort" | "topword" | "graphchi" |
+          "promotion" =>
         YakRegionMatrixHelpers.runBenchmark(mode, workload)
       case other =>
         throw new IllegalArgumentException(
-          s"unknown Yak workload '$other'; expected wordcount, graphstep, sort, topword, promotion, or all"
+          s"unknown Yak workload '$other'; expected wordcount, graphstep, sort, topword, graphchi, promotion, or all"
         )
     }
   } finally {

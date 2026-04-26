@@ -2,7 +2,8 @@
 
 Status: Yak-style methodology reproduction harness with validated smoke,
 default median, pressure median, external-sort-shaped median, top-word/filter
-median, runtime-safety proxy, and promotion/escape proxy runs.
+median, GraphChi-style subinterval median, runtime-safety proxy, and
+promotion/escape proxy runs.
 
 The harness is implemented in
 `sandbox/src/main/scala-next/YakRegionMatrix.scala` and run with
@@ -32,6 +33,10 @@ The current local workloads are:
   heap counters and reusable combiner arrays remain control state; each epoch
   allocates ordinary word records, filters them, combines counts, and records
   the top word for the task.
+- `graphchi`: GraphChi-like subinterval update shape. Durable vertex values
+  stay on the heap; each subinterval allocates ordinary edge-update objects,
+  applies them to the current vertex interval, and releases the subinterval
+  region.
 - `promotion`: durable heap counters plus rare retained data objects. Region
   escape handling is routed through `RiftRegion.RuntimeEpoch`, which owns
   barrier checks, remembered-reference counts, and promoted-object counts.
@@ -58,13 +63,15 @@ or a distributed runtime.
 | `YAK_VERTICES` | `100000` |
 | `YAK_MESSAGES_PER_EPOCH` | `100000` |
 | `YAK_SORT_RECORDS_PER_EPOCH` | `20000` |
+| `YAK_GRAPHCHI_SUBINTERVALS` | `16` |
+| `YAK_GRAPHCHI_EDGES_PER_SUBINTERVAL` | `5000` |
 | `YAK_ESCAPE_MODULO` | `1000` |
 | `YAK_SCRATCH_SLOTS` | `128` |
 | `YAK_WARMUPS` | `1` |
 | `YAK_BENCHMARK_RUNS` | `3` |
 
-Use `YAK_WORKLOAD=wordcount`, `graphstep`, `sort`, `topword`, `promotion`, or
-`all`.
+Use `YAK_WORKLOAD=wordcount`, `graphstep`, `sort`, `topword`, `graphchi`,
+`promotion`, or `all`.
 
 ## Commands
 
@@ -95,10 +102,10 @@ YAK_OUTPUT_DIR=/tmp/yak-region-instrumented \
 
 ## Result Status
 
-Compile, smoke, default local medians, epoch-pressure runs, grouped-sort and
-top-word/filter pressure runs, runtime-proxy runs, and a promotion/escape proxy
-pressure run have been recorded. These are local Yak-style methodology numbers,
-not an exact Yak artifact reproduction.
+Compile, smoke, default local medians, epoch-pressure runs, grouped-sort,
+top-word/filter, and GraphChi-style pressure runs, runtime-proxy runs, and a
+promotion/escape proxy pressure run have been recorded. These are local
+Yak-style methodology numbers, not an exact Yak artifact reproduction.
 
 Validation commands run on 2026-04-25 and 2026-04-26:
 
@@ -127,6 +134,12 @@ YAK_OUTPUT_DIR=/tmp/yak-sort-pressure \
 YAK_BUILD=0 YAK_WORKLOAD=topword YAK_BENCHMARK_RUNS=3 YAK_WARMUPS=1 \
 YAK_EPOCHS=40 YAK_RECORDS_PER_EPOCH=250000 \
 YAK_OUTPUT_DIR=/tmp/yak-topword-pressure \
+  zsh sandbox/run_yak_region_instrumented_matrix.sh
+
+YAK_BUILD=0 YAK_WORKLOAD=graphchi YAK_BENCHMARK_RUNS=3 YAK_WARMUPS=1 \
+YAK_EPOCHS=40 YAK_GRAPHCHI_SUBINTERVALS=16 \
+YAK_GRAPHCHI_EDGES_PER_SUBINTERVAL=15625 \
+YAK_OUTPUT_DIR=/tmp/yak-graphchi-pressure \
   zsh sandbox/run_yak_region_instrumented_matrix.sh
 
 YAK_BUILD=0 YAK_WORKLOAD=promotion YAK_BENCHMARK_RUNS=3 YAK_WARMUPS=1 \
@@ -166,8 +179,8 @@ Configuration:
 
 Interpretation:
 
-- This table predates adding the `sort` and `topword` workloads to `all`; it
-  covers `wordcount` and `graphstep`.
+- This table predates adding the `sort`, `topword`, and `graphchi` workloads
+  to `all`; it covers `wordcount` and `graphstep`.
 - This reproduces the Yak control/data split locally: durable counters or vertex
   state remain on heap, while two million epoch-local data objects are allocated
   per workload.
@@ -262,6 +275,52 @@ Interpretation:
   `3.1%` in this local median, while removing `44.949 ms` of measured heap GC.
 - Rift operation time stays low at about `0.4 ms` for ten million region
   objects. `yak-runtime` still costs more than raw Rift Streaming.
+
+## GraphChi-Style Subinterval Median
+
+Date: 2026-04-26
+
+Configuration:
+
+- `YAK_EPOCHS=40`
+- `YAK_GRAPHCHI_SUBINTERVALS=16`
+- `YAK_GRAPHCHI_EDGES_PER_SUBINTERVAL=15625`
+- `YAK_VERTICES=100000`
+- `YAK_BENCHMARK_RUNS=3`
+- `YAK_WARMUPS=1`
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+YAK_BUILD=0 YAK_WORKLOAD=graphchi YAK_BENCHMARK_RUNS=3 YAK_WARMUPS=1 \
+YAK_EPOCHS=40 YAK_GRAPHCHI_SUBINTERVALS=16 \
+YAK_GRAPHCHI_EDGES_PER_SUBINTERVAL=15625 \
+YAK_OUTPUT_DIR=/tmp/yak-graphchi-pressure \
+  zsh sandbox/run_yak_region_instrumented_matrix.sh
+```
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Rift objects | Opens/closes/resets | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|
+| heap | 302.599 | 58.498 | 0.000 | 0 | 0 / 0 / 0 | 12468224 |
+| current SafeZone | 232.621 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 13008896 |
+| improved SafeZone | 228.252 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 12959744 |
+| Rift HPZone | 237.091 | 0.000 | 0.430 | 10000000 | 640 / 640 / 0 | 12943360 |
+| Rift Streaming | 236.388 | 0.000 | 0.400 | 10000000 | 1 / 1 / 639 | 12910592 |
+| Yak-runtime proxy | 270.159 | 0.000 | 0.411 | 10000000 | 1 / 1 / 640 | 12910592 |
+
+Interpretation:
+
+- This is the closest current local model of Yak's GraphChi family: durable
+  vertex state stays on heap, while per-subinterval edge-update objects are
+  region-local.
+- Rift Streaming beats heap by about `21.9%` and removes `58.498 ms` of
+  measured heap GC, but improved SafeZone is still faster (`228.252 ms`).
+- The workload opens/closes or resets 640 subinterval regions. Region operation
+  time remains about `0.4 ms`, so the remaining gap to improved SafeZone is not
+  explained by close/reset accounting alone.
+- This is still not GraphChi/Yak artifact evidence; it is a local methodology
+  probe.
 
 ## Epoch-Pressure 3-Run Median
 
