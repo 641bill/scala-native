@@ -38,6 +38,8 @@ object YakRegionConfig {
   val keySpace: Int = envInt("YAK_KEY_SPACE", 65536)
   val vertices: Int = envInt("YAK_VERTICES", 100000)
   val messagesPerEpoch: Int = envInt("YAK_MESSAGES_PER_EPOCH", 100000)
+  val escapeModulo: Int = envInt("YAK_ESCAPE_MODULO", 1000)
+  val scratchSlots: Int = envInt("YAK_SCRATCH_SLOTS", 128)
   val benchmarkRuns: Int = envInt("YAK_BENCHMARK_RUNS", 3)
   val warmupRuns: Int = envNonNegativeInt("YAK_WARMUPS", 1)
 }
@@ -58,40 +60,64 @@ object YakRegionMatrixHelpers {
       val next: Message
   )
 
+  private final class PromoChild(
+      val marker: Int,
+      val weight: Int
+  )
+
+  private final class PromoToken(
+      val key: Int,
+      val weight: Int,
+      val epoch: Int,
+      val child: PromoChild
+  )
+
+  private final class WorkloadResult(
+      val checksum: Long,
+      val barrierChecks: Long,
+      val rememberedRefs: Long,
+      val promotedObjects: Long
+  )
+
   private final class YakRuntimeEpoch {
-    private var region: RiftRegion = RiftRegion.open(RiftRegion.Streaming)
-    private var closed = false
+    private val epoch = RiftRegion.runtimeEpoch(RiftRegion.Streaming)
 
-    def begin(): RiftRegion = {
-      if (closed)
-        throw new IllegalStateException("Yak runtime epoch is closed")
-      region.reset()
-      region
-    }
+    def begin(): RiftRegion =
+      epoch.begin()
 
-    def end(): Unit = {
-      if (closed)
-        throw new IllegalStateException("Yak runtime epoch is closed")
-    }
+    def end(): Unit =
+      epoch.end()
 
     def close(): Unit =
-      if (!closed) {
-        region.close()
-        region = null
-        closed = true
-      }
+      epoch.close()
 
-    def allocToken(key: Int, weight: Int, next: Token): Token = {
-      if (closed)
-        throw new IllegalStateException("allocation after Yak epoch close")
-      region.alloc(new Token(key, weight, next))
+    def allocToken(key: Int, weight: Int, next: Token): Token =
+      epoch.alloc(new Token(key, weight, next))
+
+    def allocMessage(dst: Int, delta: Int, tag: Int, next: Message): Message =
+      epoch.alloc(new Message(dst, delta, tag, next))
+
+    def allocPromoChild(marker: Int, weight: Int): PromoChild =
+      epoch.alloc(new PromoChild(marker, weight))
+
+    def allocPromoToken(
+        key: Int,
+        weight: Int,
+        epoch: Int,
+        child: PromoChild
+    ): PromoToken = {
+      this.epoch.alloc(new PromoToken(key, weight, epoch, child))
     }
 
-    def allocMessage(dst: Int, delta: Int, tag: Int, next: Message): Message = {
-      if (closed)
-        throw new IllegalStateException("allocation after Yak epoch close")
-      region.alloc(new Message(dst, delta, tag, next))
-    }
+    def controlWriteOrNull(
+        value: PromoToken,
+        retain: Boolean
+    )(using promoter: RiftRegion.RuntimePromoter[PromoToken, PromoToken])
+        : PromoToken =
+      epoch.controlWriteOrNull(value, retain)
+
+    def statsSnapshot(): RiftRegion.RuntimeEpochStats =
+      epoch.statsSnapshot()
   }
 
   final case class RuntimeSample(
@@ -222,7 +248,58 @@ object YakRegionMatrixHelpers {
       if (runtimeSafe) runtimeEpoch.allocMessage(dst, delta, tag, next)
       else if (usesRift) region.alloc(new Message(dst, delta, tag, next))
       else new Message(dst, delta, tag, next)
+
+    def allocPromoChild(
+        region: RiftRegion,
+        marker: Int,
+        weight: Int
+    ): PromoChild =
+      if (runtimeSafe) runtimeEpoch.allocPromoChild(marker, weight)
+      else if (usesRift) region.alloc(new PromoChild(marker, weight))
+      else new PromoChild(marker, weight)
+
+    def allocPromoToken(
+        region: RiftRegion,
+        key: Int,
+        weight: Int,
+        epoch: Int,
+        child: PromoChild
+    ): PromoToken =
+      if (runtimeSafe) runtimeEpoch.allocPromoToken(key, weight, epoch, child)
+      else if (usesRift) region.alloc(new PromoToken(key, weight, epoch, child))
+      else new PromoToken(key, weight, epoch, child)
+
+    def controlWrite(
+        value: PromoToken,
+        retained: Boolean
+    ): PromoToken = {
+      if (runtimeSafe) runtimeEpoch.controlWriteOrNull(value, retained)
+      else if (usesRift && retained)
+        throw new IllegalArgumentException(
+          "escaping Yak promotion data requires yak-runtime; raw Rift modes are static/trusted and do not promote escaping region objects"
+        )
+      else if (usesRift) null
+      else value
+    }
+
+    def promotionStats(): RiftRegion.RuntimeEpochStats =
+      if (runtimeSafe && runtimeEpoch != null) runtimeEpoch.statsSnapshot()
+      else RiftRegion.RuntimeEpochStats(0L, 0L, 0L)
   }
+
+  private given promoTokenPromoter
+      : RiftRegion.RuntimePromoter[PromoToken, PromoToken] =
+    new RiftRegion.RuntimePromoter[PromoToken, PromoToken] {
+      override def promote(value: PromoToken): PromoToken =
+        new PromoToken(
+          value.key,
+          value.weight,
+          value.epoch,
+          new PromoChild(value.child.marker, value.child.weight)
+        )
+
+      override def promotedObjectCount(value: PromoToken): Int = 2
+    }
 
   private def mix(value: Int): Int = {
     var x = value
@@ -272,6 +349,71 @@ object YakRegionMatrixHelpers {
     val checksum = checksumLongs(counts)
     checksumSink = checksum
     checksum
+  }
+
+  private def runHeapOrRuntimePromotion(modeName: String): WorkloadResult = {
+    val cfg = YakRegionConfig
+    val mode = new ModeState(modeName)
+    val counts = new Array[Long](cfg.keySpace)
+    val retainedPerEpoch =
+      ((cfg.recordsPerEpoch - 1).toLong / cfg.escapeModulo.toLong) + 1L
+    val retainedCapacityLong = cfg.epochs.toLong * retainedPerEpoch
+    if (retainedCapacityLong > Int.MaxValue)
+      throw new IllegalArgumentException(
+        s"too many retained Yak promotion records: $retainedCapacityLong"
+      )
+    val retainedCapacity = retainedCapacityLong.toInt
+    val retained = new Array[PromoToken](retainedCapacity)
+    val scratch = new Array[PromoToken](cfg.scratchSlots)
+    var retainedCount = 0
+    var epoch = 0
+    var stats = RiftRegion.RuntimeEpochStats(0L, 0L, 0L)
+    try {
+      while (epoch < cfg.epochs) {
+        val region = mode.beginEpoch()
+        var i = 0
+        while (i < cfg.recordsPerEpoch) {
+          val seed = mix(epoch * 1000003 + i)
+          val key = seed % cfg.keySpace
+          val weight = (mix(seed + 17) & 7) + 1
+          val child =
+            mode.allocPromoChild(region, seed & 0xffff, weight ^ (seed & 3))
+          val token = mode.allocPromoToken(region, key, weight, epoch, child)
+          counts(token.key) +=
+            token.weight.toLong + (token.child.weight.toLong & 1L)
+
+          val shouldRetain = i % cfg.escapeModulo == 0
+          val stored = mode.controlWrite(token, shouldRetain)
+          if (shouldRetain) {
+            retained(retainedCount) = stored
+            retainedCount += 1
+          } else {
+            scratch(i % cfg.scratchSlots) = null
+          }
+          i += 1
+        }
+        mode.endEpoch(region)
+        epoch += 1
+      }
+      stats = mode.promotionStats()
+    } finally mode.finish()
+
+    var checksum = checksumLongs(counts)
+    var i = 0
+    while (i < retainedCount) {
+      val token = retained(i)
+      checksum =
+        (checksum * 16777619L) ^ token.key.toLong ^ token.weight.toLong ^
+          token.epoch.toLong ^ token.child.marker.toLong
+      i += 1
+    }
+    checksumSink = checksum
+    new WorkloadResult(
+      checksum,
+      stats.barrierChecks,
+      stats.rememberedRefs,
+      stats.promotedObjects
+    )
   }
 
   def runHeapOrRiftGraphStep(modeName: String): Long = {
@@ -421,17 +563,27 @@ object YakRegionMatrixHelpers {
     else (sorted(sorted.length / 2 - 1) + sorted(sorted.length / 2)) / 2L
   }
 
-  private def runWorkload(mode: String, workload: String): Long =
+  private def runWorkload(mode: String, workload: String): WorkloadResult =
     workload match {
       case "wordcount" =>
-        if (mode == "safezone") runSafeZoneWordCount()
-        else runHeapOrRiftWordCount(mode)
+        val checksum =
+          if (mode == "safezone") runSafeZoneWordCount()
+          else runHeapOrRiftWordCount(mode)
+        new WorkloadResult(checksum, 0L, 0L, 0L)
       case "graphstep" =>
-        if (mode == "safezone") runSafeZoneGraphStep()
-        else runHeapOrRiftGraphStep(mode)
+        val checksum =
+          if (mode == "safezone") runSafeZoneGraphStep()
+          else runHeapOrRiftGraphStep(mode)
+        new WorkloadResult(checksum, 0L, 0L, 0L)
+      case "promotion" =>
+        if (mode == "safezone")
+          throw new IllegalArgumentException(
+            "Yak promotion workload is not defined for SafeZone; use heap, rift-hp, rift-streaming, or yak-runtime"
+          )
+        else runHeapOrRuntimePromotion(mode)
       case other =>
         throw new IllegalArgumentException(
-          s"unknown Yak workload '$other'; expected wordcount or graphstep"
+          s"unknown Yak workload '$other'; expected wordcount, graphstep, or promotion"
         )
     }
 
@@ -440,6 +592,7 @@ object YakRegionMatrixHelpers {
     workload match {
       case "wordcount" => cfg.epochs.toLong * cfg.recordsPerEpoch.toLong
       case "graphstep" => cfg.epochs.toLong * cfg.messagesPerEpoch.toLong
+      case "promotion" => cfg.epochs.toLong * cfg.recordsPerEpoch.toLong * 2L
       case _           => 0L
     }
   }
@@ -449,6 +602,7 @@ object YakRegionMatrixHelpers {
     workload match {
       case "wordcount" => cfg.keySpace.toLong
       case "graphstep" => cfg.vertices.toLong
+      case "promotion" => cfg.keySpace.toLong + cfg.scratchSlots.toLong
       case _           => 0L
     }
   }
@@ -461,10 +615,10 @@ object YakRegionMatrixHelpers {
 
     var warmup = 0
     while (warmup < cfg.warmupRuns) {
-      val checksum = runWorkload(mode, workload)
-      if (checksum != expected)
+      val result = runWorkload(mode, workload)
+      if (result.checksum != expected.checksum)
         throw new IllegalStateException(
-          s"warmup checksum mismatch workload=$workload mode=$mode expected=$expected actual=$checksum"
+          s"warmup checksum mismatch workload=$workload mode=$mode expected=${expected.checksum} actual=${result.checksum}"
         )
       warmup += 1
     }
@@ -479,20 +633,23 @@ object YakRegionMatrixHelpers {
     val riftOpens = new Array[Long](cfg.benchmarkRuns)
     val riftCloses = new Array[Long](cfg.benchmarkRuns)
     val riftResets = new Array[Long](cfg.benchmarkRuns)
+    val barrierChecks = new Array[Long](cfg.benchmarkRuns)
+    val rememberedRefs = new Array[Long](cfg.benchmarkRuns)
+    val promotedObjects = new Array[Long](cfg.benchmarkRuns)
 
     println(s"Running yak-$workload-$mode for ${cfg.benchmarkRuns} timed runs")
     var run = 0
     while (run < cfg.benchmarkRuns) {
       val startRuntime = RuntimeSample.capture(usesRift)
       val start = System.nanoTime()
-      val checksum = runWorkload(mode, workload)
+      val result = runWorkload(mode, workload)
       val end = System.nanoTime()
       val endRuntime = RuntimeSample.capture(usesRift)
       val runtime = RuntimeSample.since(startRuntime, endRuntime)
 
-      if (checksum != expected)
+      if (result.checksum != expected.checksum)
         throw new IllegalStateException(
-          s"checksum mismatch workload=$workload mode=$mode expected=$expected actual=$checksum"
+          s"checksum mismatch workload=$workload mode=$mode expected=${expected.checksum} actual=${result.checksum}"
         )
 
       elapsedMs(run) = (end - start) / 1000000.0
@@ -503,13 +660,19 @@ object YakRegionMatrixHelpers {
       riftOpens(run) = runtime.riftRegionOpenTotal
       riftCloses(run) = runtime.riftRegionCloseTotal
       riftResets(run) = runtime.riftRegionResetTotal
+      barrierChecks(run) = result.barrierChecks
+      rememberedRefs(run) = result.rememberedRefs
+      promotedObjects(run) = result.promotedObjects
       println(
         f"  run=${run + 1}%d elapsed_ms=${elapsedMs(run)}%.3f " +
           f"gc_collections=${runtime.gcCollections}%d " +
           f"gc_ms=${runtime.gcNanos / 1000000.0}%.3f " +
           f"rift_op_ms=${runtime.riftRegionOpNanos / 1000000.0}%.3f " +
           f"rift_slow_alloc_ms=${runtime.riftSlowAllocNanos / 1000000.0}%.3f " +
-          f"rift_alloc_object_total=${runtime.riftAllocObjectTotal}%d"
+          f"rift_alloc_object_total=${runtime.riftAllocObjectTotal}%d " +
+          f"yak_barrier_checks=${result.barrierChecks}%d " +
+          f"yak_remembered_refs=${result.rememberedRefs}%d " +
+          f"yak_promoted_objects=${result.promotedObjects}%d"
       )
       run += 1
     }
@@ -526,9 +689,12 @@ object YakRegionMatrixHelpers {
         f"median_rift_open_total=${medianLong(riftOpens)}%d " +
         f"median_rift_close_total=${medianLong(riftCloses)}%d " +
         f"median_rift_reset_total=${medianLong(riftResets)}%d " +
+        f"median_yak_barrier_checks=${medianLong(barrierChecks)}%d " +
+        f"median_yak_remembered_refs=${medianLong(rememberedRefs)}%d " +
+        f"median_yak_promoted_objects=${medianLong(promotedObjects)}%d " +
         f"logical_data_objects=$dataObjects%d " +
         f"control_slots=$slots%d " +
-        f"checksum=$expected%d"
+        f"checksum=${expected.checksum}%d"
     )
   }
 
@@ -536,7 +702,7 @@ object YakRegionMatrixHelpers {
     val cfg = YakRegionConfig
     val rootsMode = sys.env.getOrElse("SAFEZONE_ROOTS_MODE", "0")
     println(
-      s"CONFIG mode=$mode workload=$workload runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} epochs=${cfg.epochs} records_per_epoch=${cfg.recordsPerEpoch} key_space=${cfg.keySpace} vertices=${cfg.vertices} messages_per_epoch=${cfg.messagesPerEpoch} safezone_roots_mode=$rootsMode"
+      s"CONFIG mode=$mode workload=$workload runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} epochs=${cfg.epochs} records_per_epoch=${cfg.recordsPerEpoch} key_space=${cfg.keySpace} vertices=${cfg.vertices} messages_per_epoch=${cfg.messagesPerEpoch} escape_modulo=${cfg.escapeModulo} scratch_slots=${cfg.scratchSlots} safezone_roots_mode=$rootsMode"
     )
   }
 
@@ -566,11 +732,11 @@ object YakRegionMatrixHelpers {
       case "all" =>
         YakRegionMatrixHelpers.runBenchmark(mode, "wordcount")
         YakRegionMatrixHelpers.runBenchmark(mode, "graphstep")
-      case "wordcount" | "graphstep" =>
+      case "wordcount" | "graphstep" | "promotion" =>
         YakRegionMatrixHelpers.runBenchmark(mode, workload)
       case other =>
         throw new IllegalArgumentException(
-          s"unknown Yak workload '$other'; expected wordcount, graphstep, or all"
+          s"unknown Yak workload '$other'; expected wordcount, graphstep, promotion, or all"
         )
     }
   } finally {

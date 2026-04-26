@@ -44,7 +44,7 @@ read_max_rss_bytes() {
 }
 
 write_summary_header() {
-  printf "label\tmode\tworkload\tmedian_ms\tmedian_gc_ms\tmedian_rift_op_ms\tmedian_rift_slow_alloc_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tlogical_data_objects\tcontrol_slots\tchecksum\tmax_rss_bytes\n" > "${summary}"
+  printf "label\tmode\tworkload\tmedian_ms\tmedian_gc_ms\tmedian_rift_op_ms\tmedian_rift_slow_alloc_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tmedian_yak_barrier_checks\tmedian_yak_remembered_refs\tmedian_yak_promoted_objects\tlogical_data_objects\tcontrol_slots\tchecksum\tmax_rss_bytes\n" > "${summary}"
 }
 
 write_result_rows() {
@@ -67,7 +67,7 @@ write_result_rows() {
     name=${fields[name]-}
     op=${name#yak-}
     op=${op%-${mode}}
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
       "${label}" \
       "${mode}" \
       "${op}" \
@@ -79,6 +79,9 @@ write_result_rows() {
       "${fields[median_rift_open_total]-}" \
       "${fields[median_rift_close_total]-}" \
       "${fields[median_rift_reset_total]-}" \
+      "${fields[median_yak_barrier_checks]-}" \
+      "${fields[median_yak_remembered_refs]-}" \
+      "${fields[median_yak_promoted_objects]-}" \
       "${fields[logical_data_objects]-}" \
       "${fields[control_slots]-}" \
       "${fields[checksum]-}" \
@@ -90,6 +93,7 @@ run_mode() {
   local label="$1"
   local mode="$2"
   local roots_mode="$3"
+  local mode_workload="${4:-${workload}}"
   local run_log="${output_dir}/run-${label}.log"
   local time_log="${output_dir}/time-${label}.log"
   local max_rss_bytes
@@ -97,9 +101,9 @@ run_mode() {
   echo
   echo "== ${label} =="
   if [[ "${platform}" == "Darwin" ]]; then
-    SAFEZONE_ROOTS_MODE="${roots_mode}" /usr/bin/time -l "${binary}" "${mode}" "${workload}" > "${run_log}" 2> "${time_log}"
+    SAFEZONE_ROOTS_MODE="${roots_mode}" /usr/bin/time -l "${binary}" "${mode}" "${mode_workload}" > "${run_log}" 2> "${time_log}"
   else
-    SAFEZONE_ROOTS_MODE="${roots_mode}" /usr/bin/time -v "${binary}" "${mode}" "${workload}" > "${run_log}" 2> "${time_log}"
+    SAFEZONE_ROOTS_MODE="${roots_mode}" /usr/bin/time -v "${binary}" "${mode}" "${mode_workload}" > "${run_log}" 2> "${time_log}"
   fi
 
   max_rss_bytes=$(read_max_rss_bytes "${time_log}")
@@ -110,12 +114,19 @@ run_mode() {
 
 write_summary_header
 
-run_mode "heap" "heap" "0"
-run_mode "current-safezone" "safezone" "0"
-run_mode "improved-safezone" "safezone" "1"
-run_mode "rift-hp" "rift-hp" "0"
-run_mode "rift-streaming" "rift-streaming" "0"
-run_mode "yak-runtime" "yak-runtime" "0"
+if [[ "${workload}" != "promotion" ]]; then
+  run_mode "heap" "heap" "0"
+  run_mode "current-safezone" "safezone" "0"
+  run_mode "improved-safezone" "safezone" "1"
+  run_mode "rift-hp" "rift-hp" "0"
+  run_mode "rift-streaming" "rift-streaming" "0"
+  run_mode "yak-runtime" "yak-runtime" "0"
+fi
+
+if [[ "${workload}" == "all" || "${workload}" == "promotion" ]]; then
+  run_mode "heap-promotion" "heap" "0" "promotion"
+  run_mode "yak-runtime-promotion" "yak-runtime" "0" "promotion"
+fi
 
 echo
 echo "Yak instrumented matrix complete"

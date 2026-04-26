@@ -115,6 +115,91 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
   }
 
+  /** Snapshot of the trusted runtime-epoch escape path.
+   *
+   *  This is the dynamic Yak-style side of Rift's comparison story, not the
+   *  intended checked API. The checked API should make these counters
+   *  unnecessary by statically rejecting or rooting unsafe cross-boundary flows.
+   */
+  final case class RuntimeEpochStats(
+      barrierChecks: Long,
+      rememberedRefs: Long,
+      promotedObjects: Long
+  )
+
+  /** Object-specific promotion hook for the trusted runtime-epoch path.
+   *
+   *  True Yak promotion copies arbitrary escaping object graphs using runtime
+   *  object-layout information and rewrites references. Rift does not have that
+   *  generic object copier yet, so this hook isolates the object-copying
+   *  boundary while the region runtime owns the barrier, remember-set, and
+   *  promotion accounting.
+   */
+  trait RuntimePromoter[-T <: AnyRef, +U <: AnyRef] {
+    def promote(value: T): U
+    def promotedObjectCount(value: T): Int = 1
+  }
+
+  /** Trusted runtime-managed epoch.
+   *
+   *  This is a dynamic escape/promotion mechanism for comparing against Yak.
+   *  It deliberately sits outside `scoped`/`streaming` checked capture
+   *  boundaries. Benchmarks and experiments that use it are measuring a runtime
+   *  memory-management policy, not the future statically checked Rift API.
+   */
+  final class RuntimeEpoch private[memory] (kind: Int) {
+    private var region: RiftRegion = RiftRegion.open(kind)
+    private var closed = false
+    private var barrierChecksValue = 0L
+    private var rememberedRefsValue = 0L
+    private var promotedObjectsValue = 0L
+
+    private def checkOpen(): Unit =
+      if (closed)
+        throw new IllegalStateException("Rift runtime epoch is closed")
+
+    def begin(): RiftRegion = {
+      checkOpen()
+      region.reset()
+      region
+    }
+
+    def end(): Unit =
+      checkOpen()
+
+    inline def alloc[T <: AnyRef](inline obj: T): T = {
+      checkOpen()
+      region.alloc(obj).asInstanceOf[T]
+    }
+
+    def controlWriteOrNull[T <: AnyRef, U <: AnyRef](
+        value: T,
+        retain: Boolean
+    )(using promoter: RuntimePromoter[T, U]): U = {
+      checkOpen()
+      barrierChecksValue += 1L
+      if (retain) {
+        rememberedRefsValue += 1L
+        promotedObjectsValue += promoter.promotedObjectCount(value).toLong
+        promoter.promote(value)
+      } else null.asInstanceOf[U]
+    }
+
+    def statsSnapshot(): RuntimeEpochStats =
+      RuntimeEpochStats(
+        barrierChecksValue,
+        rememberedRefsValue,
+        promotedObjectsValue
+      )
+
+    def close(): Unit =
+      if (!closed) {
+        closed = true
+        region.close()
+        region = null
+      }
+  }
+
   /** Evidence that a checked region body may return `T`.
    *
    *  Scala-next capture checking currently misses one important closure case:
@@ -338,6 +423,12 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
 
   def shutdown(): Unit =
     RiftAllocator.Impl.shutdown()
+
+  /** Opens a trusted runtime-managed epoch used to measure Yak-style dynamic
+   *  escape handling. Prefer `scoped`/`streaming` for checked Rift code.
+   */
+  def runtimeEpoch(kind: Int = Streaming): RuntimeEpoch =
+    new RuntimeEpoch(kind)
 
   /** Opens a low-level trusted Rift region.
    *

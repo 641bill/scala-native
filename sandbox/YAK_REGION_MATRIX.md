@@ -1,7 +1,8 @@
 # Yak Region Matrix
 
 Status: Yak-style methodology reproduction harness with validated smoke,
-default median, and pressure median runs.
+default median, pressure median, runtime-safety proxy, and promotion/escape
+proxy runs.
 
 The harness is implemented in
 `sandbox/src/main/scala-next/YakRegionMatrix.scala` and run with
@@ -16,12 +17,17 @@ harness reproduces the key comparison shape:
 - durable control metadata stays on the GC heap;
 - high-volume data-path objects are allocated per epoch;
 - epoch-local data dies together at the epoch boundary;
+- rare data objects may escape to durable control state through the trusted
+  `RiftRegion.RuntimeEpoch` escape/promotion API;
 - heap, SafeZone, and Rift variants run the same logical program.
 
 The current local workloads are:
 
 - `wordcount`: durable heap dictionary counters, epoch-local token objects.
 - `graphstep`: durable heap vertex state, epoch-local graph update messages.
+- `promotion`: durable heap counters plus rare retained data objects. Region
+  escape handling is routed through `RiftRegion.RuntimeEpoch`, which owns
+  barrier checks, remembered-reference counts, and promoted-object counts.
 
 The stream/data objects are ordinary Scala objects. Heap mode allocates them
 with `new`; SafeZone mode allocates them in Scala Native SafeZone; Rift modes
@@ -30,8 +36,10 @@ allocate them with `region.alloc`.
 The `yak-runtime` mode is a local runtime-safety proxy. It uses a reusable Rift
 streaming region behind a dynamic epoch object with lifecycle checks. This
 models the performance envelope of a Yak-like runtime-managed epoch discipline
-on Scala Native, without claiming to implement Yak's full promotion and write
-barrier machinery.
+on Scala Native. The `promotion` workload adds a local proxy for Yak's
+write-barrier/escaping-object mechanism through the Rift memory API, but it
+still does not implement real JVM-style object movement, remote stack scanning,
+or a distributed runtime.
 
 ## Default Configuration
 
@@ -42,10 +50,12 @@ barrier machinery.
 | `YAK_KEY_SPACE` | `65536` |
 | `YAK_VERTICES` | `100000` |
 | `YAK_MESSAGES_PER_EPOCH` | `100000` |
+| `YAK_ESCAPE_MODULO` | `1000` |
+| `YAK_SCRATCH_SLOTS` | `128` |
 | `YAK_WARMUPS` | `1` |
 | `YAK_BENCHMARK_RUNS` | `3` |
 
-Use `YAK_WORKLOAD=wordcount`, `graphstep`, or `all`.
+Use `YAK_WORKLOAD=wordcount`, `graphstep`, `promotion`, or `all`.
 
 ## Commands
 
@@ -76,9 +86,9 @@ YAK_OUTPUT_DIR=/tmp/yak-region-instrumented \
 
 ## Result Status
 
-Compile, smoke, default local medians, and one epoch-pressure run have been
-recorded. These are local Yak-style methodology numbers, not an exact Yak
-artifact reproduction.
+Compile, smoke, default local medians, epoch-pressure runs, runtime-proxy runs,
+and a promotion/escape proxy pressure run have been recorded. These are local
+Yak-style methodology numbers, not an exact Yak artifact reproduction.
 
 Validation commands run on 2026-04-25:
 
@@ -97,6 +107,11 @@ YAK_OUTPUT_DIR=/tmp/yak-region-instrumented \
 YAK_BUILD=0 YAK_BENCHMARK_RUNS=3 YAK_WARMUPS=1 \
 YAK_EPOCHS=40 YAK_RECORDS_PER_EPOCH=250000 YAK_MESSAGES_PER_EPOCH=250000 \
 YAK_OUTPUT_DIR=/tmp/yak-region-pressure \
+  zsh sandbox/run_yak_region_instrumented_matrix.sh
+
+YAK_BUILD=0 YAK_WORKLOAD=promotion YAK_BENCHMARK_RUNS=3 YAK_WARMUPS=1 \
+YAK_EPOCHS=40 YAK_RECORDS_PER_EPOCH=250000 YAK_ESCAPE_MODULO=1000 \
+YAK_OUTPUT_DIR=/tmp/yak-runtime-promotion-api-pressure \
   zsh sandbox/run_yak_region_instrumented_matrix.sh
 ```
 
@@ -178,8 +193,9 @@ Interpretation:
 Caveats:
 
 - This is not an exact Yak reproduction. It does not run Hyracks, Hadoop, or
-  GraphChi, and it does not implement Yak's dynamic promotion/write-barrier
-  mechanism.
+  GraphChi. The wordcount/graphstep workloads are no-escape epoch workloads;
+  the separate promotion workload below exercises Rift's trusted runtime epoch
+  escape API, but still lacks generic object movement and stack scanning.
 - The benchmark's purpose is to isolate the control/data split and epoch-local
   lifetime shape in Scala Native. Do not compare the absolute speedups directly
   to Yak's distributed JVM results.
@@ -236,9 +252,10 @@ Implementation:
 - Allocation goes through a dynamic epoch object that checks lifecycle state and
   resets the region at epoch boundaries. This represents a runtime-managed
   Yak-style epoch discipline, not the checked Rift API.
-- The mode does not implement Yak's full dynamic promotion or write-barrier
-  mechanism. There are no escaping data objects in this harness, so the measured
-  cost is the no-escape runtime path.
+- The no-escape `wordcount`/`graphstep` path does not exercise Yak's full
+  dynamic promotion or write-barrier mechanism, so those measurements isolate
+  the runtime epoch path. The separate `promotion` workload below routes rare
+  escaping data objects through `RiftRegion.RuntimeEpoch`.
 
 Commands:
 
@@ -300,3 +317,64 @@ Interpretation:
 - This gives the project a useful axis: pure runtime safety can be measured,
   and the checked Rift path should eventually be compared against both raw Rift
   and this runtime proxy.
+
+## Yak-Style Runtime Promotion/Escape Proxy
+
+Date: 2026-04-26
+
+Implementation:
+
+- Added workload `promotion`.
+- Each logical record allocates an ordinary Scala `PromoToken` and nested
+  `PromoChild`. Heap mode uses `new`; `yak-runtime` places both objects in a
+  runtime-managed epoch region.
+- Every record performs a heap/control write through the runtime epoch API.
+  `RiftRegion.RuntimeEpoch` counts one barrier check per write.
+- Every `YAK_ESCAPE_MODULO` records, the token is retained by durable heap
+  control state. The runtime epoch counts one remembered reference and two
+  promoted objects, then uses a `RuntimePromoter` hook to copy the escaping
+  token/child pair to heap.
+- This is now a memory-API-level proxy rather than benchmark-inline promotion
+  accounting. It is still not a generic object-moving collector, stack scanner,
+  or cross-thread remember-set.
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+YAK_BUILD=0 YAK_WORKLOAD=promotion YAK_BENCHMARK_RUNS=3 YAK_WARMUPS=1 \
+YAK_EPOCHS=40 YAK_RECORDS_PER_EPOCH=250000 YAK_ESCAPE_MODULO=1000 \
+YAK_OUTPUT_DIR=/tmp/yak-runtime-promotion-api-pressure \
+  zsh sandbox/run_yak_region_instrumented_matrix.sh
+```
+
+Pressure configuration:
+
+- `YAK_EPOCHS=40`
+- `YAK_RECORDS_PER_EPOCH=250000`
+- `YAK_ESCAPE_MODULO=1000`
+- `YAK_SCRATCH_SLOTS=128`
+- `YAK_BENCHMARK_RUNS=3`
+- `YAK_WARMUPS=1`
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Rift objects | Barrier checks | Remembered refs | Promoted objects | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 424.768 | 43.745 | 0.000 | 0 | 0 | 0 | 0 | 576045056 |
+| Yak-runtime proxy | 513.465 | 0.000 | 0.736 | 20000000 | 10000000 | 10000 | 20000 | 220692480 |
+
+Interpretation:
+
+- This is the closest current local Yak model: it keeps the control/data split,
+  includes rare escaping data objects, and moves barrier/remember/promotion
+  accounting into Rift's trusted runtime epoch API.
+- The Yak-runtime path removes measured heap GC and reduces peak RSS versus
+  heap while preserving the same logical program and checksum.
+- The corrected memory-API-level runtime path is slower than heap in elapsed
+  time (`513.465 ms` vs `424.768 ms`). That is an important negative result:
+  dynamic promotion/barrier discipline is not free on Scala Native, and the
+  static checked Rift path still needs to avoid paying this cost on every
+  heap/control write.
+- The result is still not exact Yak. It does not include Hyracks/Hadoop/GraphChi
+  workloads, distributed execution, compiler-inserted write barriers on
+  arbitrary object fields, generic object movement, stack scanning, or STW
+  epoch-end coordination.
