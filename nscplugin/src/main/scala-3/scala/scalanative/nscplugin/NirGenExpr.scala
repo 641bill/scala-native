@@ -163,9 +163,18 @@ trait NirGenExpr(using Context) {
         case _                   => false
       }
 
+    private def isStableConstructorFieldSelect(tree: Select): Boolean =
+      tree.symbol.is(ParamAccessor) && !tree.symbol.is(Mutable)
+
     private def isKnownRiftRegionValue(tree: Tree): Boolean =
       tree match {
+        case Apply(select @ Select(qualifier, _), Nil)
+            if isStableConstructorFieldSelect(select) =>
+          isKnownRiftRegionValue(qualifier)
         case TypeApply(Select(qualifier, nme.asInstanceOf_), _) =>
+          isKnownRiftRegionValue(qualifier)
+        case select @ Select(qualifier, _)
+            if isStableConstructorFieldSelect(select) =>
           isKnownRiftRegionValue(qualifier)
         case Typed(expr, _)      => isKnownRiftRegionValue(expr)
         case Inlined(_, _, expr) => isKnownRiftRegionValue(expr)

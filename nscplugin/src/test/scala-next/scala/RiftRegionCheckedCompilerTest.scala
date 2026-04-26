@@ -287,6 +287,63 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked region allocation cannot store an unrooted heap object"
     )
 
+  @Test def explicitRegionParamFieldCanBeStoredInScopedObject(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Leaf(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    final class Pair(val leaf: Leaf^{region})
+      |    final class Node(val leaf: Leaf^{region})
+      |    val leaf: Leaf^{region} = RiftRegion.alloc(new Leaf(41))
+      |    val pair: Pair^{region} = RiftRegion.alloc(new Pair(leaf))
+      |    val node: Node^{region} = RiftRegion.alloc(new Node(pair.leaf))
+      |    node.leaf.value + 1
+      |  }
+      |""".stripMargin)
+
+  @Test def explicitRegionParamFieldAliasCanBeStoredInScopedObject(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Leaf(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    final class Pair(val leaf: Leaf^{region})
+      |    final class Node(val leaf: Leaf^{region})
+      |    val leaf: Leaf^{region} = RiftRegion.alloc(new Leaf(41))
+      |    val pair: Pair^{region} = RiftRegion.alloc(new Pair(leaf))
+      |    val selected: Leaf^{region} = pair.leaf
+      |    val node: Node^{region} = RiftRegion.alloc(new Node(selected))
+      |    node.leaf.value + 1
+      |  }
+      |""".stripMargin)
+
+  @Test def plainRegionOwnerParamFieldCannotBeStoredAsRegionValue(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Leaf(val value: Int)
+      |final class Pair(val leaf: Leaf^)
+      |final class Node(val leaf: Leaf^)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val leaf: Leaf^{region} = RiftRegion.alloc(new Leaf(41))
+      |    val pair: Pair^{region} = RiftRegion.alloc(new Pair(leaf))
+      |    val node: Node^{region} = RiftRegion.alloc(new Node(pair.leaf))
+      |    node.leaf.value + 1
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
   @Test def streamingResetValueCannotEscapeEpoch(): Unit =
     assertDoesNotCompile("""
       |import scala.language.experimental.captureChecking
