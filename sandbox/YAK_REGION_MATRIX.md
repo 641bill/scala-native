@@ -27,6 +27,12 @@ The stream/data objects are ordinary Scala objects. Heap mode allocates them
 with `new`; SafeZone mode allocates them in Scala Native SafeZone; Rift modes
 allocate them with `region.alloc`.
 
+The `yak-runtime` mode is a local runtime-safety proxy. It uses a reusable Rift
+streaming region behind a dynamic epoch object with lifecycle checks. This
+models the performance envelope of a Yak-like runtime-managed epoch discipline
+on Scala Native, without claiming to implement Yak's full promotion and write
+barrier machinery.
+
 ## Default Configuration
 
 | Environment variable | Default |
@@ -217,3 +223,80 @@ Interpretation:
 - Improved SafeZone remains the strongest baseline, so this is good
   Rift-vs-heap evidence and near-parity with improved SafeZone, not a clean
   Rift-over-SafeZone result.
+
+## Yak-Style Runtime-Safety Proxy
+
+Date: 2026-04-26
+
+Implementation:
+
+- Added mode `yak-runtime`.
+- `yak-runtime` keeps durable control state on the heap, as in other modes.
+- Epoch-local data objects are allocated in a reusable Rift streaming region.
+- Allocation goes through a dynamic epoch object that checks lifecycle state and
+  resets the region at epoch boundaries. This represents a runtime-managed
+  Yak-style epoch discipline, not the checked Rift API.
+- The mode does not implement Yak's full dynamic promotion or write-barrier
+  mechanism. There are no escaping data objects in this harness, so the measured
+  cost is the no-escape runtime path.
+
+Commands:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+YAK_EPOCHS=2 YAK_RECORDS_PER_EPOCH=1000 YAK_MESSAGES_PER_EPOCH=1000 \
+YAK_BENCHMARK_RUNS=1 YAK_WARMUPS=0 \
+YAK_OUTPUT_DIR=/tmp/yak-runtime-smoke \
+  zsh sandbox/run_yak_region_instrumented_matrix.sh
+
+YAK_BUILD=0 YAK_BENCHMARK_RUNS=3 YAK_WARMUPS=1 \
+YAK_EPOCHS=40 YAK_RECORDS_PER_EPOCH=250000 \
+YAK_MESSAGES_PER_EPOCH=250000 \
+YAK_OUTPUT_DIR=/tmp/yak-runtime-pressure \
+  zsh sandbox/run_yak_region_instrumented_matrix.sh
+```
+
+Validation:
+
+- The smoke run rebuilt and native-linked `YakRegionMatrix`.
+- The pressure run completed.
+- All heap/SafeZone/Rift/Yak-runtime checksums matched.
+
+Pressure configuration:
+
+- `YAK_EPOCHS=40`
+- `YAK_RECORDS_PER_EPOCH=250000`
+- `YAK_MESSAGES_PER_EPOCH=250000`
+- `YAK_BENCHMARK_RUNS=3`
+- `YAK_WARMUPS=1`
+
+| Workload | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Rift objects | Opens/closes/resets | Peak RSS bytes |
+|---|---|---:|---:|---:|---:|---:|---:|
+| wordcount | heap | 255.335 | 51.043 | 0.000 | 0 | 0 / 0 / 0 | 75071488 |
+| wordcount | current SafeZone | 233.729 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 83165184 |
+| wordcount | improved SafeZone | 196.523 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 83181568 |
+| wordcount | Rift HPZone | 201.921 | 0.000 | 0.414 | 10000000 | 40 / 40 / 0 | 83099648 |
+| wordcount | Rift Streaming | 206.291 | 0.000 | 0.330 | 10000000 | 1 / 1 / 39 | 83066880 |
+| wordcount | Yak-runtime proxy | 211.585 | 0.000 | 0.300 | 10000000 | 1 / 1 / 40 | 83066880 |
+| graphstep | heap | 321.660 | 55.830 | 0.000 | 0 | 0 / 0 / 0 | 75071488 |
+| graphstep | current SafeZone | 553.408 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 83165184 |
+| graphstep | improved SafeZone | 212.354 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 83181568 |
+| graphstep | Rift HPZone | 217.911 | 0.000 | 0.536 | 10000000 | 40 / 40 / 0 | 83099648 |
+| graphstep | Rift Streaming | 214.947 | 0.000 | 0.404 | 10000000 | 1 / 1 / 39 | 83066880 |
+| graphstep | Yak-runtime proxy | 234.914 | 0.000 | 0.497 | 10000000 | 1 / 1 / 40 | 83066880 |
+
+Interpretation:
+
+- A pure runtime epoch mechanism on Scala Native is viable for Yak-shaped
+  workloads: it removes measured heap GC and beats heap on both pressure
+  workloads.
+- The runtime proxy is slower than raw Rift Streaming in this run, especially
+  on `graphstep` (`234.914 ms` vs `214.947 ms`). That is the expected cost of
+  adding dynamic lifecycle checks around the region path.
+- Improved SafeZone remains the strongest baseline for `wordcount`, and is
+  close to raw Rift modes on `graphstep`. The result is therefore not a
+  Rift-over-SafeZone claim.
+- This gives the project a useful axis: pure runtime safety can be measured,
+  and the checked Rift path should eventually be compared against both raw Rift
+  and this runtime proxy.

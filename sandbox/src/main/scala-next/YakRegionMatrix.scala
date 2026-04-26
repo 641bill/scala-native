@@ -58,6 +58,42 @@ object YakRegionMatrixHelpers {
       val next: Message
   )
 
+  private final class YakRuntimeEpoch {
+    private var region: RiftRegion = RiftRegion.open(RiftRegion.Streaming)
+    private var closed = false
+
+    def begin(): RiftRegion = {
+      if (closed)
+        throw new IllegalStateException("Yak runtime epoch is closed")
+      region.reset()
+      region
+    }
+
+    def end(): Unit = {
+      if (closed)
+        throw new IllegalStateException("Yak runtime epoch is closed")
+    }
+
+    def close(): Unit =
+      if (!closed) {
+        region.close()
+        region = null
+        closed = true
+      }
+
+    def allocToken(key: Int, weight: Int, next: Token): Token = {
+      if (closed)
+        throw new IllegalStateException("allocation after Yak epoch close")
+      region.alloc(new Token(key, weight, next))
+    }
+
+    def allocMessage(dst: Int, delta: Int, tag: Int, next: Message): Message = {
+      if (closed)
+        throw new IllegalStateException("allocation after Yak epoch close")
+      region.alloc(new Message(dst, delta, tag, next))
+    }
+  }
+
   final case class RuntimeSample(
       gcCollections: Long,
       gcNanos: Long,
@@ -128,14 +164,21 @@ object YakRegionMatrixHelpers {
   }
 
   private final class ModeState(mode: String) {
-    val usesRift: Boolean = mode == "rift-hp" || mode == "rift-streaming"
+    val usesRift: Boolean =
+      mode == "rift-hp" || mode == "rift-streaming" || mode == "yak-runtime"
+    private val runtimeSafe: Boolean = mode == "yak-runtime"
     private val streaming: Boolean = mode == "rift-streaming"
     private val kind: Int =
       if (streaming) RiftRegion.Streaming else RiftRegion.HPZone
     private var streamRegion: RiftRegion = null
+    private var runtimeEpoch: YakRuntimeEpoch = null
 
     def beginEpoch(): RiftRegion =
       if (!usesRift) null
+      else if (runtimeSafe) {
+        if (runtimeEpoch == null) runtimeEpoch = new YakRuntimeEpoch()
+        runtimeEpoch.begin()
+      }
       else if (streaming) {
         if (streamRegion == null) streamRegion = RiftRegion.open(kind)
         else streamRegion.reset()
@@ -145,13 +188,19 @@ object YakRegionMatrixHelpers {
       }
 
     def endEpoch(region: RiftRegion): Unit =
-      if (usesRift && !streaming) region.close()
+      if (runtimeSafe) runtimeEpoch.end()
+      else if (usesRift && !streaming) region.close()
 
-    def finish(): Unit =
+    def finish(): Unit = {
       if (streamRegion != null) {
         streamRegion.close()
         streamRegion = null
       }
+      if (runtimeEpoch != null) {
+        runtimeEpoch.close()
+        runtimeEpoch = null
+      }
+    }
 
     def allocToken(
         region: RiftRegion,
@@ -159,7 +208,8 @@ object YakRegionMatrixHelpers {
         weight: Int,
         next: Token
     ): Token =
-      if (usesRift) region.alloc(new Token(key, weight, next))
+      if (runtimeSafe) runtimeEpoch.allocToken(key, weight, next)
+      else if (usesRift) region.alloc(new Token(key, weight, next))
       else new Token(key, weight, next)
 
     def allocMessage(
@@ -169,7 +219,8 @@ object YakRegionMatrixHelpers {
         tag: Int,
         next: Message
     ): Message =
-      if (usesRift) region.alloc(new Message(dst, delta, tag, next))
+      if (runtimeSafe) runtimeEpoch.allocMessage(dst, delta, tag, next)
+      else if (usesRift) region.alloc(new Message(dst, delta, tag, next))
       else new Message(dst, delta, tag, next)
   }
 
@@ -404,7 +455,8 @@ object YakRegionMatrixHelpers {
 
   def runBenchmark(mode: String, workload: String): Unit = {
     val cfg = YakRegionConfig
-    val usesRift = mode == "rift-hp" || mode == "rift-streaming"
+    val usesRift =
+      mode == "rift-hp" || mode == "rift-streaming" || mode == "yak-runtime"
     val expected = runWorkload("heap", workload)
 
     var warmup = 0
@@ -490,10 +542,11 @@ object YakRegionMatrixHelpers {
 
   def validateMode(mode: String): Unit =
     mode match {
-      case "heap" | "safezone" | "rift-hp" | "rift-streaming" => ()
+      case "heap" | "safezone" | "rift-hp" | "rift-streaming" | "yak-runtime" =>
+        ()
       case other =>
         throw new IllegalArgumentException(
-          s"unknown Yak mode '$other'; expected heap, safezone, rift-hp, or rift-streaming"
+          s"unknown Yak mode '$other'; expected heap, safezone, rift-hp, rift-streaming, or yak-runtime"
         )
     }
 }
@@ -505,7 +558,8 @@ object YakRegionMatrixHelpers {
   YakRegionMatrixHelpers.validateMode(mode)
   YakRegionMatrixHelpers.printConfig(mode, workload)
 
-  val usesRift = mode == "rift-hp" || mode == "rift-streaming"
+  val usesRift =
+    mode == "rift-hp" || mode == "rift-streaming" || mode == "yak-runtime"
   if (usesRift) RiftRegion.init(0)
   try {
     workload match {
