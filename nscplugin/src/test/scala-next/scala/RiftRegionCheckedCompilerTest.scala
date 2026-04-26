@@ -22,6 +22,20 @@ class RiftRegionCheckedCompilerTest {
     assertTrue("expected a compiler diagnostic", err.getMessage.nonEmpty)
   }
 
+  private def assertDoesNotCompileWith(
+      source: String,
+      expectedMessage: String
+  ): Unit = {
+    val err = assertThrows(
+      classOf[CompilationFailedException],
+      () => scalanative.NIRCompiler(_.compile(source))
+    )
+    assertTrue(
+      s"expected diagnostic containing '$expectedMessage', got: ${err.getMessage}",
+      err.getMessage.contains(expectedMessage)
+    )
+  }
+
   @Test def checkedScopedObjectGraphCompiles(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking
@@ -135,9 +149,6 @@ class RiftRegionCheckedCompilerTest {
       |""".stripMargin)
 
   @Test def closureCapturingScopedValueCannotEscape(): Unit =
-    // This covers closure escape when the closure retains the region handle.
-    // Returning a closure that captures only a region-local value still
-    // compiles today; HANDOFF.md records that as a remaining checker gap.
     assertDoesNotCompile("""
       |import scala.language.experimental.captureChecking
       |import scala.scalanative.memory.RiftRegion
@@ -152,6 +163,22 @@ class RiftRegionCheckedCompilerTest {
       |    Holder.retained = () => region.alloc(new Box(1)).value
       |  }
       |""".stripMargin)
+
+  @Test def closureCapturingScopedValueCannotEscapeByReturn(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def bad(): () => Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val box: Box^{region} = RiftRegion.alloc(new Box(1))
+      |    () => box.value
+      |  }
+      |""".stripMargin,
+      "Rift checked regions cannot return function values yet"
+    )
 
   @Test def heapObjectCannotRetainScopedValue(): Unit =
     assertDoesNotCompile("""

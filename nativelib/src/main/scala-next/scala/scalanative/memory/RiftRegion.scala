@@ -1,6 +1,7 @@
 package scala.scalanative.memory
 
 import scala.annotation.implicitNotFound
+import scala.compiletime.{erasedValue, error}
 
 import scala.scalanative.runtime.{
   RawPtr,
@@ -65,6 +66,218 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   sealed trait ScopedRegion extends RiftRegion
   sealed trait StreamingRegion extends RiftRegion
 
+  /** Evidence that a checked region body may return `T`.
+   *
+   *  Scala-next capture checking currently misses one important closure case:
+   *  a function value returned from a region body can capture a region-local
+   *  object without the region capability appearing in the result type. Until
+   *  that gap is closed, checked region boundaries reject direct function
+   *  results. Trusted benchmark code can still use `open`/`trustedOpen`.
+   */
+  @implicitNotFound(
+    "Rift checked regions cannot return this result type safely."
+  )
+  sealed trait CanReturnFromRegion[-T]
+
+  object CanReturnFromRegion {
+    private object AnyResult extends CanReturnFromRegion[Any]
+
+    private inline def rejectFunctionResult(): Nothing =
+      error(
+        "Rift checked regions cannot return function values yet; returned closures may hide region-local captures."
+      )
+
+    inline given allowResult[T]: CanReturnFromRegion[T] =
+      inline erasedValue[T] match {
+        case _: Function0[?]       => rejectFunctionResult()
+        case _: Function1[?, ?]    => rejectFunctionResult()
+        case _: Function2[?, ?, ?] => rejectFunctionResult()
+        case _: Function3[?, ?, ?, ?] => rejectFunctionResult()
+        case _: Function4[?, ?, ?, ?, ?] => rejectFunctionResult()
+        case _: Function5[?, ?, ?, ?, ?, ?] => rejectFunctionResult()
+        case _: Function6[?, ?, ?, ?, ?, ?, ?] => rejectFunctionResult()
+        case _: Function7[?, ?, ?, ?, ?, ?, ?, ?] => rejectFunctionResult()
+        case _: Function8[?, ?, ?, ?, ?, ?, ?, ?, ?] =>
+          rejectFunctionResult()
+        case _: Function9[?, ?, ?, ?, ?, ?, ?, ?, ?, ?] =>
+          rejectFunctionResult()
+        case _: Function10[?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?] =>
+          rejectFunctionResult()
+        case _: Function11[?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?] =>
+          rejectFunctionResult()
+        case _: Function12[?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?] =>
+          rejectFunctionResult()
+        case _: Function13[?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?] =>
+          rejectFunctionResult()
+        case _: Function14[?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?] =>
+          rejectFunctionResult()
+        case _: Function15[?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?] =>
+          rejectFunctionResult()
+        case _: Function16[
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?
+            ] =>
+          rejectFunctionResult()
+        case _: Function17[
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?
+            ] =>
+          rejectFunctionResult()
+        case _: Function18[
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?
+            ] =>
+          rejectFunctionResult()
+        case _: Function19[
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?
+            ] =>
+          rejectFunctionResult()
+        case _: Function20[
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?
+            ] =>
+          rejectFunctionResult()
+        case _: Function21[
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?
+            ] =>
+          rejectFunctionResult()
+        case _: Function22[
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              ?
+            ] =>
+          rejectFunctionResult()
+        case _ => AnyResult.asInstanceOf[CanReturnFromRegion[T]]
+      }
+  }
+
   private[memory] val defaultAlignment: CSize =
     unsignedOf(castIntToRawSizeUnsigned(16))
 
@@ -95,14 +308,18 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    *  Values allocated with `alloc` in this block capture the scoped region
    *  capability and cannot escape the block under Scala capture checking.
    */
-  final def scoped[T](body: (ScopedRegion^) ?=> T): T = {
+  final def scoped[T](body: (ScopedRegion^) ?=> T)(using
+      canReturn: CanReturnFromRegion[T]
+  ): T = {
     val region: ScopedRegion^ = openImpl(Scoped).asInstanceOf[ScopedRegion]
     try body(using region)
     finally region.close()
   }
 
   /** Runs `body` with one resettable streaming region, closed at block exit. */
-  final def streaming[T](body: (StreamingRegion^) ?=> T): T = {
+  final def streaming[T](body: (StreamingRegion^) ?=> T)(using
+      canReturn: CanReturnFromRegion[T]
+  ): T = {
     val region: StreamingRegion^ =
       openImpl(Streaming).asInstanceOf[StreamingRegion]
     try body(using region)
@@ -117,7 +334,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    */
   final def reset[T](
       body: (StreamingRegion^) ?=> T
-  )(using region: StreamingRegion^): T = {
+  )(using region: StreamingRegion^, canReturn: CanReturnFromRegion[T]): T = {
     try body(using region)
     finally region.reset()
   }
