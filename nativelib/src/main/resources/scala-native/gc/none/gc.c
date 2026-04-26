@@ -35,6 +35,7 @@ static size_t CHUNK;
 static size_t TO_NORMAL_MMAP = 1L;
 static size_t DO_PREALLOC = 0L;     // No Preallocation.
 static size_t TOTAL_ALLOCATED = 0L; // Track total allocated memory
+static size_t ALLOCATION_TOTAL = 0L;
 
 static void exitWithOutOfMemory() {
     GC_LOG_ERROR("Out of heap space");
@@ -54,6 +55,12 @@ size_t scalanative_GC_get_used_heapsize() { return TOTAL_ALLOCATED; }
 size_t scalanative_GC_stats_collection_total() { return -1L; }
 
 size_t scalanative_GC_stats_collection_duration_total() { return -1L; }
+
+size_t scalanative_GC_stats_allocation_total() { return ALLOCATION_TOTAL; }
+
+size_t scalanative_GC_stats_allocation_bytes_total() { return TOTAL_ALLOCATED; }
+
+size_t scalanative_GC_stats_allocation_duration_total() { return 0L; }
 
 void Prealloc_Or_Default() {
 
@@ -130,6 +137,7 @@ void *scalanative_GC_alloc(Rtti *info, size_t size) {
         alloc->rtti = info;
         current += size;
         TOTAL_ALLOCATED += size;
+        ALLOCATION_TOTAL += 1L;
         return alloc;
     } else {
         scalanative_GC_init();
@@ -139,6 +147,7 @@ void *scalanative_GC_alloc(Rtti *info, size_t size) {
     Object *alloc = (Object *)calloc(size, 1);
     alloc->rtti = info;
     TOTAL_ALLOCATED += size;
+    ALLOCATION_TOTAL += 1L;
     return alloc;
 #endif
 }

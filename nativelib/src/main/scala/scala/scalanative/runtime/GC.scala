@@ -49,6 +49,18 @@ object GC {
   // The total (cumulative) time in nanos spent on GC runs
   @name("scalanative_GC_stats_collection_duration_total")
   def getStatsCollectionDurationTotal(): CSize = extern
+  // The total (cumulative) number of GC heap allocation calls recorded when
+  // SCALANATIVE_GC_ALLOC_STATS=1 is set.
+  @name("scalanative_GC_stats_allocation_total")
+  def getStatsAllocationTotal(): CSize = extern
+  // The total (cumulative) rounded bytes requested by recorded GC heap
+  // allocation calls.
+  @name("scalanative_GC_stats_allocation_bytes_total")
+  def getStatsAllocationBytesTotal(): CSize = extern
+  // The total (cumulative) time in nanos spent in recorded GC heap allocation
+  // calls. This is an attribution metric and can perturb benchmark timings.
+  @name("scalanative_GC_stats_allocation_duration_total")
+  def getStatsAllocationDurationTotal(): CSize = extern
 
   /*  Multithreading awareness for GC Every implementation of GC supported in
    *  ScalaNative needs to register a given thread The main thread is

@@ -43,6 +43,9 @@ metric_keys=(
   phase_untracked_ns
   gc_collections
   gc_time_ns
+  gc_alloc_total
+  gc_alloc_bytes_total
+  gc_alloc_time_ns
   rift_region_op_ns
   rift_open_ns
   rift_close_ns

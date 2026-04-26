@@ -37,6 +37,9 @@ object Debs2015RunBothRunner {
   final case class RuntimeMetrics(
       gcCollections: Long,
       gcNanos: Long,
+      gcAllocTotal: Long,
+      gcAllocBytesTotal: Long,
+      gcAllocNanos: Long,
       riftRegionOpenTotal: Long,
       riftRegionCloseTotal: Long,
       riftRegionResetTotal: Long,
@@ -59,6 +62,7 @@ object Debs2015RunBothRunner {
   private object RuntimeMetrics {
     val zero: RuntimeMetrics =
       RuntimeMetrics(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
+        0L, 0L, 0L,
         0L, 0L, 0L, 0L, 0L, 0L)
 
     private def rawSizeToLong(value: RawSize): Long =
@@ -73,13 +77,27 @@ object Debs2015RunBothRunner {
     def capture(includeRift: Boolean): RuntimeMetrics = {
       val gcCollections = nonNegative(GC.getStatsCollectionTotal().toLong)
       val gcNanos = nonNegative(GC.getStatsCollectionDurationTotal().toLong)
+      val gcAllocTotal = nonNegative(GC.getStatsAllocationTotal().toLong)
+      val gcAllocBytesTotal =
+        nonNegative(GC.getStatsAllocationBytesTotal().toLong)
+      val gcAllocNanos =
+        nonNegative(GC.getStatsAllocationDurationTotal().toLong)
 
       if (!includeRift) {
-        zero.copy(gcCollections = gcCollections, gcNanos = gcNanos)
+        zero.copy(
+          gcCollections = gcCollections,
+          gcNanos = gcNanos,
+          gcAllocTotal = gcAllocTotal,
+          gcAllocBytesTotal = gcAllocBytesTotal,
+          gcAllocNanos = gcAllocNanos
+        )
       } else {
         RuntimeMetrics(
           gcCollections = gcCollections,
           gcNanos = gcNanos,
+          gcAllocTotal = gcAllocTotal,
+          gcAllocBytesTotal = gcAllocBytesTotal,
+          gcAllocNanos = gcAllocNanos,
           riftRegionOpenTotal =
             rawSizeToLong(RiftAllocator.Impl.statsRegionOpenTotal()),
           riftRegionCloseTotal =
@@ -117,6 +135,10 @@ object Debs2015RunBothRunner {
       RuntimeMetrics(
         gcCollections = delta(end.gcCollections, start.gcCollections),
         gcNanos = delta(end.gcNanos, start.gcNanos),
+        gcAllocTotal = delta(end.gcAllocTotal, start.gcAllocTotal),
+        gcAllocBytesTotal =
+          delta(end.gcAllocBytesTotal, start.gcAllocBytesTotal),
+        gcAllocNanos = delta(end.gcAllocNanos, start.gcAllocNanos),
         riftRegionOpenTotal =
           delta(end.riftRegionOpenTotal, start.riftRegionOpenTotal),
         riftRegionCloseTotal =
@@ -418,6 +440,9 @@ object Debs2015RunBothRunner {
         f"q2_max_ms=${if (q2Sorted.isEmpty) 0L else q2Sorted.last}%d " +
         f"gc_collections=${runtime.gcCollections}%d " +
         f"gc_time_ns=${runtime.gcNanos}%d " +
+        f"gc_alloc_total=${runtime.gcAllocTotal}%d " +
+        f"gc_alloc_bytes_total=${runtime.gcAllocBytesTotal}%d " +
+        f"gc_alloc_time_ns=${runtime.gcAllocNanos}%d " +
         f"rift_region_op_ns=${runtime.riftRegionOpNanos}%d " +
         f"rift_open_ns=${runtime.riftOpenNanos}%d " +
         f"rift_close_ns=${runtime.riftCloseNanos}%d " +

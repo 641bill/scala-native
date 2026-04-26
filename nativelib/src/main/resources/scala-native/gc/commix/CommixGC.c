@@ -18,6 +18,7 @@
 #include "Sweeper.h"
 #include "immix_commix/Synchronizer.h"
 #include "shared/jmx.h"
+#include "shared/Time.h"
 
 #include "shared/Parsing.h"
 
@@ -48,6 +49,7 @@ NOINLINE void scalanative_GC_init() {
     MutatorThreads_init();
     MutatorThread_init((word_t **)dummy); // approximate stack bottom
     customRoots = GC_Roots_Init();
+    jmx_stats_init_allocation();
 #ifdef ENABLE_GC_STATS
     atexit(scalanative_afterexit);
 #endif
@@ -58,6 +60,10 @@ INLINE void *scalanative_GC_alloc(Rtti *info, size_t size) {
 
     assert(size % ALLOCATION_ALIGNMENT == 0);
 
+    size_t alloc_start_ns = 0;
+    if (jmx_stats_allocation_enabled())
+        alloc_start_ns = (size_t)Time_current_nanos();
+
     Object *alloc;
     if (size >= LARGE_BLOCK_SIZE) {
         alloc = (Object *)LargeAllocator_Alloc(&heap, size);
@@ -65,22 +71,42 @@ INLINE void *scalanative_GC_alloc(Rtti *info, size_t size) {
         alloc = (Object *)Allocator_Alloc(&heap, size);
     }
     alloc->rtti = info;
+    if (alloc_start_ns != 0) {
+        jmx_stats_record_allocation(size, alloc_start_ns,
+                                    (size_t)Time_current_nanos());
+    }
     return (void *)alloc;
 }
 
 INLINE void *scalanative_GC_alloc_small(Rtti *info, size_t size) {
     size = MathUtils_RoundToNextMultiple(size, ALLOCATION_ALIGNMENT);
 
+    size_t alloc_start_ns = 0;
+    if (jmx_stats_allocation_enabled())
+        alloc_start_ns = (size_t)Time_current_nanos();
+
     Object *alloc = (Object *)Allocator_Alloc(&heap, size);
     alloc->rtti = info;
+    if (alloc_start_ns != 0) {
+        jmx_stats_record_allocation(size, alloc_start_ns,
+                                    (size_t)Time_current_nanos());
+    }
     return (void *)alloc;
 }
 
 INLINE void *scalanative_GC_alloc_large(Rtti *info, size_t size) {
     size = MathUtils_RoundToNextMultiple(size, ALLOCATION_ALIGNMENT);
 
+    size_t alloc_start_ns = 0;
+    if (jmx_stats_allocation_enabled())
+        alloc_start_ns = (size_t)Time_current_nanos();
+
     Object *alloc = (Object *)LargeAllocator_Alloc(&heap, size);
     alloc->rtti = info;
+    if (alloc_start_ns != 0) {
+        jmx_stats_record_allocation(size, alloc_start_ns,
+                                    (size_t)Time_current_nanos());
+    }
     return (void *)alloc;
 }
 INLINE void *scalanative_GC_alloc_array(Rtti *info, size_t length,
@@ -123,6 +149,18 @@ size_t scalanative_GC_stats_collection_total() {
 
 size_t scalanative_GC_stats_collection_duration_total() {
     return jmx_stats_get_collection_duration_total();
+}
+
+size_t scalanative_GC_stats_allocation_total() {
+    return jmx_stats_get_allocation_total();
+}
+
+size_t scalanative_GC_stats_allocation_bytes_total() {
+    return jmx_stats_get_allocation_bytes_total();
+}
+
+size_t scalanative_GC_stats_allocation_duration_total() {
+    return jmx_stats_get_allocation_duration_total();
 }
 
 void scalanative_GC_add_roots(void *addr_low, void *addr_high) {

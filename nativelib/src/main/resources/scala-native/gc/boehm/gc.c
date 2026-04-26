@@ -20,6 +20,7 @@ static void GC_CALLBACK weakRefFinalizer(void *obj, void *client_data);
 
 void scalanative_GC_init() {
     GC_INIT();
+    jmx_stats_init_allocation();
     // Keep this hook enabled at all times to collect Boehm GC statistics.
     GC_set_on_collection_event(handleOnCollectionEvent);
     // Drive Java-side weak reference processing through Boehm finalizers.
@@ -27,25 +28,53 @@ void scalanative_GC_init() {
 }
 
 void *scalanative_GC_alloc(Rtti *info, size_t size) {
+    size_t alloc_start_ns = 0;
+    if (jmx_stats_allocation_enabled())
+        alloc_start_ns = (size_t)Time_current_nanos();
+
     Object *alloc = (Object *)GC_malloc(size);
     alloc->rtti = info;
+    if (alloc_start_ns != 0) {
+        jmx_stats_record_allocation(size, alloc_start_ns,
+                                    (size_t)Time_current_nanos());
+    }
     return (void *)alloc;
 }
 
 void *scalanative_GC_alloc_small(Rtti *info, size_t size) {
+    size_t alloc_start_ns = 0;
+    if (jmx_stats_allocation_enabled())
+        alloc_start_ns = (size_t)Time_current_nanos();
+
     Object *alloc = (Object *)GC_malloc(size);
     alloc->rtti = info;
+    if (alloc_start_ns != 0) {
+        jmx_stats_record_allocation(size, alloc_start_ns,
+                                    (size_t)Time_current_nanos());
+    }
     return (void *)alloc;
 }
 
 void *scalanative_GC_alloc_large(Rtti *info, size_t size) {
+    size_t alloc_start_ns = 0;
+    if (jmx_stats_allocation_enabled())
+        alloc_start_ns = (size_t)Time_current_nanos();
+
     Object *alloc = (Object *)GC_malloc(size);
     alloc->rtti = info;
+    if (alloc_start_ns != 0) {
+        jmx_stats_record_allocation(size, alloc_start_ns,
+                                    (size_t)Time_current_nanos());
+    }
     return (void *)alloc;
 }
 
 void *scalanative_GC_alloc_array(Rtti *info, size_t length, size_t stride) {
     size_t size = info->size + length * stride;
+    size_t alloc_start_ns = 0;
+    if (jmx_stats_allocation_enabled())
+        alloc_start_ns = (size_t)Time_current_nanos();
+
     ArrayHeader *alloc;
     int32_t classId = info->rt.id;
     if (classId == __object_array_id || classId == __blob_array_id)
@@ -56,6 +85,10 @@ void *scalanative_GC_alloc_array(Rtti *info, size_t length, size_t stride) {
     alloc->rtti = info;
     alloc->length = length;
     alloc->stride = stride;
+    if (alloc_start_ns != 0) {
+        jmx_stats_record_allocation(size, alloc_start_ns,
+                                    (size_t)Time_current_nanos());
+    }
     return (void *)alloc;
 }
 
@@ -86,6 +119,18 @@ size_t scalanative_GC_stats_collection_total() {
 
 size_t scalanative_GC_stats_collection_duration_total() {
     return jmx_stats_get_collection_duration_total();
+}
+
+size_t scalanative_GC_stats_allocation_total() {
+    return jmx_stats_get_allocation_total();
+}
+
+size_t scalanative_GC_stats_allocation_bytes_total() {
+    return jmx_stats_get_allocation_bytes_total();
+}
+
+size_t scalanative_GC_stats_allocation_duration_total() {
+    return jmx_stats_get_allocation_duration_total();
 }
 
 void scalanative_GC_collect() { GC_gcollect(); }

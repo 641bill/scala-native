@@ -50,6 +50,13 @@ size_t scalanative_GC_get_used_heapsize();
 size_t scalanative_GC_stats_collection_total();
 // The total (accumulated) elapsed time in nanos of GC runs
 size_t scalanative_GC_stats_collection_duration_total();
+// The total (accumulated) number of GC heap allocation calls in attribution mode
+size_t scalanative_GC_stats_allocation_total();
+// The total (accumulated) rounded bytes requested from GC heap allocation calls
+size_t scalanative_GC_stats_allocation_bytes_total();
+// The total (accumulated) time in nanos spent inside measured GC heap allocation
+// calls. This is an attribution metric and can perturb benchmark timings.
+size_t scalanative_GC_stats_allocation_duration_total();
 
 // Functions used to create a new thread supporting multithreading support in
 // the garbage collector. Would execute a proxy startup routine to register

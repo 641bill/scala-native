@@ -2282,6 +2282,81 @@ Interpretation:
   The current claim should therefore be bounded-sample median evidence, not a
   final full-DEBS application result.
 
+### GC Heap Allocation Attribution
+
+Date: 2026-04-26
+
+Purpose:
+
+- `gc_time_ns` measures only collection time. It does not include the mutator
+  cost of calling the heap allocator for ordinary `new` and array allocation.
+- Add opt-in GC heap allocation counters for attribution:
+  `SCALANATIVE_GC_ALLOC_STATS=1`.
+- The counters record heap allocation calls, rounded heap bytes requested, and
+  nanoseconds spent in measured GC allocation calls.
+
+Caveat:
+
+- This mode times every GC heap allocation call and uses atomic counters, so it
+  perturbs elapsed timings. Use it to explain where time goes, not as the
+  headline throughput comparison. The normal 3-run medians above remain the
+  performance checkpoint.
+
+Commands:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+SCALANATIVE_GC_ALLOC_STATS=1 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-gc-alloc-stats-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+SCALANATIVE_GC_ALLOC_STATS=1 \
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-gc-alloc-stats-1000000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+Validation:
+
+- 100k and 1M attribution matrices completed.
+- Heap/Rift outputs matched after stripping only the measured latency column.
+
+100k single-run attribution:
+
+| Mode | Elapsed ms | GC collect ms | GC alloc calls | GC alloc bytes | GC alloc time ms | Rift objects | Rift op ms | RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 698.664 | 8.333 | 2790996 | 116791680 | 82.020 | 0 | 0.000 | 102350848 |
+| Rift HPZone | 655.328 | 4.955 | 2193091 | 69285392 | 57.251 | 602458 | 2.058 | 41467904 |
+| Rift Streaming | 654.947 | 4.980 | 2193109 | 69285776 | 57.495 | 602458 | 2.072 | 41484288 |
+
+1M single-run attribution:
+
+| Mode | Elapsed ms | GC collect ms | GC alloc calls | GC alloc bytes | GC alloc time ms | Rift objects | Rift op ms | RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 6495.025 | 68.739 | 19924383 | 679841024 | 582.629 | 0 | 0.000 | 305643520 |
+| Rift HPZone | 6373.794 | 37.610 | 14462042 | 455349920 | 385.807 | 5494563 | 20.131 | 116588544 |
+| Rift Streaming | 6169.514 | 37.617 | 14462060 | 455350304 | 384.031 | 5494563 | 18.424 | 116555776 |
+
+Interpretation:
+
+- The median speedup is not explained by collection time alone. In this
+  attribution mode at 1M, collection time drops by about `31 ms`, but measured
+  GC allocator-call time drops by about `197-199 ms`.
+- Rift also removes about `5.46M` heap allocation calls and about `224 MB` of
+  rounded heap allocation requests at 1M by moving structured-lifetime data and
+  control objects into regions.
+- This supports the current design interpretation: the win comes from placing
+  structured-lifetime Scala objects in regions, not from a Rift-only DEBS
+  algorithm. The Q2 top-10 cache is shared by heap and Rift; allocation
+  placement and lifetime policy remain the experimental variable.
+- The remaining elapsed delta beyond collection plus measured allocator-call
+  time is still application work: locality, cache behavior, phase-level CPU
+  differences, output, and ranking/control operations. Do not collapse it into
+  "GC pause time."
+
 ## JVM RunBoth Cross-check
 
 Date: 2026-04-25
