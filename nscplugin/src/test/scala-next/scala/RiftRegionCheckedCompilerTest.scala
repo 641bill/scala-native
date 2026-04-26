@@ -53,6 +53,59 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def scopedForLoopAllocationCompiles(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    var total = 0
+      |    for i <- 0 until 8 do
+      |      val box: Box^{region} = region.alloc(new Box(i))
+      |      total += box.value
+      |    total
+      |  }
+      |""".stripMargin)
+
+  @Test def nestedScopedRegionsReturningPureValueCompiles(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { outer ?=>
+      |    val outerBox: Box^{outer} = RiftRegion.alloc(new Box(20))
+      |    RiftRegion.scoped { inner ?=>
+      |      val innerBox: Box^{inner} = RiftRegion.alloc(new Box(22))
+      |      outerBox.value + innerBox.value
+      |    }
+      |  }
+      |""".stripMargin)
+
+  @Test def scopedHigherOrderConsumerCompiles(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def withBox(using region: RiftRegion.ScopedRegion^)(
+      |    use: Box^{region} => Int
+      |): Int =
+      |  val box: Box^{region} = RiftRegion.alloc(new Box(40))
+      |  use(box)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    withBox { box => box.value + 2 }
+      |  }
+      |""".stripMargin)
+
   @Test def scopedValueCannotEscapeByReturn(): Unit =
     assertDoesNotCompile("""
       |import scala.language.experimental.captureChecking
@@ -63,6 +116,21 @@ class RiftRegionCheckedCompilerTest {
       |def bad(): AnyRef =
       |  RiftRegion.scoped { region ?=>
       |    RiftRegion.alloc(new Box(1))
+      |  }
+      |""".stripMargin)
+
+  @Test def innerScopedValueCannotEscapeOuterScope(): Unit =
+    assertDoesNotCompile("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def bad(): AnyRef =
+      |  RiftRegion.scoped { outer ?=>
+      |    RiftRegion.scoped { inner ?=>
+      |      RiftRegion.alloc(new Box(1))
+      |    }
       |  }
       |""".stripMargin)
 
