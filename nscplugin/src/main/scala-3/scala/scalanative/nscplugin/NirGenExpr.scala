@@ -30,6 +30,7 @@ import core.TypeErasure.ErasedValueType
 import core.Types._
 import core._
 import transform.{Erasure, ValueClasses}
+import scala.collection.mutable
 
 trait NirGenExpr(using Context) {
   self: NirCodeGen =>
@@ -90,6 +91,77 @@ trait NirGenExpr(using Context) {
     }
 
     object AllocationZoneInstance extends Property.Key[nir.Val]
+
+    private val riftRegionAllocatedSyms = mutable.Set.empty[Symbol]
+
+    private def isRiftRegionType(tpe: Type): Boolean = {
+      val fullName = tpe.widenDealias.typeSymbol.fullName.toString
+      fullName == "scala.scalanative.memory.RiftRegion" ||
+      fullName.startsWith("scala.scalanative.memory.RiftRegion.")
+    }
+
+    private def isRiftHeapRootTree(tree: Tree): Boolean = {
+      val heapRootName = "scala.scalanative.memory.RiftRegion.HeapRoot"
+      tree.tpe.show.contains(heapRootName) ||
+      tree.tpe.widenDealias.show.contains(heapRootName) ||
+      tree.symbol.info.show.contains(heapRootName)
+    }
+
+    private def isPrimitiveOrNull(tree: Tree): Boolean =
+      tree match {
+        case Literal(Constant(null)) => true
+        case Literal(_)              => true
+        case _ =>
+          val sym = tree.tpe.widenDealias.typeSymbol
+          sym.isPrimitiveValueClass || sym == defn.UnitClass
+      }
+
+    private def isAllowedRiftConstructorArg(tree: Tree): Boolean =
+      isPrimitiveOrNull(tree) ||
+        isRiftHeapRootTree(tree) ||
+        riftRegionAllocatedSyms.contains(tree.symbol)
+
+    private def checkRiftConstructorArgs(args: List[Tree]): Unit =
+      args.foreach { arg =>
+        if !isAllowedRiftConstructorArg(arg) then
+          report.error(
+            "Rift checked region allocation cannot store an unrooted heap object; use RiftRegion.root(value) for heap metadata.",
+            arg.srcPos
+          )
+      }
+
+    private def calledSymbol(tree: Tree): Symbol =
+      tree match {
+        case Apply(fun, _)     => calledSymbol(fun)
+        case TypeApply(fun, _) => calledSymbol(fun)
+        case Select(_, _)      => tree.symbol
+        case _                 => tree.symbol
+      }
+
+    private def isRuntimeRiftAllocate(tree: Tree): Boolean =
+      defnNir.RuntimeRiftAllocator_allocate.exists(_ == calledSymbol(tree))
+
+    private def isRuntimeSafeZoneAllocateInRift(tree: Tree): Boolean =
+      tree match {
+        case Apply(_, List(zone, _)) =>
+          defnNir.RuntimeSafeZoneAllocator_allocate.exists(
+            _ == calledSymbol(tree)
+          ) &&
+            isRiftRegionType(zone.tpe)
+        case _ => false
+      }
+
+    private def isRiftAllocationTree(tree: Tree): Boolean =
+      tree match {
+        case app: Apply =>
+          isRuntimeRiftAllocate(app) || isRuntimeSafeZoneAllocateInRift(app)
+        case TypeApply(Select(qualifier, nme.asInstanceOf_), _) =>
+          isRiftAllocationTree(qualifier)
+        case Typed(expr, _)      => isRiftAllocationTree(expr)
+        case Inlined(_, _, expr) => isRiftAllocationTree(expr)
+        case Block(_, expr)      => isRiftAllocationTree(expr)
+        case _                   => false
+      }
 
     def genApply(app: Apply): nir.Val = {
       given nir.SourcePosition = app.span.orElse(fallbackSourcePosition)
@@ -1022,6 +1094,7 @@ trait NirGenExpr(using Context) {
       given nir.SourcePosition = vd.span
       val localNames = curMethodLocalNames.get
       val isMutable = curMethodInfo.mutableVars.contains(vd.symbol)
+      val isRiftAllocated = isRiftAllocationTree(vd.rhs)
       def name = genLocalName(vd.symbol)
       val rhs = genExpr(vd.rhs) match {
         case v @ nir.Val.Local(id, _) =>
@@ -1048,6 +1121,7 @@ trait NirGenExpr(using Context) {
         val slot = curMethodEnv.resolve(vd.symbol)
         buf.varstore(slot, rhs, unwind)
       else
+        if isRiftAllocated then riftRegionAllocatedSyms += vd.symbol
         curMethodEnv.enter(vd.symbol, rhs)
         nir.Val.Unit
     }
@@ -2601,7 +2675,8 @@ trait NirGenExpr(using Context) {
       // For new expression with a specified safe zone, e.g. `new {sz} T(...)`,
       // it's translated to `allocate(sz, new T(...))` in TyperPhase.
       tree match {
-        case Apply(Select(New(_), nme.CONSTRUCTOR), _)          =>
+        case Apply(Select(New(_), nme.CONSTRUCTOR), args)       =>
+          if isRiftRegionType(sz.tpe) then checkRiftConstructorArgs(args)
         case Apply(fun, _) if fun.symbol == defn.newArrayMethod =>
         case _                                                  =>
           report.error(
@@ -2622,7 +2697,8 @@ trait NirGenExpr(using Context) {
     def genRiftAlloc(app: Apply): nir.Val = {
       val Apply(_, List(region, tree)) = app
       tree match {
-        case Apply(Select(New(_), nme.CONSTRUCTOR), _)          =>
+        case Apply(Select(New(_), nme.CONSTRUCTOR), args)       =>
+          checkRiftConstructorArgs(args)
         case Apply(fun, _) if fun.symbol == defn.newArrayMethod =>
         case _                                                  =>
           report.error(

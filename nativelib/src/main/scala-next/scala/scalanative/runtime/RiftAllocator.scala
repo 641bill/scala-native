@@ -10,7 +10,7 @@ object RiftAllocator {
   final val Scoped: Int = 1
   final val Streaming: Int = 2
 
-  def allocate[T](region: RiftRegion^, obj: T): T^{region} = intrinsic
+  def allocate[T](region: RiftRegion^, obj: T^{region}): T^{region} = intrinsic
 
   @extern @define("__SCALANATIVE_MEMORY_RIFT") object Impl {
     @name("scalanative_rift_init")

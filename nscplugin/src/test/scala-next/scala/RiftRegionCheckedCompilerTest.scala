@@ -213,6 +213,24 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def directHeapValueCannotBeStoredInScopedObject(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata^)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val metadata = new Metadata(41)
+      |    val entry: Entry^{region} = RiftRegion.alloc(new Entry(metadata))
+      |    entry.metadata.value + 1
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
   @Test def streamingResetValueCannotEscapeEpoch(): Unit =
     assertDoesNotCompile("""
       |import scala.language.experimental.captureChecking
