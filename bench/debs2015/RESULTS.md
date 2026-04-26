@@ -1868,3 +1868,100 @@ Interpretation:
   same 1M window probe spends `1322 ms` in GC out of `1864 ms` elapsed.
 - This is a probe, not a full JVM DEBS baseline. A fair JVM Q1/Q2 comparison
   would need the same query logic ported or generated for the JVM.
+
+## Q2 Incremental Median Heaps
+
+Date: 2026-04-26
+
+Purpose:
+
+- Existing diagnostics identified Q2 median/rank maintenance as the dominant
+  remaining processing path: at 1M, the previous checkpoint recorded about
+  `1.76M` dirty median recomputations, `19.16M` values copied/sorted, and
+  `3.25M` Q2 rank fixes.
+- Replace per-dirty-cell copy/sort median recomputation with a shared per-cell
+  two-heap median structure.
+- Keep heap and Rift logically aligned: heap and Rift use the same Q2 window,
+  ranking, and median-maintenance algorithm. Heap mode allocates median/control
+  arrays with ordinary `new`; Rift modes allocate the same `ProfitStats` and
+  median heap arrays in the Q2 run-lifetime ranking/control region.
+- Durable taxi-id metadata and the existing output path were not changed in
+  this checkpoint.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/.codex/worktrees/8d31/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Q2Smoke\")" run
+
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-incremental-median-sample \
+  zsh bench/debs2015/run_both_sample_matrix.sh
+
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-incremental-median-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-incremental-median-1000000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+`sandbox3_next` compiled, `Debs2015Q2Smoke` passed for heap, Rift HPZone, and
+Rift Streaming, and the sample, 100k, and 1M RunBoth matrices matched heap
+outputs after stripping only the measured latency column.
+
+These rows are single-run instrumented diagnostics, not medians.
+
+### 100k Single Run With Incremental Median Heaps
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q2 process ms | Q2 output ms | Rift op ms | Rift alloc objects | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 673.637 | 8.352 | 143.438 | 210.383 | 54.081 | 0.000 | 0 | 97386496 |
+| Rift HPZone | 683.219 | 7.128 | 144.419 | 200.590 | 67.487 | 1.980 | 602450 | 40173568 |
+| Rift Streaming | 672.708 | 7.098 | 147.105 | 203.167 | 56.016 | 2.162 | 602450 | 40173568 |
+
+Common Q2 diagnostics:
+
+| Events | Q2 rank fixes | Median sort computes | Median values sorted | Median reads | Median heap adds | Median heap removes | Median rebalances |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100000 | 312906 | 0 | 0 | 321758 | 98214 | 98213 | 86767 |
+
+### 1M Single Run With Incremental Median Heaps
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Rift alloc objects | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 7001.241 | 71.783 | 1530.498 | 566.199 | 2238.863 | 696.061 | 0.000 | 0 | 305741824 |
+| Rift HPZone | 7832.895 | 54.735 | 1598.990 | 808.177 | 2256.581 | 1142.072 | 16.201 | 5494550 | 114458624 |
+| Rift Streaming | 6729.748 | 56.712 | 1494.611 | 546.894 | 2115.207 | 600.078 | 15.108 | 5494550 | 113934336 |
+
+Common Q2 diagnostics:
+
+| Events | Q2 rank fixes | Median sort computes | Median values sorted | Median reads | Median heap adds | Median heap removes | Median rebalances |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1000000 | 3252279 | 0 | 0 | 3320865 | 981885 | 981883 | 898934 |
+
+Interpretation:
+
+- This checkpoint removes the old Q2 median copy/sort path from both heap and
+  Rift. The old `diag_q2_median_computes` and
+  `diag_q2_median_values_sorted` counters are now zero; new counters track
+  median reads, heap adds/removes, and rebalances.
+- The change is a shared query-structure improvement, not a separate Rift
+  benchmark. The allocation-placement split remains the experimental variable
+  for the median/control arrays.
+- Q2 process time drops sharply compared with the previous output-snapshot
+  medians, but the comparison is cross-checkpoint and single-run. It is useful
+  as a direction signal, not a headline result.
+- Rift RSS is much lower than heap in these runs, but 1M elapsed ordering is
+  still noisy: Streaming is faster than heap in this single run, while HPZone
+  is slower because Q1/Q2 output phases are unusually high. Median reruns are
+  required before making a performance claim.
+- Q2 rank fixes remain about `3.25M` at 1M. The next measured Q2 target should
+  be rank-maintenance cost and output-phase variance, not reintroducing
+  per-event scratch regions.
