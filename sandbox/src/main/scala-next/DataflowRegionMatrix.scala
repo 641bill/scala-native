@@ -581,6 +581,198 @@ object DataflowRegionMatrixHelpers {
     total
   }
 
+  def runCheckedAggregate(): Long = {
+    val cfg = DataflowRegionConfig
+    val tableSize = nextPowerOfTwo(cfg.keySpace * 2)
+    val tableMask = tableSize - 1
+    val total = RiftRegion.streaming { stream ?=>
+      var total = 0L
+      var epoch = 0
+      while (epoch < cfg.epochs) {
+        total += RiftRegion.reset { region ?=>
+          final class CheckedDocument(
+              val docId: Int,
+              val key: Int,
+              val authorKey: Int,
+              val value: Int,
+              val next: CheckedDocument^{region}
+          )
+          final class CheckedAggregateEntry(
+              val key: Int,
+              var count: Int,
+              var sum: Long,
+              var next: CheckedAggregateEntry^{region}
+          )
+
+          var docs: CheckedDocument^{region} = null
+          var i = 0
+          while (i < cfg.docsPerEpoch) {
+            val seed = mix(epoch * 1000003 + i)
+            val key = seed % cfg.keySpace
+            val author = mix(seed + 17) % cfg.authorKeySpace
+            val value = mix(seed + 31) & 0xffff
+            val docId = epoch * cfg.docsPerEpoch + i
+            docs =
+              RiftRegion.alloc(
+                new CheckedDocument(docId, key, author, value, docs)
+              )
+            i += 1
+          }
+
+          val table:
+            Array[CheckedAggregateEntry^{region}]^{region} =
+            RiftRegion.alloc(
+              new Array[CheckedAggregateEntry^{region}](tableSize)
+            )
+
+          var cursor = docs
+          while (cursor != null) {
+            val key = cursor.key
+            val bucket = mix(key) & tableMask
+            var entry: CheckedAggregateEntry^{region} = table(bucket)
+            var found: CheckedAggregateEntry^{region} = null
+            while (entry != null && found == null) {
+              if (entry.key == key) found = entry
+              entry = entry.next
+            }
+            if (found == null) {
+              found =
+                RiftRegion.alloc(
+                  new CheckedAggregateEntry(key, 0, 0L, null)
+                )
+              found.next = table(bucket)
+              table(bucket) = found
+            }
+            found.count += 1
+            found.sum += cursor.value.toLong
+            cursor = cursor.next
+          }
+
+          var epochTotal = 0L
+          i = 0
+          while (i < table.length) {
+            var entry: CheckedAggregateEntry^{region} = table(i)
+            while (entry != null) {
+              epochTotal +=
+                entry.sum ^ (entry.count.toLong << 17) ^ entry.key.toLong
+              entry = entry.next
+            }
+            i += 1
+          }
+          epochTotal
+        }
+        epoch += 1
+      }
+      total
+    }
+
+    checksumSink = total
+    total
+  }
+
+  def runCheckedJoin(): Long = {
+    val cfg = DataflowRegionConfig
+    val tableSize = nextPowerOfTwo(cfg.authorKeySpace * 2)
+    val tableMask = tableSize - 1
+    val total = RiftRegion.streaming { stream ?=>
+      var total = 0L
+      var epoch = 0
+      while (epoch < cfg.epochs) {
+        total += RiftRegion.reset { region ?=>
+          final class CheckedDocument(
+              val docId: Int,
+              val key: Int,
+              val authorKey: Int,
+              val value: Int,
+              val next: CheckedDocument^{region}
+          )
+          final class CheckedAuthorEntry(
+              val authorKey: Int,
+              val weight: Int,
+              var next: CheckedAuthorEntry^{region}
+          )
+          final class CheckedJoinedRecord(
+              val docId: Int,
+              val authorKey: Int,
+              val score: Long
+          )
+
+          val authors:
+            Array[CheckedAuthorEntry^{region}]^{region} =
+            RiftRegion.alloc(
+              new Array[CheckedAuthorEntry^{region}](tableSize)
+            )
+          var a = 0
+          while (a < cfg.authorsPerEpoch) {
+            val key = authorKey(epoch, a)
+            val bucket = mix(key) & tableMask
+            val entry: CheckedAuthorEntry^{region} =
+              RiftRegion.alloc(
+                new CheckedAuthorEntry(key, (a + 1) * 7, null)
+              )
+            entry.next = authors(bucket)
+            authors(bucket) = entry
+            a += 1
+          }
+
+          var docs: CheckedDocument^{region} = null
+          var i = 0
+          while (i < cfg.docsPerEpoch) {
+            val seed = mix(epoch * 1000003 + i)
+            val key = seed % cfg.keySpace
+            val author = mix(seed + 17) % cfg.authorKeySpace
+            val value = mix(seed + 31) & 0xffff
+            val docId = epoch * cfg.docsPerEpoch + i
+            docs =
+              RiftRegion.alloc(
+                new CheckedDocument(docId, key, author, value, docs)
+              )
+            i += 1
+          }
+
+          val joined =
+            RiftRegion.regionBuffer[CheckedJoinedRecord](16)
+          var cursor = docs
+          while (cursor != null) {
+            val bucket = mix(cursor.authorKey) & tableMask
+            var author: CheckedAuthorEntry^{region} = authors(bucket)
+            while (author != null) {
+              if (author.authorKey == cursor.authorKey) {
+                val score =
+                  cursor.value.toLong * author.weight.toLong + cursor.key
+                val record: CheckedJoinedRecord^{region} =
+                  RiftRegion.alloc(
+                    new CheckedJoinedRecord(
+                      cursor.docId,
+                      cursor.authorKey,
+                      score
+                    )
+                  )
+                region.append(joined, record)
+              }
+              author = author.next
+            }
+            cursor = cursor.next
+          }
+
+          var epochTotal = 0L
+          i = 0
+          while (i < region.length(joined)) {
+            val out = region.get(joined, i)
+            epochTotal += out.score ^ out.docId.toLong ^ out.authorKey.toLong
+            i += 1
+          }
+          epochTotal
+        }
+        epoch += 1
+      }
+      total
+    }
+
+    checksumSink = total
+    total
+  }
+
   def runSelect(modeName: String): Long = {
     val cfg = DataflowRegionConfig
     val mode = new ModeState(modeName)
@@ -741,17 +933,11 @@ object DataflowRegionMatrixHelpers {
         else runSelect(mode)
       case "aggregate" =>
         if (mode == "safezone") runSafeZoneAggregate()
-        else if (mode == "rift-checked")
-          throw new IllegalArgumentException(
-            "rift-checked is currently implemented only for dataflow select"
-          )
+        else if (mode == "rift-checked") runCheckedAggregate()
         else runAggregate(mode)
       case "join" =>
         if (mode == "safezone") runSafeZoneJoin()
-        else if (mode == "rift-checked")
-          throw new IllegalArgumentException(
-            "rift-checked is currently implemented only for dataflow select"
-          )
+        else if (mode == "rift-checked") runCheckedJoin()
         else runJoin(mode)
       case other =>
         throw new IllegalArgumentException(
@@ -894,10 +1080,6 @@ object DataflowRegionMatrixHelpers {
   try {
     operator match {
       case "all" =>
-        if (mode == "rift-checked")
-          throw new IllegalArgumentException(
-            "rift-checked is currently implemented only for dataflow select"
-          )
         DataflowRegionMatrixHelpers.runBenchmark(mode, "select")
         DataflowRegionMatrixHelpers.runBenchmark(mode, "aggregate")
         DataflowRegionMatrixHelpers.runBenchmark(mode, "join")

@@ -1,7 +1,8 @@
 # Dataflow Region Matrix
 
 Status: Broom-style methodology reproduction harness with trusted
-heap/SafeZone/Rift medians and a SELECT-only checked RegionBuffer mode.
+heap/SafeZone/Rift medians and checked RegionBuffer modes for SELECT,
+AGGREGATE, and JOIN.
 
 The harness is implemented in
 `sandbox/src/main/scala-next/DataflowRegionMatrix.scala` and run with
@@ -25,9 +26,10 @@ Heap and Rift variants use the same logical programs:
   per epoch.
 - `rift-streaming`: the same classes allocated with `region.alloc`, using a
   resettable streaming region across epochs.
-- `rift-checked`: SELECT-only checked safe-API variant using
-  `RiftRegion.streaming/reset` plus growable `RegionBuffer` for selected
-  records. Aggregate and join are not yet ported to checked mode.
+- `rift-checked`: checked safe-API variant using
+  `RiftRegion.streaming/reset`. SELECT and JOIN use growable `RegionBuffer`
+  for output records. AGGREGATE uses a region-owned table array with linked
+  region-owned aggregate entries.
 
 The benchmark intentionally uses ordinary Scala object graphs in regions. It is
 not a primitive-key-only layout experiment.
@@ -76,17 +78,16 @@ DATAFLOW_BUILD=0 DATAFLOW_BENCHMARK_RUNS=3 DATAFLOW_WARMUPS=1 \
 DATAFLOW_OUTPUT_DIR=/tmp/dataflow-region-instrumented-100k \
   zsh sandbox/run_dataflow_region_instrumented_matrix.sh
 
-DATAFLOW_BUILD=0 DATAFLOW_OPERATOR=select \
-DATAFLOW_OUTPUT_DIR=/tmp/dataflow-checked-select-default \
+DATAFLOW_BUILD=0 \
+DATAFLOW_OUTPUT_DIR=/tmp/dataflow-checked-all-default \
   zsh sandbox/run_dataflow_region_instrumented_matrix.sh
 ```
 
-Checked SELECT run:
+Checked all-operator run:
 
 ```sh
 cd /Users/siyaoliu/rift/scala-native-rift
-DATAFLOW_BUILD=0 DATAFLOW_OPERATOR=select \
-DATAFLOW_OUTPUT_DIR=/tmp/dataflow-checked-select-default \
+DATAFLOW_BUILD=0 DATAFLOW_OUTPUT_DIR=/tmp/dataflow-checked-all-default \
   zsh sandbox/run_dataflow_region_instrumented_matrix.sh
 ```
 
@@ -100,8 +101,8 @@ DATAFLOW_EPOCHS=40 DATAFLOW_DOCS_PER_EPOCH=500000 DATAFLOW_BENCHMARK_RUNS=3 DATA
 
 ## Result Status
 
-Smoke, local medians, native-only instrumented RSS runs, and a SELECT-only
-checked RegionBuffer median have been recorded. These are local methodology
+Smoke, local medians, native-only instrumented RSS runs, and checked
+RegionBuffer/table medians have been recorded. These are local methodology
 reproduction numbers, not exact Broom/Naiad numbers.
 
 Validation commands run on 2026-04-25:
@@ -217,21 +218,22 @@ Interpretation:
 - Streaming is not consistently good on this run; keep HPZone and Streaming
   claims separate.
 
-## Checked RegionBuffer SELECT Median
+## Checked RegionBuffer/Table Medians
 
 Date: 2026-04-26
 
-This run adds a `rift-checked` SELECT-only mode to the existing Broom-style
-matrix. The checked path uses `RiftRegion.streaming/reset` and
-`RiftRegion.RegionBuffer` for selected output records. Heap, SafeZone, trusted
-Rift, and checked Rift all produce the same SELECT checksum.
+This run extends `rift-checked` across the existing Broom-style matrix. The
+checked path uses `RiftRegion.streaming/reset`; SELECT and JOIN use
+`RiftRegion.RegionBuffer` for output records, and AGGREGATE uses a
+region-owned table array with linked region-owned aggregate entries. Heap,
+SafeZone, trusted Rift, and checked Rift all produce matching checksums for all
+three operators.
 
 Command:
 
 ```sh
 cd /Users/siyaoliu/rift/scala-native-rift
-DATAFLOW_BUILD=0 DATAFLOW_OPERATOR=select \
-DATAFLOW_OUTPUT_DIR=/tmp/dataflow-checked-select-default \
+DATAFLOW_BUILD=0 DATAFLOW_OUTPUT_DIR=/tmp/dataflow-checked-all-default \
   zsh sandbox/run_dataflow_region_instrumented_matrix.sh
 ```
 
@@ -242,26 +244,37 @@ Configuration:
 - `DATAFLOW_BENCHMARK_RUNS=3`
 - `DATAFLOW_WARMUPS=1`
 
-| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens/closes/resets | Peak RSS bytes |
-|---|---:|---:|---:|---:|---:|---:|
-| heap | 27.671 | 6.761 | 0.000 | 0 | 0 / 0 / 0 | 39288832 |
-| current SafeZone | 26.304 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 30392320 |
-| improved SafeZone | 23.403 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 30392320 |
-| Rift HPZone | 20.186 | 0.000 | 0.039 | 1124990 | 10 / 10 / 0 | 30375936 |
-| Rift Streaming | 20.760 | 0.000 | 0.038 | 1124990 | 1 / 1 / 9 | 30343168 |
-| Rift checked RegionBuffer | 18.472 | 0.000 | 0.133 | 1125100 | 1 / 1 / 10 | 30490624 |
+| Operator | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens/closes/resets | Peak RSS bytes |
+|---|---|---:|---:|---:|---:|---:|---:|
+| SELECT | heap | 36.868 | 8.624 | 0.000 | 0 | 0 / 0 / 0 | 75907072 |
+| SELECT | current SafeZone | 26.785 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 47104000 |
+| SELECT | improved SafeZone | 23.454 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 47120384 |
+| SELECT | Rift HPZone | 20.958 | 0.000 | 0.051 | 1124990 | 10 / 10 / 0 | 47005696 |
+| SELECT | Rift Streaming | 21.042 | 0.000 | 0.040 | 1124990 | 1 / 1 / 9 | 46956544 |
+| SELECT | Rift checked RegionBuffer | 18.865 | 0.000 | 0.178 | 1125100 | 1 / 1 / 10 | 46972928 |
+| AGGREGATE | heap | 51.474 | 11.510 | 0.000 | 0 | 0 / 0 / 0 | 75907072 |
+| AGGREGATE | current SafeZone | 50.328 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 47104000 |
+| AGGREGATE | improved SafeZone | 41.290 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 47120384 |
+| AGGREGATE | Rift HPZone | 39.118 | 0.000 | 0.218 | 1627152 | 10 / 10 / 0 | 47005696 |
+| AGGREGATE | Rift Streaming | 39.482 | 0.000 | 0.160 | 1627152 | 1 / 1 / 9 | 46956544 |
+| AGGREGATE | Rift checked table | 36.003 | 0.000 | 0.171 | 1627152 | 1 / 1 / 10 | 46972928 |
+| JOIN | heap | 32.170 | 10.966 | 0.000 | 0 | 0 / 0 / 0 | 75907072 |
+| JOIN | current SafeZone | 25.536 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 47104000 |
+| JOIN | improved SafeZone | 22.604 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 47120384 |
+| JOIN | Rift HPZone | 20.819 | 0.000 | 0.038 | 1078279 | 10 / 10 / 0 | 47005696 |
+| JOIN | Rift Streaming | 21.192 | 0.000 | 0.039 | 1078279 | 1 / 1 / 9 | 46956544 |
+| JOIN | Rift checked RegionBuffer | 18.736 | 0.000 | 0.101 | 1078379 | 1 / 1 / 10 | 46972928 |
 
 Interpretation:
 
-- This is the first existing literature-shaped operator path using the checked
+- This is the first existing literature-shaped operator set using the checked
   safe API rather than trusted `RiftRegion.open`.
-- The checked SELECT variant is SELECT-only. Aggregate and join still need
-  checked table/container provenance before they can be included.
-- `rift-checked` is faster than heap, improved SafeZone, trusted HPZone, and
-  trusted Streaming in this local SELECT run.
-- Region operation time remains small (`0.133 ms` median), though higher than
-  trusted Streaming because checked reset runs every epoch and the selected
-  output uses growable backing arrays.
+- The checked variants are faster than heap, improved SafeZone, trusted HPZone,
+  and trusted Streaming in this local run for SELECT, AGGREGATE, and JOIN.
+- Region operation time remains small; the largest checked median here is
+  `0.178 ms` for SELECT.
+- This is still a local methodology reproduction, not exact Naiad/Broom
+  evidence and not a DEBS application result.
 
 ## Provisional Broom-Scale Single Run, 40 Epochs x 500k Documents
 

@@ -112,9 +112,7 @@ run_mode "current-safezone" "safezone" "0"
 run_mode "improved-safezone" "safezone" "1"
 run_mode "rift-hp" "rift-hp" "0"
 run_mode "rift-streaming" "rift-streaming" "0"
-if [[ "${operator}" == "select" ]]; then
-  run_mode "rift-checked" "rift-checked" "0"
-fi
+run_mode "rift-checked" "rift-checked" "0"
 
 echo
 echo "Dataflow instrumented matrix complete"
