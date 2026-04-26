@@ -3,7 +3,8 @@ package debs2015
 import java.io.BufferedWriter
 import java.io.FileWriter
 
-import scala.collection.mutable
+import scala.language.experimental.captureChecking
+
 import scala.scalanative.memory.RiftRegion
 import scala.scalanative.runtime.{fromRawUSize, GC, RawSize, RiftAllocator}
 
@@ -162,6 +163,41 @@ object Debs2015RunBothRunner {
       else events.toDouble * 1000000000.0 / elapsedNanos.toDouble
   }
 
+  private final class LongSampleBuffer(
+      useRegions: Boolean,
+      region: RiftRegion,
+      initialCapacity: Int
+  ) {
+    private var values = allocate(initialCapacity)
+    private var used = 0
+
+    def +=(value: Long): Unit = {
+      ensureCapacity(used + 1)
+      values(used) = value
+      used += 1
+    }
+
+    def toArray: Array[Long] = {
+      val result = new Array[Long](used)
+      Array.copy(values, 0, result, 0, used)
+      result
+    }
+
+    private def ensureCapacity(required: Int): Unit =
+      if (required > values.length) {
+        var next = values.length
+        while (required > next)
+          next *= 2
+        val expanded = allocate(next)
+        Array.copy(values, 0, expanded, 0, used)
+        values = expanded
+      }
+
+    private def allocate(size: Int): Array[Long] =
+      if (useRegions) region.alloc(new Array[Long](size))
+      else new Array[Long](size)
+  }
+
   def run(
       inputPath: String,
       q1OutputPath: String,
@@ -185,8 +221,8 @@ object Debs2015RunBothRunner {
       if (usesRift) RiftRegion.open(regionKindForMode(q1Mode)) else null
     val q1Writer = new BufferedWriter(new FileWriter(q1OutputPath))
     val q2Writer = new BufferedWriter(new FileWriter(q2OutputPath))
-    val q1Latencies = new mutable.ArrayBuffer[Long](1024)
-    val q2Latencies = new mutable.ArrayBuffer[Long](1024)
+    val q1Latencies = new LongSampleBuffer(usesRift, snapshotRegion, 1024)
+    val q2Latencies = new LongSampleBuffer(usesRift, snapshotRegion, 1024)
     val trip = Trip.empty
 
     var previousQ1 = Q1Output.EmptySnapshot
@@ -203,6 +239,8 @@ object Debs2015RunBothRunner {
     var q2ProcessNanos = 0L
     var q2OutputNanos = 0L
     var closeNanos = 0L
+    var q1LatencyMillis = Array.emptyLongArray
+    var q2LatencyMillis = Array.emptyLongArray
     val started = System.nanoTime()
 
     try {
@@ -265,6 +303,8 @@ object Debs2015RunBothRunner {
       val closeStarted = System.nanoTime()
       q2Writer.close()
       q1Writer.close()
+      q1LatencyMillis = q1Latencies.toArray
+      q2LatencyMillis = q2Latencies.toArray
       source.close()
       q2.close()
       q1.close()
@@ -281,8 +321,8 @@ object Debs2015RunBothRunner {
       q1Outputs = q1Outputs,
       q2Outputs = q2Outputs,
       elapsedNanos = System.nanoTime() - started,
-      q1LatencyMillis = q1Latencies.toArray,
-      q2LatencyMillis = q2Latencies.toArray,
+      q1LatencyMillis = q1LatencyMillis,
+      q2LatencyMillis = q2LatencyMillis,
       phases = PhaseMetrics(
         readNanos = readNanos,
         parseNanos = parseNanos,

@@ -2066,6 +2066,67 @@ Interpretation:
   performs about `3.25M` rank fixes and Q2 process time remains about
   `1.9-2.0 s`.
 
+### Checked-Guard Boundary And Region-Backed Latency Buffers
+
+Date: 2026-04-26
+
+Change:
+
+- Narrowed the checked Rift allocation guard so it applies to the checked
+  `RiftRegion.ScopedRegion`/`RiftRegion.StreamingRegion` API surface, not to
+  trusted low-level `RiftRegion.open(...)` benchmark allocations. This keeps
+  the safe API checks active while allowing trusted benchmark linked structures
+  to use ordinary region allocation without the v1 mixed-reference rejection.
+- Replaced RunBoth's generic `mutable.ArrayBuffer[Long]` latency collectors
+  with a shared `LongSampleBuffer`. Heap mode uses a heap `Array[Long]`; Rift
+  modes allocate the backing `Array[Long]` in the existing RunBoth snapshot
+  region and copy the final primitive arrays to heap before closing the region
+  because `Metrics` outlives the run region.
+
+Commands:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Smoke\")" \
+      run
+
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-latency-100000 \
+  zsh bench/debs2015/run_both_sample_matrix.sh
+```
+
+Validation:
+
+- `RiftRegionCheckedCompilerTest`: passed `30/30`.
+- `Debs2015Smoke`: passed.
+- 100k RunBoth sample matrix: heap/Rift outputs matched.
+
+100k single-run sample matrix:
+
+| Mode | Elapsed ms | Throughput events/s | GC ms | Q1 process ms | Q1 output ms | Q2 process ms | Q2 output ms | Rift op ms | Region objects |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 728.465 | 137275.033 | 12.690 | 149.200 | 76.313 | 222.304 | 80.431 | 0.000 | 0 |
+| Rift HPZone | 651.938 | 153388.849 | 5.190 | 144.700 | 58.584 | 200.772 | 49.300 | 2.370 | 602457 |
+| Rift Streaming | 633.442 | 157867.702 | 5.318 | 136.581 | 60.215 | 185.881 | 55.154 | 1.874 | 602457 |
+
+Interpretation:
+
+- This is a validation checkpoint, not a new headline benchmark. The latest
+  3-run median table above remains the current stronger bounded-sample DEBS
+  evidence.
+- The latency collector change removes generic `ArrayBuffer` allocation noise
+  from both modes while preserving the same logical program: heap uses ordinary
+  heap arrays and Rift uses region-backed arrays at the same lifetime boundary.
+- The checked guard now reflects the intended API split: `scoped`/`streaming`
+  are checked; `RiftRegion.open` remains a documented trusted/unsafe low-level
+  path for benchmark and runtime experiments.
+
 ## JVM RunBoth Cross-check
 
 Date: 2026-04-25

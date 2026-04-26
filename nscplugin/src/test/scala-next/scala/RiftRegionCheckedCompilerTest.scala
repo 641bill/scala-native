@@ -518,6 +518,25 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def trustedOpenAllocationAllowsBenchmarkLinkedObjects(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Node(val value: Int, val next: Node^)
+      |
+      |def ok(): Int =
+      |  val region = RiftRegion.open(RiftRegion.HPZone)
+      |  try
+      |    var head: Node = null
+      |    var i = 0
+      |    while i < 4 do
+      |      head = region.alloc(new Node(i, head))
+      |      i += 1
+      |    head.value
+      |  finally region.close()
+      |""".stripMargin)
+
   @Test def streamingResetValueCannotEscapeEpoch(): Unit =
     assertDoesNotCompile("""
       |import scala.language.experimental.captureChecking

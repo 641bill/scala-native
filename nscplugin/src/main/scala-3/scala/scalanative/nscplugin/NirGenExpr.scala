@@ -94,10 +94,16 @@ trait NirGenExpr(using Context) {
 
     private val riftRegionAllocatedSyms = mutable.Set.empty[Symbol]
 
-    private def isRiftRegionType(tpe: Type): Boolean = {
+    private def isCheckedRiftRegionType(tpe: Type): Boolean = {
+      val checkedRegionNames = Set(
+        "scala.scalanative.memory.RiftRegion.ScopedRegion",
+        "scala.scalanative.memory.RiftRegion.StreamingRegion"
+      )
       val fullName = tpe.widenDealias.typeSymbol.fullName.toString
-      fullName == "scala.scalanative.memory.RiftRegion" ||
-      fullName.startsWith("scala.scalanative.memory.RiftRegion.")
+      checkedRegionNames.contains(fullName) ||
+        checkedRegionNames.exists(name =>
+          tpe.show.contains(name) || tpe.widenDealias.show.contains(name)
+        )
     }
 
     private def isRiftHeapRootTree(tree: Tree): Boolean = {
@@ -172,20 +178,28 @@ trait NirGenExpr(using Context) {
     private def isRuntimeRiftAllocate(tree: Tree): Boolean =
       defnNir.RuntimeRiftAllocator_allocate.exists(_ == calledSymbol(tree))
 
-    private def isRuntimeSafeZoneAllocateInRift(tree: Tree): Boolean =
+    private def isRuntimeRiftAllocateInCheckedRegion(tree: Tree): Boolean =
+      tree match {
+        case app @ Apply(_, List(region, _)) =>
+          isRuntimeRiftAllocate(app) && isCheckedRiftRegionType(region.tpe)
+        case _ => false
+      }
+
+    private def isRuntimeSafeZoneAllocateInCheckedRift(tree: Tree): Boolean =
       tree match {
         case Apply(_, List(zone, _)) =>
           defnNir.RuntimeSafeZoneAllocator_allocate.exists(
             _ == calledSymbol(tree)
           ) &&
-            isRiftRegionType(zone.tpe)
+            isCheckedRiftRegionType(zone.tpe)
         case _ => false
       }
 
     private def isRiftAllocationTree(tree: Tree): Boolean =
       tree match {
         case app: Apply =>
-          isRuntimeRiftAllocate(app) || isRuntimeSafeZoneAllocateInRift(app) ||
+          isRuntimeRiftAllocateInCheckedRegion(app) ||
+            isRuntimeSafeZoneAllocateInCheckedRift(app) ||
             isRiftObjectBufferFactory(app)
         case TypeApply(Select(qualifier, nme.asInstanceOf_), _) =>
           isRiftAllocationTree(qualifier)
@@ -2737,7 +2751,7 @@ trait NirGenExpr(using Context) {
       // it's translated to `allocate(sz, new T(...))` in TyperPhase.
       tree match {
         case Apply(Select(New(_), nme.CONSTRUCTOR), args)       =>
-          if isRiftRegionType(sz.tpe) then checkRiftConstructorArgs(args)
+          if isCheckedRiftRegionType(sz.tpe) then checkRiftConstructorArgs(args)
         case Apply(fun, _) if fun.symbol == defn.newArrayMethod =>
         case _                                                  =>
           report.error(
@@ -2759,7 +2773,8 @@ trait NirGenExpr(using Context) {
       val Apply(_, List(region, tree)) = app
       tree match {
         case Apply(Select(New(_), nme.CONSTRUCTOR), args)       =>
-          checkRiftConstructorArgs(args)
+          if isCheckedRiftRegionType(region.tpe) then
+            checkRiftConstructorArgs(args)
         case Apply(fun, _) if fun.symbol == defn.newArrayMethod =>
         case _                                                  =>
           report.error(
