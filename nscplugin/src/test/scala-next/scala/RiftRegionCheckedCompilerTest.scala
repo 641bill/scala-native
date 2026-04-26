@@ -231,6 +231,62 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked region allocation cannot store an unrooted heap object"
     )
 
+  @Test def regionAllocatedAliasCanBeStoredInScopedObject(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Leaf(val value: Int)
+      |final class Node(val leaf: Leaf^)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val leaf: Leaf^{region} = RiftRegion.alloc(new Leaf(41))
+      |    val alias: Leaf^{region} = leaf
+      |    val node: Node^{region} = RiftRegion.alloc(new Node(alias))
+      |    node.leaf.value + 1
+      |  }
+      |""".stripMargin)
+
+  @Test def heapAliasCannotBeStoredInScopedObject(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata^)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val metadata = new Metadata(41)
+      |    val alias = metadata
+      |    val entry: Entry^{region} = RiftRegion.alloc(new Entry(alias))
+      |    entry.metadata.value + 1
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def heapFieldSelectionCannotBeStoredInScopedObject(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Holder(val metadata: Metadata)
+      |final class Entry(val metadata: Metadata^)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val holder = new Holder(new Metadata(41))
+      |    val entry: Entry^{region} =
+      |      RiftRegion.alloc(new Entry(holder.metadata))
+      |    entry.metadata.value + 1
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
   @Test def streamingResetValueCannotEscapeEpoch(): Unit =
     assertDoesNotCompile("""
       |import scala.language.experimental.captureChecking

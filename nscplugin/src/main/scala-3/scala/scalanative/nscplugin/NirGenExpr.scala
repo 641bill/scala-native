@@ -119,7 +119,7 @@ trait NirGenExpr(using Context) {
     private def isAllowedRiftConstructorArg(tree: Tree): Boolean =
       isPrimitiveOrNull(tree) ||
         isRiftHeapRootTree(tree) ||
-        riftRegionAllocatedSyms.contains(tree.symbol)
+        isKnownRiftRegionValue(tree)
 
     private def checkRiftConstructorArgs(args: List[Tree]): Unit =
       args.foreach { arg =>
@@ -161,6 +161,16 @@ trait NirGenExpr(using Context) {
         case Inlined(_, _, expr) => isRiftAllocationTree(expr)
         case Block(_, expr)      => isRiftAllocationTree(expr)
         case _                   => false
+      }
+
+    private def isKnownRiftRegionValue(tree: Tree): Boolean =
+      tree match {
+        case TypeApply(Select(qualifier, nme.asInstanceOf_), _) =>
+          isKnownRiftRegionValue(qualifier)
+        case Typed(expr, _)      => isKnownRiftRegionValue(expr)
+        case Inlined(_, _, expr) => isKnownRiftRegionValue(expr)
+        case Block(_, expr)      => isKnownRiftRegionValue(expr)
+        case _                   => riftRegionAllocatedSyms.contains(tree.symbol)
       }
 
     def genApply(app: Apply): nir.Val = {
@@ -1094,7 +1104,8 @@ trait NirGenExpr(using Context) {
       given nir.SourcePosition = vd.span
       val localNames = curMethodLocalNames.get
       val isMutable = curMethodInfo.mutableVars.contains(vd.symbol)
-      val isRiftAllocated = isRiftAllocationTree(vd.rhs)
+      val isRiftRegionValue =
+        isRiftAllocationTree(vd.rhs) || isKnownRiftRegionValue(vd.rhs)
       def name = genLocalName(vd.symbol)
       val rhs = genExpr(vd.rhs) match {
         case v @ nir.Val.Local(id, _) =>
@@ -1121,7 +1132,7 @@ trait NirGenExpr(using Context) {
         val slot = curMethodEnv.resolve(vd.symbol)
         buf.varstore(slot, rhs, unwind)
       else
-        if isRiftAllocated then riftRegionAllocatedSyms += vd.symbol
+        if isRiftRegionValue then riftRegionAllocatedSyms += vd.symbol
         curMethodEnv.enter(vd.symbol, rhs)
         nir.Val.Unit
     }
