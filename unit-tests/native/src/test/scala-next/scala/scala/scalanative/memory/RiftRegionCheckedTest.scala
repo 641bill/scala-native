@@ -183,6 +183,33 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def scopedRegionAllowsMutableLinkedListBuilder(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.scoped { region ?=>
+        final class Node(val value: Int, val next: Node^{region})
+        var head: Node^{region} = null
+        var i = 0
+        while (i < 4) {
+          head = RiftRegion.alloc(new Node(i, head))
+          i += 1
+        }
+
+        var sum = 0
+        var current = head
+        while (current != null) {
+          sum += current.value
+          current = current.next
+        }
+        sum
+      }
+
+      assertEquals(6, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def streamingRegionAllowsGraphChiSubintervalUpdates(): Unit = {
     RiftRegion.init(1)
     try {
@@ -200,24 +227,24 @@ class RiftRegionCheckedTest {
             final class EdgeUpdate(
                 val src: Int,
                 val dst: Int,
-                val delta: Int)
+                val delta: Int,
+                val next: EdgeUpdate^{region})
 
-            val updates: Array[EdgeUpdate^{region}]^{region} =
-              RiftRegion.alloc(new Array[EdgeUpdate^{region}](2))
+            var updates: EdgeUpdate^{region} = null
             var i = 0
             while (i < 2) {
               val src = (currentSubinterval + i) & 3
               val dst = ((currentSubinterval * 2) + i) & 3
-              updates(i) = RiftRegion.alloc(new EdgeUpdate(src, dst, i + 1))
+              updates =
+                RiftRegion.alloc(new EdgeUpdate(src, dst, i + 1, updates))
               i += 1
             }
 
-            i = 0
-            while (i < updates.length) {
-              val current = updates(i)
+            var current = updates
+            while (current != null) {
               values(current.dst) =
                 values(current.dst) + values(current.src) + current.delta
-              i += 1
+              current = current.next
             }
           }
           subinterval += 1
@@ -226,7 +253,7 @@ class RiftRegionCheckedTest {
         values.sum
       }
 
-      assertEquals(35L, total)
+      assertEquals(28L, total)
     } finally {
       RiftRegion.shutdown()
     }

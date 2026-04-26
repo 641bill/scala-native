@@ -542,6 +542,40 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def checkedMutableLinkedListBuilderCompiles(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    final class Node(val value: Int, val next: Node^{region})
+      |    var head: Node^{region} = null
+      |    var i = 0
+      |    while i < 4 do
+      |      head = RiftRegion.alloc(new Node(i, head))
+      |      i += 1
+      |    head.value + head.next.value
+      |  }
+      |""".stripMargin)
+
+  @Test def mutableRegionHeadCannotBeRetaggedFromHeapObject(): Unit =
+    assertDoesNotCompile("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    final class Node(val value: Int, val next: Node^{region})
+      |    final class Holder(val node: Node^{region})
+      |    var head: Node^{region} = null
+      |    val heapNode: Node^{region} = new Node(1, null)
+      |    head = heapNode
+      |    val holder: Holder^{region} = RiftRegion.alloc(new Holder(head))
+      |    holder.node.value
+      |  }
+      |""".stripMargin)
+
   @Test def topwordBufferCanStoreRecordsWithRootedMetadata(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking

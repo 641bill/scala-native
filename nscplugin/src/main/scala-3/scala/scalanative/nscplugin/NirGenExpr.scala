@@ -122,6 +122,15 @@ trait NirGenExpr(using Context) {
           sym.isPrimitiveValueClass || sym == defn.UnitClass
       }
 
+    private def isNullLiteral(tree: Tree): Boolean =
+      tree match {
+        case Literal(Constant(null)) => true
+        case Typed(expr, _)          => isNullLiteral(expr)
+        case Inlined(_, _, expr)     => isNullLiteral(expr)
+        case Block(_, expr)          => isNullLiteral(expr)
+        case _                       => false
+      }
+
     private def isRiftRegionCompanionOwner(sym: Symbol): Boolean =
       sym.owner.fullName.toString.stripSuffix("$") ==
         "scala.scalanative.memory.RiftRegion"
@@ -217,6 +226,9 @@ trait NirGenExpr(using Context) {
         case Apply(select @ Select(qualifier, _), Nil)
             if isStableConstructorFieldSelect(select) =>
           isKnownRiftRegionValue(qualifier)
+        case Apply(fun, Nil) =>
+          riftRegionAllocatedSyms.contains(fun.symbol) ||
+            isKnownRiftRegionValue(fun)
         case TypeApply(Select(qualifier, nme.asInstanceOf_), _) =>
           isKnownRiftRegionValue(qualifier)
         case select @ Select(qualifier, _)
@@ -227,6 +239,11 @@ trait NirGenExpr(using Context) {
         case Block(_, expr)      => isKnownRiftRegionValue(expr)
         case _                   => riftRegionAllocatedSyms.contains(tree.symbol)
       }
+
+    private def isSafeRiftMutableVarValue(tree: Tree): Boolean =
+      isNullLiteral(tree) ||
+        isRiftAllocationTree(tree) ||
+        isKnownRiftRegionValue(tree)
 
     def genApply(app: Apply): nir.Val = {
       given nir.SourcePosition = app.span.orElse(fallbackSourcePosition)
@@ -322,6 +339,10 @@ trait NirGenExpr(using Context) {
           }
 
         case id: Ident =>
+          val safeRiftMutableRegionValue =
+            isSafeRiftMutableVarValue(rhsp)
+          if safeRiftMutableRegionValue then riftRegionAllocatedSyms += id.symbol
+          else riftRegionAllocatedSyms -= id.symbol
           val rhs = genExpr(rhsp)
           val slot = curMethodEnv.resolve(id.symbol)
           buf.varstore(slot, rhs, unwind)
@@ -1169,6 +1190,9 @@ trait NirGenExpr(using Context) {
       val isMutable = curMethodInfo.mutableVars.contains(vd.symbol)
       val isRiftRegionValue =
         isRiftAllocationTree(vd.rhs) || isKnownRiftRegionValue(vd.rhs)
+      val isSafeRiftMutableRegionValue =
+        isMutable &&
+          isSafeRiftMutableVarValue(vd.rhs)
       def name = genLocalName(vd.symbol)
       val rhs = genExpr(vd.rhs) match {
         case v @ nir.Val.Local(id, _) =>
@@ -1192,6 +1216,7 @@ trait NirGenExpr(using Context) {
       if (vd.symbol.isExtern)
         checkExplicitReturnTypeAnnotation(vd, "extern field")
       if (isMutable)
+        if isSafeRiftMutableRegionValue then riftRegionAllocatedSyms += vd.symbol
         val slot = curMethodEnv.resolve(vd.symbol)
         buf.varstore(slot, rhs, unwind)
       else
