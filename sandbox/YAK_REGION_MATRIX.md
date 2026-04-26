@@ -1,8 +1,8 @@
 # Yak Region Matrix
 
 Status: Yak-style methodology reproduction harness with validated smoke,
-default median, pressure median, external-sort-shaped median, runtime-safety
-proxy, and promotion/escape proxy runs.
+default median, pressure median, external-sort-shaped median, top-word/filter
+median, runtime-safety proxy, and promotion/escape proxy runs.
 
 The harness is implemented in
 `sandbox/src/main/scala-next/YakRegionMatrix.scala` and run with
@@ -28,6 +28,10 @@ The current local workloads are:
 - `sort`: external-sort-shaped grouped sort. Durable heap group totals remain
   live across epochs; each epoch allocates ordinary record objects, sorts them
   by key, and folds grouped sums into the durable totals.
+- `topword`: Hadoop-like map/filter/in-map-combine/top-word shape. Durable
+  heap counters and reusable combiner arrays remain control state; each epoch
+  allocates ordinary word records, filters them, combines counts, and records
+  the top word for the task.
 - `promotion`: durable heap counters plus rare retained data objects. Region
   escape handling is routed through `RiftRegion.RuntimeEpoch`, which owns
   barrier checks, remembered-reference counts, and promoted-object counts.
@@ -59,7 +63,8 @@ or a distributed runtime.
 | `YAK_WARMUPS` | `1` |
 | `YAK_BENCHMARK_RUNS` | `3` |
 
-Use `YAK_WORKLOAD=wordcount`, `graphstep`, `sort`, `promotion`, or `all`.
+Use `YAK_WORKLOAD=wordcount`, `graphstep`, `sort`, `topword`, `promotion`, or
+`all`.
 
 ## Commands
 
@@ -90,10 +95,10 @@ YAK_OUTPUT_DIR=/tmp/yak-region-instrumented \
 
 ## Result Status
 
-Compile, smoke, default local medians, epoch-pressure runs, a grouped-sort
-pressure run, runtime-proxy runs, and a promotion/escape proxy pressure run
-have been recorded. These are local Yak-style methodology numbers, not an exact
-Yak artifact reproduction.
+Compile, smoke, default local medians, epoch-pressure runs, grouped-sort and
+top-word/filter pressure runs, runtime-proxy runs, and a promotion/escape proxy
+pressure run have been recorded. These are local Yak-style methodology numbers,
+not an exact Yak artifact reproduction.
 
 Validation commands run on 2026-04-25 and 2026-04-26:
 
@@ -117,6 +122,11 @@ YAK_OUTPUT_DIR=/tmp/yak-region-pressure \
 YAK_BUILD=0 YAK_WORKLOAD=sort YAK_BENCHMARK_RUNS=3 YAK_WARMUPS=1 \
 YAK_EPOCHS=10 YAK_SORT_RECORDS_PER_EPOCH=100000 \
 YAK_OUTPUT_DIR=/tmp/yak-sort-pressure \
+  zsh sandbox/run_yak_region_instrumented_matrix.sh
+
+YAK_BUILD=0 YAK_WORKLOAD=topword YAK_BENCHMARK_RUNS=3 YAK_WARMUPS=1 \
+YAK_EPOCHS=40 YAK_RECORDS_PER_EPOCH=250000 \
+YAK_OUTPUT_DIR=/tmp/yak-topword-pressure \
   zsh sandbox/run_yak_region_instrumented_matrix.sh
 
 YAK_BUILD=0 YAK_WORKLOAD=promotion YAK_BENCHMARK_RUNS=3 YAK_WARMUPS=1 \
@@ -156,8 +166,8 @@ Configuration:
 
 Interpretation:
 
-- This table predates adding the `sort` workload to `all`; it covers
-  `wordcount` and `graphstep`.
+- This table predates adding the `sort` and `topword` workloads to `all`; it
+  covers `wordcount` and `graphstep`.
 - This reproduces the Yak control/data split locally: durable counters or vertex
   state remain on heap, while two million epoch-local data objects are allocated
   per workload.
@@ -211,6 +221,47 @@ Interpretation:
 - `yak-runtime` is slower than raw Rift and heap here, which again shows that
   dynamic runtime discipline has visible cost when escape handling is not
   needed.
+
+## Hadoop-Style Top-Word/Filter Median
+
+Date: 2026-04-26
+
+Configuration:
+
+- `YAK_EPOCHS=40`
+- `YAK_RECORDS_PER_EPOCH=250000`
+- `YAK_KEY_SPACE=65536`
+- `YAK_BENCHMARK_RUNS=3`
+- `YAK_WARMUPS=1`
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+YAK_BUILD=0 YAK_WORKLOAD=topword YAK_BENCHMARK_RUNS=3 YAK_WARMUPS=1 \
+YAK_EPOCHS=40 YAK_RECORDS_PER_EPOCH=250000 \
+YAK_OUTPUT_DIR=/tmp/yak-topword-pressure \
+  zsh sandbox/run_yak_region_instrumented_matrix.sh
+```
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Rift objects | Opens/closes/resets | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|
+| heap | 311.527 | 44.949 | 0.000 | 0 | 0 / 0 / 0 | 75038720 |
+| current SafeZone | 326.680 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 83116032 |
+| improved SafeZone | 271.273 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 83116032 |
+| Rift HPZone | 266.478 | 0.000 | 0.416 | 10000000 | 40 / 40 / 0 | 82968576 |
+| Rift Streaming | 262.980 | 0.000 | 0.401 | 10000000 | 1 / 1 / 39 | 82935808 |
+| Yak-runtime proxy | 292.179 | 0.000 | 0.418 | 10000000 | 1 / 1 / 40 | 82935808 |
+
+Interpretation:
+
+- This is the closest current local model of Yak's Hadoop top-word/filter
+  family: durable global counts and reusable combiner arrays remain heap
+  control state; high-volume per-record stream objects are epoch-local.
+- Rift Streaming beats heap by about `15.6%` and improved SafeZone by about
+  `3.1%` in this local median, while removing `44.949 ms` of measured heap GC.
+- Rift operation time stays low at about `0.4 ms` for ten million region
+  objects. `yak-runtime` still costs more than raw Rift Streaming.
 
 ## Epoch-Pressure 3-Run Median
 

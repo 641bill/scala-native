@@ -66,6 +66,13 @@ object YakRegionMatrixHelpers {
       val value: Int
   )
 
+  private final class WordRecord(
+      val key: Int,
+      val weight: Int,
+      val keep: Boolean,
+      val next: WordRecord
+  )
+
   private final class PromoChild(
       val marker: Int,
       val weight: Int
@@ -105,6 +112,14 @@ object YakRegionMatrixHelpers {
 
     def allocSortRecord(key: Int, value: Int): SortRecord =
       epoch.alloc(new SortRecord(key, value))
+
+    def allocWordRecord(
+        key: Int,
+        weight: Int,
+        keep: Boolean,
+        next: WordRecord
+    ): WordRecord =
+      epoch.alloc(new WordRecord(key, weight, keep, next))
 
     def allocPromoChild(marker: Int, weight: Int): PromoChild =
       epoch.alloc(new PromoChild(marker, weight))
@@ -266,6 +281,17 @@ object YakRegionMatrixHelpers {
       if (runtimeSafe) runtimeEpoch.allocSortRecord(key, value)
       else if (usesRift) region.alloc(new SortRecord(key, value))
       else new SortRecord(key, value)
+
+    def allocWordRecord(
+        region: RiftRegion,
+        key: Int,
+        weight: Int,
+        keep: Boolean,
+        next: WordRecord
+    ): WordRecord =
+      if (runtimeSafe) runtimeEpoch.allocWordRecord(key, weight, keep, next)
+      else if (usesRift) region.alloc(new WordRecord(key, weight, keep, next))
+      else new WordRecord(key, weight, keep, next)
 
     def allocPromoChild(
         region: RiftRegion,
@@ -441,6 +467,66 @@ object YakRegionMatrixHelpers {
       }
     } finally mode.finish()
     val checksum = checksumLongs(groups)
+    checksumSink = checksum
+    checksum
+  }
+
+  def runHeapOrRiftTopWord(modeName: String): Long = {
+    val cfg = YakRegionConfig
+    val mode = new ModeState(modeName)
+    val globalCounts = new Array[Long](cfg.keySpace)
+    val localCounts = new Array[Int](cfg.keySpace)
+    val touchedKeys = new Array[Int](cfg.keySpace)
+    var topChecksum = 0L
+    var epoch = 0
+    try {
+      while (epoch < cfg.epochs) {
+        val region = mode.beginEpoch()
+        var records: WordRecord = null
+        var i = 0
+        while (i < cfg.recordsPerEpoch) {
+          val seed = mix(epoch * 1000003 + i * 131)
+          val key = seed % cfg.keySpace
+          val weight = (mix(seed + 19) & 15) + 1
+          val keep = ((seed ^ (seed >>> 3)) & 7) != 0
+          records = mode.allocWordRecord(region, key, weight, keep, records)
+          i += 1
+        }
+
+        var touched = 0
+        var current = records
+        while (current != null) {
+          if (current.keep) {
+            if (localCounts(current.key) == 0) {
+              touchedKeys(touched) = current.key
+              touched += 1
+            }
+            localCounts(current.key) += current.weight
+          }
+          current = current.next
+        }
+
+        var bestKey = -1
+        var bestCount = -1L
+        var j = 0
+        while (j < touched) {
+          val key = touchedKeys(j)
+          val count = localCounts(key).toLong
+          globalCounts(key) = (globalCounts(key) + count) & 0xffffffffL
+          if (count > bestCount || (count == bestCount && key < bestKey)) {
+            bestCount = count
+            bestKey = key
+          }
+          localCounts(key) = 0
+          j += 1
+        }
+        topChecksum =
+          (topChecksum * 1099511628211L) ^ bestKey.toLong ^ bestCount
+        mode.endEpoch(region)
+        epoch += 1
+      }
+    } finally mode.finish()
+    val checksum = checksumLongs(globalCounts) ^ topChecksum
     checksumSink = checksum
     checksum
   }
@@ -723,6 +809,74 @@ object YakRegionMatrixHelpers {
     checksum
   }
 
+  def runSafeZoneTopWord(): Long = {
+    val cfg = YakRegionConfig
+    val globalCounts = new Array[Long](cfg.keySpace)
+    val localCounts = new Array[Int](cfg.keySpace)
+    val touchedKeys = new Array[Int](cfg.keySpace)
+    var topChecksum = 0L
+    var epoch = 0
+    while (epoch < cfg.epochs) {
+      val currentEpoch = epoch
+      SafeZone { sz ?=>
+        final class SZWordRecord(
+            val key: Int,
+            val weight: Int,
+            val keep: Boolean,
+            val next: SZWordRecord^{sz}
+        )
+
+        var records: SZWordRecord^{sz} = null
+        var i = 0
+        while (i < cfg.recordsPerEpoch) {
+          val seed = mix(currentEpoch * 1000003 + i * 131)
+          val key = seed % cfg.keySpace
+          val weight = (mix(seed + 19) & 15) + 1
+          val keep = ((seed ^ (seed >>> 3)) & 7) != 0
+          records = SafeZoneAllocator.allocate(
+            sz,
+            new SZWordRecord(key, weight, keep, records)
+          )
+          i += 1
+        }
+
+        var touched = 0
+        var current = records
+        while (current != null) {
+          if (current.keep) {
+            if (localCounts(current.key) == 0) {
+              touchedKeys(touched) = current.key
+              touched += 1
+            }
+            localCounts(current.key) += current.weight
+          }
+          current = current.next
+        }
+
+        var bestKey = -1
+        var bestCount = -1L
+        var j = 0
+        while (j < touched) {
+          val key = touchedKeys(j)
+          val count = localCounts(key).toLong
+          globalCounts(key) = (globalCounts(key) + count) & 0xffffffffL
+          if (count > bestCount || (count == bestCount && key < bestKey)) {
+            bestCount = count
+            bestKey = key
+          }
+          localCounts(key) = 0
+          j += 1
+        }
+        topChecksum =
+          (topChecksum * 1099511628211L) ^ bestKey.toLong ^ bestCount
+      }
+      epoch += 1
+    }
+    val checksum = checksumLongs(globalCounts) ^ topChecksum
+    checksumSink = checksum
+    checksum
+  }
+
   private def medianDouble(values: Array[Double]): Double = {
     val sorted = values.clone()
     scala.util.Sorting.quickSort(sorted)
@@ -754,6 +908,11 @@ object YakRegionMatrixHelpers {
           if (mode == "safezone") runSafeZoneSort()
           else runHeapOrRiftSort(mode)
         new WorkloadResult(checksum, 0L, 0L, 0L)
+      case "topword" =>
+        val checksum =
+          if (mode == "safezone") runSafeZoneTopWord()
+          else runHeapOrRiftTopWord(mode)
+        new WorkloadResult(checksum, 0L, 0L, 0L)
       case "promotion" =>
         if (mode == "safezone")
           throw new IllegalArgumentException(
@@ -762,7 +921,7 @@ object YakRegionMatrixHelpers {
         else runHeapOrRuntimePromotion(mode)
       case other =>
         throw new IllegalArgumentException(
-          s"unknown Yak workload '$other'; expected wordcount, graphstep, sort, or promotion"
+          s"unknown Yak workload '$other'; expected wordcount, graphstep, sort, topword, or promotion"
         )
     }
 
@@ -772,6 +931,7 @@ object YakRegionMatrixHelpers {
       case "wordcount" => cfg.epochs.toLong * cfg.recordsPerEpoch.toLong
       case "graphstep" => cfg.epochs.toLong * cfg.messagesPerEpoch.toLong
       case "sort" => cfg.epochs.toLong * cfg.sortRecordsPerEpoch.toLong
+      case "topword" => cfg.epochs.toLong * cfg.recordsPerEpoch.toLong
       case "promotion" => cfg.epochs.toLong * cfg.recordsPerEpoch.toLong * 2L
       case _           => 0L
     }
@@ -783,6 +943,7 @@ object YakRegionMatrixHelpers {
       case "wordcount" => cfg.keySpace.toLong
       case "graphstep" => cfg.vertices.toLong
       case "sort"      => cfg.keySpace.toLong
+      case "topword"   => cfg.keySpace.toLong * 3L
       case "promotion" => cfg.keySpace.toLong + cfg.scratchSlots.toLong
       case _           => 0L
     }
@@ -914,11 +1075,12 @@ object YakRegionMatrixHelpers {
         YakRegionMatrixHelpers.runBenchmark(mode, "wordcount")
         YakRegionMatrixHelpers.runBenchmark(mode, "graphstep")
         YakRegionMatrixHelpers.runBenchmark(mode, "sort")
-      case "wordcount" | "graphstep" | "sort" | "promotion" =>
+        YakRegionMatrixHelpers.runBenchmark(mode, "topword")
+      case "wordcount" | "graphstep" | "sort" | "topword" | "promotion" =>
         YakRegionMatrixHelpers.runBenchmark(mode, workload)
       case other =>
         throw new IllegalArgumentException(
-          s"unknown Yak workload '$other'; expected wordcount, graphstep, sort, promotion, or all"
+          s"unknown Yak workload '$other'; expected wordcount, graphstep, sort, topword, promotion, or all"
         )
     }
   } finally {
