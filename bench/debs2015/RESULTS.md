@@ -2176,6 +2176,77 @@ Interpretation:
   `5.39M` and did not improve Q2 process time on the 100k sample. Do not redo
   that variant without a different comparison strategy.
 
+### Q2 Cached Top-10 Extraction
+
+Date: 2026-04-26
+
+Change:
+
+- Added a shared heap/Rift Q2 top-10 cache. `process` still returns the current
+  top-k ranking on every event, but the expensive heap frontier extraction is
+  recomputed only when a rank update can affect the cached top 10.
+- The invalidation rule is conservative: updates to current top-10 cells,
+  additions while fewer than 10 cells are ranked, removals from the top 10, or
+  non-top cells that can beat the cached tenth entry mark the cache dirty.
+- Added `diag_q2_top10_recomputes` to distinguish logical top-10 calls from
+  actual top-k extraction work.
+
+Commands:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Smoke\")" \
+      run
+
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-top-cache-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-top-cache-1000000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+Validation:
+
+- `Debs2015Smoke`: passed.
+- 100k and 1M RunBoth instrumented matrices completed.
+- Heap/Rift outputs matched after stripping only the measured latency column.
+
+100k single-run checkpoint:
+
+| Mode | Elapsed ms | Q2 process ms | Q2 output ms | GC ms | Rift op ms | Q2 top10 calls | Q2 top10 recomputes | Q2 rank compares | Q2 top-candidate compares | RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 628.690 | 127.308 | 80.264 | 9.825 | 0.000 | 100000 | 4189 | 774978 | 144949 | 102367232 |
+| Rift HPZone | 550.082 | 114.019 | 47.548 | 5.314 | 1.605 | 100000 | 4189 | 774978 | 144949 | 41500672 |
+| Rift Streaming | 553.841 | 115.732 | 47.588 | 5.371 | 1.735 | 100000 | 4189 | 774978 | 144949 | 41484288 |
+
+1M single-run checkpoint:
+
+| Mode | Elapsed ms | Q2 process ms | Q2 output ms | GC ms | Rift op ms | Q2 top10 calls | Q2 top10 recomputes | Q2 rank compares | Q2 top-candidate compares | RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 5367.670 | 1321.860 | 372.546 | 68.932 | 0.000 | 1000000 | 29983 | 7374791 | 1162935 | 305627136 |
+| Rift HPZone | 5149.720 | 1210.340 | 371.787 | 35.475 | 11.813 | 1000000 | 29983 | 7374791 | 1162935 | 116604928 |
+| Rift Streaming | 5191.038 | 1220.904 | 370.809 | 35.887 | 12.376 | 1000000 | 29983 | 7374791 | 1162935 | 116588544 |
+
+Interpretation:
+
+- This is still a shared query-algorithm cleanup, not a Rift-only change.
+  Heap and Rift use the same top-10 cache; the experimental variable remains
+  allocation placement for region-backed data/control structures.
+- The cache directly addresses the Q2 attribution finding: top-k extraction is
+  no longer paid on every event. At 100k, top-candidate comparisons fall from
+  `4.45M` to `144949`; at 1M, only `29983` of `1000000` logical top-10 calls
+  recompute the heap frontier.
+- The 1M single run shows Rift HPZone `217.950 ms` faster than heap and
+  Streaming `176.632 ms` faster than heap, with RSS about `116 MB` for Rift
+  versus `306 MB` for heap. Keep this as a single-run checkpoint until rerun as
+  medians.
+
 ## JVM RunBoth Cross-check
 
 Date: 2026-04-25

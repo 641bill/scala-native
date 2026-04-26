@@ -453,6 +453,7 @@ object Debs2015RunBothRunner {
         f"diag_q2_rank_heap_swaps=${counters.q2RankHeapSwaps}%d " +
         f"diag_q2_top_candidate_compares=${counters.q2TopCandidateCompares}%d " +
         f"diag_q2_top10_calls=${counters.q2Top10Calls}%d " +
+        f"diag_q2_top10_recomputes=${counters.q2Top10Recomputes}%d " +
         f"diag_q2_result_array_allocs=${counters.q2ResultArrayAllocs}%d " +
         f"diag_q2_result_array_slots=${counters.q2ResultArraySlots}%d " +
         f"diag_q2_median_computes=${counters.q2MedianComputes}%d " +

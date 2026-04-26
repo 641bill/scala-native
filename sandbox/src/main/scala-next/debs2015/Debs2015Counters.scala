@@ -17,6 +17,7 @@ object Debs2015Counters {
       q2RankFixes: Long,
       q2RankCreated: Long,
       q2Top10Calls: Long,
+      q2Top10Recomputes: Long,
       q2ResultArrayAllocs: Long,
       q2ResultArraySlots: Long,
       q2MedianComputes: Long,
@@ -60,6 +61,7 @@ object Debs2015Counters {
         q2RankFixes - start.q2RankFixes,
         q2RankCreated - start.q2RankCreated,
         q2Top10Calls - start.q2Top10Calls,
+        q2Top10Recomputes - start.q2Top10Recomputes,
         q2ResultArrayAllocs - start.q2ResultArrayAllocs,
         q2ResultArraySlots - start.q2ResultArraySlots,
         q2MedianComputes - start.q2MedianComputes,
@@ -94,7 +96,8 @@ object Debs2015Counters {
       0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
       0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
       0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
-      0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L
+      0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
+      0L
     )
 
   private var gridQ1Calls = 0L
@@ -112,6 +115,7 @@ object Debs2015Counters {
   private var q2RankFixes = 0L
   private var q2RankCreated = 0L
   private var q2Top10Calls = 0L
+  private var q2Top10Recomputes = 0L
   private var q2ResultArrayAllocs = 0L
   private var q2ResultArraySlots = 0L
   private var q2MedianComputes = 0L
@@ -154,6 +158,7 @@ object Debs2015Counters {
     q2RankFixes = 0L
     q2RankCreated = 0L
     q2Top10Calls = 0L
+    q2Top10Recomputes = 0L
     q2ResultArrayAllocs = 0L
     q2ResultArraySlots = 0L
     q2MedianComputes = 0L
@@ -198,6 +203,7 @@ object Debs2015Counters {
       q2RankFixes,
       q2RankCreated,
       q2Top10Calls,
+      q2Top10Recomputes,
       q2ResultArrayAllocs,
       q2ResultArraySlots,
       q2MedianComputes,
@@ -265,6 +271,9 @@ object Debs2015Counters {
 
   def recordQ2Top10(): Unit =
     q2Top10Calls += 1L
+
+  def recordQ2Top10Recompute(): Unit =
+    q2Top10Recomputes += 1L
 
   def recordQ2ResultArrayAlloc(size: Int): Unit = {
     q2ResultArrayAllocs += 1L

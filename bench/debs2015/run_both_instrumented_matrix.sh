@@ -78,6 +78,7 @@ metric_keys=(
   diag_q2_rank_heap_swaps
   diag_q2_top_candidate_compares
   diag_q2_top10_calls
+  diag_q2_top10_recomputes
   diag_q2_result_array_allocs
   diag_q2_result_array_slots
   diag_q2_median_computes

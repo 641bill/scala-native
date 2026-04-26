@@ -53,6 +53,9 @@ private abstract class Q2BucketedWindow(
   private val heapIndexByCell =
     if (useRegions) rankRegion.alloc(new Array[Int](CellKeyCapacity))
     else new Array[Int](CellKeyCapacity)
+  private val topIndexByCell =
+    if (useRegions) rankRegion.alloc(new Array[Int](CellKeyCapacity))
+    else new Array[Int](CellKeyCapacity)
   private var heapAreas = allocateAreaArray(InitialAreaRankCapacity)
   private var heapCellKeys = allocateIntArray(InitialAreaRankCapacity)
   private val topCandidateHeap = allocateIntArray(TopCandidateCapacity)
@@ -62,6 +65,8 @@ private abstract class Q2BucketedWindow(
   private var currentEmptyBucket: EmptyBucket = null
   private var nextSeq = 0L
   private var heapSize = 0
+  private var cachedTopSize = 0
+  private var topCacheDirty = true
 
   override def process(trip: Trip): Array[ProfitableArea] = {
     evictProfitBefore(trip.dropoffSeconds - ProfitWindowSeconds)
@@ -166,6 +171,7 @@ private abstract class Q2BucketedWindow(
 
   private def updateRank(cellKey: Int): Unit = {
     val existing = rank(cellKey)
+    val wasTop = isCachedTop(cellKey)
 
     val profits = profitStats(cellKey)
     if (profits != null) {
@@ -178,6 +184,7 @@ private abstract class Q2BucketedWindow(
           existing.profitability = median / empty.toDouble
           existing.latestSeq = latest(cellKey)
           fixRankHeap(cellKey)
+          markTopCacheAfterUpdate(existing, wasTop)
         } else {
           val created =
             allocateProfitableArea(
@@ -189,19 +196,27 @@ private abstract class Q2BucketedWindow(
             )
           updateRankEntry(cellKey, created)
           addRankHeap(cellKey, created)
+          markTopCacheAfterUpdate(created, wasTop = false)
         }
       } else {
-        clearRank(cellKey)
+        clearRank(cellKey, wasTop)
       }
     } else {
-      clearRank(cellKey)
+      clearRank(cellKey, wasTop)
     }
   }
 
   private def top10(): Array[ProfitableArea] = {
     Debs2015Counters.recordQ2Top10()
+    if (!topCacheDirty && cachedTopSize == math.min(10, heapSize))
+      return resultArray(cachedTopSize)
+
     val size = math.min(10, heapSize)
     val ranked = resultArray(size)
+    clearTopCacheIndex()
+    cachedTopSize = size
+    topCacheDirty = false
+    Debs2015Counters.recordQ2Top10Recompute()
     if (size == 0) return ranked
 
     var candidateCount = 1
@@ -214,6 +229,7 @@ private abstract class Q2BucketedWindow(
       topCandidateHeap(candidateSlot) = topCandidateHeap(candidateCount)
 
       ranked(i) = heapAreas(heapPosition)
+      topIndexByCell(ranked(i).cellKey) = i + 1
 
       val left = (heapPosition << 1) + 1
       if (left < heapSize) {
@@ -356,9 +372,11 @@ private abstract class Q2BucketedWindow(
   private def updateRankEntry(cellKey: Int, area: ProfitableArea): Unit =
     rankByCell(cellKey) = area
 
-  private def clearRank(cellKey: Int): Unit = {
+  private def clearRank(cellKey: Int, wasTop: Boolean): Unit = {
     removeRankHeap(cellKey)
     rankByCell(cellKey) = null
+    if (wasTop || cachedTopSize < 10)
+      topCacheDirty = true
   }
 
   private def latestEmpty(taxiKey: Int): EmptyEntry =
@@ -543,6 +561,7 @@ private abstract class Q2BucketedWindow(
     }
 
   private def clearRankIndex(): Unit = {
+    clearTopCacheIndex()
     var i = 0
     while (i < heapSize) {
       heapIndexByCell(heapCellKeys(i)) = 0
@@ -551,6 +570,33 @@ private abstract class Q2BucketedWindow(
       i += 1
     }
     heapSize = 0
+    cachedTopSize = 0
+    topCacheDirty = true
+  }
+
+  private def isCachedTop(cellKey: Int): Boolean =
+    topIndexByCell(cellKey) > 0
+
+  private def markTopCacheAfterUpdate(
+      area: ProfitableArea,
+      wasTop: Boolean
+  ): Unit =
+    if (topCacheDirty || wasTop || cachedTopSize < 10 || canEnterTop(area))
+      topCacheDirty = true
+
+  private def canEnterTop(area: ProfitableArea): Boolean =
+    cachedTopSize == 0 ||
+      compareAreas(area, resultArray(cachedTopSize)(cachedTopSize - 1)) < 0
+
+  private def clearTopCacheIndex(): Unit = {
+    val oldTop = if (cachedTopSize == 0) null else resultArray(cachedTopSize)
+    var i = 0
+    while (i < cachedTopSize) {
+      val area = oldTop(i)
+      if (area != null)
+        topIndexByCell(area.cellKey) = 0
+      i += 1
+    }
   }
 
   private def closeProfitBucket(bucket: ProfitBucket): Unit = {
