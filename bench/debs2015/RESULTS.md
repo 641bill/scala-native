@@ -2209,12 +2209,27 @@ DEBS2015_BOTH_BUILD=0 \
 DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
 DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-top-cache-1000000 \
   zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+for i in 1 2 3; do
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-top-cache-median-100000/run-${i} \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+
+for i in 1 2 3; do
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-top-cache-median-1000000/run-${i} \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
 ```
 
 Validation:
 
 - `Debs2015Smoke`: passed.
 - 100k and 1M RunBoth instrumented matrices completed.
+- 100k and 1M 3-run median matrices completed.
 - Heap/Rift outputs matched after stripping only the measured latency column.
 
 100k single-run checkpoint:
@@ -2233,6 +2248,22 @@ Validation:
 | Rift HPZone | 5149.720 | 1210.340 | 371.787 | 35.475 | 11.813 | 1000000 | 29983 | 7374791 | 1162935 | 116604928 |
 | Rift Streaming | 5191.038 | 1220.904 | 370.809 | 35.887 | 12.376 | 1000000 | 29983 | 7374791 | 1162935 | 116588544 |
 
+100k 3-run medians:
+
+| Mode | Elapsed ms | Throughput events/s | Q1 process ms | Q2 process ms | Q2 output ms | GC ms | Rift op ms | Region objects | Q2 top10 recomputes | Q2 top-candidate compares | RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 607.176 | 164696.869 | 153.854 | 142.477 | 49.822 | 9.254 | 0.000 | 0 | 4189 | 144949 | 102350848 |
+| Rift HPZone | 571.465 | 174988.755 | 141.815 | 125.495 | 49.499 | 5.348 | 2.677 | 602458 | 4189 | 144949 | 41500672 |
+| Rift Streaming | 590.900 | 169233.444 | 146.598 | 132.482 | 50.538 | 5.093 | 2.620 | 602458 | 4189 | 144949 | 41500672 |
+
+1M 3-run medians:
+
+| Mode | Elapsed ms | Throughput events/s | Q1 process ms | Q2 process ms | Q2 output ms | GC ms | Rift op ms | Region objects | Q2 top10 recomputes | Q2 top-candidate compares | RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 6192.692 | 161480.658 | 1625.747 | 1608.462 | 444.281 | 70.762 | 0.000 | 0 | 29983 | 1162935 | 304463872 |
+| Rift HPZone | 5697.948 | 175501.773 | 1528.989 | 1427.353 | 388.500 | 36.231 | 18.824 | 5494563 | 29983 | 1162935 | 116588544 |
+| Rift Streaming | 5657.424 | 176758.892 | 1521.009 | 1409.247 | 400.798 | 36.288 | 21.925 | 5494563 | 29983 | 1162935 | 96239616 |
+
 Interpretation:
 
 - This is still a shared query-algorithm cleanup, not a Rift-only change.
@@ -2242,10 +2273,14 @@ Interpretation:
   no longer paid on every event. At 100k, top-candidate comparisons fall from
   `4.45M` to `144949`; at 1M, only `29983` of `1000000` logical top-10 calls
   recompute the heap frontier.
-- The 1M single run shows Rift HPZone `217.950 ms` faster than heap and
-  Streaming `176.632 ms` faster than heap, with RSS about `116 MB` for Rift
-  versus `306 MB` for heap. Keep this as a single-run checkpoint until rerun as
-  medians.
+- The 3-run medians confirm the single-run direction. At 1M, HPZone is
+  `494.744 ms` faster than heap and Streaming is `535.268 ms` faster than heap.
+  GC time falls from `70.762 ms` to about `36 ms`, and peak RSS falls from
+  `304463872` bytes to `116588544` bytes for HPZone and `96239616` bytes for
+  Streaming.
+- The median rerun also shows variance: one 1M HPZone run was slower than heap.
+  The current claim should therefore be bounded-sample median evidence, not a
+  final full-DEBS application result.
 
 ## JVM RunBoth Cross-check
 
