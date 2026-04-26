@@ -344,6 +344,99 @@ class RiftRegionCheckedCompilerTest {
       "cannot flow into capture set"
     )
 
+  @Test def regionOwnedArrayCanBeStoredInScopedObject(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Leaf(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    final class Bag(val items: Array[Leaf^{region}]^{region})
+      |    val items: Array[Leaf^{region}]^{region} =
+      |      RiftRegion.alloc(new Array[Leaf^{region}](2))
+      |    val bag: Bag^{region} = RiftRegion.alloc(new Bag(items))
+      |    bag.items.length + 40
+      |  }
+      |""".stripMargin)
+
+  @Test def regionOwnedArrayCanStoreRegionObject(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Leaf(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val items: Array[Leaf^{region}]^{region} =
+      |      RiftRegion.alloc(new Array[Leaf^{region}](1))
+      |    val leaf: Leaf^{region} = RiftRegion.alloc(new Leaf(42))
+      |    items(0) = leaf
+      |    leaf.value
+      |  }
+      |""".stripMargin)
+
+  @Test def regionOwnedArrayCannotStoreHeapObject(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val items =
+      |      RiftRegion.alloc(new Array[Metadata](1))
+      |    val metadata = new Metadata(41)
+      |    items(0) = metadata
+      |  }
+      |""".stripMargin,
+      "Rift checked region array store cannot store an unrooted heap object"
+    )
+
+  @Test def heapArrayCannotBeStoredInScopedObject(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Bag(val items: Array[Metadata]^)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val items = new Array[Metadata](1)
+      |    val bag: Bag^{region} = RiftRegion.alloc(new Bag(items))
+      |    bag.items.length
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def regionOwnedArrayCanStoreHeapRoot(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    final class RootBag(
+      |        val roots: Array[RiftRegion.HeapRoot[Metadata]^{region}]^{region}
+      |    )
+      |    val roots: Array[RiftRegion.HeapRoot[Metadata]^{region}]^{region} =
+      |      RiftRegion.alloc(
+      |        new Array[RiftRegion.HeapRoot[Metadata]^{region}](1)
+      |      )
+      |    val metadata = new Metadata(41)
+      |    roots(0) = RiftRegion.root(metadata)
+      |    val bag: RootBag^{region} = RiftRegion.alloc(new RootBag(roots))
+      |    bag.roots.length + 41
+      |  }
+      |""".stripMargin)
+
   @Test def streamingResetValueCannotEscapeEpoch(): Unit =
     assertDoesNotCompile("""
       |import scala.language.experimental.captureChecking

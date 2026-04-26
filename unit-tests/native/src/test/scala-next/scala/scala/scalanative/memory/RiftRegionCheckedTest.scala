@@ -75,6 +75,31 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def scopedRegionAllowsRegionOwnedArraysWithHeapRoots(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.scoped { region ?=>
+        val leaves: Array[RiftCheckedLeaf^{region}]^{region} =
+          RiftRegion.alloc(new Array[RiftCheckedLeaf^{region}](2))
+        leaves(0) = RiftRegion.alloc(new RiftCheckedLeaf(20))
+        leaves(1) = RiftRegion.alloc(new RiftCheckedLeaf(21))
+
+        val roots:
+          Array[RiftRegion.HeapRoot[RiftCheckedMetadata]^{region}]^{region} =
+          RiftRegion.alloc(
+            new Array[RiftRegion.HeapRoot[RiftCheckedMetadata]^{region}](1)
+          )
+        roots(0) = RiftRegion.root(new RiftCheckedMetadata(1))
+
+        leaves(0).value + leaves(1).value + roots(0).value.value
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def streamingResetBlockReturnsOnlyNonLocalValues(): Unit = {
     RiftRegion.init(1)
     try {

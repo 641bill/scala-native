@@ -119,6 +119,7 @@ trait NirGenExpr(using Context) {
     private def isAllowedRiftConstructorArg(tree: Tree): Boolean =
       isPrimitiveOrNull(tree) ||
         isRiftHeapRootTree(tree) ||
+        isRiftAllocationTree(tree) ||
         isKnownRiftRegionValue(tree)
 
     private def checkRiftConstructorArgs(args: List[Tree]): Unit =
@@ -129,6 +130,14 @@ trait NirGenExpr(using Context) {
             arg.srcPos
           )
       }
+
+    private def checkRiftArrayStore(array: Tree, value: Tree): Unit =
+      if isKnownRiftRegionValue(array) && !isAllowedRiftConstructorArg(value)
+      then
+        report.error(
+          "Rift checked region array store cannot store an unrooted heap object; use RiftRegion.root(value) for heap metadata.",
+          value.srcPos
+        )
 
     private def calledSymbol(tree: Tree): Symbol =
       tree match {
@@ -1920,6 +1929,7 @@ trait NirGenExpr(using Context) {
         val idx = genExpr(argsp(0))
         buf.arrayload(elemty, array, idx, unwind)
       else if (isArraySet(code))
+        checkRiftArrayStore(arrayp, argsp(1))
         val idx = genExpr(argsp(0))
         val value = genExpr(argsp(1))
         buf.arraystore(elemty, array, idx, value, unwind)
