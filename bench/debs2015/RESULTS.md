@@ -2127,6 +2127,55 @@ Interpretation:
   are checked; `RiftRegion.open` remains a documented trusted/unsafe low-level
   path for benchmark and runtime experiments.
 
+### Q2 Rank/Output Attribution Counters
+
+Date: 2026-04-26
+
+Change:
+
+- Added RunBoth phase timers for Q1/Q2 output-change checks and snapshot work:
+  `phase_q1_change_ns`, `phase_q1_snapshot_ns`, `phase_q2_change_ns`, and
+  `phase_q2_snapshot_ns`.
+- Added Q2 diagnostic counters for rank-heap comparisons/swaps, top-candidate
+  comparisons during top-10 extraction, and Q2 changed-output comparisons.
+- Updated `bench/debs2015/run_both_instrumented_matrix.sh` so these fields are
+  written into `summary.tsv`.
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-attribution-final-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+Validation:
+
+- 100k RunBoth instrumented matrix completed.
+- Heap/Rift outputs matched after stripping only the measured latency column.
+
+100k single-run attribution:
+
+| Mode | Elapsed ms | Q2 process ms | Q2 change ms | Q2 output ms | Q2 snapshot ms | Q2 rank compares | Q2 rank swaps | Q2 top-candidate compares | Q2 changed calls | Q2 changed element checks |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 643.082 | 200.551 | 18.765 | 47.617 | 0.672 | 5075427 | 68022 | 4445398 | 99457 | 976407 |
+| Rift HPZone | 663.542 | 187.618 | 18.601 | 47.133 | 0.703 | 5075427 | 68022 | 4445398 | 99457 | 976407 |
+| Rift Streaming | 616.502 | 186.946 | 18.478 | 46.855 | 0.696 | 5075427 | 68022 | 4445398 | 99457 | 976407 |
+
+Interpretation:
+
+- Q2 snapshot allocation/copy time is small at 100k: about `0.7 ms`.
+- Q2 changed-output checks are visible but not dominant: about `18-19 ms`.
+- Q2 rank/top-10 extraction remains the major Q2 CPU path. At 100k, about
+  `4.45M` of `5.08M` rank comparisons are from the temporary top-candidate
+  scan used to extract the top 10 from the rank heap.
+- A small binary heap for top candidates was tested during this session and
+  rejected before commit: it increased top-candidate comparisons to about
+  `5.39M` and did not improve Q2 process time on the 100k sample. Do not redo
+  that variant without a different comparison strategy.
+
 ## JVM RunBoth Cross-check
 
 Date: 2026-04-25

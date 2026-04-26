@@ -18,11 +18,13 @@ object Q2Output {
     new Snapshot(Array.emptyIntArray, Array.emptyIntArray, Array.emptyDoubleArray, Array.emptyDoubleArray)
 
   def changed(previous: Snapshot, current: Array[ProfitableArea]): Boolean = {
+    Debs2015Counters.recordQ2ChangedCall()
     if (previous.cellKeys.length != current.length) true
     else {
       var i = 0
       var same = true
       while (i < current.length && same) {
+        Debs2015Counters.recordQ2ChangedElementCheck()
         same =
           previous.cellKeys(i) == current(i).cellKey &&
             previous.emptyTaxis(i) == current(i).emptyTaxis &&
@@ -35,11 +37,13 @@ object Q2Output {
   }
 
   def changed(previous: Array[ProfitableArea], current: Array[ProfitableArea]): Boolean = {
+    Debs2015Counters.recordQ2ChangedCall()
     if (previous.length != current.length) true
     else {
       var i = 0
       var same = true
       while (i < current.length && same) {
+        Debs2015Counters.recordQ2ChangedElementCheck()
         same =
           previous(i).cellKey == current(i).cellKey &&
             previous(i).emptyTaxis == current(i).emptyTaxis &&

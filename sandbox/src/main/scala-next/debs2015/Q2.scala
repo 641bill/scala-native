@@ -497,6 +497,7 @@ private abstract class Q2BucketedWindow(
   }
 
   private def swapRankHeap(left: Int, right: Int): Unit = {
+    Debs2015Counters.recordQ2RankHeapSwap()
     val leftArea = heapAreas(left)
     val leftCellKey = heapCellKeys(left)
     heapAreas(left) = heapAreas(right)
@@ -511,6 +512,7 @@ private abstract class Q2BucketedWindow(
     var best = 0
     var i = 1
     while (i < candidateCount) {
+      Debs2015Counters.recordQ2TopCandidateCompare()
       if (betterHeapIndex(topCandidateHeap(i), topCandidateHeap(best)))
         best = i
       i += 1
@@ -518,8 +520,10 @@ private abstract class Q2BucketedWindow(
     best
   }
 
-  private def betterHeapIndex(leftIndex: Int, rightIndex: Int): Boolean =
+  private def betterHeapIndex(leftIndex: Int, rightIndex: Int): Boolean = {
+    Debs2015Counters.recordQ2RankHeapCompare()
     compareAreas(heapAreas(leftIndex), heapAreas(rightIndex)) < 0
+  }
 
   private def rankHeapIndex(cellKey: Int): Int =
     heapIndexByCell(cellKey) - 1

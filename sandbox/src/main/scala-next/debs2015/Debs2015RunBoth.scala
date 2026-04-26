@@ -13,17 +13,23 @@ object Debs2015RunBothRunner {
       readNanos: Long,
       parseNanos: Long,
       q1ProcessNanos: Long,
+      q1ChangeNanos: Long,
       q1OutputNanos: Long,
+      q1SnapshotNanos: Long,
       q2ProcessNanos: Long,
+      q2ChangeNanos: Long,
       q2OutputNanos: Long,
+      q2SnapshotNanos: Long,
       closeNanos: Long
   ) {
     def trackedNanos: Long =
       readNanos +
         parseNanos +
         q1ProcessNanos +
+        q1ChangeNanos +
         q1OutputNanos +
         q2ProcessNanos +
+        q2ChangeNanos +
         q2OutputNanos +
         closeNanos
   }
@@ -235,9 +241,13 @@ object Debs2015RunBothRunner {
     var readNanos = 0L
     var parseNanos = 0L
     var q1ProcessNanos = 0L
+    var q1ChangeNanos = 0L
     var q1OutputNanos = 0L
+    var q1SnapshotNanos = 0L
     var q2ProcessNanos = 0L
+    var q2ChangeNanos = 0L
     var q2OutputNanos = 0L
+    var q2SnapshotNanos = 0L
     var closeNanos = 0L
     var q1LatencyMillis = Array.emptyLongArray
     var q2LatencyMillis = Array.emptyLongArray
@@ -266,7 +276,11 @@ object Debs2015RunBothRunner {
             val q1Current = q1.process(trip)
             val q1Finished = System.nanoTime()
             q1ProcessNanos += q1Finished - q1Started
-            if (q1Current.nonEmpty && Q1Output.changed(previousQ1, q1Current)) {
+            val q1ChangeStarted = System.nanoTime()
+            val q1Changed =
+              q1Current.nonEmpty && Q1Output.changed(previousQ1, q1Current)
+            q1ChangeNanos += System.nanoTime() - q1ChangeStarted
+            if (q1Changed) {
               val q1OutputStarted = System.nanoTime()
               val writeAt = q1OutputStarted
               val delayMillis = (writeAt - readAt) / 1000000L
@@ -275,7 +289,9 @@ object Debs2015RunBothRunner {
               q1Latencies += delayMillis
               Debs2015Counters.recordQ1LatencyAppend()
               q1Outputs += 1L
+              val q1SnapshotStarted = System.nanoTime()
               previousQ1 = Q1Output.snapshot(q1Current, snapshotRegion)
+              q1SnapshotNanos += System.nanoTime() - q1SnapshotStarted
               q1OutputNanos += System.nanoTime() - q1OutputStarted
             }
 
@@ -283,7 +299,11 @@ object Debs2015RunBothRunner {
             val q2Current = q2.process(trip)
             val q2Finished = System.nanoTime()
             q2ProcessNanos += q2Finished - q2Started
-            if (q2Current.nonEmpty && Q2Output.changed(previousQ2, q2Current)) {
+            val q2ChangeStarted = System.nanoTime()
+            val q2Changed =
+              q2Current.nonEmpty && Q2Output.changed(previousQ2, q2Current)
+            q2ChangeNanos += System.nanoTime() - q2ChangeStarted
+            if (q2Changed) {
               val q2OutputStarted = System.nanoTime()
               val writeAt = q2OutputStarted
               val delayMillis = (writeAt - readAt) / 1000000L
@@ -292,7 +312,9 @@ object Debs2015RunBothRunner {
               q2Latencies += delayMillis
               Debs2015Counters.recordQ2LatencyAppend()
               q2Outputs += 1L
+              val q2SnapshotStarted = System.nanoTime()
               previousQ2 = Q2Output.snapshot(q2Current, snapshotRegion)
+              q2SnapshotNanos += System.nanoTime() - q2SnapshotStarted
               q2OutputNanos += System.nanoTime() - q2OutputStarted
             }
         } else {
@@ -327,9 +349,13 @@ object Debs2015RunBothRunner {
         readNanos = readNanos,
         parseNanos = parseNanos,
         q1ProcessNanos = q1ProcessNanos,
+        q1ChangeNanos = q1ChangeNanos,
         q1OutputNanos = q1OutputNanos,
+        q1SnapshotNanos = q1SnapshotNanos,
         q2ProcessNanos = q2ProcessNanos,
+        q2ChangeNanos = q2ChangeNanos,
         q2OutputNanos = q2OutputNanos,
+        q2SnapshotNanos = q2SnapshotNanos,
         closeNanos = closeNanos
       ),
       runtime = RuntimeMetrics.since(runtimeStart, runtimeEnd),
@@ -372,9 +398,13 @@ object Debs2015RunBothRunner {
         f"phase_read_ns=${phases.readNanos}%d " +
         f"phase_parse_ns=${phases.parseNanos}%d " +
         f"phase_q1_process_ns=${phases.q1ProcessNanos}%d " +
+        f"phase_q1_change_ns=${phases.q1ChangeNanos}%d " +
         f"phase_q1_output_ns=${phases.q1OutputNanos}%d " +
+        f"phase_q1_snapshot_ns=${phases.q1SnapshotNanos}%d " +
         f"phase_q2_process_ns=${phases.q2ProcessNanos}%d " +
+        f"phase_q2_change_ns=${phases.q2ChangeNanos}%d " +
         f"phase_q2_output_ns=${phases.q2OutputNanos}%d " +
+        f"phase_q2_snapshot_ns=${phases.q2SnapshotNanos}%d " +
         f"phase_close_ns=${phases.closeNanos}%d " +
         f"phase_tracked_ns=${trackedNanos}%d " +
         f"phase_untracked_ns=${untrackedNanos}%d " +
@@ -419,6 +449,9 @@ object Debs2015RunBothRunner {
         f"diag_q2_rank_removes=${counters.q2RankRemoves}%d " +
         f"diag_q2_rank_fixes=${counters.q2RankFixes}%d " +
         f"diag_q2_rank_created=${counters.q2RankCreated}%d " +
+        f"diag_q2_rank_heap_compares=${counters.q2RankHeapCompares}%d " +
+        f"diag_q2_rank_heap_swaps=${counters.q2RankHeapSwaps}%d " +
+        f"diag_q2_top_candidate_compares=${counters.q2TopCandidateCompares}%d " +
         f"diag_q2_top10_calls=${counters.q2Top10Calls}%d " +
         f"diag_q2_result_array_allocs=${counters.q2ResultArrayAllocs}%d " +
         f"diag_q2_result_array_slots=${counters.q2ResultArraySlots}%d " +
@@ -435,6 +468,8 @@ object Debs2015RunBothRunner {
         f"diag_q2_snapshot_slots=${counters.q2SnapshotSlots}%d " +
         f"diag_q1_latency_appends=${counters.q1LatencyAppends}%d " +
         f"diag_q2_latency_appends=${counters.q2LatencyAppends}%d " +
+        f"diag_q2_changed_calls=${counters.q2ChangedCalls}%d " +
+        f"diag_q2_changed_element_checks=${counters.q2ChangedElementChecks}%d " +
         f"diag_taxi_lookups=${counters.taxiLookups}%d " +
         f"diag_taxi_hits=${counters.taxiHits}%d " +
         f"diag_taxi_misses=${counters.taxiMisses}%d " +

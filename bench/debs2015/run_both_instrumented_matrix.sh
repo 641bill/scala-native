@@ -31,9 +31,13 @@ metric_keys=(
   phase_read_ns
   phase_parse_ns
   phase_q1_process_ns
+  phase_q1_change_ns
   phase_q1_output_ns
+  phase_q1_snapshot_ns
   phase_q2_process_ns
+  phase_q2_change_ns
   phase_q2_output_ns
+  phase_q2_snapshot_ns
   phase_close_ns
   phase_tracked_ns
   phase_untracked_ns
@@ -70,6 +74,9 @@ metric_keys=(
   diag_q2_rank_removes
   diag_q2_rank_fixes
   diag_q2_rank_created
+  diag_q2_rank_heap_compares
+  diag_q2_rank_heap_swaps
+  diag_q2_top_candidate_compares
   diag_q2_top10_calls
   diag_q2_result_array_allocs
   diag_q2_result_array_slots
@@ -86,6 +93,8 @@ metric_keys=(
   diag_q2_snapshot_slots
   diag_q1_latency_appends
   diag_q2_latency_appends
+  diag_q2_changed_calls
+  diag_q2_changed_element_checks
   diag_taxi_lookups
   diag_taxi_hits
   diag_taxi_misses

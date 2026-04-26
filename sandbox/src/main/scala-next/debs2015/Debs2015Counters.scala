@@ -36,7 +36,12 @@ object Debs2015Counters {
       taxiHits: Long,
       taxiMisses: Long,
       taxiEntriesScanned: Long,
-      taxiEntriesCreated: Long
+      taxiEntriesCreated: Long,
+      q2RankHeapCompares: Long,
+      q2RankHeapSwaps: Long,
+      q2TopCandidateCompares: Long,
+      q2ChangedCalls: Long,
+      q2ChangedElementChecks: Long
   ) {
     def since(start: Snapshot): Snapshot =
       Snapshot(
@@ -74,7 +79,12 @@ object Debs2015Counters {
         taxiHits - start.taxiHits,
         taxiMisses - start.taxiMisses,
         taxiEntriesScanned - start.taxiEntriesScanned,
-        taxiEntriesCreated - start.taxiEntriesCreated
+        taxiEntriesCreated - start.taxiEntriesCreated,
+        q2RankHeapCompares - start.q2RankHeapCompares,
+        q2RankHeapSwaps - start.q2RankHeapSwaps,
+        q2TopCandidateCompares - start.q2TopCandidateCompares,
+        q2ChangedCalls - start.q2ChangedCalls,
+        q2ChangedElementChecks - start.q2ChangedElementChecks
       )
   }
 
@@ -84,7 +94,7 @@ object Debs2015Counters {
       0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
       0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
       0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
-      0L, 0L, 0L
+      0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L
     )
 
   private var gridQ1Calls = 0L
@@ -122,6 +132,11 @@ object Debs2015Counters {
   private var taxiMisses = 0L
   private var taxiEntriesScanned = 0L
   private var taxiEntriesCreated = 0L
+  private var q2RankHeapCompares = 0L
+  private var q2RankHeapSwaps = 0L
+  private var q2TopCandidateCompares = 0L
+  private var q2ChangedCalls = 0L
+  private var q2ChangedElementChecks = 0L
 
   def reset(): Unit = {
     gridQ1Calls = 0L
@@ -159,6 +174,11 @@ object Debs2015Counters {
     taxiMisses = 0L
     taxiEntriesScanned = 0L
     taxiEntriesCreated = 0L
+    q2RankHeapCompares = 0L
+    q2RankHeapSwaps = 0L
+    q2TopCandidateCompares = 0L
+    q2ChangedCalls = 0L
+    q2ChangedElementChecks = 0L
   }
 
   def snapshot(): Snapshot =
@@ -197,7 +217,12 @@ object Debs2015Counters {
       taxiHits,
       taxiMisses,
       taxiEntriesScanned,
-      taxiEntriesCreated
+      taxiEntriesCreated,
+      q2RankHeapCompares,
+      q2RankHeapSwaps,
+      q2TopCandidateCompares,
+      q2ChangedCalls,
+      q2ChangedElementChecks
     )
 
   def recordGridCell(gridName: String, hit: Boolean): Unit =
@@ -294,4 +319,19 @@ object Debs2015Counters {
 
   def recordTaxiEntryCreated(): Unit =
     taxiEntriesCreated += 1L
+
+  def recordQ2RankHeapCompare(): Unit =
+    q2RankHeapCompares += 1L
+
+  def recordQ2RankHeapSwap(): Unit =
+    q2RankHeapSwaps += 1L
+
+  def recordQ2TopCandidateCompare(): Unit =
+    q2TopCandidateCompares += 1L
+
+  def recordQ2ChangedCall(): Unit =
+    q2ChangedCalls += 1L
+
+  def recordQ2ChangedElementCheck(): Unit =
+    q2ChangedElementChecks += 1L
 }
