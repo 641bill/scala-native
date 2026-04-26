@@ -1,7 +1,7 @@
 # Stancu Region Matrix
 
 Status: Stancu-style annotation/accounting probe with validated smoke, default
-median, and pressure median runs.
+median, pressure median, heavier-object median, and boundary-sensitivity runs.
 
 The harness is implemented in
 `sandbox/src/main/scala-next/StancuRegionMatrix.scala` and run with
@@ -98,6 +98,39 @@ STANCU_OUTPUT_DIR=/tmp/stancu-region-pressure \
 The smoke run rebuilt and native-linked the benchmark successfully. All
 heap/SafeZone/Rift checksums matched.
 
+Additional boundary-sensitivity validation run on 2026-04-26 from the Codex
+worktree clone at
+`/Users/siyaoliu/.codex/worktrees/ba3c/rift/scala-native-rift`:
+
+```sh
+cd /Users/siyaoliu/.codex/worktrees/ba3c/rift/scala-native-rift
+
+STANCU_TRANSACTIONS=2000 STANCU_TX_PER_REGION=64 \
+STANCU_BENCHMARK_RUNS=1 STANCU_WARMUPS=0 \
+STANCU_OUTPUT_DIR=/tmp/ba3c-stancu-smoke \
+  zsh sandbox/run_stancu_region_instrumented_matrix.sh
+
+STANCU_BUILD=0 STANCU_TRANSACTIONS=200000 STANCU_ITEMS_PER_TX=8 \
+STANCU_TX_PER_REGION=1 STANCU_BENCHMARK_RUNS=3 STANCU_WARMUPS=1 \
+STANCU_OUTPUT_DIR=/tmp/ba3c-stancu-boundary-1 \
+  zsh sandbox/run_stancu_region_instrumented_matrix.sh
+
+STANCU_BUILD=0 STANCU_TRANSACTIONS=200000 STANCU_ITEMS_PER_TX=8 \
+STANCU_TX_PER_REGION=64 STANCU_BENCHMARK_RUNS=3 STANCU_WARMUPS=1 \
+STANCU_OUTPUT_DIR=/tmp/ba3c-stancu-boundary-64 \
+  zsh sandbox/run_stancu_region_instrumented_matrix.sh
+
+STANCU_BUILD=0 STANCU_TRANSACTIONS=200000 STANCU_ITEMS_PER_TX=8 \
+STANCU_TX_PER_REGION=512 STANCU_BENCHMARK_RUNS=3 STANCU_WARMUPS=1 \
+STANCU_OUTPUT_DIR=/tmp/ba3c-stancu-boundary-512 \
+  zsh sandbox/run_stancu_region_instrumented_matrix.sh
+```
+
+The smoke/link run and all boundary runs completed with matching
+heap/SafeZone/Rift checksums. `sbt` and `/usr/bin/time -l` needed unsandboxed
+access to the existing user cache/RSS counters; the benchmark source and
+outputs were kept inside the new worktree clone and `/tmp`.
+
 ## Native-Only Local 3-Run Median, Batched Boundary And Fixed Counters
 
 Configuration:
@@ -126,6 +159,64 @@ Interpretation:
 - The previous per-transaction boundary was too fine-grained. It paid
   `200000` opens/closes or resets on this default run.
 - Improved SafeZone remains the fastest mode at this size.
+
+## Boundary-Sensitivity 3-Run Median
+
+Configuration:
+
+- `STANCU_TRANSACTIONS=200000`
+- `STANCU_ITEMS_PER_TX=8`
+- `STANCU_WAREHOUSES=64`
+- `STANCU_PRODUCTS=4096`
+- `STANCU_BENCHMARK_RUNS=3`
+- `STANCU_WARMUPS=1`
+
+### `STANCU_TX_PER_REGION=1`
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region opens | Region closes | Region resets | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| heap | 44.592 | 4.862 | 0.000 | 0 | 0 | 0 | 7962624 |
+| current SafeZone | 57.568 | 1.412 | 0.000 | 0 | 0 | 0 | 7995392 |
+| improved SafeZone | 62.564 | 1.678 | 0.000 | 0 | 0 | 0 | 8011776 |
+| Rift HPZone | 63.257 | 0.576 | 9.318 | 200000 | 200000 | 0 | 7979008 |
+| Rift Streaming | 50.487 | 0.000 | 3.922 | 1 | 1 | 199999 | 7979008 |
+
+### `STANCU_TX_PER_REGION=64`
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region opens | Region closes | Region resets | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| heap | 43.189 | 4.880 | 0.000 | 0 | 0 | 0 | 7962624 |
+| current SafeZone | 36.691 | 0.000 | 0.000 | 0 | 0 | 0 | 7979008 |
+| improved SafeZone | 37.057 | 0.000 | 0.000 | 0 | 0 | 0 | 7995392 |
+| Rift HPZone | 39.522 | 0.000 | 0.188 | 3125 | 3125 | 0 | 8011776 |
+| Rift Streaming | 38.844 | 0.000 | 0.060 | 1 | 1 | 3124 | 7995392 |
+
+### `STANCU_TX_PER_REGION=512`
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region opens | Region closes | Region resets | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| heap | 45.315 | 4.740 | 0.000 | 0 | 0 | 0 | 7962624 |
+| current SafeZone | 37.701 | 0.000 | 0.000 | 0 | 0 | 0 | 8126464 |
+| improved SafeZone | 38.436 | 0.000 | 0.000 | 0 | 0 | 0 | 8110080 |
+| Rift HPZone | 40.025 | 0.000 | 0.101 | 391 | 391 | 0 | 8159232 |
+| Rift Streaming | 39.717 | 0.000 | 0.065 | 1 | 1 | 390 | 8126464 |
+
+Boundary interpretation:
+
+- The Stancu-style result is now complete enough to label the original weak
+  result as a boundary-granularity issue, not a checksum or placement bug.
+- Per-transaction regions are too fine-grained for this workload:
+  HPZone pays `9.318 ms` in measured region operations and loses to heap;
+  Streaming reduces the open/close cost but still does not beat heap.
+- Batching `64` transactions per region is the best measured point in this
+  local sweep: Streaming is `38.844 ms` versus heap `43.189 ms`, with measured
+  GC removed and only `0.060 ms` of Rift region-operation time.
+- Increasing to `512` transactions per region reduces measured Rift operation
+  time slightly, but elapsed time is not better than the `64`-transaction
+  boundary on this local run.
+- SafeZone remains faster than Rift at the coarse boundaries, so this supports
+  a Rift-vs-heap Stancu-style accounting story, not a Rift-vs-improved-SafeZone
+  claim.
 
 ## Transaction-Pressure 3-Run Median, Batched Boundary And Fixed Counters
 
