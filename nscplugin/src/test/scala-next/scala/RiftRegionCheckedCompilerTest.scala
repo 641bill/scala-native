@@ -121,7 +121,7 @@ class RiftRegionCheckedCompilerTest {
       |""".stripMargin)
 
   @Test def scopedValueCannotEscapeByReturn(): Unit =
-    assertDoesNotCompile("""
+    assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
       |import scala.scalanative.memory.RiftRegion
       |
@@ -131,10 +131,12 @@ class RiftRegionCheckedCompilerTest {
       |  RiftRegion.scoped { region ?=>
       |    RiftRegion.alloc(new Box(1))
       |  }
-      |""".stripMargin)
+      |""".stripMargin,
+      "Capability `region` outlives its scope"
+    )
 
   @Test def innerScopedValueCannotEscapeOuterScope(): Unit =
-    assertDoesNotCompile("""
+    assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
       |import scala.scalanative.memory.RiftRegion
       |
@@ -146,10 +148,12 @@ class RiftRegionCheckedCompilerTest {
       |      RiftRegion.alloc(new Box(1))
       |    }
       |  }
-      |""".stripMargin)
+      |""".stripMargin,
+      "Capability `inner` outlives its scope"
+    )
 
   @Test def closureCapturingScopedValueCannotEscape(): Unit =
-    assertDoesNotCompile("""
+    assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
       |import scala.scalanative.memory.RiftRegion
       |
@@ -162,7 +166,9 @@ class RiftRegionCheckedCompilerTest {
       |  RiftRegion.scoped { region ?=>
       |    Holder.retained = () => region.alloc(new Box(1)).value
       |  }
-      |""".stripMargin)
+      |""".stripMargin,
+      "Reference `region` is not included in the allowed capture set"
+    )
 
   @Test def closureCapturingScopedValueCannotEscapeByReturn(): Unit =
     assertDoesNotCompileWith("""
@@ -181,7 +187,7 @@ class RiftRegionCheckedCompilerTest {
     )
 
   @Test def heapObjectCannotRetainScopedValue(): Unit =
-    assertDoesNotCompile("""
+    assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
       |import scala.scalanative.memory.RiftRegion
       |
@@ -194,7 +200,9 @@ class RiftRegionCheckedCompilerTest {
       |  RiftRegion.scoped { region ?=>
       |    Holder.retained = RiftRegion.alloc(new Box(1))
       |  }
-      |""".stripMargin)
+      |""".stripMargin,
+      "cannot flow into capture set {}"
+    )
 
   @Test def rootedHeapValueCanBeStoredInScopedObject(): Unit =
     assertCompiles("""
@@ -522,7 +530,7 @@ class RiftRegionCheckedCompilerTest {
       |""".stripMargin)
 
   @Test def objectBufferCannotStoreInnerScopedValue(): Unit =
-    assertDoesNotCompile("""
+    assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
       |import scala.scalanative.memory.RiftRegion
       |
@@ -536,10 +544,12 @@ class RiftRegionCheckedCompilerTest {
       |      RiftRegion.append(outer, buffer, leaf)
       |    }
       |  }
-      |""".stripMargin)
+      |""".stripMargin,
+      "cannot flow into capture set {outer}"
+    )
 
   @Test def objectBufferCannotEscapeScopedRegion(): Unit =
-    assertDoesNotCompile("""
+    assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
       |import scala.scalanative.memory.RiftRegion
       |
@@ -549,7 +559,9 @@ class RiftRegionCheckedCompilerTest {
       |  RiftRegion.scoped { region ?=>
       |    RiftRegion.objectBuffer[Leaf](1)
       |  }
-      |""".stripMargin)
+      |""".stripMargin,
+      "Capability `region` outlives its scope"
+    )
 
   @Test def streamingResetRegionArrayEpochCompiles(): Unit =
     assertCompiles("""
@@ -593,7 +605,7 @@ class RiftRegionCheckedCompilerTest {
       |""".stripMargin)
 
   @Test def mutableRegionHeadCannotBeRetaggedFromHeapObject(): Unit =
-    assertDoesNotCompile("""
+    assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
       |import scala.scalanative.memory.RiftRegion
       |
@@ -607,7 +619,9 @@ class RiftRegionCheckedCompilerTest {
       |    val holder: Holder^{region} = RiftRegion.alloc(new Holder(head))
       |    holder.node.value
       |  }
-      |""".stripMargin)
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
 
   @Test def topwordBufferCanStoreRecordsWithRootedMetadata(): Unit =
     assertCompiles("""
@@ -677,7 +691,7 @@ class RiftRegionCheckedCompilerTest {
     )
 
   @Test def streamingResetValueCannotBeStoredInOuterBuffer(): Unit =
-    assertDoesNotCompile("""
+    assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
       |import scala.scalanative.memory.RiftRegion
       |
@@ -693,7 +707,9 @@ class RiftRegionCheckedCompilerTest {
       |    }
       |    RiftRegion.get(stream, buffer, 0).dst
       |  }
-      |""".stripMargin)
+      |""".stripMargin,
+      "cannot flow into capture set {stream}"
+    )
 
   @Test def trustedOpenAllocationAllowsBenchmarkLinkedObjects(): Unit =
     assertCompiles("""
@@ -715,7 +731,7 @@ class RiftRegionCheckedCompilerTest {
       |""".stripMargin)
 
   @Test def streamingResetValueCannotEscapeEpoch(): Unit =
-    assertDoesNotCompile("""
+    assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
       |import scala.scalanative.memory.RiftRegion
       |
@@ -728,5 +744,7 @@ class RiftRegionCheckedCompilerTest {
       |    }
       |    leaked.value
       |  }
-      |""".stripMargin)
+      |""".stripMargin,
+      "Capability `region` outlives its scope"
+    )
 }
