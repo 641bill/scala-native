@@ -142,4 +142,36 @@ object Q2Output {
     OutputSupport.writeComma(writer)
     OutputSupport.writeLong(writer, delayMillis)
   }
+
+  def writeRow(
+      writer: OutputSupport.ByteRowWriter,
+      trip: Trip,
+      ranking: Array[ProfitableArea],
+      delayMillis: Long
+  ): Unit = {
+    trip.writePickupTimestamp(writer)
+    OutputSupport.writeComma(writer)
+    trip.writeDropoffTimestamp(writer)
+
+    var i = 0
+    while (i < 10) {
+      OutputSupport.writeComma(writer)
+      if (i < ranking.length) {
+        val area = ranking(i)
+        Q2Support.writeCellId(writer, area.cellKey)
+        OutputSupport.writeComma(writer)
+        OutputSupport.writeInt(writer, area.emptyTaxis)
+        OutputSupport.writeComma(writer)
+        OutputSupport.writeFixed(writer, area.medianProfit, 2)
+        OutputSupport.writeComma(writer)
+        OutputSupport.writeFixed(writer, area.profitability, 6)
+      } else {
+        writer.writeAscii("NULL,NULL,NULL,NULL")
+      }
+      i += 1
+    }
+
+    OutputSupport.writeComma(writer)
+    OutputSupport.writeLong(writer, delayMillis)
+  }
 }

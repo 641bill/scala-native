@@ -900,6 +900,16 @@ object Q2Support {
       key & CellPartMask
     )
 
+  private[debs2015] def writeCellId(
+      writer: OutputSupport.ByteRowWriter,
+      key: Int
+  ): Unit =
+    OutputSupport.writeCellId(
+      writer,
+      key >>> CellPartBits,
+      key & CellPartMask
+    )
+
   private def compareCellKeysById(left: Int, right: Int): Int = {
     val east = compareDecimalLex(left >>> CellPartBits, right >>> CellPartBits)
     if (east != 0) east

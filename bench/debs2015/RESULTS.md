@@ -2432,6 +2432,94 @@ Interpretation:
   heap objects; per-row scratch builders/formatting intermediates are the
   structured-lifetime candidates.
 
+## RunBoth Byte-Oriented Output Writer
+
+Date: 2026-04-26
+
+Purpose:
+
+- Act on the phase-attribution finding above: output construction was the
+  dominant remaining heap allocation source.
+- Replace RunBoth's `java.io.BufferedWriter`/`Writer` character path with a
+  shared byte-oriented row writer. Heap mode uses the same writer with a heap
+  byte buffer; Rift modes allocate the writer's reusable byte buffer in the
+  existing run snapshot region. Durable file handles remain heap objects.
+- Preserve logical-program shape: Q1/Q2 algorithms, output rows, rankings, and
+  changed-output semantics are unchanged.
+
+Implementation:
+
+- `OutputSupport.ByteRowWriter` buffers ASCII CSV bytes and flushes to a
+  `FileOutputStream`.
+- `Trip`, `Q1Output`, `Q2Output`, and `Q2Support` have byte-writer overloads
+  alongside the existing `Writer` paths.
+- `Debs2015RunBoth` uses the byte writer; the single-query Q1/Q2 runners still
+  use the existing `Writer` path.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Smoke\")" \
+      run
+
+SCALANATIVE_GC_ALLOC_STATS=1 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-byte-output-alloc-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+SCALANATIVE_GC_ALLOC_STATS=1 \
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-byte-output-alloc-1000000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+- `Debs2015Smoke`: passed.
+- 100k and 1M attribution matrices completed.
+- Heap/Rift outputs matched after stripping only the measured latency column.
+
+Clean allocation-attribution checkpoints after byte output:
+
+| Input | Mode | Total GC alloc calls | Total GC alloc bytes | Total GC alloc ms | Q1 output calls / bytes / ms | Q2 output calls / bytes / ms | GC collect ms | RSS bytes |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 100k | heap | 674381 | 49120368 | 29.327 | 75 / 115888 / 0.013 | 63676 / 1067968 / 1.543 | 8.789 | 55394304 |
+| 100k | Rift HPZone | 76467 | 1482832 | 1.751 | 72 / 1152 / 0.002 | 63674 / 1018784 / 1.431 | 0.000 | 38830080 |
+| 100k | Rift Streaming | 76487 | 1483216 | 1.746 | 72 / 1152 / 0.002 | 63674 / 1018784 / 1.432 | 0.000 | 38813696 |
+| 1M | heap | 6025143 | 235159552 | 171.868 | 397 / 514256 / 0.055 | 490897 / 8362256 / 10.491 | 20.156 | 159940608 |
+| 1M | Rift HPZone | 562793 | 10537200 | 12.923 | 392 / 6272 / 0.011 | 490892 / 7854272 / 11.227 | 0.670 | 116785152 |
+| 1M | Rift Streaming | 562813 | 10537584 | 12.801 | 392 / 6272 / 0.010 | 490892 / 7854272 / 11.127 | 0.618 | 116785152 |
+
+Non-attribution 3-run medians after byte output:
+
+| Input | Mode | Elapsed ms | Throughput events/s | Q1 process ms | Q2 process ms | Q1 output ms | Q2 output ms | GC collect ms | Rift op ms | Region objects | RSS bytes |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100k | heap | 478.524 | 208975.789 | 135.282 | 123.914 | 10.811 | 9.945 | 8.212 | 0.000 | 0 | 55377920 |
+| 100k | Rift HPZone | 463.141 | 215917.084 | 132.179 | 112.300 | 10.848 | 10.132 | 0.000 | 1.704 | 602460 | 38830080 |
+| 100k | Rift Streaming | 470.538 | 212522.838 | 134.977 | 116.505 | 10.946 | 10.194 | 0.000 | 1.823 | 602460 | 38830080 |
+| 1M | heap | 4640.593 | 215489.696 | 1339.997 | 1240.706 | 65.032 | 78.033 | 21.025 | 0.000 | 0 | 159907840 |
+| 1M | Rift HPZone | 4524.706 | 221008.853 | 1313.434 | 1143.983 | 60.996 | 82.963 | 0.685 | 10.245 | 5494565 | 116785152 |
+| 1M | Rift Streaming | 4522.308 | 221126.019 | 1307.018 | 1146.500 | 59.912 | 83.045 | 0.635 | 9.626 | 5494565 | 116785152 |
+
+Interpretation:
+
+- The output allocation diagnosis was correct. At 1M, total heap allocation in
+  Rift modes falls from about `14.46M` calls / `455 MB` before byte output to
+  about `0.56M` calls / `10.5 MB` after byte output.
+- The heap mode also improves because the noisy `Writer` path was shared. This
+  is intended: it removes accidental output overhead from both arms rather than
+  inventing a Rift-only output algorithm.
+- Rift now spends almost no time in GC collection on the bounded 1M RunBoth
+  sample (`0.6-0.7 ms` in the single attribution run; `0.6-0.7 ms` median
+  collection time in non-attribution runs). The remaining elapsed gap is mostly
+  query CPU and I/O, not GC.
+- This strengthens Phase 5 evidence but still does not seal it. The latest
+  checkpoint is bounded-sample RunBoth evidence; full-month/Commix/SafeZone
+  controls and safe API integration remain open.
+
 ## JVM RunBoth Cross-check
 
 Date: 2026-04-25

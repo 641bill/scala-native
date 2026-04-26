@@ -82,6 +82,16 @@ final class Trip(
   private[debs2015] def writeDropoffTimestamp(writer: Writer): Unit =
     writeSlice(writer, dropoffTimestampStart, dropoffTimestampEnd)
 
+  private[debs2015] def writePickupTimestamp(
+      writer: OutputSupport.ByteRowWriter
+  ): Unit =
+    writeSlice(writer, pickupTimestampStart, pickupTimestampEnd)
+
+  private[debs2015] def writeDropoffTimestamp(
+      writer: OutputSupport.ByteRowWriter
+  ): Unit =
+    writeSlice(writer, dropoffTimestampStart, dropoffTimestampEnd)
+
   private[debs2015] def taxiIdHash: Int = {
     var hash = 0
     var i = taxiStart
@@ -145,6 +155,18 @@ final class Trip(
     var i = from
     while (i < until) {
       writer.write(charAt(i).toInt)
+      i += 1
+    }
+  }
+
+  private def writeSlice(
+      writer: OutputSupport.ByteRowWriter,
+      from: Int,
+      until: Int
+  ): Unit = {
+    var i = from
+    while (i < until) {
+      writer.writeByte(charAt(i).toInt)
       i += 1
     }
   }

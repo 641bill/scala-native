@@ -98,6 +98,34 @@ object Q1Output {
     OutputSupport.writeLong(writer, delayMillis)
   }
 
+  def writeRow(
+      writer: OutputSupport.ByteRowWriter,
+      trip: Trip,
+      ranking: Array[RankedRoute],
+      delayMillis: Long
+  ): Unit = {
+    trip.writePickupTimestamp(writer)
+    OutputSupport.writeComma(writer)
+    trip.writeDropoffTimestamp(writer)
+
+    var i = 0
+    while (i < 10) {
+      OutputSupport.writeComma(writer)
+      if (i < ranking.length) {
+        val route = ranking(i).route
+        OutputSupport.writeCellId(writer, route.start.east, route.start.south)
+        OutputSupport.writeComma(writer)
+        OutputSupport.writeCellId(writer, route.end.east, route.end.south)
+      } else {
+        writer.writeAscii("NULL,NULL")
+      }
+      i += 1
+    }
+
+    OutputSupport.writeComma(writer)
+    OutputSupport.writeLong(writer, delayMillis)
+  }
+
   private def routeKey(ranked: RankedRoute): Long =
     Q1Support.routeKey(ranked.route.start, ranked.route.end)
 }

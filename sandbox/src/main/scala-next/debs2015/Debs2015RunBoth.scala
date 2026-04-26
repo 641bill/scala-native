@@ -1,8 +1,5 @@
 package debs2015
 
-import java.io.BufferedWriter
-import java.io.FileWriter
-
 import scala.language.experimental.captureChecking
 
 import scala.scalanative.memory.RiftRegion
@@ -307,8 +304,8 @@ object Debs2015RunBothRunner {
     val source = new CsvLineReader(inputPath, q1Mode)
     val snapshotRegion =
       if (usesRift) RiftRegion.open(regionKindForMode(q1Mode)) else null
-    val q1Writer = new BufferedWriter(new FileWriter(q1OutputPath))
-    val q2Writer = new BufferedWriter(new FileWriter(q2OutputPath))
+    val q1Writer = OutputSupport.ByteRowWriter.open(q1OutputPath, snapshotRegion)
+    val q2Writer = OutputSupport.ByteRowWriter.open(q2OutputPath, snapshotRegion)
     val q1Latencies = new LongSampleBuffer(usesRift, snapshotRegion, 1024)
     val q2Latencies = new LongSampleBuffer(usesRift, snapshotRegion, 1024)
     val trip = Trip.empty
