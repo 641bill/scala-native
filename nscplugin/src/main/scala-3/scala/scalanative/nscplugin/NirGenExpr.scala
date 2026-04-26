@@ -116,6 +116,20 @@ trait NirGenExpr(using Context) {
           sym.isPrimitiveValueClass || sym == defn.UnitClass
       }
 
+    private def isRiftRegionCompanionOwner(sym: Symbol): Boolean =
+      sym.owner.fullName.toString.stripSuffix("$") ==
+        "scala.scalanative.memory.RiftRegion"
+
+    private def isRiftObjectBufferFactory(tree: Tree): Boolean = {
+      val sym = calledSymbol(tree)
+      sym.name.toString == "objectBuffer" && isRiftRegionCompanionOwner(sym)
+    }
+
+    private def isRiftObjectBufferAppend(tree: Tree): Boolean = {
+      val sym = calledSymbol(tree)
+      sym.name.toString == "append" && isRiftRegionCompanionOwner(sym)
+    }
+
     private def isAllowedRiftConstructorArg(tree: Tree): Boolean =
       isPrimitiveOrNull(tree) ||
         isRiftHeapRootTree(tree) ||
@@ -136,6 +150,14 @@ trait NirGenExpr(using Context) {
       then
         report.error(
           "Rift checked region array store cannot store an unrooted heap object; use RiftRegion.root(value) for heap metadata.",
+          value.srcPos
+        )
+
+    private def checkRiftObjectBufferAppend(value: Tree): Unit =
+      if !isAllowedRiftConstructorArg(value)
+      then
+        report.error(
+          "Rift checked object buffer cannot store an unrooted heap object; use RiftRegion.root(value) for heap metadata.",
           value.srcPos
         )
 
@@ -163,7 +185,8 @@ trait NirGenExpr(using Context) {
     private def isRiftAllocationTree(tree: Tree): Boolean =
       tree match {
         case app: Apply =>
-          isRuntimeRiftAllocate(app) || isRuntimeSafeZoneAllocateInRift(app)
+          isRuntimeRiftAllocate(app) || isRuntimeSafeZoneAllocateInRift(app) ||
+            isRiftObjectBufferFactory(app)
         case TypeApply(Select(qualifier, nme.asInstanceOf_), _) =>
           isRiftAllocationTree(qualifier)
         case Typed(expr, _)      => isRiftAllocationTree(expr)
@@ -209,6 +232,14 @@ trait NirGenExpr(using Context) {
         case _ if sym == defnNir.UnsafePackage_extern =>
           fail(s"extern can be used only from non-inlined extern methods")
 
+        case _ if isRiftObjectBufferAppend(app) =>
+          checkRiftObjectBufferAppend(args.last)
+          genApplyMethod(
+            sym,
+            statically = sym.isClassConstructor,
+            qualifier,
+            args
+          )
         case _: TypeApply           => genApplyTypeApply(app)
         case Select(Super(_, _), _) =>
           genApplyMethod(

@@ -84,6 +84,37 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     def value: T = referent
   }
 
+  /** Small checked append-only buffer backed by a region-owned array.
+   *
+   *  The buffer object itself is ordinary heap control metadata whose capture
+   *  set prevents it from escaping the owning region; the data array is
+   *  region-owned. Operations take the owner token explicitly so the capture
+   *  checker can reject cross-region values. Direct heap values are rejected by
+   *  the checked compiler path unless wrapped in a `HeapRoot`.
+   */
+  final class ObjectBuffer[T <: Object] private[memory] (
+      private val items: Array[Object]
+  ) {
+    private var used = 0
+
+    def length: Int = used
+
+    def capacity: Int = items.length
+
+    private[memory] def appendTrusted(value: Object): Unit = {
+      if (used >= items.length)
+        throw new IndexOutOfBoundsException("Rift ObjectBuffer is full")
+      items(used) = value
+      used += 1
+    }
+
+    private[memory] def applyTrusted(index: Int): Object = {
+      if (index < 0 || index >= used)
+        throw new IndexOutOfBoundsException(index.toString)
+      items(index)
+    }
+  }
+
   /** Evidence that a checked region body may return `T`.
    *
    *  Scala-next capture checking currently misses one important closure case:
@@ -367,6 +398,38 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       region: RiftRegion^
   ): HeapRoot[T]^{region} =
     region.retainHeapRoot(value)
+
+  /** Allocates a fixed-capacity checked object buffer in the implicit region. */
+  def objectBuffer[T <: Object](capacity: Int)(using
+      region: RiftRegion^
+  ): ObjectBuffer[T]^{region} = {
+    val items: Array[Object] =
+      alloc(new Array[Object](capacity)).asInstanceOf[Array[Object]]
+    new ObjectBuffer[T](items)
+  }
+
+  /** Appends `value` to a checked object buffer owned by `owner`. */
+  def append[T <: Object](
+      owner: RiftRegion^,
+      buffer: ObjectBuffer[T]^{owner},
+      value: T^{owner}
+  ): Unit =
+    buffer.appendTrusted(value.asInstanceOf[Object])
+
+  /** Reads an element from a checked object buffer owned by `owner`. */
+  def get[T <: Object](
+      owner: RiftRegion^,
+      buffer: ObjectBuffer[T]^{owner},
+      index: Int
+  ): T^{owner} =
+    buffer.applyTrusted(index).asInstanceOf[T^{owner}]
+
+  /** Returns the number of elements appended to a checked object buffer. */
+  def length[T <: Object](
+      owner: RiftRegion^,
+      buffer: ObjectBuffer[T]^{owner}
+  ): Int =
+    buffer.length
 
   /** Allocates an object in the implicit Rift region. */
   inline def alloc[T <: AnyRef](inline obj: T)(using

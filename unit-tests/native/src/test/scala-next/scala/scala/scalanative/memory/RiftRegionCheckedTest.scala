@@ -100,6 +100,37 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def scopedRegionAllowsObjectBufferWithHeapRoots(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.scoped { region ?=>
+        val leaves = RiftRegion.objectBuffer[RiftCheckedLeaf](2)
+        val left: RiftCheckedLeaf^{region} =
+          RiftRegion.alloc(new RiftCheckedLeaf(20))
+        val right: RiftCheckedLeaf^{region} =
+          RiftRegion.alloc(new RiftCheckedLeaf(21))
+        RiftRegion.append(region, leaves, left)
+        RiftRegion.append(region, leaves, right)
+
+        val roots =
+          RiftRegion.objectBuffer[RiftRegion.HeapRoot[RiftCheckedMetadata]](1)
+        RiftRegion.append(
+          region,
+          roots,
+          RiftRegion.root(new RiftCheckedMetadata(1))
+        )
+
+        RiftRegion.get(region, leaves, 0).value +
+          RiftRegion.get(region, leaves, 1).value +
+          RiftRegion.get(region, roots, 0).value.value
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def streamingResetBlockReturnsOnlyNonLocalValues(): Unit = {
     RiftRegion.init(1)
     try {
