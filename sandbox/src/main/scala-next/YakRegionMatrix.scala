@@ -38,6 +38,7 @@ object YakRegionConfig {
   val keySpace: Int = envInt("YAK_KEY_SPACE", 65536)
   val vertices: Int = envInt("YAK_VERTICES", 100000)
   val messagesPerEpoch: Int = envInt("YAK_MESSAGES_PER_EPOCH", 100000)
+  val sortRecordsPerEpoch: Int = envInt("YAK_SORT_RECORDS_PER_EPOCH", 20000)
   val escapeModulo: Int = envInt("YAK_ESCAPE_MODULO", 1000)
   val scratchSlots: Int = envInt("YAK_SCRATCH_SLOTS", 128)
   val benchmarkRuns: Int = envInt("YAK_BENCHMARK_RUNS", 3)
@@ -58,6 +59,11 @@ object YakRegionMatrixHelpers {
       val delta: Int,
       val tag: Int,
       val next: Message
+  )
+
+  private final class SortRecord(
+      val key: Int,
+      val value: Int
   )
 
   private final class PromoChild(
@@ -96,6 +102,9 @@ object YakRegionMatrixHelpers {
 
     def allocMessage(dst: Int, delta: Int, tag: Int, next: Message): Message =
       epoch.alloc(new Message(dst, delta, tag, next))
+
+    def allocSortRecord(key: Int, value: Int): SortRecord =
+      epoch.alloc(new SortRecord(key, value))
 
     def allocPromoChild(marker: Int, weight: Int): PromoChild =
       epoch.alloc(new PromoChild(marker, weight))
@@ -249,6 +258,15 @@ object YakRegionMatrixHelpers {
       else if (usesRift) region.alloc(new Message(dst, delta, tag, next))
       else new Message(dst, delta, tag, next)
 
+    def allocSortRecord(
+        region: RiftRegion,
+        key: Int,
+        value: Int
+    ): SortRecord =
+      if (runtimeSafe) runtimeEpoch.allocSortRecord(key, value)
+      else if (usesRift) region.alloc(new SortRecord(key, value))
+      else new SortRecord(key, value)
+
     def allocPromoChild(
         region: RiftRegion,
         marker: Int,
@@ -319,6 +337,53 @@ object YakRegionMatrixHelpers {
     checksum
   }
 
+  private def sortRecordComesBefore(left: SortRecord, right: SortRecord): Boolean =
+    left.key < right.key || (left.key == right.key && left.value < right.value)
+
+  private def sortRecords(records: Array[SortRecord]): Unit = {
+    def swap(i: Int, j: Int): Unit = {
+      val tmp = records(i)
+      records(i) = records(j)
+      records(j) = tmp
+    }
+
+    def quickSort(lo: Int, hi: Int): Unit =
+      if (lo < hi) {
+        val pivot = records((lo + hi) >>> 1)
+        var i = lo
+        var j = hi
+        while (i <= j) {
+          while (sortRecordComesBefore(records(i), pivot)) i += 1
+          while (sortRecordComesBefore(pivot, records(j))) j -= 1
+          if (i <= j) {
+            swap(i, j)
+            i += 1
+            j -= 1
+          }
+        }
+        if (lo < j) quickSort(lo, j)
+        if (i < hi) quickSort(i, hi)
+      }
+
+    if (records.length > 1) quickSort(0, records.length - 1)
+  }
+
+  private def consumeSortedRecords(
+      records: Array[SortRecord],
+      groups: Array[Long]
+  ): Unit = {
+    var i = 0
+    while (i < records.length) {
+      val key = records(i).key
+      var sum = 0L
+      while (i < records.length && records(i).key == key) {
+        sum += records(i).value.toLong
+        i += 1
+      }
+      groups(key) = (groups(key) + sum) & 0xffffffffL
+    }
+  }
+
   def runHeapOrRiftWordCount(modeName: String): Long = {
     val cfg = YakRegionConfig
     val mode = new ModeState(modeName)
@@ -347,6 +412,35 @@ object YakRegionMatrixHelpers {
       }
     } finally mode.finish()
     val checksum = checksumLongs(counts)
+    checksumSink = checksum
+    checksum
+  }
+
+  def runHeapOrRiftSort(modeName: String): Long = {
+    val cfg = YakRegionConfig
+    val mode = new ModeState(modeName)
+    val groups = new Array[Long](cfg.keySpace)
+    var epoch = 0
+    try {
+      while (epoch < cfg.epochs) {
+        val region = mode.beginEpoch()
+        val records = new Array[SortRecord](cfg.sortRecordsPerEpoch)
+        var i = 0
+        while (i < records.length) {
+          val seed = mix(epoch * 1000003 + i * 97)
+          val key = seed % cfg.keySpace
+          val value = (mix(seed + 31337) & 0xffff) + 1
+          records(i) = mode.allocSortRecord(region, key, value)
+          i += 1
+        }
+
+        sortRecords(records)
+        consumeSortedRecords(records, groups)
+        mode.endEpoch(region)
+        epoch += 1
+      }
+    } finally mode.finish()
+    val checksum = checksumLongs(groups)
     checksumSink = checksum
     checksum
   }
@@ -549,6 +643,86 @@ object YakRegionMatrixHelpers {
     checksum
   }
 
+  def runSafeZoneSort(): Long = {
+    val cfg = YakRegionConfig
+    val groups = new Array[Long](cfg.keySpace)
+    var epoch = 0
+    while (epoch < cfg.epochs) {
+      val currentEpoch = epoch
+      SafeZone { sz ?=>
+        def comesBefore(
+            left: SortRecord^{sz},
+            right: SortRecord^{sz}
+        ): Boolean =
+          left.key < right.key ||
+            (left.key == right.key && left.value < right.value)
+
+        def sortSafeRecords(records: Array[SortRecord^{sz}]^{sz}): Unit = {
+          def swap(i: Int, j: Int): Unit = {
+            val tmp = records(i)
+            records(i) = records(j)
+            records(j) = tmp
+          }
+
+          def quickSort(lo: Int, hi: Int): Unit =
+            if (lo < hi) {
+              val pivot = records((lo + hi) >>> 1)
+              var i = lo
+              var j = hi
+              while (i <= j) {
+                while (comesBefore(records(i), pivot)) i += 1
+                while (comesBefore(pivot, records(j))) j -= 1
+                if (i <= j) {
+                  swap(i, j)
+                  i += 1
+                  j -= 1
+                }
+              }
+              if (lo < j) quickSort(lo, j)
+              if (i < hi) quickSort(i, hi)
+            }
+
+          if (records.length > 1) quickSort(0, records.length - 1)
+        }
+
+        def consumeSafeRecords(records: Array[SortRecord^{sz}]^{sz}): Unit = {
+          var i = 0
+          while (i < records.length) {
+            val key = records(i).key
+            var sum = 0L
+            while (i < records.length && records(i).key == key) {
+              sum += records(i).value.toLong
+              i += 1
+            }
+            groups(key) = (groups(key) + sum) & 0xffffffffL
+          }
+        }
+
+        val records: Array[SortRecord^{sz}]^{sz} =
+          SafeZoneAllocator.allocate(
+            sz,
+            new Array[SortRecord^{sz}](cfg.sortRecordsPerEpoch)
+          )
+        var i = 0
+        while (i < records.length) {
+          val seed = mix(currentEpoch * 1000003 + i * 97)
+          val key = seed % cfg.keySpace
+          val value = (mix(seed + 31337) & 0xffff) + 1
+          records(i) =
+            SafeZoneAllocator.allocate(sz, new SortRecord(key, value))
+          i += 1
+        }
+
+        sortSafeRecords(records)
+        consumeSafeRecords(records)
+      }
+      epoch += 1
+    }
+    val checksum = checksumLongs(groups)
+    checksumSink = checksum
+    checksum
+  }
+
   private def medianDouble(values: Array[Double]): Double = {
     val sorted = values.clone()
     scala.util.Sorting.quickSort(sorted)
@@ -575,6 +749,11 @@ object YakRegionMatrixHelpers {
           if (mode == "safezone") runSafeZoneGraphStep()
           else runHeapOrRiftGraphStep(mode)
         new WorkloadResult(checksum, 0L, 0L, 0L)
+      case "sort" =>
+        val checksum =
+          if (mode == "safezone") runSafeZoneSort()
+          else runHeapOrRiftSort(mode)
+        new WorkloadResult(checksum, 0L, 0L, 0L)
       case "promotion" =>
         if (mode == "safezone")
           throw new IllegalArgumentException(
@@ -583,7 +762,7 @@ object YakRegionMatrixHelpers {
         else runHeapOrRuntimePromotion(mode)
       case other =>
         throw new IllegalArgumentException(
-          s"unknown Yak workload '$other'; expected wordcount, graphstep, or promotion"
+          s"unknown Yak workload '$other'; expected wordcount, graphstep, sort, or promotion"
         )
     }
 
@@ -592,6 +771,7 @@ object YakRegionMatrixHelpers {
     workload match {
       case "wordcount" => cfg.epochs.toLong * cfg.recordsPerEpoch.toLong
       case "graphstep" => cfg.epochs.toLong * cfg.messagesPerEpoch.toLong
+      case "sort" => cfg.epochs.toLong * cfg.sortRecordsPerEpoch.toLong
       case "promotion" => cfg.epochs.toLong * cfg.recordsPerEpoch.toLong * 2L
       case _           => 0L
     }
@@ -602,6 +782,7 @@ object YakRegionMatrixHelpers {
     workload match {
       case "wordcount" => cfg.keySpace.toLong
       case "graphstep" => cfg.vertices.toLong
+      case "sort"      => cfg.keySpace.toLong
       case "promotion" => cfg.keySpace.toLong + cfg.scratchSlots.toLong
       case _           => 0L
     }
@@ -702,7 +883,7 @@ object YakRegionMatrixHelpers {
     val cfg = YakRegionConfig
     val rootsMode = sys.env.getOrElse("SAFEZONE_ROOTS_MODE", "0")
     println(
-      s"CONFIG mode=$mode workload=$workload runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} epochs=${cfg.epochs} records_per_epoch=${cfg.recordsPerEpoch} key_space=${cfg.keySpace} vertices=${cfg.vertices} messages_per_epoch=${cfg.messagesPerEpoch} escape_modulo=${cfg.escapeModulo} scratch_slots=${cfg.scratchSlots} safezone_roots_mode=$rootsMode"
+      s"CONFIG mode=$mode workload=$workload runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} epochs=${cfg.epochs} records_per_epoch=${cfg.recordsPerEpoch} key_space=${cfg.keySpace} vertices=${cfg.vertices} messages_per_epoch=${cfg.messagesPerEpoch} sort_records_per_epoch=${cfg.sortRecordsPerEpoch} escape_modulo=${cfg.escapeModulo} scratch_slots=${cfg.scratchSlots} safezone_roots_mode=$rootsMode"
     )
   }
 
@@ -732,11 +913,12 @@ object YakRegionMatrixHelpers {
       case "all" =>
         YakRegionMatrixHelpers.runBenchmark(mode, "wordcount")
         YakRegionMatrixHelpers.runBenchmark(mode, "graphstep")
-      case "wordcount" | "graphstep" | "promotion" =>
+        YakRegionMatrixHelpers.runBenchmark(mode, "sort")
+      case "wordcount" | "graphstep" | "sort" | "promotion" =>
         YakRegionMatrixHelpers.runBenchmark(mode, workload)
       case other =>
         throw new IllegalArgumentException(
-          s"unknown Yak workload '$other'; expected wordcount, graphstep, promotion, or all"
+          s"unknown Yak workload '$other'; expected wordcount, graphstep, sort, promotion, or all"
         )
     }
   } finally {
