@@ -1918,6 +1918,39 @@ outputs after stripping only the measured latency column.
 
 These rows are single-run instrumented diagnostics, not medians.
 
+Coordinator rerun after merging the branch into `feature/rift`:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"debs2015.Debs2015Q2Smoke\")" run
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-coordinator-q2-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+The coordinator 100k rerun passed, and RunBoth outputs matched heap after
+stripping only the measured latency column. It agrees with the worker result:
+median-copy sorting remains eliminated and Rift RSS is much lower than heap.
+
+| Mode | Elapsed ms | GC ms | Q1 process ms | Q2 process ms | Q2 output ms | Rift op ms | Rift alloc objects | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 677.280 | 8.745 | 138.271 | 224.260 | 53.904 | 0.000 | 0 | 97370112 |
+| Rift HPZone | 661.426 | 5.743 | 136.537 | 205.504 | 51.117 | 3.972 | 602450 | 40173568 |
+| Rift Streaming | 646.588 | 5.833 | 132.890 | 199.458 | 48.812 | 2.322 | 602450 | 40173568 |
+
+Common coordinator Q2 diagnostics:
+
+| Events | Q2 rank fixes | Median sort computes | Median values sorted | Median reads | Median heap adds | Median heap removes | Median rebalances |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100000 | 312906 | 0 | 0 | 321758 | 98214 | 98213 | 86767 |
+
 ### 100k Single Run With Incremental Median Heaps
 
 | Mode | Elapsed ms | GC ms | Q1 process ms | Q2 process ms | Q2 output ms | Rift op ms | Rift alloc objects | Peak RSS bytes |
