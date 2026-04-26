@@ -518,6 +518,116 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def streamingResetRegionArrayEpochCompiles(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Record(val key: Int, val value: Int)
+      |
+      |def ok(): Long =
+      |  RiftRegion.streaming { stream ?=>
+      |    var total = 0L
+      |    var epoch = 0
+      |    while epoch < 2 do
+      |      total += RiftRegion.reset { region ?=>
+      |        val records: Array[Record^{region}]^{region} =
+      |          RiftRegion.alloc(new Array[Record^{region}](2))
+      |        records(0) = RiftRegion.alloc(new Record(epoch, 20))
+      |        records(1) = RiftRegion.alloc(new Record(epoch + 1, 22))
+      |        records(0).value.toLong + records(1).value.toLong
+      |      }
+      |      epoch += 1
+      |    total
+      |  }
+      |""".stripMargin)
+
+  @Test def topwordBufferCanStoreRecordsWithRootedMetadata(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val shard: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    final class WordRecord(
+      |        val key: Int,
+      |        val metadata: RiftRegion.HeapRoot[Metadata]^{region}
+      |    )
+      |    val buffer = RiftRegion.objectBuffer[WordRecord](2)
+      |    val rooted = RiftRegion.root(new Metadata(2))
+      |    val record: WordRecord^{region} =
+      |      RiftRegion.alloc(new WordRecord(40, rooted))
+      |    RiftRegion.append(region, buffer, record)
+      |    val stored = RiftRegion.get(region, buffer, 0)
+      |    stored.key + stored.metadata.value.shard
+      |  }
+      |""".stripMargin)
+
+  @Test def graphChiSubintervalCanUseRootedHeapVertexMetadata(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Vertex(val value: Int)
+      |final class EdgeUpdate(
+      |    val src: RiftRegion.HeapRoot[Vertex]^,
+      |    val dst: Int,
+      |    val next: EdgeUpdate^
+      |)
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    val vertex = new Vertex(41)
+      |    RiftRegion.reset { region ?=>
+      |      val update: EdgeUpdate^{region} =
+      |        RiftRegion.alloc(new EdgeUpdate(RiftRegion.root(vertex), 1, null))
+      |      update.src.value.value + update.dst
+      |    }
+      |  }
+      |""".stripMargin)
+
+  @Test def graphChiSubintervalCannotStoreUnrootedHeapVertex(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Vertex(val value: Int)
+      |final class EdgeUpdate(val src: Vertex^, val dst: Int)
+      |
+      |def bad(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    val vertex = new Vertex(41)
+      |    RiftRegion.reset { region ?=>
+      |      val update: EdgeUpdate^{region} =
+      |        RiftRegion.alloc(new EdgeUpdate(vertex, 1))
+      |      update.src.value + update.dst
+      |    }
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def streamingResetValueCannotBeStoredInOuterBuffer(): Unit =
+    assertDoesNotCompile("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class EdgeUpdate(val dst: Int)
+      |
+      |def bad(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    val buffer = RiftRegion.objectBuffer[EdgeUpdate](1)
+      |    RiftRegion.reset { region ?=>
+      |      val update: EdgeUpdate^{region} =
+      |        RiftRegion.alloc(new EdgeUpdate(1))
+      |      RiftRegion.append(stream, buffer, update)
+      |    }
+      |    RiftRegion.get(stream, buffer, 0).dst
+      |  }
+      |""".stripMargin)
+
   @Test def trustedOpenAllocationAllowsBenchmarkLinkedObjects(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking

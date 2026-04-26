@@ -131,6 +131,36 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def scopedRegionAllowsTopWordBufferWithRootedMetadata(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.scoped { region ?=>
+        final class WordRecord(
+            val key: Int,
+            val weight: Int,
+            val metadata: RiftRegion.HeapRoot[RiftCheckedMetadata]^{region})
+
+        val buffer = RiftRegion.objectBuffer[WordRecord](2)
+        val metadata = RiftRegion.root(new RiftCheckedMetadata(1))
+        val first: WordRecord^{region} =
+          RiftRegion.alloc(new WordRecord(10, 20, metadata))
+        val second: WordRecord^{region} =
+          RiftRegion.alloc(new WordRecord(11, 10, metadata))
+
+        RiftRegion.append(region, buffer, first)
+        RiftRegion.append(region, buffer, second)
+
+        val a = RiftRegion.get(region, buffer, 0)
+        val b = RiftRegion.get(region, buffer, 1)
+        a.key + a.weight + b.weight + a.metadata.value.value
+      }
+
+      assertEquals(41, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def streamingResetBlockReturnsOnlyNonLocalValues(): Unit = {
     RiftRegion.init(1)
     try {
@@ -148,6 +178,55 @@ class RiftRegionCheckedTest {
       }
 
       assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def streamingRegionAllowsGraphChiSubintervalUpdates(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        val values = new Array[Long](4)
+        values(0) = 1L
+        values(1) = 2L
+        values(2) = 3L
+        values(3) = 4L
+
+        var subinterval = 0
+        while (subinterval < 2) {
+          val currentSubinterval = subinterval
+          RiftRegion.reset { region ?=>
+            final class EdgeUpdate(
+                val src: Int,
+                val dst: Int,
+                val delta: Int)
+
+            val updates: Array[EdgeUpdate^{region}]^{region} =
+              RiftRegion.alloc(new Array[EdgeUpdate^{region}](2))
+            var i = 0
+            while (i < 2) {
+              val src = (currentSubinterval + i) & 3
+              val dst = ((currentSubinterval * 2) + i) & 3
+              updates(i) = RiftRegion.alloc(new EdgeUpdate(src, dst, i + 1))
+              i += 1
+            }
+
+            i = 0
+            while (i < updates.length) {
+              val current = updates(i)
+              values(current.dst) =
+                values(current.dst) + values(current.src) + current.delta
+              i += 1
+            }
+          }
+          subinterval += 1
+        }
+
+        values.sum
+      }
+
+      assertEquals(35L, total)
     } finally {
       RiftRegion.shutdown()
     }
