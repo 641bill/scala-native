@@ -133,6 +133,22 @@ size_t scalanative_GC_stats_allocation_duration_total() {
     return jmx_stats_get_allocation_duration_total();
 }
 
+void scalanative_GC_stats_allocation_phase_enter(int phase) {
+    jmx_stats_set_allocation_phase(phase);
+}
+
+size_t scalanative_GC_stats_allocation_phase_total(int phase) {
+    return jmx_stats_get_phase_allocation_total(phase);
+}
+
+size_t scalanative_GC_stats_allocation_phase_bytes_total(int phase) {
+    return jmx_stats_get_phase_allocation_bytes_total(phase);
+}
+
+size_t scalanative_GC_stats_allocation_phase_duration_total(int phase) {
+    return jmx_stats_get_phase_allocation_duration_total(phase);
+}
+
 void scalanative_GC_collect() { GC_gcollect(); }
 
 void scalanative_GC_set_weak_references_collected_callback(

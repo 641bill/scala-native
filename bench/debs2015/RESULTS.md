@@ -2357,6 +2357,81 @@ Interpretation:
   differences, output, and ranking/control operations. Do not collapse it into
   "GC pause time."
 
+### Phase-Level GC Heap Allocation Attribution
+
+Date: 2026-04-26
+
+Purpose:
+
+- Identify which DEBS phases still allocate on the GC heap after moving Q1/Q2
+  structured-lifetime state into Rift regions.
+- Keep this diagnostic separate from headline elapsed medians because
+  `SCALANATIVE_GC_ALLOC_STATS=1` still times every heap allocation call.
+
+Measurement correction:
+
+- A first implementation sampled Scala-side GC allocation counters around every
+  phase. That was rejected because reading the counters allocated and polluted
+  the buckets. At 1M, parse/change-style buckets gained millions of fake tiny
+  allocation calls.
+- The current numbers below use C-side thread-local phase bucketing inside the
+  GC allocation hook. The Scala benchmark only enters/leaves a phase; it does
+  not read allocation counters on the hot path.
+
+Commands:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+SCALANATIVE_GC_ALLOC_STATS=1 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-phase-gc-alloc-fixed-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+SCALANATIVE_GC_ALLOC_STATS=1 \
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-phase-gc-alloc-fixed-1000000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+Validation:
+
+- 100k and 1M phase-attribution matrices completed.
+- Heap/Rift outputs matched after stripping only the measured latency column.
+- The clean buckets no longer show fake parse/change allocation spikes.
+
+100k clean phase attribution:
+
+| Mode | Total GC alloc calls | Total GC alloc bytes | Total GC alloc ms | Q1 process calls / bytes / ms | Q2 process calls / bytes / ms | Q1 output calls / bytes / ms | Q2 output calls / bytes / ms | Snapshot calls / bytes / ms |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 2793038 | 116855232 | 78.098 | 358318 / 12895904 / 14.900 | 227619 / 9676608 / 6.421 | 1153940 / 37077216 / 27.947 | 1028446 / 31947104 / 24.168 | 22172 / 1725184 / 0.615 |
+| Rift HPZone | 2195129 | 69348816 | 54.992 | 3074 / 97600 / 0.074 | 7150 / 211424 / 0.168 | 1153937 / 36962480 / 29.311 | 1028444 / 31897920 / 25.355 | 0 / 0 / 0.000 |
+| Rift Streaming | 2195148 | 69349184 | 55.658 | 3074 / 97600 / 0.074 | 7150 / 211424 / 0.164 | 1153937 / 36962480 / 29.558 | 1028444 / 31897920 / 25.790 | 0 / 0 / 0.000 |
+
+1M clean phase attribution:
+
+| Mode | Total GC alloc calls | Total GC alloc bytes | Total GC alloc ms | Q1 process calls / bytes / ms | Q2 process calls / bytes / ms | Q1 output calls / bytes / ms | Q2 output calls / bytes / ms | Snapshot calls / bytes / ms |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 19926437 | 679904992 | 537.038 | 3284649 / 105197520 / 86.237 | 2088994 / 84904608 / 55.307 | 6452447 / 206957216 / 149.152 | 7940120 / 246770352 / 238.504 | 157054 / 12147840 / 4.149 |
+| Rift HPZone | 14464093 | 455413840 | 350.305 | 21512 / 689088 / 0.460 | 46869 / 1439440 / 0.996 | 6452442 / 206449232 / 161.202 | 7940115 / 246262368 / 187.258 | 0 / 0 / 0.000 |
+| Rift Streaming | 14464112 | 455414144 | 352.571 | 21512 / 689088 / 0.515 | 46869 / 1439440 / 1.064 | 6452442 / 206449232 / 156.849 | 7940115 / 246262368 / 194.056 | 0 / 0 / 0.000 |
+
+Interpretation:
+
+- Rift is doing what this stage intended for Q1/Q2 processing state: at 1M,
+  Q1 process heap allocation falls from `3.28M` calls to `21.5k`, and Q2
+  process heap allocation falls from `2.09M` calls to `46.9k`. Snapshot heap
+  allocation is also eliminated in Rift modes.
+- The dominant remaining heap churn is output formatting/writing. At 1M, Q1
+  and Q2 output still account for about `14.39M` heap allocation calls in both
+  heap and Rift modes. That explains why total GC allocation bytes remain high
+  even after process/snapshot objects move into regions.
+- The next DEBS step should target shared output-row construction and formatting
+  without changing the logical Q1/Q2 algorithms. Durable file writers can remain
+  heap objects; per-row scratch builders/formatting intermediates are the
+  structured-lifetime candidates.
+
 ## JVM RunBoth Cross-check
 
 Date: 2026-04-25

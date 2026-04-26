@@ -61,6 +61,16 @@ object GC {
   // calls. This is an attribution metric and can perturb benchmark timings.
   @name("scalanative_GC_stats_allocation_duration_total")
   def getStatsAllocationDurationTotal(): CSize = extern
+  // Set the current phase bucket for GC heap allocation attribution.
+  // Passing a negative value disables phase attribution.
+  @name("scalanative_GC_stats_allocation_phase_enter")
+  def enterStatsAllocationPhase(phase: CInt): Unit = extern
+  @name("scalanative_GC_stats_allocation_phase_total")
+  def getStatsAllocationPhaseTotal(phase: CInt): CSize = extern
+  @name("scalanative_GC_stats_allocation_phase_bytes_total")
+  def getStatsAllocationPhaseBytesTotal(phase: CInt): CSize = extern
+  @name("scalanative_GC_stats_allocation_phase_duration_total")
+  def getStatsAllocationPhaseDurationTotal(phase: CInt): CSize = extern
 
   /*  Multithreading awareness for GC Every implementation of GC supported in
    *  ScalaNative needs to register a given thread The main thread is

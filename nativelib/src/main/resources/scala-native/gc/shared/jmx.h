@@ -12,5 +12,9 @@ void jmx_stats_record_allocation(size_t bytes, size_t start_ns, size_t end_ns);
 size_t jmx_stats_get_allocation_total();
 size_t jmx_stats_get_allocation_bytes_total();
 size_t jmx_stats_get_allocation_duration_total();
+void jmx_stats_set_allocation_phase(int phase);
+size_t jmx_stats_get_phase_allocation_total(int phase);
+size_t jmx_stats_get_phase_allocation_bytes_total(int phase);
+size_t jmx_stats_get_phase_allocation_duration_total(int phase);
 
 #endif

@@ -34,6 +34,63 @@ object Debs2015RunBothRunner {
         closeNanos
   }
 
+  private object PhaseIndex {
+    final val Read = 0
+    final val Parse = 1
+    final val Q1Process = 2
+    final val Q1Change = 3
+    final val Q1Output = 4
+    final val Q1Snapshot = 5
+    final val Q2Process = 6
+    final val Q2Change = 7
+    final val Q2Output = 8
+    final val Q2Snapshot = 9
+    final val Close = 10
+    final val Count = 11
+  }
+
+  final case class PhaseGcAllocMetrics(
+      totals: Array[Long],
+      bytes: Array[Long],
+      nanos: Array[Long]
+  ) {
+    def total(index: Int): Long = totals(index)
+    def byteCount(index: Int): Long = bytes(index)
+    def timeNanos(index: Int): Long = nanos(index)
+  }
+
+  private object PhaseGcAllocMetrics {
+    val zero: PhaseGcAllocMetrics =
+      PhaseGcAllocMetrics(
+        new Array[Long](PhaseIndex.Count),
+        new Array[Long](PhaseIndex.Count),
+        new Array[Long](PhaseIndex.Count)
+      )
+  }
+
+  private final class PhaseGcAllocAccumulator(enabled: Boolean) {
+    def enter(index: Int): Unit =
+      if (enabled) GC.enterStatsAllocationPhase(index)
+
+    def clear(): Unit =
+      if (enabled) GC.enterStatsAllocationPhase(-1)
+
+    def result(): PhaseGcAllocMetrics =
+      if (enabled) {
+        val totals = new Array[Long](PhaseIndex.Count)
+        val bytes = new Array[Long](PhaseIndex.Count)
+        val nanos = new Array[Long](PhaseIndex.Count)
+        var i = 0
+        while (i < PhaseIndex.Count) {
+          totals(i) = GC.getStatsAllocationPhaseTotal(i).toLong
+          bytes(i) = GC.getStatsAllocationPhaseBytesTotal(i).toLong
+          nanos(i) = GC.getStatsAllocationPhaseDurationTotal(i).toLong
+          i += 1
+        }
+        PhaseGcAllocMetrics(totals, bytes, nanos)
+      } else PhaseGcAllocMetrics.zero
+  }
+
   final case class RuntimeMetrics(
       gcCollections: Long,
       gcNanos: Long,
@@ -181,6 +238,7 @@ object Debs2015RunBothRunner {
       q1LatencyMillis: Array[Long],
       q2LatencyMillis: Array[Long],
       phases: PhaseMetrics,
+      phaseGcAlloc: PhaseGcAllocMetrics,
       runtime: RuntimeMetrics,
       counters: Debs2015Counters.Snapshot
   ) {
@@ -241,6 +299,8 @@ object Debs2015RunBothRunner {
     val counterStart = Debs2015Counters.snapshot()
     val runtimeStart = RuntimeMetrics.capture(usesRift)
     var runtimeEnd = runtimeStart
+    val phaseGcAlloc =
+      new PhaseGcAllocAccumulator(gcAllocAttributionEnabled())
 
     val q1 = Debs2015Q1Runner.createEngine(q1Mode)
     val q2 = Debs2015Q2Runner.createEngine(q1Mode)
@@ -278,7 +338,9 @@ object Debs2015RunBothRunner {
     try {
       while ({
         val readStarted = System.nanoTime()
+        phaseGcAlloc.enter(PhaseIndex.Read)
         val hasNext = source.nextLine()
+        phaseGcAlloc.clear()
         readNanos += System.nanoTime() - readStarted
         hasNext
       }) {
@@ -286,8 +348,10 @@ object Debs2015RunBothRunner {
         events += 1L
 
         val parseStarted = System.nanoTime()
+        phaseGcAlloc.enter(PhaseIndex.Parse)
         val parsedTrip =
           Trip.parseInto(source.bytes, source.lineStart, source.lineEnd, trip)
+        phaseGcAlloc.clear()
         val parseFinished = System.nanoTime()
         parseNanos += parseFinished - parseStarted
 
@@ -295,15 +359,20 @@ object Debs2015RunBothRunner {
             parsed += 1L
 
             val q1Started = System.nanoTime()
+            phaseGcAlloc.enter(PhaseIndex.Q1Process)
             val q1Current = q1.process(trip)
+            phaseGcAlloc.clear()
             val q1Finished = System.nanoTime()
             q1ProcessNanos += q1Finished - q1Started
             val q1ChangeStarted = System.nanoTime()
+            phaseGcAlloc.enter(PhaseIndex.Q1Change)
             val q1Changed =
               q1Current.nonEmpty && Q1Output.changed(previousQ1, q1Current)
+            phaseGcAlloc.clear()
             q1ChangeNanos += System.nanoTime() - q1ChangeStarted
             if (q1Changed) {
               val q1OutputStarted = System.nanoTime()
+              phaseGcAlloc.enter(PhaseIndex.Q1Output)
               val writeAt = q1OutputStarted
               val delayMillis = (writeAt - readAt) / 1000000L
               Q1Output.writeRow(q1Writer, trip, q1Current, delayMillis)
@@ -312,21 +381,28 @@ object Debs2015RunBothRunner {
               Debs2015Counters.recordQ1LatencyAppend()
               q1Outputs += 1L
               val q1SnapshotStarted = System.nanoTime()
+              phaseGcAlloc.enter(PhaseIndex.Q1Snapshot)
               previousQ1 = Q1Output.snapshot(q1Current, snapshotRegion)
+              phaseGcAlloc.clear()
               q1SnapshotNanos += System.nanoTime() - q1SnapshotStarted
               q1OutputNanos += System.nanoTime() - q1OutputStarted
             }
 
             val q2Started = System.nanoTime()
+            phaseGcAlloc.enter(PhaseIndex.Q2Process)
             val q2Current = q2.process(trip)
+            phaseGcAlloc.clear()
             val q2Finished = System.nanoTime()
             q2ProcessNanos += q2Finished - q2Started
             val q2ChangeStarted = System.nanoTime()
+            phaseGcAlloc.enter(PhaseIndex.Q2Change)
             val q2Changed =
               q2Current.nonEmpty && Q2Output.changed(previousQ2, q2Current)
+            phaseGcAlloc.clear()
             q2ChangeNanos += System.nanoTime() - q2ChangeStarted
             if (q2Changed) {
               val q2OutputStarted = System.nanoTime()
+              phaseGcAlloc.enter(PhaseIndex.Q2Output)
               val writeAt = q2OutputStarted
               val delayMillis = (writeAt - readAt) / 1000000L
               Q2Output.writeRow(q2Writer, trip, q2Current, delayMillis)
@@ -335,7 +411,9 @@ object Debs2015RunBothRunner {
               Debs2015Counters.recordQ2LatencyAppend()
               q2Outputs += 1L
               val q2SnapshotStarted = System.nanoTime()
+              phaseGcAlloc.enter(PhaseIndex.Q2Snapshot)
               previousQ2 = Q2Output.snapshot(q2Current, snapshotRegion)
+              phaseGcAlloc.clear()
               q2SnapshotNanos += System.nanoTime() - q2SnapshotStarted
               q2OutputNanos += System.nanoTime() - q2OutputStarted
             }
@@ -345,6 +423,7 @@ object Debs2015RunBothRunner {
       }
     } finally {
       val closeStarted = System.nanoTime()
+      phaseGcAlloc.enter(PhaseIndex.Close)
       q2Writer.close()
       q1Writer.close()
       q1LatencyMillis = q1Latencies.toArray
@@ -354,6 +433,7 @@ object Debs2015RunBothRunner {
       q1.close()
       if (snapshotRegion != null) snapshotRegion.close()
       closeNanos = System.nanoTime() - closeStarted
+      phaseGcAlloc.clear()
       runtimeEnd = RuntimeMetrics.capture(usesRift)
       if (usesRift) RiftRegion.shutdown()
     }
@@ -380,9 +460,15 @@ object Debs2015RunBothRunner {
         q2SnapshotNanos = q2SnapshotNanos,
         closeNanos = closeNanos
       ),
+      phaseGcAlloc = phaseGcAlloc.result(),
       runtime = RuntimeMetrics.since(runtimeStart, runtimeEnd),
       counters = Debs2015Counters.snapshot().since(counterStart)
     )
+  }
+
+  private def gcAllocAttributionEnabled(): Boolean = {
+    val env = System.getenv("SCALANATIVE_GC_ALLOC_STATS")
+    env != null && env.nonEmpty && env != "0"
   }
 
   private def regionKindForMode(mode: String): Int =
@@ -404,6 +490,7 @@ object Debs2015RunBothRunner {
     val q2Sorted = metrics.q2LatencyMillis.clone()
     val runtime = metrics.runtime
     val phases = metrics.phases
+    val phaseGcAlloc = metrics.phaseGcAlloc
     val counters = metrics.counters
     val trackedNanos = phases.trackedNanos
     val untrackedNanos =
@@ -430,6 +517,17 @@ object Debs2015RunBothRunner {
         f"phase_close_ns=${phases.closeNanos}%d " +
         f"phase_tracked_ns=${trackedNanos}%d " +
         f"phase_untracked_ns=${untrackedNanos}%d " +
+        phaseGcAllocFields("read", PhaseIndex.Read, phaseGcAlloc) +
+        phaseGcAllocFields("parse", PhaseIndex.Parse, phaseGcAlloc) +
+        phaseGcAllocFields("q1_process", PhaseIndex.Q1Process, phaseGcAlloc) +
+        phaseGcAllocFields("q1_change", PhaseIndex.Q1Change, phaseGcAlloc) +
+        phaseGcAllocFields("q1_output", PhaseIndex.Q1Output, phaseGcAlloc) +
+        phaseGcAllocFields("q1_snapshot", PhaseIndex.Q1Snapshot, phaseGcAlloc) +
+        phaseGcAllocFields("q2_process", PhaseIndex.Q2Process, phaseGcAlloc) +
+        phaseGcAllocFields("q2_change", PhaseIndex.Q2Change, phaseGcAlloc) +
+        phaseGcAllocFields("q2_output", PhaseIndex.Q2Output, phaseGcAlloc) +
+        phaseGcAllocFields("q2_snapshot", PhaseIndex.Q2Snapshot, phaseGcAlloc) +
+        phaseGcAllocFields("close", PhaseIndex.Close, phaseGcAlloc) +
         f"q1_p50_ms=${percentile(q1Sorted, 0.50)}%d " +
         f"q1_p99_ms=${percentile(q1Sorted, 0.99)}%d " +
         f"q1_p999_ms=${percentile(q1Sorted, 0.999)}%d " +
@@ -503,6 +601,15 @@ object Debs2015RunBothRunner {
         f"diag_taxi_entries_created=${counters.taxiEntriesCreated}%d"
     )
   }
+
+  private def phaseGcAllocFields(
+      name: String,
+      index: Int,
+      metrics: PhaseGcAllocMetrics
+  ): String =
+    f"phase_${name}_gc_alloc_total=${metrics.total(index)}%d " +
+      f"phase_${name}_gc_alloc_bytes=${metrics.byteCount(index)}%d " +
+      f"phase_${name}_gc_alloc_time_ns=${metrics.timeNanos(index)}%d "
 }
 
 @main def Debs2015RunBoth(

@@ -163,6 +163,22 @@ size_t scalanative_GC_stats_allocation_duration_total() {
     return jmx_stats_get_allocation_duration_total();
 }
 
+void scalanative_GC_stats_allocation_phase_enter(int phase) {
+    jmx_stats_set_allocation_phase(phase);
+}
+
+size_t scalanative_GC_stats_allocation_phase_total(int phase) {
+    return jmx_stats_get_phase_allocation_total(phase);
+}
+
+size_t scalanative_GC_stats_allocation_phase_bytes_total(int phase) {
+    return jmx_stats_get_phase_allocation_bytes_total(phase);
+}
+
+size_t scalanative_GC_stats_allocation_phase_duration_total(int phase) {
+    return jmx_stats_get_phase_allocation_duration_total(phase);
+}
+
 void scalanative_GC_add_roots(void *addr_low, void *addr_high) {
     AddressRange range = {addr_low, addr_high};
     GC_Roots_Add(customRoots, range);

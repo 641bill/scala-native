@@ -62,6 +62,18 @@ size_t scalanative_GC_stats_allocation_bytes_total() { return TOTAL_ALLOCATED; }
 
 size_t scalanative_GC_stats_allocation_duration_total() { return 0L; }
 
+void scalanative_GC_stats_allocation_phase_enter(int phase) {}
+
+size_t scalanative_GC_stats_allocation_phase_total(int phase) { return 0L; }
+
+size_t scalanative_GC_stats_allocation_phase_bytes_total(int phase) {
+    return 0L;
+}
+
+size_t scalanative_GC_stats_allocation_phase_duration_total(int phase) {
+    return 0L;
+}
+
 void Prealloc_Or_Default() {
 
     if (TO_NORMAL_MMAP == 1L) { // Check if we have prealloc env varible

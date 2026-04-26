@@ -57,6 +57,12 @@ size_t scalanative_GC_stats_allocation_bytes_total();
 // The total (accumulated) time in nanos spent inside measured GC heap allocation
 // calls. This is an attribution metric and can perturb benchmark timings.
 size_t scalanative_GC_stats_allocation_duration_total();
+// Set the current thread-local attribution phase for GC heap allocations.
+// Passing a negative or out-of-range phase disables phase attribution.
+void scalanative_GC_stats_allocation_phase_enter(int phase);
+size_t scalanative_GC_stats_allocation_phase_total(int phase);
+size_t scalanative_GC_stats_allocation_phase_bytes_total(int phase);
+size_t scalanative_GC_stats_allocation_phase_duration_total(int phase);
 
 // Functions used to create a new thread supporting multithreading support in
 // the garbage collector. Would execute a proxy startup routine to register

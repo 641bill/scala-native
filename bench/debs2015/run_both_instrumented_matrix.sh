@@ -41,6 +41,39 @@ metric_keys=(
   phase_close_ns
   phase_tracked_ns
   phase_untracked_ns
+  phase_read_gc_alloc_total
+  phase_read_gc_alloc_bytes
+  phase_read_gc_alloc_time_ns
+  phase_parse_gc_alloc_total
+  phase_parse_gc_alloc_bytes
+  phase_parse_gc_alloc_time_ns
+  phase_q1_process_gc_alloc_total
+  phase_q1_process_gc_alloc_bytes
+  phase_q1_process_gc_alloc_time_ns
+  phase_q1_change_gc_alloc_total
+  phase_q1_change_gc_alloc_bytes
+  phase_q1_change_gc_alloc_time_ns
+  phase_q1_output_gc_alloc_total
+  phase_q1_output_gc_alloc_bytes
+  phase_q1_output_gc_alloc_time_ns
+  phase_q1_snapshot_gc_alloc_total
+  phase_q1_snapshot_gc_alloc_bytes
+  phase_q1_snapshot_gc_alloc_time_ns
+  phase_q2_process_gc_alloc_total
+  phase_q2_process_gc_alloc_bytes
+  phase_q2_process_gc_alloc_time_ns
+  phase_q2_change_gc_alloc_total
+  phase_q2_change_gc_alloc_bytes
+  phase_q2_change_gc_alloc_time_ns
+  phase_q2_output_gc_alloc_total
+  phase_q2_output_gc_alloc_bytes
+  phase_q2_output_gc_alloc_time_ns
+  phase_q2_snapshot_gc_alloc_total
+  phase_q2_snapshot_gc_alloc_bytes
+  phase_q2_snapshot_gc_alloc_time_ns
+  phase_close_gc_alloc_total
+  phase_close_gc_alloc_bytes
+  phase_close_gc_alloc_time_ns
   gc_collections
   gc_time_ns
   gc_alloc_total
