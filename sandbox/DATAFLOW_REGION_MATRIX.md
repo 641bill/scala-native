@@ -1,6 +1,7 @@
 # Dataflow Region Matrix
 
-Status: new Broom-style methodology reproduction harness.
+Status: Broom-style methodology reproduction harness with trusted
+heap/SafeZone/Rift medians and a SELECT-only checked RegionBuffer mode.
 
 The harness is implemented in
 `sandbox/src/main/scala-next/DataflowRegionMatrix.scala` and run with
@@ -24,6 +25,9 @@ Heap and Rift variants use the same logical programs:
   per epoch.
 - `rift-streaming`: the same classes allocated with `region.alloc`, using a
   resettable streaming region across epochs.
+- `rift-checked`: SELECT-only checked safe-API variant using
+  `RiftRegion.streaming/reset` plus growable `RegionBuffer` for selected
+  records. Aggregate and join are not yet ported to checked mode.
 
 The benchmark intentionally uses ordinary Scala object graphs in regions. It is
 not a primitive-key-only layout experiment.
@@ -71,6 +75,19 @@ cd /Users/siyaoliu/rift/scala-native-rift
 DATAFLOW_BUILD=0 DATAFLOW_BENCHMARK_RUNS=3 DATAFLOW_WARMUPS=1 \
 DATAFLOW_OUTPUT_DIR=/tmp/dataflow-region-instrumented-100k \
   zsh sandbox/run_dataflow_region_instrumented_matrix.sh
+
+DATAFLOW_BUILD=0 DATAFLOW_OPERATOR=select \
+DATAFLOW_OUTPUT_DIR=/tmp/dataflow-checked-select-default \
+  zsh sandbox/run_dataflow_region_instrumented_matrix.sh
+```
+
+Checked SELECT run:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+DATAFLOW_BUILD=0 DATAFLOW_OPERATOR=select \
+DATAFLOW_OUTPUT_DIR=/tmp/dataflow-checked-select-default \
+  zsh sandbox/run_dataflow_region_instrumented_matrix.sh
 ```
 
 Broom-scale methodology run, subject to local runtime feasibility:
@@ -83,8 +100,9 @@ DATAFLOW_EPOCHS=40 DATAFLOW_DOCS_PER_EPOCH=500000 DATAFLOW_BENCHMARK_RUNS=3 DATA
 
 ## Result Status
 
-Smoke, local medians, and native-only instrumented RSS runs have been recorded.
-These are local methodology reproduction numbers, not exact Broom/Naiad numbers.
+Smoke, local medians, native-only instrumented RSS runs, and a SELECT-only
+checked RegionBuffer median have been recorded. These are local methodology
+reproduction numbers, not exact Broom/Naiad numbers.
 
 Validation commands run on 2026-04-25:
 
@@ -198,6 +216,52 @@ Interpretation:
   operators in this rerun.
 - Streaming is not consistently good on this run; keep HPZone and Streaming
   claims separate.
+
+## Checked RegionBuffer SELECT Median
+
+Date: 2026-04-26
+
+This run adds a `rift-checked` SELECT-only mode to the existing Broom-style
+matrix. The checked path uses `RiftRegion.streaming/reset` and
+`RiftRegion.RegionBuffer` for selected output records. Heap, SafeZone, trusted
+Rift, and checked Rift all produce the same SELECT checksum.
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+DATAFLOW_BUILD=0 DATAFLOW_OPERATOR=select \
+DATAFLOW_OUTPUT_DIR=/tmp/dataflow-checked-select-default \
+  zsh sandbox/run_dataflow_region_instrumented_matrix.sh
+```
+
+Configuration:
+
+- `DATAFLOW_EPOCHS=10`
+- `DATAFLOW_DOCS_PER_EPOCH=100000`
+- `DATAFLOW_BENCHMARK_RUNS=3`
+- `DATAFLOW_WARMUPS=1`
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens/closes/resets | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|
+| heap | 27.671 | 6.761 | 0.000 | 0 | 0 / 0 / 0 | 39288832 |
+| current SafeZone | 26.304 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 30392320 |
+| improved SafeZone | 23.403 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 30392320 |
+| Rift HPZone | 20.186 | 0.000 | 0.039 | 1124990 | 10 / 10 / 0 | 30375936 |
+| Rift Streaming | 20.760 | 0.000 | 0.038 | 1124990 | 1 / 1 / 9 | 30343168 |
+| Rift checked RegionBuffer | 18.472 | 0.000 | 0.133 | 1125100 | 1 / 1 / 10 | 30490624 |
+
+Interpretation:
+
+- This is the first existing literature-shaped operator path using the checked
+  safe API rather than trusted `RiftRegion.open`.
+- The checked SELECT variant is SELECT-only. Aggregate and join still need
+  checked table/container provenance before they can be included.
+- `rift-checked` is faster than heap, improved SafeZone, trusted HPZone, and
+  trusted Streaming in this local SELECT run.
+- Region operation time remains small (`0.133 ms` median), though higher than
+  trusted Streaming because checked reset runs every epoch and the selected
+  output uses growable backing arrays.
 
 ## Provisional Broom-Scale Single Run, 40 Epochs x 500k Documents
 

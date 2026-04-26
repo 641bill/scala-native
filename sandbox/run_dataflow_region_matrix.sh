@@ -30,3 +30,6 @@ SAFEZONE_ROOTS_MODE=0 run_mode "Current SafeZone" "safezone"
 SAFEZONE_ROOTS_MODE=1 run_mode "Improved SafeZone" "safezone"
 run_mode "Rift HPZone" "rift-hp"
 run_mode "Rift Streaming" "rift-streaming"
+if [[ "${operator}" == "select" ]]; then
+  run_mode "Rift checked RegionBuffer" "rift-checked"
+fi

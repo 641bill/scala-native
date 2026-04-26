@@ -512,6 +512,75 @@ object DataflowRegionMatrixHelpers {
     total
   }
 
+  def runCheckedSelect(): Long = {
+    val cfg = DataflowRegionConfig
+    val total = RiftRegion.streaming { stream ?=>
+      var total = 0L
+      var epoch = 0
+      while (epoch < cfg.epochs) {
+        total += RiftRegion.reset { region ?=>
+          final class CheckedDocument(
+              val docId: Int,
+              val key: Int,
+              val authorKey: Int,
+              val value: Int,
+              val next: CheckedDocument^{region}
+          )
+          final class CheckedSelectedRecord(
+              val docId: Int,
+              val key: Int,
+              val score: Long
+          )
+
+          var docs: CheckedDocument^{region} = null
+          var i = 0
+          while (i < cfg.docsPerEpoch) {
+            val seed = mix(epoch * 1000003 + i)
+            val key = seed % cfg.keySpace
+            val author = mix(seed + 17) % cfg.authorKeySpace
+            val value = mix(seed + 31) & 0xffff
+            val docId = epoch * cfg.docsPerEpoch + i
+            docs =
+              RiftRegion.alloc(
+                new CheckedDocument(docId, key, author, value, docs)
+              )
+            i += 1
+          }
+
+          val selected =
+            RiftRegion.regionBuffer[CheckedSelectedRecord](16)
+          var cursor = docs
+          while (cursor != null) {
+            if ((cursor.value % cfg.selectModulo) == 0) {
+              val score =
+                cursor.value.toLong * 31L + cursor.key.toLong + cursor.authorKey
+              val record: CheckedSelectedRecord^{region} =
+                RiftRegion.alloc(
+                  new CheckedSelectedRecord(cursor.docId, cursor.key, score)
+                )
+              region.append(selected, record)
+            }
+            cursor = cursor.next
+          }
+
+          var epochTotal = 0L
+          i = 0
+          while (i < region.length(selected)) {
+            val out = region.get(selected, i)
+            epochTotal += out.score ^ out.docId.toLong ^ out.key.toLong
+            i += 1
+          }
+          epochTotal
+        }
+        epoch += 1
+      }
+      total
+    }
+
+    checksumSink = total
+    total
+  }
+
   def runSelect(modeName: String): Long = {
     val cfg = DataflowRegionConfig
     val mode = new ModeState(modeName)
@@ -668,12 +737,21 @@ object DataflowRegionMatrixHelpers {
     operator match {
       case "select" =>
         if (mode == "safezone") runSafeZoneSelect()
+        else if (mode == "rift-checked") runCheckedSelect()
         else runSelect(mode)
       case "aggregate" =>
         if (mode == "safezone") runSafeZoneAggregate()
+        else if (mode == "rift-checked")
+          throw new IllegalArgumentException(
+            "rift-checked is currently implemented only for dataflow select"
+          )
         else runAggregate(mode)
       case "join" =>
         if (mode == "safezone") runSafeZoneJoin()
+        else if (mode == "rift-checked")
+          throw new IllegalArgumentException(
+            "rift-checked is currently implemented only for dataflow select"
+          )
         else runJoin(mode)
       case other =>
         throw new IllegalArgumentException(
@@ -697,7 +775,8 @@ object DataflowRegionMatrixHelpers {
 
   def runBenchmark(mode: String, operator: String): Unit = {
     val cfg = DataflowRegionConfig
-    val usesRift = mode == "rift-hp" || mode == "rift-streaming"
+    val usesRift =
+      mode == "rift-hp" || mode == "rift-streaming" || mode == "rift-checked"
     val expectedChecksum = expected(operator)
 
     var warmup = 0
@@ -792,10 +871,12 @@ object DataflowRegionMatrixHelpers {
 
   def validateMode(mode: String): Unit =
     mode match {
-      case "heap" | "safezone" | "rift-hp" | "rift-streaming" => ()
+      case "heap" | "safezone" | "rift-hp" | "rift-streaming" |
+          "rift-checked" =>
+        ()
       case other =>
         throw new IllegalArgumentException(
-          s"unknown dataflow mode '$other'; expected heap, safezone, rift-hp, or rift-streaming"
+          s"unknown dataflow mode '$other'; expected heap, safezone, rift-hp, rift-streaming, or rift-checked"
         )
     }
 }
@@ -807,11 +888,16 @@ object DataflowRegionMatrixHelpers {
   DataflowRegionMatrixHelpers.validateMode(mode)
   DataflowRegionMatrixHelpers.printConfig(mode, operator)
 
-  val usesRift = mode == "rift-hp" || mode == "rift-streaming"
+  val usesRift =
+    mode == "rift-hp" || mode == "rift-streaming" || mode == "rift-checked"
   if (usesRift) RiftRegion.init(0)
   try {
     operator match {
       case "all" =>
+        if (mode == "rift-checked")
+          throw new IllegalArgumentException(
+            "rift-checked is currently implemented only for dataflow select"
+          )
         DataflowRegionMatrixHelpers.runBenchmark(mode, "select")
         DataflowRegionMatrixHelpers.runBenchmark(mode, "aggregate")
         DataflowRegionMatrixHelpers.runBenchmark(mode, "join")
