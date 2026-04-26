@@ -1999,6 +1999,73 @@ Interpretation:
   be rank-maintenance cost and output-phase variance, not reintroducing
   per-event scratch regions.
 
+### 100k And 1M 3-Run Medians With Incremental Median Heaps
+
+Date: 2026-04-26
+
+Commands:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+for i in 1 2 3; do
+  DEBS2015_BOTH_BUILD=$([[ $i == 1 ]] && echo 1 || echo 0) \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-incremental-current-100000/run-${i} \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+
+for i in 1 2 3; do
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-incremental-current-1000000/run-${i} \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+```
+
+All runs matched heap/Rift outputs after stripping only the measured latency
+column. These rows supersede the single-run Q2 incremental-median diagnostics
+above for headline current-checkpoint claims.
+
+100k medians:
+
+| Mode | Elapsed ms | Throughput events/s | GC ms | Q1 process ms | Q2 process ms | Q2 output ms | Rift op ms | Region objects | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 619.735 | 161359.399 | 8.091 | 135.542 | 196.361 | 46.384 | 0.000 | 0 | 97370112 |
+| Rift HPZone | 626.609 | 159589.101 | 5.839 | 133.007 | 180.546 | 48.361 | 1.518 | 602450 | 40173568 |
+| Rift Streaming | 610.258 | 163865.186 | 5.781 | 133.449 | 183.060 | 47.792 | 1.573 | 602450 | 40173568 |
+
+1M medians:
+
+| Mode | Elapsed ms | Throughput events/s | GC ms | Q1 process ms | Q2 process ms | Q2 output ms | Rift op ms | Region objects | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 5976.447 | 167323.501 | 67.086 | 1387.651 | 2027.508 | 419.937 | 0.000 | 0 | 305758208 |
+| Rift HPZone | 5794.879 | 172566.172 | 59.658 | 1351.446 | 1905.210 | 377.610 | 10.737 | 5494550 | 113950720 |
+| Rift Streaming | 5948.755 | 168102.414 | 55.056 | 1403.377 | 1922.138 | 386.790 | 11.172 | 5494550 | 113934336 |
+
+Common diagnostics:
+
+| Input | Q2 rank fixes | Median sort computes | Median values sorted | Median reads | Median heap adds | Median heap removes | Median rebalances |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 100k | 312906 | 0 | 0 | 321758 | 98214 | 98213 | 86767 |
+| 1M | 3252279 | 0 | 0 | 3320865 | 981885 | 981883 | 898934 |
+
+Interpretation:
+
+- The Q2 incremental median checkpoint is now median-backed on the bounded
+  100k and 1M samples.
+- It is a shared algorithmic cleanup: both heap and Rift stop copying/sorting
+  dirty median arrays. The allocation-placement variable remains that Rift
+  modes allocate the median/control arrays and related ordinary Scala objects
+  in run-lifetime regions.
+- At 1M, HPZone is `181.568 ms` faster than heap and Streaming is
+  `27.692 ms` faster than heap. Both Rift modes reduce GC time versus heap and
+  cut peak RSS from about `306 MB` to about `114 MB`.
+- The main remaining bottleneck is not Rift allocation bookkeeping. Rift
+  operation time is about `11 ms` at 1M, while Q2 rank maintenance still
+  performs about `3.25M` rank fixes and Q2 process time remains about
+  `1.9-2.0 s`.
+
 ## JVM RunBoth Cross-check
 
 Date: 2026-04-25
