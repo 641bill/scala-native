@@ -14,6 +14,9 @@ private final class RiftCheckedNode(
     val value: Int,
     val left: RiftCheckedLeaf^,
     val next: RiftCheckedNode^)
+private final class RiftCheckedMetadata(val value: Int)
+private final class RiftCheckedRootedNode(
+    val metadata: RiftRegion.HeapRoot[RiftCheckedMetadata]^)
 
 class RiftRegionCheckedTest {
   private def address(ptr: Ptr[Byte]): Long =
@@ -47,6 +50,23 @@ class RiftRegionCheckedTest {
         val addCaptured = (n: Int) => leaf.value + n
 
         addCaptured(2)
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionAllowsExplicitHeapRootHandle(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.scoped { region ?=>
+        val metadata = new RiftCheckedMetadata(42)
+        val rooted = RiftRegion.root(metadata)
+        val node = RiftRegion.alloc(new RiftCheckedRootedNode(rooted))
+
+        node.metadata.value.value
       }
 
       assertEquals(42, total)

@@ -56,6 +56,10 @@ trait RiftRegion extends SafeZone {
   override def isOpen: Boolean
 
   override def isClosed: Boolean = !isOpen
+
+  private[memory] def retainHeapRoot[T <: AnyRef](
+      value: T
+  ): RiftRegion.HeapRoot[T]
 }
 
 object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
@@ -65,6 +69,20 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
 
   sealed trait ScopedRegion extends RiftRegion
   sealed trait StreamingRegion extends RiftRegion
+
+  /** A heap object explicitly retained by a live Rift region.
+   *
+   *  Rift slabs are not scanned by Scala Native's GC. If a region object needs
+   *  to point at a heap object, the heap object must be reachable through some
+   *  ordinary GC path. `HeapRoot` is the v1 explicit-root handle: the handle is
+   *  stored in heap memory owned by the live region object, so the referent is
+   *  visible to the GC even if region memory also points at the handle.
+   */
+  final class HeapRoot[+T <: AnyRef] private[memory] (
+      private val referent: T
+  ) {
+    def value: T = referent
+  }
 
   /** Evidence that a checked region body may return `T`.
    *
@@ -339,6 +357,17 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     finally region.reset()
   }
 
+  /** Retains `value` through the live region's GC-visible root list.
+   *
+   *  Use this when a checked region object must refer to heap metadata. Direct
+   *  region-to-heap ownership is unsafe in Rift because the GC does not scan
+   *  region slabs.
+   */
+  def root[T <: AnyRef](value: T)(using
+      region: RiftRegion^
+  ): HeapRoot[T]^{region} =
+    region.retainHeapRoot(value)
+
   /** Allocates an object in the implicit Rift region. */
   inline def alloc[T <: AnyRef](inline obj: T)(using
       region: RiftRegion^
@@ -374,6 +403,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       private[scalanative] override val handle: RawPtr)
       extends RiftRegion {
     private var flagIsOpen = true
+    private var heapRoots: List[RiftRegion.HeapRoot[AnyRef]] = Nil
 
     override def isOpen: Boolean = flagIsOpen
 
@@ -397,14 +427,25 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       RiftAllocator.Impl.alloc(handle, cls, size)
     }
 
+    private[memory] override def retainHeapRoot[T <: AnyRef](
+        value: T
+    ): RiftRegion.HeapRoot[T] = {
+      checkOpen()
+      val root = new RiftRegion.HeapRoot(value)
+      heapRoots = root.asInstanceOf[RiftRegion.HeapRoot[AnyRef]] :: heapRoots
+      root
+    }
+
     override def reset(): Unit = {
       checkOpen()
+      heapRoots = Nil
       RiftAllocator.Impl.reset(handle)
     }
 
     override def close(): Unit = {
       checkOpen()
       flagIsOpen = false
+      heapRoots = Nil
       RiftAllocator.Impl.close(handle)
     }
   }

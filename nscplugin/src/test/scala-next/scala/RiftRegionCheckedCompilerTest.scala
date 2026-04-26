@@ -196,6 +196,23 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def rootedHeapValueCanBeStoredInScopedObject(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: RiftRegion.HeapRoot[Metadata]^)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val metadata = new Metadata(41)
+      |    val rooted = RiftRegion.root(metadata)
+      |    val entry = RiftRegion.alloc(new Entry(rooted))
+      |    entry.metadata.value.value + 1
+      |  }
+      |""".stripMargin)
+
   @Test def streamingResetValueCannotEscapeEpoch(): Unit =
     assertDoesNotCompile("""
       |import scala.language.experimental.captureChecking
