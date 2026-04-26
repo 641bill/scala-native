@@ -115,6 +115,53 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
   }
 
+  /** Growable checked buffer backed by region-owned arrays.
+   *
+   *  Like `ObjectBuffer`, the buffer object is heap control metadata captured
+   *  by the owning region. Appending past capacity allocates a larger backing
+   *  array in the same region and leaves the old array to be reclaimed when the
+   *  region closes or resets.
+   */
+  final class RegionBuffer[T <: Object] private[memory] (
+      private var items: Array[Object]
+  ) {
+    private var used = 0
+
+    def length: Int = used
+
+    def capacity: Int = items.length
+
+    private[memory] def appendTrusted(
+        owner: RiftRegion^,
+        value: Object
+    ): Unit = {
+      if (used >= items.length) growTrusted(owner)
+      items(used) = value
+      used += 1
+    }
+
+    private[memory] def applyTrusted(index: Int): Object = {
+      if (index < 0 || index >= used)
+        throw new IndexOutOfBoundsException(index.toString)
+      items(index)
+    }
+
+    private def growTrusted(owner: RiftRegion^): Unit = {
+      val oldItems = items
+      val nextCapacity =
+        if (oldItems.length == 0) 1 else oldItems.length * 2
+      val nextItems =
+        owner.alloc(new Array[Object](nextCapacity)).asInstanceOf[Array[Object]]
+
+      var i = 0
+      while (i < used) {
+        nextItems(i) = oldItems(i)
+        i += 1
+      }
+      items = nextItems
+    }
+  }
+
   /** Snapshot of the trusted runtime-epoch escape path.
    *
    *  This is the dynamic Yak-style side of Rift's comparison story, not the
@@ -499,6 +546,16 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     new ObjectBuffer[T](items)
   }
 
+  /** Allocates a growable checked buffer in the implicit region. */
+  def regionBuffer[T <: Object](initialCapacity: Int = 4)(using
+      region: RiftRegion^
+  ): RegionBuffer[T]^{region} = {
+    val capacity = if (initialCapacity <= 0) 1 else initialCapacity
+    val items: Array[Object] =
+      alloc(new Array[Object](capacity)).asInstanceOf[Array[Object]]
+    new RegionBuffer[T](items)
+  }
+
   /** Appends `value` to a checked object buffer owned by `owner`. */
   def append[T <: Object](
       owner: RiftRegion^,
@@ -521,6 +578,36 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       buffer: ObjectBuffer[T]^{owner}
   ): Int =
     buffer.length
+
+  /** Appends `value` to a growable checked buffer owned by `owner`. */
+  def append[T <: Object](
+      owner: RiftRegion^,
+      buffer: RegionBuffer[T]^{owner},
+      value: T^{owner}
+  ): Unit =
+    buffer.appendTrusted(owner, value.asInstanceOf[Object])
+
+  /** Reads an element from a growable checked buffer owned by `owner`. */
+  def get[T <: Object](
+      owner: RiftRegion^,
+      buffer: RegionBuffer[T]^{owner},
+      index: Int
+  ): T^{owner} =
+    buffer.applyTrusted(index).asInstanceOf[T^{owner}]
+
+  /** Returns the number of elements appended to a growable checked buffer. */
+  def length[T <: Object](
+      owner: RiftRegion^,
+      buffer: RegionBuffer[T]^{owner}
+  ): Int =
+    buffer.length
+
+  /** Returns the current backing capacity of a growable checked buffer. */
+  def capacity[T <: Object](
+      owner: RiftRegion^,
+      buffer: RegionBuffer[T]^{owner}
+  ): Int =
+    buffer.capacity
 
   /** Owner-token method syntax for checked object buffers.
    *
@@ -546,6 +633,28 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     @targetName("objectBufferLength")
     def length[T <: Object](buffer: ObjectBuffer[T]^{owner}): Int =
       RiftRegion.length(owner, buffer)
+
+    @targetName("appendToRegionBuffer")
+    def append[T <: Object](
+        buffer: RegionBuffer[T]^{owner},
+        value: T^{owner}
+    ): Unit =
+      buffer.appendTrusted(owner, value.asInstanceOf[Object])
+
+    @targetName("getFromRegionBuffer")
+    def get[T <: Object](
+        buffer: RegionBuffer[T]^{owner},
+        index: Int
+    ): T^{owner} =
+      RiftRegion.get(owner, buffer, index)
+
+    @targetName("regionBufferLength")
+    def length[T <: Object](buffer: RegionBuffer[T]^{owner}): Int =
+      RiftRegion.length(owner, buffer)
+
+    @targetName("regionBufferCapacity")
+    def capacity[T <: Object](buffer: RegionBuffer[T]^{owner}): Int =
+      RiftRegion.capacity(owner, buffer)
 
   /** Allocates an object in the implicit Rift region. */
   inline def alloc[T <: AnyRef](inline obj: T)(using

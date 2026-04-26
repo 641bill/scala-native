@@ -137,13 +137,19 @@ trait NirGenExpr(using Context) {
 
     private def isRiftObjectBufferFactory(tree: Tree): Boolean = {
       val sym = calledSymbol(tree)
-      sym.name.toString == "objectBuffer" && isRiftRegionCompanionOwner(sym)
+      val name = sym.name.toString
+      (name == "objectBuffer" || name == "regionBuffer") &&
+        isRiftRegionCompanionOwner(sym)
     }
 
     private def isRiftObjectBufferAppend(tree: Tree): Boolean = {
       val sym = calledSymbol(tree)
       val name = sym.name.toString
-      (name == "append" || name == "appendToObjectBuffer") &&
+      (
+        name == "append" ||
+          name == "appendToObjectBuffer" ||
+          name == "appendToRegionBuffer"
+      ) &&
         isRiftRegionCompanionOwner(sym)
     }
 

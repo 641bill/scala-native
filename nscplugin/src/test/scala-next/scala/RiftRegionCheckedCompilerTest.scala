@@ -623,6 +623,78 @@ class RiftRegionCheckedCompilerTest {
       "Capability `region` outlives its scope"
     )
 
+  @Test def regionBufferCanGrowAndStoreRegionObjects(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Leaf(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val buffer = RiftRegion.regionBuffer[Leaf](1)
+      |    val left: Leaf^{region} = RiftRegion.alloc(new Leaf(20))
+      |    val right: Leaf^{region} = RiftRegion.alloc(new Leaf(21))
+      |    region.append(buffer, left)
+      |    region.append(buffer, right)
+      |    region.get(buffer, 0).value +
+      |      region.get(buffer, 1).value +
+      |      region.length(buffer) - 1
+      |  }
+      |""".stripMargin)
+
+  @Test def regionBufferCannotStoreHeapObject(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val buffer = RiftRegion.regionBuffer[Metadata](1)
+      |    val metadata = new Metadata(41)
+      |    region.append(buffer, metadata)
+      |  }
+      |""".stripMargin,
+      "Rift checked object buffer cannot store an unrooted heap object"
+    )
+
+  @Test def regionBufferCanStoreHeapRoot(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val buffer =
+      |      RiftRegion.regionBuffer[RiftRegion.HeapRoot[Metadata]](1)
+      |    region.append(buffer, RiftRegion.root(new Metadata(41)))
+      |    region.get(buffer, 0).value.value + region.length(buffer)
+      |  }
+      |""".stripMargin)
+
+  @Test def regionBufferCannotStoreInnerScopedValue(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Leaf(val value: Int)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { outer ?=>
+      |    val buffer = RiftRegion.regionBuffer[Leaf](1)
+      |    RiftRegion.scoped { inner ?=>
+      |      val leaf: Leaf^{inner} = RiftRegion.alloc(new Leaf(41))
+      |      outer.append(buffer, leaf)
+      |    }
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set {outer}"
+    )
+
   @Test def streamingResetRegionArrayEpochCompiles(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking

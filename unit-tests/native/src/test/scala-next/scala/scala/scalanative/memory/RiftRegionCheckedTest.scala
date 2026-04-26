@@ -180,6 +180,30 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def scopedRegionAllowsRegionBufferGrowthWithHeapRoots(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.scoped { region ?=>
+        val leaves = RiftRegion.regionBuffer[RiftCheckedLeaf](1)
+        region.append(leaves, RiftRegion.alloc(new RiftCheckedLeaf(20)))
+        region.append(leaves, RiftRegion.alloc(new RiftCheckedLeaf(21)))
+
+        val roots =
+          RiftRegion.regionBuffer[RiftRegion.HeapRoot[RiftCheckedMetadata]](0)
+        region.append(roots, RiftRegion.root(new RiftCheckedMetadata(1)))
+
+        region.get(leaves, 0).value +
+          region.get(leaves, 1).value +
+          region.get(roots, 0).value.value +
+          region.length(roots) - 1
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def scopedRegionAllowsTopWordBufferWithRootedMetadata(): Unit = {
     RiftRegion.init(1)
     try {
