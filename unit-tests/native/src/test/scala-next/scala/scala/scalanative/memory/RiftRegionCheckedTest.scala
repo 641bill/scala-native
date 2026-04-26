@@ -17,6 +17,10 @@ private final class RiftCheckedNode(
 private final class RiftCheckedMetadata(val value: Int)
 private final class RiftCheckedRootedNode(
     val metadata: RiftRegion.HeapRoot[RiftCheckedMetadata]^)
+private object RiftCheckedStaticMetadata:
+  val metadata: RiftCheckedMetadata = new RiftCheckedMetadata(2)
+private final class RiftCheckedStaticEntry(
+    val metadata: RiftCheckedMetadata^)
 
 class RiftRegionCheckedTest {
   private def address(ptr: Ptr[Byte]): Long =
@@ -67,6 +71,23 @@ class RiftRegionCheckedTest {
         val node = RiftRegion.alloc(new RiftCheckedRootedNode(rooted))
 
         node.metadata.value.value
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionAllowsStaticHeapMetadata(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.scoped { region ?=>
+        val entry: RiftCheckedStaticEntry^{region} =
+          RiftRegion.alloc(
+            new RiftCheckedStaticEntry(RiftCheckedStaticMetadata.metadata)
+          )
+        entry.metadata.value + 40
       }
 
       assertEquals(42, total)

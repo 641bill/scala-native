@@ -221,6 +221,66 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def staticModuleCanBeStoredInScopedObject(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |object StaticMetadata:
+      |  val shard: Int = 41
+      |
+      |final class Entry(val metadata: StaticMetadata.type)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val entry: Entry^{region} =
+      |      RiftRegion.alloc(new Entry(StaticMetadata))
+      |    entry.metadata.shard + 1
+      |  }
+      |""".stripMargin)
+
+  @Test def staticValCanBeStoredInScopedObject(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |object StaticMetadata:
+      |  val metadata: Metadata = new Metadata(41)
+      |
+      |final class Entry(val metadata: Metadata^)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val entry: Entry^{region} =
+      |      RiftRegion.alloc(new Entry(StaticMetadata.metadata))
+      |    entry.metadata.value + 1
+      |  }
+      |""".stripMargin)
+
+  @Test def staticVarCannotBeStoredInScopedObject(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |object StaticMetadata:
+      |  var metadata: Metadata = new Metadata(41)
+      |
+      |final class Entry(val metadata: Metadata^)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val entry: Entry^{region} =
+      |      RiftRegion.alloc(new Entry(StaticMetadata.metadata))
+      |    entry.metadata.value + 1
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
   @Test def directHeapValueCannotBeStoredInScopedObject(): Unit =
     assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking

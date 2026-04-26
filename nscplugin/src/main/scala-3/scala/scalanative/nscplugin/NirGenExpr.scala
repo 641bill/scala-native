@@ -147,8 +147,28 @@ trait NirGenExpr(using Context) {
         isRiftRegionCompanionOwner(sym)
     }
 
+    private def isStableStaticFieldSelect(tree: Select): Boolean =
+      tree.symbol.is(Accessor) && !tree.symbol.is(Mutable)
+
+    private def isStableStaticHeapReference(tree: Tree): Boolean =
+      tree match {
+        case Apply(select @ Select(qualifier, _), Nil)
+            if isStableStaticFieldSelect(select) =>
+          isStableStaticHeapReference(qualifier)
+        case TypeApply(Select(qualifier, nme.asInstanceOf_), _) =>
+          isStableStaticHeapReference(qualifier)
+        case select @ Select(qualifier, _)
+            if isStableStaticFieldSelect(select) =>
+          isStableStaticHeapReference(qualifier)
+        case Typed(expr, _)      => isStableStaticHeapReference(expr)
+        case Inlined(_, _, expr) => isStableStaticHeapReference(expr)
+        case Block(_, expr)      => isStableStaticHeapReference(expr)
+        case _                   => tree.symbol.isStaticModule
+      }
+
     private def isAllowedRiftConstructorArg(tree: Tree): Boolean =
       isPrimitiveOrNull(tree) ||
+        isStableStaticHeapReference(tree) ||
         isRiftHeapRootTree(tree) ||
         isRiftAllocationTree(tree) ||
         isKnownRiftRegionValue(tree)
