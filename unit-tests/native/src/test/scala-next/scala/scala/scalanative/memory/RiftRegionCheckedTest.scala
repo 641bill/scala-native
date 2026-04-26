@@ -131,6 +131,34 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def scopedRegionAllowsObjectBufferOwnerMethods(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.scoped { region ?=>
+        val leaves = RiftRegion.objectBuffer[RiftCheckedLeaf](2)
+        val left: RiftCheckedLeaf^{region} =
+          RiftRegion.alloc(new RiftCheckedLeaf(20))
+        val right: RiftCheckedLeaf^{region} =
+          RiftRegion.alloc(new RiftCheckedLeaf(21))
+        region.append(leaves, left)
+        region.append(leaves, right)
+
+        val roots =
+          RiftRegion.objectBuffer[RiftRegion.HeapRoot[RiftCheckedMetadata]](1)
+        region.append(roots, RiftRegion.root(new RiftCheckedMetadata(1)))
+
+        region.get(leaves, 0).value +
+          region.get(leaves, 1).value +
+          region.get(roots, 0).value.value +
+          region.length(roots) - 1
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def scopedRegionAllowsTopWordBufferWithRootedMetadata(): Unit = {
     RiftRegion.init(1)
     try {

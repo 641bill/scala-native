@@ -1,6 +1,6 @@
 package scala.scalanative.memory
 
-import scala.annotation.implicitNotFound
+import scala.annotation.{implicitNotFound, targetName}
 import scala.compiletime.{erasedValue, error}
 
 import scala.scalanative.runtime.{
@@ -521,6 +521,31 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       buffer: ObjectBuffer[T]^{owner}
   ): Int =
     buffer.length
+
+  /** Owner-token method syntax for checked object buffers.
+   *
+   *  These methods keep the same explicit owner in the type signature as the
+   *  companion functions above, but let checked code use `region.append(...)`
+   *  and `region.get(...)` at the allocation boundary.
+   */
+  extension (owner: RiftRegion^)
+    @targetName("appendToObjectBuffer")
+    def append[T <: Object](
+        buffer: ObjectBuffer[T]^{owner},
+        value: T^{owner}
+    ): Unit =
+      buffer.appendTrusted(value.asInstanceOf[Object])
+
+    @targetName("getFromObjectBuffer")
+    def get[T <: Object](
+        buffer: ObjectBuffer[T]^{owner},
+        index: Int
+    ): T^{owner} =
+      RiftRegion.get(owner, buffer, index)
+
+    @targetName("objectBufferLength")
+    def length[T <: Object](buffer: ObjectBuffer[T]^{owner}): Int =
+      RiftRegion.length(owner, buffer)
 
   /** Allocates an object in the implicit Rift region. */
   inline def alloc[T <: AnyRef](inline obj: T)(using

@@ -454,6 +454,39 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def objectBufferOwnerMethodsCanStoreRegionObjects(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Leaf(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val buffer = RiftRegion.objectBuffer[Leaf](2)
+      |    val leaf: Leaf^{region} = RiftRegion.alloc(new Leaf(41))
+      |    region.append(buffer, leaf)
+      |    region.get(buffer, 0).value + region.length(buffer)
+      |  }
+      |""".stripMargin)
+
+  @Test def objectBufferOwnerMethodsCannotStoreHeapObject(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val buffer = RiftRegion.objectBuffer[Metadata](1)
+      |    val metadata = new Metadata(41)
+      |    region.append(buffer, metadata)
+      |  }
+      |""".stripMargin,
+      "Rift checked object buffer cannot store an unrooted heap object"
+    )
+
   @Test def objectBufferCannotStoreHeapObject(): Unit =
     assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
