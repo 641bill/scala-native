@@ -6,6 +6,8 @@ script_dir=${0:A:h}
 repo_dir=${script_dir:h:h}
 input=${DEBS2015_BOTH_INPUT:-"${script_dir}/sample_both.csv"}
 output_dir=${DEBS2015_BOTH_OUTPUT_DIR:-"/tmp/debs2015-runboth-matrix"}
+modes_text=${DEBS2015_BOTH_MODES:-"heap rift-hp rift-streaming rift-checked"}
+modes=(${=modes_text})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"
@@ -32,14 +34,16 @@ strip_latency() {
 
 cd "${repo_dir}"
 
-run_mode heap
-run_mode rift-hp
-run_mode rift-streaming
+for mode in "${modes[@]}"; do
+  run_mode "${mode}"
+done
 
-diff -u <(strip_latency "${output_dir}/q1-heap.out") <(strip_latency "${output_dir}/q1-rift-hp.out")
-diff -u <(strip_latency "${output_dir}/q1-heap.out") <(strip_latency "${output_dir}/q1-rift-streaming.out")
-diff -u <(strip_latency "${output_dir}/q2-heap.out") <(strip_latency "${output_dir}/q2-rift-hp.out")
-diff -u <(strip_latency "${output_dir}/q2-heap.out") <(strip_latency "${output_dir}/q2-rift-streaming.out")
+for mode in "${modes[@]}"; do
+  if [[ "${mode}" != "heap" ]]; then
+    diff -u <(strip_latency "${output_dir}/q1-heap.out") <(strip_latency "${output_dir}/q1-${mode}.out")
+    diff -u <(strip_latency "${output_dir}/q2-heap.out") <(strip_latency "${output_dir}/q2-${mode}.out")
+  fi
+done
 
 echo
 echo "RunBoth sample matrix outputs match in ${output_dir}"

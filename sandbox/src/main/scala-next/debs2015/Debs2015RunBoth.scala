@@ -287,6 +287,9 @@ object Debs2015RunBothRunner {
       q2OutputPath: String,
       q1Mode: String
   ): Metrics = {
+    if (q1Mode == "rift-checked")
+      return runChecked(inputPath, q1OutputPath, q2OutputPath, q1Mode)
+
     val usesRift = q1Mode.startsWith("rift-")
     if (usesRift) {
       RiftRegion.init(0)
@@ -433,6 +436,204 @@ object Debs2015RunBothRunner {
       phaseGcAlloc.clear()
       runtimeEnd = RuntimeMetrics.capture(usesRift)
       if (usesRift) RiftRegion.shutdown()
+    }
+
+    Metrics(
+      events = events,
+      parsed = parsed,
+      invalid = invalid,
+      q1Outputs = q1Outputs,
+      q2Outputs = q2Outputs,
+      elapsedNanos = System.nanoTime() - started,
+      q1LatencyMillis = q1LatencyMillis,
+      q2LatencyMillis = q2LatencyMillis,
+      phases = PhaseMetrics(
+        readNanos = readNanos,
+        parseNanos = parseNanos,
+        q1ProcessNanos = q1ProcessNanos,
+        q1ChangeNanos = q1ChangeNanos,
+        q1OutputNanos = q1OutputNanos,
+        q1SnapshotNanos = q1SnapshotNanos,
+        q2ProcessNanos = q2ProcessNanos,
+        q2ChangeNanos = q2ChangeNanos,
+        q2OutputNanos = q2OutputNanos,
+        q2SnapshotNanos = q2SnapshotNanos,
+        closeNanos = closeNanos
+      ),
+      phaseGcAlloc = phaseGcAlloc.result(),
+      runtime = RuntimeMetrics.since(runtimeStart, runtimeEnd),
+      counters = Debs2015Counters.snapshot().since(counterStart)
+    )
+  }
+
+  private def runChecked(
+      inputPath: String,
+      q1OutputPath: String,
+      q2OutputPath: String,
+      q1Mode: String
+  ): Metrics = {
+    RiftRegion.init(0)
+    RiftAllocator.Impl.statsReset()
+    Debs2015Counters.reset()
+    val counterStart = Debs2015Counters.snapshot()
+    val runtimeStart = RuntimeMetrics.capture(includeRift = true)
+    var runtimeEnd = runtimeStart
+    val phaseGcAlloc =
+      new PhaseGcAllocAccumulator(gcAllocAttributionEnabled())
+
+    var events = 0L
+    var parsed = 0L
+    var invalid = 0L
+    var q1Outputs = 0L
+    var q2Outputs = 0L
+    var readNanos = 0L
+    var parseNanos = 0L
+    var q1ProcessNanos = 0L
+    var q1ChangeNanos = 0L
+    var q1OutputNanos = 0L
+    var q1SnapshotNanos = 0L
+    var q2ProcessNanos = 0L
+    var q2ChangeNanos = 0L
+    var q2OutputNanos = 0L
+    var q2SnapshotNanos = 0L
+    var closeNanos = 0L
+    var q1LatencyMillis = Array.emptyLongArray
+    var q2LatencyMillis = Array.emptyLongArray
+    var snapshotRegion: RiftRegion = null
+    val started = System.nanoTime()
+
+    try {
+      snapshotRegion = RiftRegion.open(RiftRegion.Streaming)
+      RiftRegion.streaming { stream ?=>
+        Debs2015Q1CheckedProcessingRunner.withCheckedProcessor { q1 =>
+          Debs2015Q2CheckedProcessingRunner.withCheckedProcessor { q2 =>
+            val source = new CsvLineReader(inputPath, "rift-streaming")
+            val q1Writer =
+              OutputSupport.ByteRowWriter.open(q1OutputPath, snapshotRegion)
+            val q2Writer =
+              OutputSupport.ByteRowWriter.open(q2OutputPath, snapshotRegion)
+            val q1Latencies =
+              new LongSampleBuffer(useRegions = true, snapshotRegion, 1024)
+            val q2Latencies =
+              new LongSampleBuffer(useRegions = true, snapshotRegion, 1024)
+            val trip = Trip.empty
+
+            var previousQ1 = Q1Output.EmptySnapshot
+            var previousQ2 = Q2Output.EmptySnapshot
+
+            try {
+              while ({
+                val readStarted = System.nanoTime()
+                phaseGcAlloc.enter(PhaseIndex.Read)
+                val hasNext = source.nextLine()
+                phaseGcAlloc.clear()
+                readNanos += System.nanoTime() - readStarted
+                hasNext
+              }) {
+                val readAt = System.nanoTime()
+                events += 1L
+
+                val parseStarted = System.nanoTime()
+                phaseGcAlloc.enter(PhaseIndex.Parse)
+                val parsedTrip =
+                  Trip.parseInto(
+                    source.bytes,
+                    source.lineStart,
+                    source.lineEnd,
+                    trip
+                  )
+                phaseGcAlloc.clear()
+                parseNanos += System.nanoTime() - parseStarted
+
+                if (parsedTrip) {
+                  parsed += 1L
+
+                  val q1Started = System.nanoTime()
+                  phaseGcAlloc.enter(PhaseIndex.Q1Process)
+                  val q1Size = q1.process(trip)
+                  phaseGcAlloc.clear()
+                  q1ProcessNanos += System.nanoTime() - q1Started
+
+                  val q1ChangeStarted = System.nanoTime()
+                  phaseGcAlloc.enter(PhaseIndex.Q1Change)
+                  val q1Changed =
+                    q1Size != 0 && q1.changed(previousQ1, q1Size)
+                  phaseGcAlloc.clear()
+                  q1ChangeNanos += System.nanoTime() - q1ChangeStarted
+                  if (q1Changed) {
+                    val q1OutputStarted = System.nanoTime()
+                    phaseGcAlloc.enter(PhaseIndex.Q1Output)
+                    val delayMillis = (q1OutputStarted - readAt) / 1000000L
+                    q1.writeRow(q1Writer, trip, q1Size, delayMillis)
+                    q1Writer.newLine()
+                    q1Latencies += delayMillis
+                    Debs2015Counters.recordQ1LatencyAppend()
+                    q1Outputs += 1L
+                    val q1SnapshotStarted = System.nanoTime()
+                    phaseGcAlloc.enter(PhaseIndex.Q1Snapshot)
+                    previousQ1 = q1.snapshot(q1Size)
+                    phaseGcAlloc.clear()
+                    q1SnapshotNanos += System.nanoTime() - q1SnapshotStarted
+                    q1OutputNanos += System.nanoTime() - q1OutputStarted
+                  }
+
+                  val q2Started = System.nanoTime()
+                  phaseGcAlloc.enter(PhaseIndex.Q2Process)
+                  val q2Size = q2.process(trip)
+                  phaseGcAlloc.clear()
+                  q2ProcessNanos += System.nanoTime() - q2Started
+
+                  val q2ChangeStarted = System.nanoTime()
+                  phaseGcAlloc.enter(PhaseIndex.Q2Change)
+                  val q2Changed =
+                    q2Size != 0 && q2.changed(previousQ2, q2Size)
+                  phaseGcAlloc.clear()
+                  q2ChangeNanos += System.nanoTime() - q2ChangeStarted
+                  if (q2Changed) {
+                    val q2OutputStarted = System.nanoTime()
+                    phaseGcAlloc.enter(PhaseIndex.Q2Output)
+                    val delayMillis = (q2OutputStarted - readAt) / 1000000L
+                    q2.writeRow(q2Writer, trip, q2Size, delayMillis)
+                    q2Writer.newLine()
+                    q2Latencies += delayMillis
+                    Debs2015Counters.recordQ2LatencyAppend()
+                    q2Outputs += 1L
+                    val q2SnapshotStarted = System.nanoTime()
+                    phaseGcAlloc.enter(PhaseIndex.Q2Snapshot)
+                    previousQ2 = q2.snapshot(q2Size)
+                    phaseGcAlloc.clear()
+                    q2SnapshotNanos += System.nanoTime() - q2SnapshotStarted
+                    q2OutputNanos += System.nanoTime() - q2OutputStarted
+                  }
+                } else {
+                  invalid += 1L
+                }
+              }
+            } finally {
+              val closeStarted = System.nanoTime()
+              phaseGcAlloc.enter(PhaseIndex.Close)
+              q2Writer.close()
+              q1Writer.close()
+              q1LatencyMillis = q1Latencies.toArray
+              q2LatencyMillis = q2Latencies.toArray
+              source.close()
+              closeNanos = System.nanoTime() - closeStarted
+              phaseGcAlloc.clear()
+            }
+          }
+        }
+      }
+      val snapshotCloseStarted = System.nanoTime()
+      phaseGcAlloc.enter(PhaseIndex.Close)
+      snapshotRegion.close()
+      snapshotRegion = null
+      closeNanos += System.nanoTime() - snapshotCloseStarted
+      phaseGcAlloc.clear()
+      runtimeEnd = RuntimeMetrics.capture(includeRift = true)
+    } finally {
+      if (snapshotRegion != null)
+        snapshotRegion.close()
+      RiftRegion.shutdown()
     }
 
     Metrics(

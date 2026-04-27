@@ -2520,6 +2520,556 @@ Interpretation:
   checkpoint is bounded-sample RunBoth evidence; full-month/Commix/SafeZone
   controls and safe API integration remain open.
 
+## Q1 Checked-Output Safe-API Probe
+
+Date: 2026-04-27
+
+Purpose:
+
+- Start moving DEBS evidence from trusted `RiftRegion.open` benchmark code
+  toward the checked `RiftRegion.streaming`/`reset` API.
+- Keep the Q1 algorithm fixed: both modes use the existing `Q1Heap` engine.
+  The experimental variable is only output/ranking materialization. Heap mode
+  writes the existing `RankedRoute` result with `Q1Output`; checked mode
+  materializes transient `CheckedCell`, `CheckedRoute`, and
+  `CheckedRankedRoute` objects plus a `RegionBuffer` inside a reset region,
+  writes the row while the region is live, and retains only the durable
+  primitive snapshot on the heap.
+
+Harness:
+
+- `sandbox/src/main/scala-next/debs2015/Debs2015Q1CheckedOutputRun.scala`
+- `bench/debs2015/run_q1_checked_output_matrix.sh`
+
+Commands:
+
+```sh
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile
+zsh bench/debs2015/run_q1_checked_output_matrix.sh
+
+DEBS2015_Q1_CHECKED_OUTPUT_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_Q1_CHECKED_OUTPUT_DIR=/tmp/debs2015-q1-checked-output-100000 \
+zsh bench/debs2015/run_q1_checked_output_matrix.sh
+```
+
+Validated:
+
+- Scala-next sandbox compile passed.
+- Sample output matched after stripping only latency.
+- 100k sorted-sample output matched after stripping only latency.
+
+Single-run local results:
+
+| Input | Mode | Events | Outputs | Elapsed ms | Throughput events/s |
+|---|---|---:|---:|---:|---:|
+| sample | heap-output | 3 | 3 | 0.395 | 7596.533 |
+| sample | checked-output | 3 | 3 | 0.363 | 8272.074 |
+| 100k sorted | heap-output | 100000 | 5942 | 653.038 | 153130.543 |
+| 100k sorted | checked-output | 100000 | 5942 | 652.211 | 153324.644 |
+
+Interpretation:
+
+- This is safe-API coverage for real DEBS-shaped ranking/output objects, not a
+  new DEBS speed claim and not a RunBoth replacement.
+- It proves the current checked API can express a small rich-object output
+  region with ordinary Scala objects and a checked `RegionBuffer` boundary.
+- Because the core Q1 window/ranking engine is still heap in both modes, this
+  probe does not measure the benefit of moving Q1 processing state to checked
+  regions. That remains the next larger Phase 5/7 integration step.
+
+## Q1 Checked-Processing Safe-API Probe
+
+Date: 2026-04-27
+
+Purpose:
+
+- Move a real Q1 processing lifetime boundary into the checked API, beyond the
+  earlier output-only probe.
+- Validate ordinary Scala objects in region-managed Q1 processing state under
+  `RiftRegion.streaming`.
+
+Harness:
+
+- `sandbox/src/main/scala-next/debs2015/Debs2015Q1CheckedProcessingRun.scala`
+- `bench/debs2015/run_q1_checked_processing_matrix.sh`
+
+What is region-managed in `checked-processing`:
+
+- per-second Q1 bucket control objects captured by the parent streaming region;
+- one `RiftRegion.childWindow` per Q1 bucket, backed by a checked child
+  streaming region;
+- live Q1 route events as path-dependent `bucket.RouteEvent` objects in the
+  bucket window's child region, with the child region closed at bucket eviction;
+- route/rank table arrays in the streaming region;
+- `CheckedCell`, `CheckedRoute`, and `CheckedRankedRoute` objects in the
+  streaming region;
+- reusable top-10 result storage in the streaming region.
+
+Important caveats:
+
+- This is a Q1 standalone probe, not RunBoth and not a new Phase 5 headline.
+- Heap mode uses the existing bucketed Q1 runner. Checked mode now also groups
+  events by per-second checked buckets and uses the same logical
+  sliding-window query. It is still a standalone probe rather than the shared
+  RunBoth Q1 backend.
+- The checked bucket lifetime now reclaims live event nodes per bucket. Ranking
+  arrays and rank objects remain in the parent run-lifetime streaming region.
+- `RiftRegion.childWindow` is now the preferred checked child-lifetime wrapper
+  for stream windows and buckets. It uses the raw `childStreaming` primitive,
+  so the child handle cannot escape the parent stream, but close ordering is
+  still explicit rather than affine-checked. The Q1 probe keeps child-owned
+  events in a path-dependent bucket event type and clears bucket fields before
+  closing. A broader checked bucket/window API with stronger close discipline is
+  still needed before treating this as the final DEBS safe API shape.
+- During implementation, the checker rejected the more direct bucket-head
+  pattern where a mutable selected field (`bucket.head`) was passed into a new
+  region object constructor. The accepted bucketed probe appends entries with
+  explicit `head`/`tail` field updates after allocating the new event.
+
+Commands:
+
+```sh
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt \
+  "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"
+zsh bench/debs2015/run_q1_checked_processing_matrix.sh
+
+DEBS2015_Q1_CHECKED_PROCESSING_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_Q1_CHECKED_PROCESSING_DIR=/tmp/debs2015-q1-checked-processing-childwindow-100000 \
+zsh bench/debs2015/run_q1_checked_processing_matrix.sh
+
+DEBS2015_Q1_CHECKED_PROCESSING_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_Q1_CHECKED_PROCESSING_DIR=/tmp/debs2015-q1-checked-processing-childwindow-1000000 \
+zsh bench/debs2015/run_q1_checked_processing_matrix.sh
+```
+
+Validated:
+
+- Scala-next sandbox compile passed.
+- `RiftRegionCheckedCompilerTest` passed 51 checked-region compiler probes,
+  including raw child-streaming bucket-event graph acceptance, child-handle
+  escape rejection, `ChildWindow` bucket-event graph acceptance, `ChildWindow`
+  escape rejection, and owner-token child-region widening.
+- After refactoring Q1 to `RiftRegion.childWindow`, sample, 100k sorted-sample,
+  and 1M sorted-sample outputs matched after stripping only latency.
+
+Single-run local results after the `ChildWindow` wrapper refactor:
+
+| Input | Mode | Events | Outputs | Elapsed ms | Throughput events/s |
+|---|---|---:|---:|---:|---:|
+| sample | heap | 3 | 3 | 0.266 | 11260.585 |
+| sample | checked-processing | 3 | 3 | 0.351 | 8544.964 |
+| 100k sorted | heap | 100000 | 5942 | 738.999 | 135318.272 |
+| 100k sorted | checked-processing | 100000 | 5942 | 652.811 | 153183.664 |
+| 1M sorted | heap | 1000000 | 32209 | 6803.066 | 146992.548 |
+| 1M sorted | checked-processing | 1000000 | 32209 | 6024.772 | 165981.383 |
+
+Interpretation:
+
+- This is the first checked DEBS processing-state probe, and it validates that
+  Q1 live stream event and ranking objects can be ordinary Scala objects in
+  checked Rift regions.
+- The timing is provisional: it is single-run and Q1-only. With per-bucket
+  event reclaim included, the checked probe is modestly faster on the 100k and
+  1M sorted slices, but this is not yet a median or full RunBoth result.
+- The checked representation now matches the production per-second event
+  lifetime for Q1 event nodes, but only as a disciplined pattern. The broader
+  API still needs a safer bucket/window abstraction so callers cannot
+  accidentally widen child-region values into parent-lived containers before
+  closing the child region.
+
+## Q2 Checked-Processing Safe-API Probe
+
+Date: 2026-04-27
+
+Purpose:
+
+- Move the larger Q2 processing object graph into the checked API, beyond Q1
+  and output-only probes.
+- Validate that Q2 window entries, median heap entries, ranking objects,
+  bounded tables, taxi-id entries/bytes, and result storage can be expressed
+  with checked region ownership while preserving heap output.
+
+Harness:
+
+- `sandbox/src/main/scala-next/debs2015/Debs2015Q2CheckedProcessingRun.scala`
+- `bench/debs2015/run_q2_checked_processing_matrix.sh`
+
+What is region-managed in `checked-processing`:
+
+- one `RiftRegion.childWindow` per profit window and per empty-taxi window;
+- `ProfitEntry` and `EmptyEntry` stream objects allocated in the corresponding
+  child window region and closed at window eviction;
+- median heap backing arrays and the entries referenced by those heaps;
+- `CheckedProfitableArea` rank objects, rank heaps, top-k result storage, and
+  bounded per-cell arrays in the parent streaming region;
+- taxi-id table entries and copied taxi-id bytes in the parent streaming region.
+
+Important caveats:
+
+- This is a standalone Q2 probe, not RunBoth and not a new Phase 5 headline.
+- `ProfitStats` objects are heap control metadata captured by the checked
+  stream. They own region-backed median heap arrays and point at region entries,
+  but they are not themselves region-allocated because the current checked
+  lowering rejected the local class allocation due to hidden/local captures.
+- Q2 uses `RiftRegion.childRegion(stream, window)` as an explicit owner-token
+  accessor when parent-lived control metadata must retain records allocated in
+  a child window until eviction. This documents the widening point but does not
+  make close ordering affine-checked.
+- The child-window close discipline is still explicit, as in the Q1 probe. A
+  reusable checked bucket/window API with stronger close discipline remains the
+  right next safety step.
+- Timings are single-run local diagnostics.
+
+Commands:
+
+```sh
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile
+zsh bench/debs2015/run_q2_checked_processing_matrix.sh
+
+DEBS2015_Q2_CHECKED_PROCESSING_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_Q2_CHECKED_PROCESSING_DIR=/tmp/debs2015-q2-checked-processing-childwindow-100000 \
+zsh bench/debs2015/run_q2_checked_processing_matrix.sh
+
+DEBS2015_Q2_CHECKED_PROCESSING_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_Q2_CHECKED_PROCESSING_DIR=/tmp/debs2015-q2-checked-processing-childwindow-1000000 \
+zsh bench/debs2015/run_q2_checked_processing_matrix.sh
+```
+
+Validated:
+
+- Scala-next sandbox compile passed.
+- After refactoring Q2 to `RiftRegion.childWindow` and the owner-token
+  `RiftRegion.childRegion(stream, window)` accessor, sample, 100k sorted-sample,
+  and 1M sorted-sample outputs matched after stripping only latency.
+
+Single-run local results after the `ChildWindow` wrapper refactor:
+
+| Input | Mode | Events | Outputs | Elapsed ms | Throughput events/s |
+|---|---|---:|---:|---:|---:|
+| sample | heap | 2 | 2 | 5.526 | 361.925 |
+| sample | checked-processing | 2 | 2 | 5.895 | 339.283 |
+| 100k sorted | heap | 100000 | 3246 | 692.603 | 144382.874 |
+| 100k sorted | checked-processing | 100000 | 3246 | 661.308 | 151215.556 |
+| 1M sorted | heap | 1000000 | 24969 | 6800.401 | 147050.152 |
+| 1M sorted | checked-processing | 1000000 | 24969 | 6316.186 | 158323.392 |
+
+Interpretation:
+
+- This is the first checked Q2 processing-state probe and covers a richer
+  object graph than Q1: two window kinds, median heaps, ranking objects,
+  taxi-id lookup state, and output-change snapshots.
+- Directionally, checked Q2 is modestly faster than heap on the 100k and 1M
+  sorted slices in this single-run probe. Treat that as encouraging but
+  provisional until medians and RunBoth integration exist.
+- The main safety/design gap is now clearer: the current checked API can
+  express this Q2 shape, but only with heap control metadata and explicit child
+  close ordering. The next safe-API step should factor Q1/Q2 child-window
+  patterns into a checked reusable abstraction or extend the checker so local
+  region-owned control classes like `ProfitStats` do not need to remain heap
+  metadata.
+
+## RunBoth Checked-Processing Integration
+
+Date: 2026-04-27
+
+Purpose:
+
+- Move the checked Q1 and checked Q2 processing-state probes into the shared
+  single-pass RunBoth loop.
+- Preserve the fair-backend rule: heap and checked modes parse the same input,
+  execute the same Q1/Q2 logical queries in the same event order, and write the
+  same Q1/Q2 outputs; the checked mode changes allocation placement and checked
+  lifetime boundaries for processing objects.
+
+Harness:
+
+- `sandbox/src/main/scala-next/debs2015/Debs2015RunBoth.scala`
+- `sandbox/src/main/scala-next/debs2015/Debs2015Q1CheckedProcessingRun.scala`
+- `sandbox/src/main/scala-next/debs2015/Debs2015Q2CheckedProcessingRun.scala`
+- `bench/debs2015/run_both_instrumented_matrix.sh`
+
+What changed:
+
+- RunBoth now accepts `q1_mode=rift-checked`.
+- `Debs2015Q1CheckedProcessingRunner` and
+  `Debs2015Q2CheckedProcessingRunner` expose capture-aware checked processor
+  adapters, so RunBoth can call both checked processors in one shared byte-parser
+  loop without exposing the region-captured object types.
+- Checked Q1 processing keeps per-bucket event nodes in `childWindow` regions
+  and rank/control objects in the parent checked stream.
+- Checked Q2 processing keeps profit/empty window entries, median heaps, rank
+  objects, taxi-id entries/bytes, and top-k storage in checked region-owned
+  state, using explicit `childRegion(parent, window)` widening for parent-held
+  child entries.
+
+Important caveats:
+
+- The first single-run integration rows are kept below for provenance. They are
+  now superseded for bounded-sample performance by the 3-run median table.
+- Q1/Q2 processing object graphs use the checked API. RunBoth still uses the
+  existing trusted runtime helpers for the byte-reader buffer and output/latency
+  scratch buffers, and previous-output snapshots are primitive heap control
+  metadata. That is acceptable for this checkpoint because the target was
+  integrating checked processing, not eliminating every remaining heap control
+  object.
+- `ProfitStats` remains heap control metadata in checked Q2, as in the
+  standalone Q2 probe.
+
+Commands:
+
+```sh
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile
+
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=bench/debs2015/sample_both.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-checked-sample \
+zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-checked-100000 \
+zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-checked-1000000 \
+zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+for n in 100000 1000000; do
+  for run in 1 2 3; do
+    DEBS2015_BOTH_BUILD=0 \
+    DEBS2015_BOTH_MODES="heap rift-hp rift-streaming rift-checked" \
+    DEBS2015_BOTH_INPUT="/tmp/debs2015-month1-${n}.csv" \
+    DEBS2015_BOTH_OUTPUT_DIR="/tmp/debs2015-runboth-median-${n}-run${run}" \
+      zsh bench/debs2015/run_both_instrumented_matrix.sh
+  done
+done
+```
+
+Validated:
+
+- Scala-next sandbox compile passed.
+- Sample, 100k sorted-sample, and 1M sorted-sample Q1/Q2 outputs matched after
+  stripping only latency.
+- The 100k and 1M 3-run median matrices completed for `heap`, `rift-hp`,
+  `rift-streaming`, and `rift-checked`; every non-heap output matched heap
+  after stripping only latency.
+
+First single-run local results:
+
+| Input | Mode | Events | Q1 outputs | Q2 outputs | Elapsed ms | GC ms | RSS bytes |
+|---|---|---:|---:|---:|---:|---:|---:|
+| sample | heap | 2 | 1 | 2 | 8.263 | 6.524 | 28164096 |
+| sample | rift-checked | 2 | 1 | 2 | 6.922 | 0.103 | 21381120 |
+| 100k sorted | heap | 100000 | 5942 | 3246 | 472.415 | 8.389 | 55459840 |
+| 100k sorted | rift-checked | 100000 | 5942 | 3246 | 447.141 | 0.072 | 39878656 |
+| 1M sorted | heap | 1000000 | 32209 | 24969 | 4932.913 | 20.505 | 160022528 |
+| 1M sorted | rift-checked | 1000000 | 32209 | 24969 | 4776.641 | 2.499 | 123977728 |
+
+Selected 1M diagnostics:
+
+| Mode | Q1 process ms | Q2 process ms | Q1 change ms | Q2 change ms | Rift op ms | Rift opens/closes |
+|---|---:|---:|---:|---:|---:|---:|
+| heap | 1446.427 | 1376.742 | 118.922 | 188.439 | 0.000 | 0 / 0 |
+| rift-checked | 1433.050 | 1313.680 | 84.682 | 142.722 | 13.988 | 32217 / 32217 |
+
+3-run bounded-sample medians:
+
+| Input | Mode | Elapsed ms | GC ms | RSS bytes | Q1 process ms | Q2 process ms | Q1 change ms | Q2 change ms | Rift op ms | Region objects | Q1 result arrays | Q2 result arrays |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100k | heap | 553.059 | 9.541 | 55459840 | 159.721 | 154.348 | 12.328 | 19.509 | 0.000 | 0 | 10 | 10 |
+| 100k | Rift HPZone | 529.613 | 0.000 | 38895616 | 155.811 | 142.131 | 12.201 | 19.360 | 3.616 | 602460 | 10 | 10 |
+| 100k | Rift Streaming | 512.808 | 0.000 | 38912000 | 150.434 | 135.390 | 11.972 | 19.050 | 2.610 | 602460 | 10 | 10 |
+| 100k | rift-checked | 508.056 | 0.077 | 39878656 | 148.586 | 138.436 | 8.506 | 14.544 | 2.685 | 578538 | 0 | 0 |
+| 1M | heap | 5363.257 | 21.226 | 159989760 | 1601.825 | 1547.054 | 125.201 | 201.664 | 0.000 | 0 | 10 | 10 |
+| 1M | Rift HPZone | 5224.005 | 0.834 | 116867072 | 1587.368 | 1440.551 | 122.895 | 197.381 | 17.597 | 5494565 | 10 | 10 |
+| 1M | Rift Streaming | 5209.104 | 0.862 | 116850688 | 1560.170 | 1423.187 | 124.926 | 199.633 | 17.497 | 5494565 | 10 | 10 |
+| 1M | rift-checked | 5043.240 | 2.473 | 123977728 | 1508.359 | 1418.395 | 99.851 | 147.038 | 16.128 | 5333055 | 0 | 0 |
+
+Selective allocation-attribution diagnostic:
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+for n in 100000 1000000; do
+  SCALANATIVE_GC_ALLOC_STATS=1 \
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_MODES="heap rift-checked" \
+  DEBS2015_BOTH_INPUT="/tmp/debs2015-month1-${n}.csv" \
+  DEBS2015_BOTH_OUTPUT_DIR="/tmp/debs2015-runboth-checked-alloc-${n}" \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+```
+
+These rows are single-run diagnostics. `SCALANATIVE_GC_ALLOC_STATS=1` times
+heap allocation entry points, so elapsed time is not a headline throughput
+number.
+
+| Input | Mode | Total GC alloc calls | Total GC alloc bytes | Total GC alloc ms | Q1 process calls / bytes / ms | Q2 process calls / bytes / ms | Q1 snapshot calls / bytes / ms | Q2 snapshot calls / bytes / ms | Q2 output calls / bytes / ms | GC collect ms | RSS bytes |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100k | heap | 674402 | 49121120 | 28.527 | 358318 / 12895904 / 9.890 | 227619 / 9676608 / 12.801 | 5942 / 545248 / 0.179 | 16230 / 1179936 / 0.442 | 63676 / 1067968 / 1.475 | 8.774 | 55443456 |
+| 100k | rift-checked | 103818 | 8342448 | 2.954 | 4540 / 145312 / 0.116 | 10827 / 374160 / 0.262 | 5942 / 545248 / 0.202 | 16230 / 1179936 / 0.516 | 63674 / 1018784 / 1.433 | 0.076 | 39878656 |
+| 1M | heap | 6025149 | 235159840 | 173.578 | 3284649 / 105197520 / 93.768 | 2088994 / 84904608 / 55.198 | 32209 / 3059888 / 7.144 | 124845 / 9087952 / 3.099 | 490897 / 8362256 / 10.483 | 20.773 | 160022528 |
+| 1M | rift-checked | 752568 | 28785632 | 20.514 | 32191 / 1030144 / 0.795 | 68889 / 2275440 / 1.681 | 32209 / 3059888 / 1.174 | 124845 / 9087952 / 5.626 | 490892 / 7854272 / 10.815 | 2.191 | 123944960 |
+
+Interpretation:
+
+- This is the first end-to-end checked RunBoth evidence: both Q1 and Q2 checked
+  processors run together over the shared byte-parser input and produce the same
+  outputs as heap.
+- The 3-run medians make the bounded-sample direction stronger. On 1M,
+  `rift-checked` is fastest among the four modes in this matrix: heap
+  `5363.257 ms`, trusted Streaming `5209.104 ms`, and checked `5043.240 ms`.
+  The heap-to-checked elapsed delta is about `320 ms`, while measured GC
+  collection time drops by about `18.8 ms`; the speedup is therefore not only
+  shorter GC pauses. It is consistent with reduced heap allocation/object churn
+  and different placement for result/ranking state.
+- `rift-checked` also has zero Q1/Q2 result-array allocations in this matrix,
+  compared with ten cached result-array allocations in heap and trusted Rift
+  modes. This reflects checked processors' different result-storage path.
+- The allocation-attribution diagnostic explains much of the memory-management
+  side of the 1M result. Checked RunBoth drops total GC heap allocation calls
+  from `6025149` to `752568`, rounded heap bytes from `235159840` to
+  `28785632`, and measured heap allocation-call time from `173.578 ms` to
+  `20.514 ms`. Most of the reduction is in Q1/Q2 processing, while output and
+  snapshot/control allocations are still visible.
+- Compared with trusted `rift-streaming`, checked RunBoth is faster in these
+  medians despite slightly higher RSS and GC collection time at 1M. Do not
+  overinterpret that as "checked is intrinsically faster": checked and trusted
+  paths are not identical implementation shapes yet.
+- Treat this as median-backed bounded-sample Phase 5/7 evidence, not final DEBS
+  proof. The next evidence steps are SafeZone DEBS if a fair closeable backend
+  is added, full-month scale, and stronger checked bucket/window safety beyond
+  the current close helper.
+
+## Checked Child-Window Close Discipline And Commix Control
+
+Date: 2026-04-27
+
+Purpose:
+
+- Strengthen the checked `childWindow` API before adding more DEBS region
+  objects.
+- Make direct child-window close unavailable to normal user code; close should
+  happen through an explicit parent-owned cleanup boundary.
+- Run the first missing DEBS GC control by relinking the same RunBoth harness
+  with Scala Native `GC.commix`.
+
+Implementation changes:
+
+- `RiftRegion.ChildWindow` now tracks open/closed state. Reusing a closed
+  window through `RiftRegion.childRegion(parent, window)` throws
+  `IllegalStateException`.
+- `ChildWindow.close()` is now `private[memory]`, so user code cannot directly
+  close a child window.
+- New helper:
+
+```scala
+RiftRegion.closeChildWindow(parent, window) {
+  // clear or detach parent-visible references to child-window values here
+}
+```
+
+- Q1 checked processing now decrements route/rank metadata, unlinks the bucket,
+  clears parent-visible child references, and closes the event child window
+  inside this helper.
+- Q2 checked processing now does the same for profit and empty-taxi bucket
+  windows.
+
+This is stronger checked close discipline, not a full affine lifetime system.
+It does not prove that every possible reference to a child-window object is
+cleared before close; it makes the close boundary explicit, rejects direct user
+close, and gives the checker/runtime a single API shape to harden next.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile
+
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt \
+  "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"
+
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt \
+  "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=bench/debs2015/sample_both.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-childwindow-close-sample \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+Results:
+
+- `sandbox3_next/compile` passed.
+- `RiftRegionCheckedCompilerTest` passed `52/52`; the new negative probe
+  rejects `window.close()` from user code.
+- `RiftRegionCheckedTest` passed `14/14`; the new runtime probe confirms
+  close-through-cleanup and child-region reuse rejection after close.
+- Sample RunBoth `heap` vs `rift-checked` outputs matched after stripping
+  latency.
+
+Commix build/control commands:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt \
+  "project sandbox3_next" \
+  "set Compile / mainClass := Some(\"debs2015.Debs2015RunBoth\")" \
+  "set nativeConfig ~= (_.withGC(scala.scalanative.build.GC.commix))" \
+  nativeLink
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-commix-checked-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+for n in 100000 1000000; do
+  for run in 1 2 3; do
+    DEBS2015_BOTH_BUILD=0 \
+    DEBS2015_BOTH_MODES="heap rift-checked" \
+    DEBS2015_BOTH_INPUT="/tmp/debs2015-month1-${n}.csv" \
+    DEBS2015_BOTH_OUTPUT_DIR="/tmp/debs2015-runboth-commix-checked-median-${n}-run${run}" \
+      zsh bench/debs2015/run_both_instrumented_matrix.sh
+  done
+done
+```
+
+Commix 3-run median controls:
+
+| Input | Mode | Elapsed ms | GC ms | RSS bytes | Q1 process ms | Q2 process ms | Q1 change ms | Q2 change ms | Rift op ms | Region objects |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100k | heap | 492.372 | 4.942 | 56885248 | 142.856 | 122.890 | 11.613 | 18.903 | 0.000 | 0 |
+| 100k | rift-checked | 472.477 | 0.092 | 39534592 | 137.291 | 117.245 | 8.499 | 14.236 | 1.942 | 578538 |
+| 1M | heap | 4968.773 | 8.206 | 158924800 | 1466.113 | 1369.003 | 120.312 | 194.535 | 0.000 | 0 |
+| 1M | rift-checked | 4745.291 | 1.137 | 125698048 | 1409.319 | 1251.375 | 86.510 | 144.526 | 11.444 | 5333055 |
+
+Interpretation:
+
+- The Commix medians match the Immix direction: checked Rift is faster at both
+  100k and 1M, has much lower measured GC collection time, and uses less RSS.
+- The 1M Commix elapsed delta is about `224 ms`, while measured GC collection
+  time drops by only about `7 ms`. As with Immix, the win should be interpreted
+  as allocation-placement/object-churn reduction plus locality/backend effects,
+  not simply shorter GC pauses.
+- One earlier single 1M Commix control had checked Rift slower than heap, so
+  do not use single-run Commix rows as claims. The 3-run median is the current
+  control result.
+- SafeZone is still not a completed DEBS control. The current RunBoth harness
+  has no fair closeable SafeZone-window mode equivalent to Rift child-window
+  eviction. Existing SafeZone controls remain in the runtime/literature
+  harnesses; a DEBS SafeZone control would need a dedicated backend before it
+  is meaningful.
+
 ## JVM RunBoth Cross-check
 
 Date: 2026-04-25

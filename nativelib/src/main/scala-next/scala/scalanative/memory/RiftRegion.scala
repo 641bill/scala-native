@@ -70,6 +70,36 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   sealed trait ScopedRegion extends RiftRegion
   sealed trait StreamingRegion extends RiftRegion
 
+  /** Heap control metadata for a child streaming lifetime.
+   *
+   *  The child region handle is captured by the parent streaming region that
+   *  created this window. Child windows are closed through
+   *  `RiftRegion.closeChildWindow`, which gives checked stream code one
+   *  structured finalization boundary for unlinking parent metadata before
+   *  the child slab lifetime ends.
+   */
+  final class ChildWindow private[memory] (
+      val region: StreamingRegion^
+  ) {
+    private var closed = false
+
+    def isOpen: Boolean =
+      !closed && region.isOpen
+
+    def isClosed: Boolean =
+      !isOpen
+
+    private[memory] def checkOpen(): Unit =
+      if (!isOpen)
+        throw new IllegalStateException("Rift child window is closed")
+
+    private[memory] def close(): Unit =
+      if (!closed) {
+        closed = true
+        region.close()
+      }
+  }
+
   /** A heap object explicitly retained by a live Rift region.
    *
    *  Rift slabs are not scanned by Scala Native's GC. If a region object needs
@@ -524,6 +554,62 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   )(using region: StreamingRegion^, canReturn: CanReturnFromRegion[T]): T = {
     try body(using region)
     finally region.reset()
+  }
+
+  /** Opens a child streaming region whose handle is captured by `parent`.
+   *
+   *  This is the first checked multi-region building block for streaming
+   *  windows. The child handle cannot escape the parent streaming boundary, but
+   *  close ordering is still explicit and not affine-checked: callers must
+   *  keep child-owned values in child-specific structures, unlink or consume
+   *  them before closing the child region, and avoid widening them into
+   *  parent-owned containers.
+   */
+  def childStreaming(using
+      parent: StreamingRegion^
+  ): StreamingRegion^{parent} =
+    openImpl(Streaming).asInstanceOf[StreamingRegion]
+
+  /** Opens a reusable checked child-window lifetime.
+   *
+   *  Prefer this over raw `childStreaming` when modeling stream windows,
+   *  buckets, or micro-batches. It keeps the child handle in heap control
+   *  metadata captured by the parent stream, while the caller keeps
+   *  child-owned data in structures tied to `window.region`.
+   */
+  def childWindow(using parent: StreamingRegion^): ChildWindow^{parent} =
+    new ChildWindow(childStreaming)
+
+  /** Returns a child window's region using the parent stream as owner token.
+   *
+   *  This is intentionally explicit. Some stream operators keep child-window
+   *  records reachable from parent-lived control metadata until the window is
+   *  evicted. The owner token documents that widening and keeps the lifetime
+   *  relation local to checked stream code.
+   */
+  def childRegion(
+      parent: StreamingRegion^,
+      window: ChildWindow^{parent}
+  ): StreamingRegion^{parent} = {
+    window.checkOpen()
+    window.region.asInstanceOf[StreamingRegion]
+  }
+
+  /** Closes a child window after caller-owned parent metadata is unlinked.
+   *
+   *  This is the preferred close boundary for checked stream windows and
+   *  buckets. The cleanup block is intentionally `Unit`-returning: close-time
+   *  code may clear parent fields, remove entries from parent tables, and
+   *  consume child-owned values, but it should not produce a value that can be
+   *  used after the child region closes.
+   */
+  def closeChildWindow(
+      parent: StreamingRegion^,
+      window: ChildWindow^{parent}
+  )(cleanup: => Unit): Unit = {
+    window.checkOpen()
+    try cleanup
+    finally window.close()
   }
 
   /** Retains `value` through the live region's GC-visible root list.

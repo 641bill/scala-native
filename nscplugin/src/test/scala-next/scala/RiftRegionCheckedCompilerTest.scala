@@ -719,6 +719,118 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def childStreamingBucketEventGraphCompiles(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    final class Bucket(val region: RiftRegion.StreamingRegion^{stream}) {
+      |      final class Event(val value: Int, var next: Event^{region})
+      |      var head: Event^{region} = null
+      |    }
+      |
+      |    val child = RiftRegion.childStreaming
+      |    val bucket: Bucket^{stream} = new Bucket(child)
+      |    val bucketRegion = bucket.region
+      |    val event: bucket.Event^{bucketRegion} =
+      |      RiftRegion.alloc(new bucket.Event(41, null))(using bucketRegion)
+      |    bucket.head = event
+      |    val result = bucket.head.value + 1
+      |    bucket.head = null
+      |    child.close()
+      |    result
+      |  }
+      |""".stripMargin)
+
+  @Test def childStreamingHandleCannotEscapeParent(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |def bad(): AnyRef =
+      |  RiftRegion.streaming { stream ?=>
+      |    RiftRegion.childStreaming
+      |  }
+      |""".stripMargin,
+      "Capability `stream` outlives its scope"
+    )
+
+  @Test def childWindowBucketEventGraphCompiles(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    final class Bucket(val window: RiftRegion.ChildWindow^{stream}) {
+      |      final class Event(val value: Int, var next: Event^{window.region})
+      |      var head: Event^{window.region} = null
+      |    }
+      |
+      |    val window = RiftRegion.childWindow
+      |    val bucket: Bucket^{stream} = new Bucket(window)
+      |    val region = bucket.window.region
+      |    val event: bucket.Event^{region} =
+      |      RiftRegion.alloc(new bucket.Event(41, null))(using region)
+      |    bucket.head = event
+      |    val result = bucket.head.value + 1
+      |    RiftRegion.closeChildWindow(stream, bucket.window) {
+      |      bucket.head = null
+      |    }
+      |    result
+      |  }
+      |""".stripMargin)
+
+  @Test def childWindowDirectCloseCannotBeCalledFromUserCode(): Unit =
+    assertDoesNotCompile("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    val window = RiftRegion.childWindow
+      |    window.close()
+      |  }
+      |""".stripMargin)
+
+  @Test def childWindowCannotEscapeParent(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |def bad(): AnyRef =
+      |  RiftRegion.streaming { stream ?=>
+      |    RiftRegion.childWindow
+      |  }
+      |""".stripMargin,
+      "Capability `stream` outlives its scope"
+    )
+
+  @Test def childWindowOwnerTokenCanWidenChildRecordsToParent(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    val window = RiftRegion.childWindow
+      |    val buffer = RiftRegion.objectBuffer[Event](1)
+      |    val region = RiftRegion.childRegion(stream, window)
+      |    val event: Event^{stream} =
+      |      RiftRegion.alloc(new Event(41))(using region)
+      |    RiftRegion.append(stream, buffer, event)
+      |    val result = RiftRegion.get(stream, buffer, 0).value + 1
+      |    RiftRegion.closeChildWindow(stream, window) {
+      |      ()
+      |    }
+      |    result
+      |  }
+      |""".stripMargin)
+
   @Test def checkedMutableLinkedListBuilderCompiles(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking
