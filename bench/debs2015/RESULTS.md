@@ -3070,6 +3070,79 @@ Interpretation:
   harnesses; a DEBS SafeZone control would need a dedicated backend before it
   is meaningful.
 
+## Reusable Checked ChildBucket Abstraction
+
+Date: 2026-04-27
+
+Purpose:
+
+- Move from per-benchmark raw `ChildWindow` fields toward a reusable checked
+  stream-bucket abstraction.
+- Keep the same Q1/Q2 logical programs and allocation placement while reducing
+  the amount of benchmark-specific lifetime plumbing.
+
+Implementation changes:
+
+- Added `RiftRegion.ChildBucket`, a heap control wrapper around a child window
+  plus the child region path used by checked stream operators.
+- Added owner-token helpers:
+
+```scala
+val bucket = RiftRegion.childBucket
+val childRegion = RiftRegion.childBucketRegion(parent, bucket)
+
+RiftRegion.closeChildBucket(parent, bucket) {
+  // unlink parent-visible child references
+}
+```
+
+- Migrated Q1 checked processing buckets from raw `ChildWindow` fields to
+  `ChildBucket`.
+- Migrated Q2 checked profit/empty buckets from raw `ChildWindow` fields to
+  `ChildBucket`.
+- Added compiler probes for a child-bucket event graph and rejection of raw
+  child-window access through `child.window`.
+- Added a runtime smoke for close-through-cleanup and reuse-after-close
+  rejection through `ChildBucket`.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile
+
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt \
+  "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"
+
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt \
+  "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"
+
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=bench/debs2015/sample_both.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-childbucket-sample \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+Results:
+
+- `sandbox3_next/compile` passed.
+- `RiftRegionCheckedCompilerTest` passed `54/54`.
+- `RiftRegionCheckedTest` passed `15/15`.
+- Sample RunBoth `heap` vs `rift-checked` outputs matched after stripping
+  latency.
+
+Interpretation:
+
+- This is a safety/API milestone, not a new performance claim.
+- `ChildBucket` is still not a full affine close proof. It hides the raw child
+  window from user code and centralizes child-bucket region access and close,
+  but the checker still does not prove every parent-visible child reference is
+  cleared before close.
+- The next safety step is to make the bucket cleanup shape more typed, for
+  example by moving parent unlink/clear obligations into a reusable operator
+  or by adding compiler support for linear close tokens.
+
 ## JVM RunBoth Cross-check
 
 Date: 2026-04-25

@@ -100,6 +100,28 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       }
   }
 
+  /** Checked stream-bucket metadata around a child window.
+   *
+   *  `ChildBucket` is the reusable shape for stream operators that keep a
+   *  child lifetime reachable from parent-owned control metadata until window
+   *  eviction. The raw `ChildWindow` is deliberately not public from this
+   *  wrapper; callers use owner-token helpers to allocate from and close the
+   *  bucket.
+   */
+  final class ChildBucket private[memory] (
+      private[memory] val window: ChildWindow^,
+      val region: StreamingRegion^
+  ) {
+    def isOpen: Boolean =
+      window.isOpen
+
+    def isClosed: Boolean =
+      window.isClosed
+
+    private[memory] def checkOpen(): Unit =
+      window.checkOpen()
+  }
+
   /** A heap object explicitly retained by a live Rift region.
    *
    *  Rift slabs are not scanned by Scala Native's GC. If a region object needs
@@ -580,6 +602,12 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   def childWindow(using parent: StreamingRegion^): ChildWindow^{parent} =
     new ChildWindow(childStreaming)
 
+  /** Opens a reusable checked child bucket owned by the parent stream. */
+  def childBucket(using parent: StreamingRegion^): ChildBucket^{parent} = {
+    val window = childWindow
+    new ChildBucket(window, window.region)
+  }
+
   /** Returns a child window's region using the parent stream as owner token.
    *
    *  This is intentionally explicit. Some stream operators keep child-window
@@ -593,6 +621,15 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   ): StreamingRegion^{parent} = {
     window.checkOpen()
     window.region.asInstanceOf[StreamingRegion]
+  }
+
+  /** Returns a child bucket's region using the parent stream as owner token. */
+  def childBucketRegion(
+      parent: StreamingRegion^,
+      bucket: ChildBucket^{parent}
+  ): StreamingRegion^{parent} = {
+    bucket.checkOpen()
+    bucket.region.asInstanceOf[StreamingRegion]
   }
 
   /** Closes a child window after caller-owned parent metadata is unlinked.
@@ -611,6 +648,21 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     try cleanup
     finally window.close()
   }
+
+  /** Closes a checked child bucket after parent metadata cleanup.
+   *
+   *  Prefer this over `closeChildWindow` for reusable stream buckets. The
+   *  cleanup block has the same discipline: unlink parent-visible references
+   *  to child-owned values, then the child region closes in `finally`.
+   */
+  def closeChildBucket(
+      parent: StreamingRegion^,
+      bucket: ChildBucket^{parent}
+  )(cleanup: => Unit): Unit =
+    closeChildWindow(
+      parent,
+      bucket.window.asInstanceOf[ChildWindow^{parent}]
+    )(cleanup)
 
   /** Retains `value` through the live region's GC-visible root list.
    *

@@ -104,14 +104,14 @@ object Debs2015Q2CheckedProcessingRunner {
     )
 
     final class ProfitBucket(
-        val window: RiftRegion.ChildWindow^{stream},
+        val child: RiftRegion.ChildBucket^{stream},
         val startSeconds: Long,
         var head: ProfitEntry^{stream},
         var next: ProfitBucket^{stream}
     )
 
     final class EmptyBucket(
-        val window: RiftRegion.ChildWindow^{stream},
+        val child: RiftRegion.ChildBucket^{stream},
         val startSeconds: Long,
         var head: EmptyEntry^{stream},
         var next: EmptyBucket^{stream}
@@ -529,7 +529,7 @@ object Debs2015Q2CheckedProcessingRunner {
           firstProfitBucket.startSeconds < cutoffSeconds
         ) {
           val bucket = firstProfitBucket
-          RiftRegion.closeChildWindow(stream, bucket.window) {
+          RiftRegion.closeChildBucket(stream, bucket.child) {
             var expired = bucket.head
             while (expired != null) {
               val next = expired.bucketNext
@@ -554,7 +554,7 @@ object Debs2015Q2CheckedProcessingRunner {
           firstEmptyBucket.startSeconds < cutoffSeconds
         ) {
           val bucket = firstEmptyBucket
-          RiftRegion.closeChildWindow(stream, bucket.window) {
+          RiftRegion.closeChildBucket(stream, bucket.child) {
             var expired = bucket.head
             while (expired != null) {
               val latest = latestEmpty(expired.taxiKey)
@@ -580,9 +580,9 @@ object Debs2015Q2CheckedProcessingRunner {
           currentProfitBucket.startSeconds == dropoffSeconds
         ) currentProfitBucket
         else {
-          val window = RiftRegion.childWindow
+          val child = RiftRegion.childBucket
           val bucket: ProfitBucket^{stream} =
-            new ProfitBucket(window, dropoffSeconds, null, null)
+            new ProfitBucket(child, dropoffSeconds, null, null)
           if (firstProfitBucket == null) {
             firstProfitBucket = bucket
             lastProfitBucket = bucket
@@ -600,9 +600,9 @@ object Debs2015Q2CheckedProcessingRunner {
           currentEmptyBucket.startSeconds == dropoffSeconds
         ) currentEmptyBucket
         else {
-          val window = RiftRegion.childWindow
+          val child = RiftRegion.childBucket
           val bucket: EmptyBucket^{stream} =
-            new EmptyBucket(window, dropoffSeconds, null, null)
+            new EmptyBucket(child, dropoffSeconds, null, null)
           if (firstEmptyBucket == null) {
             firstEmptyBucket = bucket
             lastEmptyBucket = bucket
@@ -619,7 +619,7 @@ object Debs2015Q2CheckedProcessingRunner {
           cellKey: Int,
           profit: Double
       ): ProfitEntry^{stream} = {
-        val region = RiftRegion.childRegion(stream, bucket.window)
+        val region = RiftRegion.childBucketRegion(stream, bucket.child)
         RiftRegion.alloc(new ProfitEntry(cellKey, profit, null))(using region)
       }
 
@@ -629,7 +629,7 @@ object Debs2015Q2CheckedProcessingRunner {
           taxiKey: Int,
           cellKey: Int
       ): EmptyEntry^{stream} = {
-        val region = RiftRegion.childRegion(stream, bucket.window)
+        val region = RiftRegion.childBucketRegion(stream, bucket.child)
         RiftRegion.alloc(new EmptyEntry(seq, taxiKey, cellKey, null))(using region)
       }
 
@@ -1019,14 +1019,14 @@ object Debs2015Q2CheckedProcessingRunner {
       }
 
       private def closeProfitBucket(bucket: ProfitBucket^{stream}): Unit = {
-        RiftRegion.closeChildWindow(stream, bucket.window) {
+        RiftRegion.closeChildBucket(stream, bucket.child) {
           bucket.head = null
           bucket.next = null
         }
       }
 
       private def closeEmptyBucket(bucket: EmptyBucket^{stream}): Unit = {
-        RiftRegion.closeChildWindow(stream, bucket.window) {
+        RiftRegion.closeChildBucket(stream, bucket.child) {
           bucket.head = null
           bucket.next = null
         }

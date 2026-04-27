@@ -287,6 +287,37 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def childBucketClosesThroughCleanupBoundary(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int)
+
+        val bucket = RiftRegion.childBucket
+        val child = RiftRegion.childBucketRegion(stream, bucket)
+        val event: Event^{stream} =
+          RiftRegion.alloc(new Event(41))(using child)
+        var retained: Event^{stream} = event
+
+        RiftRegion.closeChildBucket(stream, bucket) {
+          retained = null
+        }
+
+        assertTrue(bucket.isClosed)
+        assertThrows(
+          classOf[IllegalStateException],
+          () => RiftRegion.childBucketRegion(stream, bucket)
+        )
+
+        42
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def scopedRegionAllowsMutableLinkedListBuilder(): Unit = {
     RiftRegion.init(1)
     try {

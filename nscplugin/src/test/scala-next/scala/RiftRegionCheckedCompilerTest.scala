@@ -831,6 +831,43 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def childBucketEventGraphCompiles(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    final class Bucket(val child: RiftRegion.ChildBucket^{stream}) {
+      |      final class Event(val value: Int, var next: Event^{child.region})
+      |      var head: Event^{child.region} = null
+      |    }
+      |
+      |    val child = RiftRegion.childBucket
+      |    val bucket: Bucket^{stream} = new Bucket(child)
+      |    val event: bucket.Event^{bucket.child.region} =
+      |      RiftRegion.alloc(new bucket.Event(41, null))(using bucket.child.region)
+      |    bucket.head = event
+      |    val result = bucket.head.value + 1
+      |    RiftRegion.closeChildBucket(stream, bucket.child) {
+      |      bucket.head = null
+      |    }
+      |    result
+      |  }
+      |""".stripMargin)
+
+  @Test def childBucketRawWindowCannotBeCalledFromUserCode(): Unit =
+    assertDoesNotCompile("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    val child = RiftRegion.childBucket
+      |    child.window.close()
+      |  }
+      |""".stripMargin)
+
   @Test def checkedMutableLinkedListBuilderCompiles(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking

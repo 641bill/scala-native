@@ -96,16 +96,16 @@ object Debs2015Q1CheckedProcessingRunner {
         var latestSeq: Long
     )
     final class Bucket(
-        val window: RiftRegion.ChildWindow^{stream},
+        val child: RiftRegion.ChildBucket^{stream},
         val startSeconds: Long,
         var next: Bucket^{stream}
     ) {
       final class RouteEvent(
           val routeKey: Long,
-          var next: RouteEvent^{window.region}
+          var next: RouteEvent^{child.region}
       )
-      var head: RouteEvent^{window.region} = null
-      var tail: RouteEvent^{window.region} = null
+      var head: RouteEvent^{child.region} = null
+      var tail: RouteEvent^{child.region} = null
     }
 
     def allocateLongArray(size: Int): Array[Long]^{stream} =
@@ -491,7 +491,7 @@ object Debs2015Q1CheckedProcessingRunner {
             val seq = nextSeq
             nextSeq += 1L
             val bucket = bucketFor(trip.dropoffSeconds)
-            val bucketRegion = bucket.window.region
+            val bucketRegion = bucket.child.region
             val event: bucket.RouteEvent^{bucketRegion} =
               RiftRegion.alloc(
                 new bucket.RouteEvent(key, null)
@@ -520,7 +520,7 @@ object Debs2015Q1CheckedProcessingRunner {
         while (firstBucket != null) {
           val bucket = firstBucket
           firstBucket = bucket.next
-          RiftRegion.closeChildWindow(stream, bucket.window) {
+          RiftRegion.closeChildBucket(stream, bucket.child) {
             bucket.head = null
             bucket.tail = null
             bucket.next = null
@@ -535,9 +535,9 @@ object Debs2015Q1CheckedProcessingRunner {
         if (currentBucket != null && currentBucket.startSeconds == startSeconds)
           currentBucket
         else {
-          val window = RiftRegion.childWindow
+          val child = RiftRegion.childBucket
           val bucket: Bucket^{stream} =
-            new Bucket(window, startSeconds, null)
+            new Bucket(child, startSeconds, null)
           if (firstBucket == null) {
             firstBucket = bucket
             lastBucket = bucket
@@ -553,7 +553,7 @@ object Debs2015Q1CheckedProcessingRunner {
       private def evictBefore(cutoffSeconds: Long): Unit =
         while (firstBucket != null && firstBucket.startSeconds < cutoffSeconds) {
           val bucket = firstBucket
-          RiftRegion.closeChildWindow(stream, bucket.window) {
+          RiftRegion.closeChildBucket(stream, bucket.child) {
             var event = bucket.head
             while (event != null) {
               routes.decrement(event.routeKey)
