@@ -3436,3 +3436,55 @@ Interpretation:
 - This is still single-run full-month evidence. It should be promoted to a
   headline claim only after repeated controlled full-month runs and any needed
   SafeZone/Commix controls.
+
+### Same-Run Full-Month Pool-Cap Control
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-full.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-fullmonth-poolcap-samerun \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+The first sandboxed attempt completed the heap process but failed while
+collecting `/usr/bin/time -l` fields because `sysctl kern.clockrate` was denied.
+The command above was rerun with the benchmark script allowed to collect
+external time/RSS fields. The completed run matched heap and `rift-checked`
+Q1/Q2 outputs after stripping only latency.
+
+Same-run full-month rows:
+
+| Mode | Parsed | Elapsed s | External real s | User+sys s | GC s | RSS MiB | Rift op s | Pool MiB | Mmap MiB | Region objects | Opens/closes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 14776529 | 71.919 | 71.96 | 69.58 | 0.323 | 579.1 | 0.000 | 0.0 | 0.0 | 0 | 0 / 0 |
+| rift-checked | 14776529 | 77.947 | 77.98 | 74.24 | 0.190 | 695.2 | 1.137 | 128.0 | 864.4 | 68834523 | 6890164 / 6890164 |
+
+Key phase rows:
+
+| Mode | Read s | Parse s | Q1 process s | Q2 process s | Q1/Q2 change s | Q1/Q2 output s |
+|---|---:|---:|---:|---:|---:|---:|
+| heap | 8.036 | 15.790 | 20.138 | 20.508 | 4.471 | 1.141 |
+| rift-checked | 8.377 | 16.579 | 21.829 | 24.290 | 3.496 | 1.334 |
+
+Interpretation:
+
+- This is the first same-binary full-month heap-vs-checked control after the
+  pool cap. It supersedes comparing the checked-only pool-cap row against the
+  older heap run when discussing full-month scale.
+- Checked Rift is slower on this single full-month run by about `6.0 s`, while
+  measured GC collection time drops by about `0.13 s`.
+- Checked peak RSS is now much closer to heap than before the cap:
+  `695.2 MiB` vs heap `579.1 MiB`, rather than the earlier `981.7 MiB`
+  checked row.
+- Rift operation time is about `1.14 s` across `6.89M` opens/closes and
+  `68.8M` region object allocations. The remaining checked slowdown is mostly
+  Q1/Q2 processing and parse/read differences, not region bookkeeping or GC
+  collection.
+- This still is not a headline full-DEBS median. The next full-month step is
+  repeated same-run medians or targeted memory-pressure work on long-lived
+  parent-stream state.
