@@ -23,6 +23,17 @@
 
 #define SCALANATIVE_RIFT_SLAB_FLAG_HUGE 0x1u
 #define SCALANATIVE_RIFT_SLAB_FLAG_ZEROED 0x2u
+#define SCALANATIVE_RIFT_SLAB_FLAG_SMALL 0x4u
+
+/* Streaming child buckets are often sparse. Use a page-sized first slab for
+ * streaming regions, then fall back to regular 32 KiB slabs on overflow.
+ */
+#define SCALANATIVE_RIFT_SMALL_SLAB_SIZE (4 * 1024)
+
+/* Keep enough closed slabs for reuse, but do not let streaming runs retain
+ * hundreds of MiB in the global pool after old windows have been closed.
+ */
+#define SCALANATIVE_RIFT_POOL_MAX_BYTES (128 * 1024 * 1024)
 
 typedef struct scalanative_rift_slab {
     struct scalanative_rift_slab *next;
@@ -49,6 +60,8 @@ typedef struct scalanative_rift_region {
 
 static _Atomic(scalanative_rift_slab *) scalanative_rift_pool_head = NULL;
 static _Atomic(size_t) scalanative_rift_pool_size = 0;
+static _Atomic(scalanative_rift_slab *) scalanative_rift_small_pool_head = NULL;
+static _Atomic(size_t) scalanative_rift_small_pool_size = 0;
 
 static _Atomic(size_t) scalanative_rift_stats_region_open_total_value = 0;
 static _Atomic(size_t) scalanative_rift_stats_region_close_total_value = 0;
@@ -105,6 +118,11 @@ static inline int scalanative_rift_slab_is_zeroed(
     return (slab->flags & SCALANATIVE_RIFT_SLAB_FLAG_ZEROED) != 0;
 }
 
+static inline int scalanative_rift_slab_is_small(
+    const scalanative_rift_slab *slab) {
+    return (slab->flags & SCALANATIVE_RIFT_SLAB_FLAG_SMALL) != 0;
+}
+
 static inline size_t scalanative_rift_slab_usable_size(
     const scalanative_rift_slab *slab) {
     return slab->mapped_size - sizeof(*slab);
@@ -123,61 +141,156 @@ static size_t scalanative_rift_round_up_to_pages(size_t n) {
     return rem == 0 ? n : (n + (page - rem));
 }
 
-static scalanative_rift_slab *scalanative_rift_pool_pop(void) {
+static size_t scalanative_rift_small_slab_mapped_size(void) {
+    return scalanative_rift_round_up_to_pages(
+        SCALANATIVE_RIFT_SMALL_SLAB_SIZE);
+}
+
+static size_t scalanative_rift_pool_resident_bytes_approx(void) {
+    size_t regular = atomic_load_explicit(&scalanative_rift_pool_size,
+                                          memory_order_relaxed);
+    size_t small = atomic_load_explicit(&scalanative_rift_small_pool_size,
+                                        memory_order_relaxed);
+    return regular * SCALANATIVE_RIFT_SLAB_SIZE +
+           small * scalanative_rift_small_slab_mapped_size();
+}
+
+static scalanative_rift_slab *scalanative_rift_pool_pop_from(
+    _Atomic(scalanative_rift_slab *) *pool_head, _Atomic(size_t) *pool_size) {
     scalanative_rift_slab *head;
     scalanative_rift_slab *next;
 
     do {
-        head = atomic_load_explicit(&scalanative_rift_pool_head,
-                                    memory_order_acquire);
+        head = atomic_load_explicit(pool_head, memory_order_acquire);
         if (head == NULL) return NULL;
         next = head->next;
     } while (!atomic_compare_exchange_weak_explicit(
-        &scalanative_rift_pool_head, &head, next, memory_order_acq_rel,
-        memory_order_acquire));
+        pool_head, &head, next, memory_order_acq_rel, memory_order_acquire));
 
-    atomic_fetch_sub_explicit(&scalanative_rift_pool_size, 1,
-                              memory_order_relaxed);
+    atomic_fetch_sub_explicit(pool_size, 1, memory_order_relaxed);
     scalanative_rift_stats_add(
         &scalanative_rift_stats_pool_reuse_total_value, 1);
     head->next = NULL;
     return head;
 }
 
-static void scalanative_rift_pool_push(scalanative_rift_slab *slab) {
+static scalanative_rift_slab *scalanative_rift_pool_pop(void) {
+    return scalanative_rift_pool_pop_from(&scalanative_rift_pool_head,
+                                          &scalanative_rift_pool_size);
+}
+
+static scalanative_rift_slab *scalanative_rift_small_pool_pop(void) {
+    return scalanative_rift_pool_pop_from(&scalanative_rift_small_pool_head,
+                                          &scalanative_rift_small_pool_size);
+}
+
+static void scalanative_rift_pool_push_to(
+    _Atomic(scalanative_rift_slab *) *pool_head, _Atomic(size_t) *pool_size,
+    scalanative_rift_slab *slab) {
     scalanative_rift_slab *head;
 
     if (slab == NULL) return;
 
     do {
-        head = atomic_load_explicit(&scalanative_rift_pool_head,
-                                    memory_order_acquire);
+        head = atomic_load_explicit(pool_head, memory_order_acquire);
         slab->next = head;
     } while (!atomic_compare_exchange_weak_explicit(
-        &scalanative_rift_pool_head, &head, slab, memory_order_acq_rel,
-        memory_order_acquire));
+        pool_head, &head, slab, memory_order_acq_rel, memory_order_acquire));
 
-    atomic_fetch_add_explicit(&scalanative_rift_pool_size, 1,
-                              memory_order_relaxed);
+    atomic_fetch_add_explicit(pool_size, 1, memory_order_relaxed);
 }
 
-static void scalanative_rift_pool_push_chain(scalanative_rift_slab *head,
-                                             scalanative_rift_slab *tail,
-                                             size_t count) {
+static void scalanative_rift_pool_push(scalanative_rift_slab *slab) {
+    scalanative_rift_pool_push_to(&scalanative_rift_pool_head,
+                                  &scalanative_rift_pool_size, slab);
+}
+
+static void scalanative_rift_pool_push_chain_to(
+    _Atomic(scalanative_rift_slab *) *pool_head, _Atomic(size_t) *pool_size,
+    scalanative_rift_slab *head, scalanative_rift_slab *tail, size_t count) {
     scalanative_rift_slab *old_head;
 
     if (head == NULL || tail == NULL || count == 0) return;
 
     do {
-        old_head = atomic_load_explicit(&scalanative_rift_pool_head,
-                                        memory_order_acquire);
+        old_head = atomic_load_explicit(pool_head, memory_order_acquire);
         tail->next = old_head;
     } while (!atomic_compare_exchange_weak_explicit(
-        &scalanative_rift_pool_head, &old_head, head, memory_order_acq_rel,
+        pool_head, &old_head, head, memory_order_acq_rel,
         memory_order_acquire));
 
-    atomic_fetch_add_explicit(&scalanative_rift_pool_size, count,
-                              memory_order_relaxed);
+    atomic_fetch_add_explicit(pool_size, count, memory_order_relaxed);
+}
+
+static void scalanative_rift_pool_push_chain(scalanative_rift_slab *head,
+                                             scalanative_rift_slab *tail,
+                                             size_t count) {
+    scalanative_rift_pool_push_chain_to(&scalanative_rift_pool_head,
+                                        &scalanative_rift_pool_size, head,
+                                        tail, count);
+}
+
+static void scalanative_rift_small_pool_push_chain(
+    scalanative_rift_slab *head, scalanative_rift_slab *tail, size_t count) {
+    scalanative_rift_pool_push_chain_to(&scalanative_rift_small_pool_head,
+                                        &scalanative_rift_small_pool_size, head,
+                                        tail, count);
+}
+
+static void scalanative_rift_unmap_slab_chain(
+    scalanative_rift_slab *head) {
+    while (head != NULL) {
+        scalanative_rift_slab *next = head->next;
+        (void)munmap(head, head->mapped_size);
+        head = next;
+    }
+}
+
+static void scalanative_rift_pool_push_regular_chain_capped(
+    scalanative_rift_slab *head, scalanative_rift_slab *tail, size_t count,
+    int small) {
+    size_t slab_size = small ? scalanative_rift_small_slab_mapped_size()
+                             : SCALANATIVE_RIFT_SLAB_SIZE;
+    size_t pool_bytes = scalanative_rift_pool_resident_bytes_approx();
+    size_t keep_count = 0;
+    scalanative_rift_slab *keep_tail;
+    scalanative_rift_slab *drop_head;
+    size_t i;
+
+    if (head == NULL || tail == NULL || count == 0) return;
+
+    if (pool_bytes < SCALANATIVE_RIFT_POOL_MAX_BYTES) {
+        keep_count = (SCALANATIVE_RIFT_POOL_MAX_BYTES - pool_bytes) / slab_size;
+        if (keep_count > count) keep_count = count;
+    }
+
+    if (keep_count == 0) {
+        scalanative_rift_unmap_slab_chain(head);
+        return;
+    }
+
+    if (keep_count == count) {
+        if (small) {
+            scalanative_rift_small_pool_push_chain(head, tail, count);
+        } else {
+            scalanative_rift_pool_push_chain(head, tail, count);
+        }
+        return;
+    }
+
+    keep_tail = head;
+    for (i = 1; i < keep_count; i++) {
+        keep_tail = keep_tail->next;
+    }
+    drop_head = keep_tail->next;
+    keep_tail->next = NULL;
+
+    if (small) {
+        scalanative_rift_small_pool_push_chain(head, keep_tail, keep_count);
+    } else {
+        scalanative_rift_pool_push_chain(head, keep_tail, keep_count);
+    }
+    scalanative_rift_unmap_slab_chain(drop_head);
 }
 
 static scalanative_rift_slab *scalanative_rift_tls_pop(void) {
@@ -228,6 +341,12 @@ static scalanative_rift_slab *scalanative_rift_mmap_regular_slab(void) {
                                             1);
 }
 
+static scalanative_rift_slab *scalanative_rift_mmap_small_slab(void) {
+    return scalanative_rift_mmap_slab_bytes(
+        scalanative_rift_small_slab_mapped_size(),
+        SCALANATIVE_RIFT_SLAB_FLAG_SMALL, 1, 0);
+}
+
 static scalanative_rift_slab *scalanative_rift_mmap_huge_slab(size_t need) {
     size_t bytes =
         scalanative_rift_round_up_to_pages(sizeof(scalanative_rift_slab) + need);
@@ -244,6 +363,13 @@ static scalanative_rift_slab *scalanative_rift_slab_acquire(void) {
     if (slab != NULL) return slab;
 
     return scalanative_rift_mmap_regular_slab();
+}
+
+static scalanative_rift_slab *scalanative_rift_small_slab_acquire(void) {
+    scalanative_rift_slab *slab = scalanative_rift_small_pool_pop();
+    if (slab != NULL) return slab;
+
+    return scalanative_rift_mmap_small_slab();
 }
 
 static void scalanative_rift_region_append_slab(
@@ -285,13 +411,26 @@ static void scalanative_rift_release_slab_chain(
     scalanative_rift_slab *head) {
     scalanative_rift_slab *regular_head = NULL;
     scalanative_rift_slab *regular_tail = NULL;
+    scalanative_rift_slab *small_head = NULL;
+    scalanative_rift_slab *small_tail = NULL;
     size_t regular_count = 0;
+    size_t small_count = 0;
 
     while (head != NULL) {
         scalanative_rift_slab *next = head->next;
 
         if (scalanative_rift_slab_is_huge(head)) {
             (void)munmap(head, head->mapped_size);
+        } else if (scalanative_rift_slab_is_small(head)) {
+            head->flags &= ~SCALANATIVE_RIFT_SLAB_FLAG_ZEROED;
+            head->next = NULL;
+            if (small_tail != NULL) {
+                small_tail->next = head;
+            } else {
+                small_head = head;
+            }
+            small_tail = head;
+            small_count++;
         } else {
             head->flags &= ~SCALANATIVE_RIFT_SLAB_FLAG_ZEROED;
             head->next = NULL;
@@ -318,8 +457,12 @@ static void scalanative_rift_release_slab_chain(
     }
 
     if (regular_head != NULL) {
-        scalanative_rift_pool_push_chain(regular_head, regular_tail,
-                                         regular_count);
+        scalanative_rift_pool_push_regular_chain_capped(
+            regular_head, regular_tail, regular_count, 0);
+    }
+    if (small_head != NULL) {
+        scalanative_rift_pool_push_regular_chain_capped(
+            small_head, small_tail, small_count, 1);
     }
 }
 
@@ -384,6 +527,7 @@ void scalanative_rift_init(size_t initial_slabs) {
 
 void scalanative_rift_shutdown(void) {
     scalanative_rift_slab *head;
+    scalanative_rift_slab *small_head;
 
     while (scalanative_rift_tls_count > 0) {
         scalanative_rift_slab *slab =
@@ -396,11 +540,20 @@ void scalanative_rift_shutdown(void) {
                                     memory_order_acq_rel);
     atomic_store_explicit(&scalanative_rift_pool_size, 0,
                           memory_order_relaxed);
+    small_head = atomic_exchange_explicit(&scalanative_rift_small_pool_head,
+                                          NULL, memory_order_acq_rel);
+    atomic_store_explicit(&scalanative_rift_small_pool_size, 0,
+                          memory_order_relaxed);
 
     while (head != NULL) {
         scalanative_rift_slab *next = head->next;
         (void)munmap(head, head->mapped_size);
         head = next;
+    }
+    while (small_head != NULL) {
+        scalanative_rift_slab *next = small_head->next;
+        (void)munmap(small_head, small_head->mapped_size);
+        small_head = next;
     }
 }
 
@@ -412,7 +565,11 @@ void *scalanative_rift_region_open(uint32_t kind) {
 
     if (region == NULL) return NULL;
 
-    slab = scalanative_rift_slab_acquire();
+    if (kind == SCALANATIVE_RIFT_KIND_STREAMING) {
+        slab = scalanative_rift_small_slab_acquire();
+    } else {
+        slab = scalanative_rift_slab_acquire();
+    }
     if (slab == NULL) {
         free(region);
         return NULL;
@@ -529,12 +686,15 @@ void *scalanative_rift_region_alloc(void *rawregion, void *info, size_t size) {
 }
 
 size_t scalanative_rift_pool_slab_count(void) {
-    return atomic_load_explicit(&scalanative_rift_pool_size,
-                                memory_order_relaxed);
+    size_t regular = atomic_load_explicit(&scalanative_rift_pool_size,
+                                          memory_order_relaxed);
+    size_t small = atomic_load_explicit(&scalanative_rift_small_pool_size,
+                                        memory_order_relaxed);
+    return regular + small;
 }
 
 size_t scalanative_rift_pool_resident_bytes(void) {
-    return scalanative_rift_pool_slab_count() * SCALANATIVE_RIFT_SLAB_SIZE;
+    return scalanative_rift_pool_resident_bytes_approx();
 }
 
 void scalanative_rift_stats_reset(void) {

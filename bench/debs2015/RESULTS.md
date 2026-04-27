@@ -3339,3 +3339,100 @@ Interpretation:
 - The next performance comparison should not use single full-month wall-clock
   rows. Use repeated controlled runs, record external user/sys time, and avoid
   running under scheduler pressure.
+
+## Streaming First-Slab And Pool-Cap Control
+
+Date: 2026-04-27
+
+Purpose:
+
+- Address the full-month scale signal from the first checked RunBoth control:
+  the checked path ended with about `780 MiB` retained in the Rift closed-slab
+  pool.
+- Keep the change in the runtime backend rather than specializing DEBS. The
+  logical Q1/Q2 program and checked `ChildBucket` lifetimes are unchanged.
+
+Implementation:
+
+- Streaming regions now use a small page-rounded first slab
+  (`SCALANATIVE_RIFT_SMALL_SLAB_SIZE`, 4 KiB before page rounding) and still
+  use regular 32 KiB slabs on overflow.
+- The global closed-slab pool is capped at `128 MiB`; slabs beyond the cap are
+  returned to the OS with `munmap`.
+- Public Rift C and Scala APIs are unchanged.
+
+Validation commands:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt \
+  "project sandbox3_next" \
+  "set Compile / mainClass := Some(\"debs2015.Debs2015RunBoth\")" \
+  nativeLink
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-poolcap-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-poolcap-1000000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-full.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-fullmonth-poolcap \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt \
+  "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"
+```
+
+The full-month checked outputs were compared against the earlier full-month
+heap outputs from `/tmp/debs2015-runboth-fullmonth-childbucket` after stripping
+only latency; both Q1 and Q2 matched.
+
+Bounded-sample single runs after the runtime change:
+
+| Input | Mode | Elapsed s | External user+sys s | GC s | RSS MiB | Rift op s | Pool MiB | Mmap MiB | Outputs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| 100k | heap | 0.443 | 0.44 | 0.008 | 52.9 | 0.000 | 0.0 | 0.0 | matched |
+| 100k | rift-checked | 0.435 | 0.43 | 0.000 | 38.5 | 0.001 | 9.3 | 30.3 | matched |
+| 1M | heap | 4.778 | 4.76 | 0.022 | 151.5 | 0.000 | 0.0 | 0.0 | matched |
+| 1M | rift-checked | 4.381 | 4.37 | 0.002 | 121.0 | 0.012 | 65.8 | 94.8 | matched |
+
+Full-month checked run after the runtime change:
+
+| Mode | Parsed | Elapsed s | External real s | User+sys s | GC s | RSS MiB | Rift op s | Pool MiB | Mmap MiB | Region objects | Opens/closes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| rift-checked | 14776529 | 70.831 | 70.87 | 68.86 | 0.166 | 846.0 | 0.998 | 128.0 | 864.4 | 68834523 | 6890164 / 6890164 |
+
+Comparison to the first full-month checked run:
+
+| Metric | Before cap | After cap |
+|---|---:|---:|
+| External real time | 1258.76 s | 70.87 s |
+| External user+sys time | 63.97 s | 68.86 s |
+| Pool bytes at metrics snapshot | 780.4 MiB | 128.0 MiB |
+| Peak RSS | 981.7 MiB | 846.0 MiB |
+| Cumulative Rift mmap bytes | 932.5 MiB | 864.4 MiB |
+| Rift op time | 0.679 s | 0.998 s |
+
+Interpretation:
+
+- The first full-month checked wall-clock row was indeed scheduler polluted;
+  the capped run has wall time and user+sys time in the same range.
+- The pool cap works: closed-slab pool residency is bounded at `128 MiB`.
+- Peak RSS improves but remains much higher than heap. The remaining memory is
+  not only closed-slab retention; long-lived parent-stream tables, rank objects,
+  taxi-id metadata, and live window data still dominate at full-month scale.
+- The cap adds some region-operation cost through extra unmaps, but Rift op
+  time remains about `1 s` over the full month.
+- This is still single-run full-month evidence. It should be promoted to a
+  headline claim only after repeated controlled full-month runs and any needed
+  SafeZone/Commix controls.
