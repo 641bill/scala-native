@@ -169,7 +169,7 @@ write_summary_header() {
   for key in "${metric_keys[@]}"; do
     printf "\t%s" "${key}" >> "${summary}"
   done
-  printf "\tmax_rss_bytes\n" >> "${summary}"
+  printf "\tmax_rss_bytes\ttime_real_s\ttime_user_s\ttime_sys_s\n" >> "${summary}"
 }
 
 read_max_rss_bytes() {
@@ -181,10 +181,56 @@ read_max_rss_bytes() {
   fi
 }
 
+read_time_real_seconds() {
+  local time_log="$1"
+  if [[ "${platform}" == "Darwin" ]]; then
+    awk '/ real/ { print $1; found = 1; exit } END { if (!found) print "" }' "${time_log}"
+  else
+    awk '
+      function seconds(value, parts, n) {
+        gsub(/^[ \t]+|[ \t]+$/, "", value)
+        n = split(value, parts, ":")
+        if (n == 3) return parts[1] * 3600 + parts[2] * 60 + parts[3]
+        if (n == 2) return parts[1] * 60 + parts[2]
+        return value
+      }
+      /Elapsed \(wall clock\) time/ {
+        value = $0
+        sub(/^.*: /, "", value)
+        print seconds(value)
+        found = 1
+        exit
+      }
+      END { if (!found) print "" }
+    ' "${time_log}"
+  fi
+}
+
+read_time_user_seconds() {
+  local time_log="$1"
+  if [[ "${platform}" == "Darwin" ]]; then
+    awk '/ real/ { print $3; found = 1; exit } END { if (!found) print "" }' "${time_log}"
+  else
+    awk -F ':' '/User time \(seconds\)/ { gsub(/^[ \t]+/, "", $2); print $2; found = 1; exit } END { if (!found) print "" }' "${time_log}"
+  fi
+}
+
+read_time_sys_seconds() {
+  local time_log="$1"
+  if [[ "${platform}" == "Darwin" ]]; then
+    awk '/ real/ { print $5; found = 1; exit } END { if (!found) print "" }' "${time_log}"
+  else
+    awk -F ':' '/System time \(seconds\)/ { gsub(/^[ \t]+/, "", $2); print $2; found = 1; exit } END { if (!found) print "" }' "${time_log}"
+  fi
+}
+
 write_summary_row() {
   local mode="$1"
   local metric="$2"
   local max_rss_bytes="$3"
+  local time_real_s="$4"
+  local time_user_s="$5"
+  local time_sys_s="$6"
   typeset -A fields
   local token key value
 
@@ -200,7 +246,7 @@ write_summary_row() {
   for key in "${metric_keys[@]}"; do
     printf "\t%s" "${fields[${key}]-}" >> "${summary}"
   done
-  printf "\t%s\n" "${max_rss_bytes}" >> "${summary}"
+  printf "\t%s\t%s\t%s\t%s\n" "${max_rss_bytes}" "${time_real_s}" "${time_user_s}" "${time_sys_s}" >> "${summary}"
 }
 
 run_mode() {
@@ -211,6 +257,9 @@ run_mode() {
   local time_log="${output_dir}/time-${mode}.log"
   local metric
   local max_rss_bytes
+  local time_real_s
+  local time_user_s
+  local time_sys_s
 
   echo
   echo "== Instrumented RunBoth Q1 ${mode} =="
@@ -227,9 +276,12 @@ run_mode() {
   fi
 
   max_rss_bytes=$(read_max_rss_bytes "${time_log}")
+  time_real_s=$(read_time_real_seconds "${time_log}")
+  time_user_s=$(read_time_user_seconds "${time_log}")
+  time_sys_s=$(read_time_sys_seconds "${time_log}")
   echo "${metric}"
-  echo "DEBS2015_RSS_RESULT q1_mode=${mode} max_rss_bytes=${max_rss_bytes}"
-  write_summary_row "${mode}" "${metric}" "${max_rss_bytes}"
+  echo "DEBS2015_RSS_RESULT q1_mode=${mode} max_rss_bytes=${max_rss_bytes} time_real_s=${time_real_s} time_user_s=${time_user_s} time_sys_s=${time_sys_s}"
+  write_summary_row "${mode}" "${metric}" "${max_rss_bytes}" "${time_real_s}" "${time_user_s}" "${time_sys_s}"
 }
 
 strip_latency() {

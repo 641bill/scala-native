@@ -3231,3 +3231,111 @@ Interpretation:
   is mostly Q2 processing and output/formatting CPU, not GC alone. Region work
   still matters for footprint and bounded-lifetime placement, but DEBS is not
   currently a benchmark where GC tracing time dominates under roomy heaps.
+
+## Full-Month RunBoth First Control
+
+Date: 2026-04-27
+
+Purpose:
+
+- Move beyond bounded 100k/1M samples and verify that the checked RunBoth path
+  can process the full January joined stream with heap-equivalent output.
+- Test the current `ChildBucket` checked processing shape at full-month scale.
+- Add external `/usr/bin/time` real/user/sys columns to the instrumented
+  summary so future full-scale rows can distinguish benchmark work from
+  scheduler/descheduling noise.
+
+Input generation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+DEBS2015_MONTH=1 \
+DEBS2015_LIMIT=0 \
+DEBS2015_JOINED_OUTPUT=/tmp/debs2015-month1-full.csv \
+  zsh bench/debs2015/join_nyc_taxi_sample.sh
+
+wc -l /tmp/debs2015-month1-full.csv
+```
+
+Generated input:
+
+- `/tmp/debs2015-month1-full.csv`
+- size: about `2.5G`
+- rows: `14776615`
+- parsed rows in RunBoth: `14776529`
+- invalid rows in RunBoth: `86`
+
+First full-month control command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-full.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-fullmonth-childbucket \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+Validation:
+
+- Heap and `rift-checked` Q1/Q2 outputs matched after stripping only the
+  measured latency column.
+- Output counts matched: `q1_outputs=274667`, `q2_outputs=180215`.
+- This validates full-month correctness for the current checked RunBoth path,
+  but it is not a valid wall-clock performance comparison.
+
+Single-run metrics:
+
+| Input | Mode | Parsed | Invalid | Elapsed s | External real s | User+sys s | GC s | RSS MiB |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| month 1 full | heap | 14776529 | 86 | 69.754 | 69.78 | 69.64 | 0.288 | 596.0 |
+| month 1 full | rift-checked | 14776529 | 86 | 1258.714 | 1258.76 | 63.97 | 0.143 | 981.7 |
+
+Phase/counter details:
+
+| Mode | Read s | Parse s | Q1 process s | Q2 process s | Rift op s | Opens/closes | Region objects | Mmap MiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 5.786 | 15.503 | 20.039 | 21.149 | 0.000 | 0 / 0 | 0 | 0.0 |
+| rift-checked | 198.794 | 885.594 | 18.422 | 149.721 | 0.679 | 6890164 / 6890164 | 68834523 | 932.5 |
+
+Harness update validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+zsh -n bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=bench/debs2015/sample_both.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-timecols-sample \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+The sample verification passed and `summary.tsv` now includes:
+
+- `max_rss_bytes`
+- `time_real_s`
+- `time_user_s`
+- `time_sys_s`
+
+Interpretation:
+
+- The full-month `rift-checked` elapsed row is polluted by descheduling or
+  equivalent external waiting. `/usr/bin/time -l` reports only about
+  `63.97 s` of user+sys CPU time for that process while wall time is
+  `1258.76 s`. Do not treat the `1258.714 s` in-process elapsed value as a
+  Rift performance result.
+- The full-month correctness result is still useful: the checked RunBoth path
+  produced heap-equivalent Q1/Q2 outputs over all January rows.
+- The memory/counter signal is real enough to guide the next step: full-month
+  checked RunBoth opens and closes about `6.89M` child buckets, allocates about
+  `68.8M` region objects, and reaches about `982 MiB` peak RSS versus heap's
+  about `596 MiB` in this run. The next full-scale work should reduce bucket
+  churn / slab retention and rerun under controlled load with external CPU
+  time columns recorded.
+- The next performance comparison should not use single full-month wall-clock
+  rows. Use repeated controlled runs, record external user/sys time, and avoid
+  running under scheduler pressure.
