@@ -3488,3 +3488,118 @@ Interpretation:
 - This still is not a headline full-DEBS median. The next full-month step is
   repeated same-run medians or targeted memory-pressure work on long-lived
   parent-stream state.
+
+## Checked ChildBucket Single-Control-Object Control
+
+Date: 2026-04-28
+
+Purpose:
+
+- Separate backend cost from checked-API shape after the post-pool-cap
+  full-month rows.
+- The trusted `rift-streaming` full-month control showed that the region
+  backend itself can beat heap at full-month scale, while checked was still
+  slower before this change.
+- `ChildBucket` was allocating both a `ChildWindow` and a `ChildBucket` for
+  every checked stream bucket. Since DEBS opens about `6.89M` child buckets on
+  the full-month input, the extra heap control object was a plausible checked
+  API overhead.
+
+Implementation:
+
+- `RiftRegion.ChildBucket` now owns the child `StreamingRegion` directly.
+- `RiftRegion.childBucket` now opens one child region and creates one
+  `ChildBucket` heap control object instead of a `ChildWindow` plus
+  `ChildBucket`.
+- `RiftRegion.closeChildBucket` now checks and closes the bucket directly while
+  preserving the structured cleanup boundary.
+- `ChildWindow` and `closeChildWindow` remain available for explicit window
+  users.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt \
+  "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest" \
+  "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"
+
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-childbucket-singleobject-1000000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-streaming" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-full.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-fullmonth-poolcap-trusted-streaming \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-full.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-fullmonth-childbucket-singleobject \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="rift-checked heap" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-full.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-fullmonth-childbucket-singleobject-reverse \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+Results:
+
+- Checked compiler probes passed `54/54`.
+- Checked runtime tests passed `15/15`.
+- 1M heap/checked outputs matched.
+- Full-month trusted Streaming outputs matched heap.
+- Full-month checked outputs matched heap in both run orders.
+
+Full-month trusted backend control, before the `ChildBucket` API change:
+
+| Mode | Elapsed s | External real s | User+sys s | GC s | RSS MiB | Rift op s | Pool MiB |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| heap | 73.888 | 73.92 | 70.90 | 0.360 | 595.7 | 0.000 | 0.0 |
+| rift-streaming | 68.990 | 69.00 | 68.39 | 0.088 | 801.7 | 0.898 | 128.0 |
+
+1M checked single run after the `ChildBucket` API change:
+
+| Mode | Elapsed s | External real s | User+sys s | GC s | RSS MiB | Rift op s | Pool MiB |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| heap | 4.810 | 5.16 | 4.76 | 0.020 | 152.6 | 0.000 | 0.0 |
+| rift-checked | 4.678 | 4.68 | 4.58 | 0.002 | 119.9 | 0.017 | 65.8 |
+
+Full-month checked same-run control after the `ChildBucket` API change:
+
+| Mode | Elapsed s | External real s | User+sys s | GC s | RSS MiB | Rift op s | Pool MiB |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| heap | 70.872 | 70.90 | 69.02 | 0.315 | 586.4 | 0.000 | 0.0 |
+| rift-checked | 65.928 | 65.95 | 65.60 | 0.086 | 866.6 | 0.816 | 128.0 |
+
+Reverse-order check:
+
+| Mode | Elapsed s | External real s | User+sys s | GC s | RSS MiB | Rift op s | Evidence |
+|---|---:|---:|---:|---:|---:|---:|---|
+| rift-checked | 68.435 | 68.46 | 66.95 | 0.086 | 910.7 | 0.893 | usable single run |
+| heap | 1871.373 | 1871.42 | 89.32 | 0.401 | 583.3 | 0.000 | invalid wall-clock row |
+
+Interpretation:
+
+- The trusted `rift-streaming` full-month row confirms that the post-pool-cap
+  backend is not the current blocker: trusted Streaming was faster than heap in
+  that same-run control.
+- Collapsing `ChildBucket` from two heap control objects to one makes the
+  checked full-month path faster in the two usable checked rows collected here:
+  `65.928 s` when checked ran second, and `68.435 s` when checked ran first.
+  The pre-change same-run checked row was `77.947 s`.
+- The reverse-order heap row is invalid as wall-clock evidence because real
+  time was `1871.42 s` while user+sys time was only about `89.32 s`.
+- RSS is not improved by this change in the full-month rows. Checked RSS rose
+  to `866-911 MiB` in these runs even though the closed-slab pool remained
+  capped at `128 MiB`. Do not claim a memory-footprint win from this change.
+- This is still single-run evidence, not a median. It is enough to keep the
+  API simplification because it removes a general checked streaming overhead
+  and passes the safety/runtime tests, but the next full-month claim needs
+  repeated controlled runs.

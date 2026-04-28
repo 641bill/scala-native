@@ -104,22 +104,30 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    *
    *  `ChildBucket` is the reusable shape for stream operators that keep a
    *  child lifetime reachable from parent-owned control metadata until window
-   *  eviction. The raw `ChildWindow` is deliberately not public from this
-   *  wrapper; callers use owner-token helpers to allocate from and close the
-   *  bucket.
+   *  eviction. It owns the child region directly to keep the common bucket
+   *  path to one heap control object; callers use owner-token helpers to
+   *  allocate from and close the bucket.
    */
   final class ChildBucket private[memory] (
-      private[memory] val window: ChildWindow^,
       val region: StreamingRegion^
   ) {
+    private var closed = false
+
     def isOpen: Boolean =
-      window.isOpen
+      !closed && region.isOpen
 
     def isClosed: Boolean =
-      window.isClosed
+      !isOpen
 
     private[memory] def checkOpen(): Unit =
-      window.checkOpen()
+      if (!isOpen)
+        throw new IllegalStateException("Rift child bucket is closed")
+
+    private[memory] def close(): Unit =
+      if (!closed) {
+        closed = true
+        region.close()
+      }
   }
 
   /** A heap object explicitly retained by a live Rift region.
@@ -603,10 +611,8 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     new ChildWindow(childStreaming)
 
   /** Opens a reusable checked child bucket owned by the parent stream. */
-  def childBucket(using parent: StreamingRegion^): ChildBucket^{parent} = {
-    val window = childWindow
-    new ChildBucket(window, window.region)
-  }
+  def childBucket(using parent: StreamingRegion^): ChildBucket^{parent} =
+    new ChildBucket(childStreaming)
 
   /** Returns a child window's region using the parent stream as owner token.
    *
@@ -658,11 +664,11 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   def closeChildBucket(
       parent: StreamingRegion^,
       bucket: ChildBucket^{parent}
-  )(cleanup: => Unit): Unit =
-    closeChildWindow(
-      parent,
-      bucket.window.asInstanceOf[ChildWindow^{parent}]
-    )(cleanup)
+  )(cleanup: => Unit): Unit = {
+    bucket.checkOpen()
+    try cleanup
+    finally bucket.close()
+  }
 
   /** Retains `value` through the live region's GC-visible root list.
    *
