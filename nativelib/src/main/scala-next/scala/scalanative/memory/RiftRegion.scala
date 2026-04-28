@@ -173,6 +173,20 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     private[memory] var current: StreamBucket = null
   }
 
+  /** Checked indexed rank storage tied to stream-window child buckets.
+   *
+   *  This combines the `StreamBucketArena` lifetime primitive with the
+   *  checked dense-key ranking primitive. Values may be ordinary Scala objects
+   *  allocated in a child bucket and deliberately widened to the parent stream
+   *  through `streamBucketRegion`. The operator still owns semantic cleanup:
+   *  keys whose values live in a closing bucket must be removed before the
+   *  bucket closes.
+   */
+  final class StreamWindowIndexedRank[T <: Object] private[memory] (
+      private[memory] val buckets: StreamBucketArena,
+      private[memory] val queue: RegionIndexedPriorityQueue[T]
+  )
+
   /** A heap object explicitly retained by a live Rift region.
    *
    *  Rift slabs are not scanned by Scala Native's GC. If a region object needs
@@ -1240,6 +1254,25 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
   }
 
+  /** Allocates a checked stream-window indexed-rank collection.
+   *
+   *  The returned collection keeps parent-owned rank storage and a reusable
+   *  stream-bucket arena. It does not infer query semantics: callers still
+   *  remove keys and clear parent-visible references in the close callback.
+   */
+  def streamWindowIndexedRank[T <: Object](
+      bucketSeconds: Long,
+      keyCapacity: Int,
+      initialCapacity: Int = 4
+  )(using parent: StreamingRegion^): StreamWindowIndexedRank[T]^{parent} = {
+    val buckets = streamBucketArena(bucketSeconds)
+    val queue = regionIndexedPriorityQueue[T](keyCapacity, initialCapacity)
+    new StreamWindowIndexedRank[T](
+      buckets.asInstanceOf[StreamBucketArena],
+      queue.asInstanceOf[RegionIndexedPriorityQueue[T]]
+    ).asInstanceOf[StreamWindowIndexedRank[T]^{parent}]
+  }
+
   /** Appends `value` to a checked object buffer owned by `owner`. */
   def append[T <: Object](
       owner: RiftRegion^,
@@ -1428,6 +1461,172 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       queue: RegionIndexedPriorityQueue[T]^{owner}
   ): Int =
     queue.keyCapacity
+
+  /** Finds or opens the window-rank bucket containing `timestampSeconds`. */
+  def streamWindowBucketFor[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent},
+      timestampSeconds: Long
+  ): StreamBucket^{parent} =
+    streamWindowBucketFor(parent, rank, timestampSeconds)(_ => ())
+
+  /** Finds or opens the window-rank bucket containing `timestampSeconds`. */
+  def streamWindowBucketFor[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent},
+      timestampSeconds: Long
+  )(onOpen: StreamBucket^{parent} => Unit): StreamBucket^{parent} =
+    streamBucketFor(
+      parent,
+      rank.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      timestampSeconds
+    )(onOpen)
+
+  /** Inserts or replaces a ranked value for `key`. */
+  def putWindowRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent},
+      key: Int,
+      value: T^{parent},
+      priority: Long
+  ): Unit =
+    rank.queue
+      .asInstanceOf[RegionIndexedPriorityQueue[T]^{parent}]
+      .putTrusted(parent, key, value.asInstanceOf[Object], priority)
+
+  /** Updates `key`'s priority if it is present. */
+  def updateWindowRankPriority[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent},
+      key: Int,
+      priority: Long
+  ): Boolean =
+    updatePriority(
+      parent,
+      rank.queue.asInstanceOf[RegionIndexedPriorityQueue[T]^{parent}],
+      key,
+      priority
+    )
+
+  /** Removes `key` if it is present. */
+  def removeWindowRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent},
+      key: Int
+  ): Boolean =
+    remove(
+      parent,
+      rank.queue.asInstanceOf[RegionIndexedPriorityQueue[T]^{parent}],
+      key
+    )
+
+  /** Returns true when `key` is present. */
+  def containsWindowRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent},
+      key: Int
+  ): Boolean =
+    contains(
+      parent,
+      rank.queue.asInstanceOf[RegionIndexedPriorityQueue[T]^{parent}],
+      key
+    )
+
+  /** Reads the value for `key`. */
+  def getWindowRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent},
+      key: Int
+  ): T^{parent} =
+    get(
+      parent,
+      rank.queue.asInstanceOf[RegionIndexedPriorityQueue[T]^{parent}],
+      key
+    )
+
+  /** Reads the highest-priority ranked value without removing it. */
+  def peekWindowRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent}
+  ): T^{parent} =
+    peek(
+      parent,
+      rank.queue.asInstanceOf[RegionIndexedPriorityQueue[T]^{parent}]
+    )
+
+  /** Reads the dense key of the highest-priority ranked value. */
+  def peekWindowRankKey[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent}
+  ): Int =
+    peekKey(
+      parent,
+      rank.queue.asInstanceOf[RegionIndexedPriorityQueue[T]^{parent}]
+    )
+
+  /** Reads the highest priority without removing the ranked value. */
+  def peekWindowRankPriority[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent}
+  ): Long =
+    peekPriority(
+      parent,
+      rank.queue.asInstanceOf[RegionIndexedPriorityQueue[T]^{parent}]
+    )
+
+  /** Removes and returns the highest-priority ranked value. */
+  def popWindowRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent}
+  ): T^{parent} =
+    pop(
+      parent,
+      rank.queue.asInstanceOf[RegionIndexedPriorityQueue[T]^{parent}]
+    )
+
+  /** Returns the number of ranked values. */
+  def windowRankLength[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent}
+  ): Int =
+    length(
+      parent,
+      rank.queue.asInstanceOf[RegionIndexedPriorityQueue[T]^{parent}]
+    )
+
+  /** Returns true if closing before `cutoffSeconds` would close a bucket. */
+  def hasWindowRankBucketsBefore[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent},
+      cutoffSeconds: Long
+  ): Boolean =
+    hasStreamBucketsBefore(
+      parent,
+      rank.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      cutoffSeconds
+    )
+
+  /** Closes window-rank buckets fully before `cutoffSeconds`. */
+  def closeWindowRankBucketsBefore[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent},
+      cutoffSeconds: Long
+  )(cleanup: StreamBucket^{parent} => Unit): Unit =
+    closeStreamBucketsBefore(
+      parent,
+      rank.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      cutoffSeconds
+    )(cleanup)
+
+  /** Closes every window-rank bucket. */
+  def closeAllWindowRankBuckets[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent}
+  )(cleanup: StreamBucket^{parent} => Unit): Unit =
+    closeAllStreamBuckets(
+      parent,
+      rank.buckets.asInstanceOf[StreamBucketArena^{parent}]
+    )(cleanup)
 
   /** Owner-token method syntax for checked object buffers.
    *

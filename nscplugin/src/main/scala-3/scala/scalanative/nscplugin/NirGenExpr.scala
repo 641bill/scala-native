@@ -142,7 +142,8 @@ trait NirGenExpr(using Context) {
         name == "objectBuffer" ||
           name == "regionBuffer" ||
           name == "regionPriorityQueue" ||
-          name == "regionIndexedPriorityQueue"
+          name == "regionIndexedPriorityQueue" ||
+          name == "streamWindowIndexedRank"
       ) &&
         isRiftRegionCompanionOwner(sym)
     }
@@ -170,6 +171,12 @@ trait NirGenExpr(using Context) {
       val name = sym.name.toString
       (name == "put" || name == "putToRegionIndexedPriorityQueue") &&
         isRiftRegionCompanionOwner(sym)
+    }
+
+    private def isRiftStreamWindowIndexedRankPut(tree: Tree): Boolean = {
+      val sym = calledSymbol(tree)
+      val name = sym.name.toString
+      name == "putWindowRank" && isRiftRegionCompanionOwner(sym)
     }
 
     private def isStableStaticFieldSelect(tree: Select): Boolean =
@@ -327,6 +334,14 @@ trait NirGenExpr(using Context) {
             args
           )
         case _ if isRiftRegionIndexedPriorityQueuePut(app) =>
+          checkRiftObjectBufferAppend(args(args.length - 2))
+          genApplyMethod(
+            sym,
+            statically = sym.isClassConstructor,
+            qualifier,
+            args
+          )
+        case _ if isRiftStreamWindowIndexedRankPut(app) =>
           checkRiftObjectBufferAppend(args(args.length - 2))
           genApplyMethod(
             sym,
