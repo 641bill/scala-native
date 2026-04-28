@@ -3547,6 +3547,18 @@ DEBS2015_BOTH_MODES="rift-checked heap" \
 DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-full.csv \
 DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-fullmonth-childbucket-singleobject-reverse \
   zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-full.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-fullmonth-childbucket-repeat-a \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-full.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-fullmonth-childbucket-repeat-b \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
 ```
 
 Results:
@@ -3578,6 +3590,19 @@ Full-month checked same-run control after the `ChildBucket` API change:
 | heap | 70.872 | 70.90 | 69.02 | 0.315 | 586.4 | 0.000 | 0.0 |
 | rift-checked | 65.928 | 65.95 | 65.60 | 0.086 | 866.6 | 0.816 | 128.0 |
 
+Full-month same-order 3-run control after the `ChildBucket` API change:
+
+| Run | Mode | Elapsed s | External real s | User+sys s | GC s | RSS MiB | Rift op s | Q1 process s | Q2 process s |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| first | heap | 70.872 | 70.90 | 69.02 | 0.315 | 586.4 | 0.000 | 19.676 | 19.823 |
+| first | rift-checked | 65.928 | 65.95 | 65.60 | 0.086 | 866.6 | 0.816 | 18.863 | 19.106 |
+| repeat A | heap | 73.166 | 73.20 | 71.05 | 0.334 | 576.4 | 0.000 | 20.534 | 22.154 |
+| repeat A | rift-checked | 75.100 | 75.12 | 73.25 | 0.104 | 855.3 | 1.206 | 20.979 | 24.215 |
+| repeat B | heap | 73.029 | 73.06 | 71.54 | 0.306 | 587.2 | 0.000 | 20.507 | 22.328 |
+| repeat B | rift-checked | 67.670 | 67.69 | 67.18 | 0.085 | 983.9 | 0.885 | 19.233 | 20.142 |
+| median | heap | 73.029 | 73.06 | 71.05 | 0.315 | 586.4 | 0.000 | 20.507 | 22.154 |
+| median | rift-checked | 67.670 | 67.69 | 67.18 | 0.086 | 866.6 | 0.885 | 19.233 | 20.142 |
+
 Reverse-order check:
 
 | Mode | Elapsed s | External real s | User+sys s | GC s | RSS MiB | Rift op s | Evidence |
@@ -3591,15 +3616,21 @@ Interpretation:
   backend is not the current blocker: trusted Streaming was faster than heap in
   that same-run control.
 - Collapsing `ChildBucket` from two heap control objects to one makes the
-  checked full-month path faster in the two usable checked rows collected here:
-  `65.928 s` when checked ran second, and `68.435 s` when checked ran first.
-  The pre-change same-run checked row was `77.947 s`.
+  checked full-month path faster on the same-order 3-run median:
+  `67.670 s` checked versus `73.029 s` heap. This is a `5.359 s`, about
+  `7.3%`, elapsed improvement. Measured GC collection time drops from
+  `0.315 s` to `0.086 s`, so the elapsed win is larger than GC pause-time
+  reduction alone.
+- The result is still noisy: repeat A has checked slower (`75.100 s` checked
+  versus `73.166 s` heap), while the other two same-order rows and the usable
+  reverse-order checked row are faster. Treat the 3-run median as stronger than
+  the earlier single-run result, not as the final full-DEBS claim.
 - The reverse-order heap row is invalid as wall-clock evidence because real
   time was `1871.42 s` while user+sys time was only about `89.32 s`.
-- RSS is not improved by this change in the full-month rows. Checked RSS rose
-  to `866-911 MiB` in these runs even though the closed-slab pool remained
-  capped at `128 MiB`. Do not claim a memory-footprint win from this change.
-- This is still single-run evidence, not a median. It is enough to keep the
-  API simplification because it removes a general checked streaming overhead
-  and passes the safety/runtime tests, but the next full-month claim needs
-  repeated controlled runs.
+- RSS is not improved by this change in the full-month rows. Checked median RSS
+  is `866.6 MiB` versus heap `586.4 MiB`, and one checked repeat reaches
+  `983.9 MiB`, even though the closed-slab pool remains capped at `128 MiB`.
+  Do not claim a memory-footprint win from this change.
+- This is the first median-backed full-month checked DEBS result after the pool
+  cap and `ChildBucket` simplification. It still needs SafeZone controls and a
+  memory-pressure follow-up before becoming a final Phase 5 claim.
