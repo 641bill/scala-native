@@ -132,6 +132,47 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       }
   }
 
+  /** Heap control metadata for one bucket in a parent-owned stream arena.
+   *
+   *  The bucket owns a checked child streaming region. The bucket object is
+   *  parent-captured control metadata; values allocated from its child region
+   *  must be unlinked or consumed before the bucket is closed.
+   */
+  final class StreamBucket private[memory] (
+      private[memory] val child: ChildBucket^,
+      val startSeconds: Long
+  ) {
+    private[memory] var next: StreamBucket = null
+
+    def isOpen: Boolean =
+      child.isOpen
+
+    def isClosed: Boolean =
+      child.isClosed
+  }
+
+  /** Reusable checked stream-bucket arena.
+   *
+   *  This is the general version of the "fine event buckets plus coarser
+   *  rank/output arenas" pattern used by streaming operators. It manages a
+   *  monotonic linked list of child buckets whose start times are rounded down
+   *  to `bucketSeconds`; callers still own the operator-specific cleanup that
+   *  unlinks parent-visible references before closing each bucket.
+   *
+   *  The private list fields are trusted heap metadata. Public operations
+   *  reattach the parent owner token before exposing a bucket or child region.
+   */
+  final class StreamBucketArena private[memory] (
+      val bucketSeconds: Long
+  ) {
+    if (bucketSeconds <= 0L)
+      throw new IllegalArgumentException("bucketSeconds must be positive")
+
+    private[memory] var first: StreamBucket = null
+    private[memory] var last: StreamBucket = null
+    private[memory] var current: StreamBucket = null
+  }
+
   /** A heap object explicitly retained by a live Rift region.
    *
    *  Rift slabs are not scanned by Scala Native's GC. If a region object needs
@@ -950,6 +991,12 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   def childBucket(using parent: StreamingRegion^): ChildBucket^{parent} =
     new ChildBucket(childStreaming)
 
+  /** Opens a parent-captured stream-bucket arena. */
+  def streamBucketArena(bucketSeconds: Long)(using
+      parent: StreamingRegion^
+  ): StreamBucketArena^{parent} =
+    new StreamBucketArena(bucketSeconds).asInstanceOf[StreamBucketArena^{parent}]
+
   /** Tags a region for opt-in benchmark diagnostics.
    *
    *  This does not change allocation or safety behavior. It only lets runtime
@@ -958,6 +1005,14 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    */
   def setDiagnosticFamily(region: RiftRegion^, family: Int): Unit =
     region.setDiagnosticFamily(family)
+
+  /** Tags a stream bucket's child region for opt-in diagnostics. */
+  def setDiagnosticFamily(
+      parent: StreamingRegion^,
+      bucket: StreamBucket^{parent},
+      family: Int
+  ): Unit =
+    setDiagnosticFamily(streamBucketRegion(parent, bucket), family)
 
   /** Returns a child window's region using the parent stream as owner token.
    *
@@ -982,6 +1037,114 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     bucket.checkOpen()
     bucket.region.asInstanceOf[StreamingRegion]
   }
+
+  /** Returns a stream bucket's child region using the parent as owner token. */
+  def streamBucketRegion(
+      parent: StreamingRegion^,
+      bucket: StreamBucket^{parent}
+  ): StreamingRegion^{parent} =
+    childBucketRegion(
+      parent,
+      bucket.child.asInstanceOf[ChildBucket^{parent}]
+    )
+
+  /** Finds or opens the stream bucket containing `timestampSeconds`. */
+  def streamBucketFor(
+      parent: StreamingRegion^,
+      arena: StreamBucketArena^{parent},
+      timestampSeconds: Long
+  ): StreamBucket^{parent} =
+    streamBucketFor(parent, arena, timestampSeconds)(_ => ())
+
+  /** Finds or opens the stream bucket containing `timestampSeconds`.
+   *
+   *  `onOpen` runs only when a new child bucket is created, which lets
+   *  benchmarks tag diagnostics without adding per-event region metadata work.
+   */
+  def streamBucketFor(
+      parent: StreamingRegion^,
+      arena: StreamBucketArena^{parent},
+      timestampSeconds: Long
+  )(onOpen: StreamBucket^{parent} => Unit): StreamBucket^{parent} = {
+    val startSeconds =
+      Math.floorDiv(timestampSeconds, arena.bucketSeconds) * arena.bucketSeconds
+    val current = arena.current
+    if (
+      current != null &&
+      current.startSeconds == startSeconds &&
+      current.isOpen
+    )
+      current.asInstanceOf[StreamBucket^{parent}]
+    else {
+      val child = childBucket(using parent)
+      val arenaBucket: StreamBucket =
+        new StreamBucket(child, startSeconds).asInstanceOf[StreamBucket]
+      if (arena.first == null) {
+        arena.first = arenaBucket
+        arena.last = arenaBucket
+      } else {
+        arena.last.next = arenaBucket
+        arena.last = arenaBucket
+      }
+      arena.current = arenaBucket
+      val bucket = arenaBucket.asInstanceOf[StreamBucket^{parent}]
+      onOpen(bucket)
+      bucket
+    }
+  }
+
+  /** Returns true if `closeStreamBucketsBefore` would close at least one bucket. */
+  def hasStreamBucketsBefore(
+      parent: StreamingRegion^,
+      arena: StreamBucketArena^{parent},
+      cutoffSeconds: Long
+  ): Boolean =
+    arena.first != null &&
+      arena.first.startSeconds + arena.bucketSeconds <= cutoffSeconds
+
+  /** Closes stream buckets whose whole interval is before `cutoffSeconds`.
+   *
+   *  The cleanup callback must remove parent-visible references to bucket-local
+   *  values before the bucket's child region closes.
+   */
+  def closeStreamBucketsBefore(
+      parent: StreamingRegion^,
+      arena: StreamBucketArena^{parent},
+      cutoffSeconds: Long
+  )(cleanup: StreamBucket^{parent} => Unit): Unit =
+    while (hasStreamBucketsBefore(parent, arena, cutoffSeconds)) {
+      val bucket = arena.first.asInstanceOf[StreamBucket^{parent}]
+      arena.first = bucket.next
+      if (arena.first == null) arena.last = null
+      if (arena.current.asInstanceOf[AnyRef] eq bucket.asInstanceOf[AnyRef])
+        arena.current = null
+      closeChildBucket(
+        parent,
+        bucket.child.asInstanceOf[ChildBucket^{parent}]
+      ) {
+        cleanup(bucket)
+        bucket.next = null
+      }
+    }
+
+  /** Closes every bucket in an arena. */
+  def closeAllStreamBuckets(
+      parent: StreamingRegion^,
+      arena: StreamBucketArena^{parent}
+  )(cleanup: StreamBucket^{parent} => Unit): Unit =
+    while (arena.first != null) {
+      val bucket = arena.first.asInstanceOf[StreamBucket^{parent}]
+      arena.first = bucket.next
+      closeChildBucket(
+        parent,
+        bucket.child.asInstanceOf[ChildBucket^{parent}]
+      ) {
+        cleanup(bucket)
+        bucket.next = null
+      }
+    }
+    arena.last = null
+    arena.current = null
 
   /** Closes a child window after caller-owned parent metadata is unlinked.
    *

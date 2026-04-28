@@ -4300,3 +4300,53 @@ Next implementation-facing options:
 - Add static/checked close-discipline tests for the rank-arena shape. The
   current code relies on the sorted-stream invariant and event eviction before
   rank-arena close; the compiler still does not prove that invariant.
+
+## Checked StreamBucketArena API, 2026-04-28
+
+This checkpoint lifts the accepted Q1 window-rank arena pattern into
+`RiftRegion.StreamBucketArena` and migrates Q1 checked rank buckets to that
+framework helper.
+
+What changed:
+
+- `RiftRegion.StreamBucketArena` manages monotonic child buckets whose starts
+  are rounded to a caller-supplied interval.
+- `RiftRegion.streamBucketFor`, `streamBucketRegion`,
+  `closeStreamBucketsBefore`, and `closeAllStreamBuckets` expose the parent
+  owner-token boundary.
+- Q1 checked processing no longer hand-encodes `RankBucket`; it asks the
+  reusable arena for the rank bucket and tags the opened child region for
+  diagnostics.
+
+Validation:
+
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile`
+  passed.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"`
+  passed `65/65`.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"`
+  passed `16/16`.
+- Sample RunBoth `heap`/`rift-checked` outputs matched in
+  `/tmp/debs2015-runboth-stream-bucket-api-sample`.
+- 100k RunBoth `heap`/`rift-checked` outputs matched in
+  `/tmp/debs2015-runboth-stream-bucket-api-100000`.
+
+100k single-run correctness control:
+
+| Mode | Elapsed ms | GC ms | Rift op ms | Q1 process ms | Q2 process ms | Q1 rank created |
+|---|---:|---:|---:|---:|---:|---:|
+| heap | 513.196 | 8.817 | 0.000 | 148.498 | 127.213 | 64672 |
+| rift-checked | 489.514 | 0.079 | 1.528 | 153.595 | 110.926 | 77974 |
+
+Interpretation:
+
+- This is the first reusable checked stream-bucket API slice, not the final
+  rank/window collection abstraction.
+- The API still uses trusted private heap metadata internally, similar to the
+  existing checked containers; public operations reattach the parent owner
+  token before exposing buckets or child regions.
+- The 100k row is a correctness/control run after migration, not a median or a
+  new DEBS headline claim.
+- Next work should build higher-level checked rank/window collections on top
+  of this primitive and investigate Q2 checked overhead under identical
+  operation counts.

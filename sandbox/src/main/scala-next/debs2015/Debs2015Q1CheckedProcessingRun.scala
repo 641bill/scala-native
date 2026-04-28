@@ -111,12 +111,6 @@ object Debs2015Q1CheckedProcessingRunner {
       var head: RouteEvent^{child.region} = null
       var tail: RouteEvent^{child.region} = null
     }
-    final class RankBucket(
-        val child: RiftRegion.ChildBucket^{stream},
-        val startSeconds: Long,
-        var next: RankBucket^{stream}
-    )
-
     def allocateLongArray(size: Int): Array[Long]^{stream} =
       RiftRegion.alloc(new Array[Long](size))
 
@@ -538,9 +532,8 @@ object Debs2015Q1CheckedProcessingRunner {
       private var firstBucket: Bucket^{stream} = null
       private var lastBucket: Bucket^{stream} = null
       private var currentBucket: Bucket^{stream} = null
-      private var firstRankBucket: RankBucket^{stream} = null
-      private var lastRankBucket: RankBucket^{stream} = null
-      private var currentRankBucket: RankBucket^{stream} = null
+      private val rankBuckets: RiftRegion.StreamBucketArena^{stream} =
+        RiftRegion.streamBucketArena(RankBucketSeconds)
       private var nextSeq = 0L
 
       def process(trip: Trip): Int = {
@@ -559,7 +552,7 @@ object Debs2015Q1CheckedProcessingRunner {
             val bucketRegion = bucket.child.region
             val rankBucket = rankBucketFor(trip.dropoffSeconds)
             val rankRegion =
-              RiftRegion.childBucketRegion(stream, rankBucket.child)
+              RiftRegion.streamBucketRegion(stream, rankBucket)
             val event: bucket.RouteEvent^{bucketRegion} =
               RiftRegion.alloc(
                 new bucket.RouteEvent(key, null)
@@ -603,17 +596,9 @@ object Debs2015Q1CheckedProcessingRunner {
             bucket.next = null
           }
         }
-        while (firstRankBucket != null) {
-          val bucket = firstRankBucket
-          firstRankBucket = bucket.next
-          RiftRegion.closeChildBucket(stream, bucket.child) {
-            bucket.next = null
-          }
-        }
         lastBucket = null
         currentBucket = null
-        lastRankBucket = null
-        currentRankBucket = null
+        RiftRegion.closeAllStreamBuckets(stream, rankBuckets) { _ => () }
       }
 
       private def bucketFor(dropoffSeconds: Long): Bucket^{stream} = {
@@ -642,33 +627,17 @@ object Debs2015Q1CheckedProcessingRunner {
         }
       }
 
-      private def rankBucketFor(dropoffSeconds: Long): RankBucket^{stream} = {
-        val startSeconds =
-          (dropoffSeconds / RankBucketSeconds) * RankBucketSeconds
-        if (
-          currentRankBucket != null &&
-          currentRankBucket.startSeconds == startSeconds
-        ) currentRankBucket
-        else {
-          val child = RiftRegion.childBucket
-          DebsRegionFamilies.setChildBucket(
-            stream,
-            child,
-            DebsRegionFamilies.Q1Window
-          )
-          val bucket: RankBucket^{stream} =
-            new RankBucket(child, startSeconds, null)
-          if (firstRankBucket == null) {
-            firstRankBucket = bucket
-            lastRankBucket = bucket
-          } else {
-            lastRankBucket.next = bucket
-            lastRankBucket = bucket
-          }
-          currentRankBucket = bucket
-          bucket
+      private def rankBucketFor(
+          dropoffSeconds: Long
+      ): RiftRegion.StreamBucket^{stream} =
+        RiftRegion.streamBucketFor(stream, rankBuckets, dropoffSeconds) {
+          bucket =>
+            RiftRegion.setDiagnosticFamily(
+              stream,
+              bucket,
+              DebsRegionFamilies.Q1Window
+            )
         }
-      }
 
       private def evictBefore(cutoffSeconds: Long): Unit = {
         while (firstBucket != null && firstBucket.startSeconds < cutoffSeconds) {
@@ -693,23 +662,20 @@ object Debs2015Q1CheckedProcessingRunner {
 
       private def closeRankBucketsBefore(cutoffSeconds: Long): Unit = {
         if (
-          firstRankBucket == null ||
-          firstRankBucket.startSeconds + RankBucketSeconds > cutoffSeconds
-        ) return
+          !RiftRegion.hasStreamBucketsBefore(
+            stream,
+            rankBuckets,
+            cutoffSeconds
+          )
+        )
+          return
 
         routes.clearResult()
-        while (
-          firstRankBucket != null &&
-          firstRankBucket.startSeconds + RankBucketSeconds <= cutoffSeconds
-        ) {
-          val bucket = firstRankBucket
-          firstRankBucket = bucket.next
-          if (firstRankBucket == null) lastRankBucket = null
-          if (currentRankBucket eq bucket) currentRankBucket = null
-          RiftRegion.closeChildBucket(stream, bucket.child) {
-            bucket.next = null
-          }
-        }
+        RiftRegion.closeStreamBucketsBefore(
+            stream,
+            rankBuckets,
+            cutoffSeconds
+        )(_ => ())
       }
     }
 

@@ -318,6 +318,51 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def streamBucketArenaReusesAndClosesBuckets(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int)
+
+        val arena = RiftRegion.streamBucketArena(10)
+        val first = RiftRegion.streamBucketFor(stream, arena, 7L)
+        val same = RiftRegion.streamBucketFor(stream, arena, 9L)
+        val next = RiftRegion.streamBucketFor(stream, arena, 12L)
+        assertTrue(first.asInstanceOf[AnyRef] eq same.asInstanceOf[AnyRef])
+        assertFalse(first.asInstanceOf[AnyRef] eq next.asInstanceOf[AnyRef])
+        assertEquals(0L, first.startSeconds)
+        assertEquals(10L, next.startSeconds)
+
+        val firstRegion = RiftRegion.streamBucketRegion(stream, first)
+        val event: Event^{stream} =
+          RiftRegion.alloc(new Event(41))(using firstRegion)
+        var retained: Event^{stream} = event
+
+        assertFalse(RiftRegion.hasStreamBucketsBefore(stream, arena, 9L))
+        assertTrue(RiftRegion.hasStreamBucketsBefore(stream, arena, 10L))
+
+        RiftRegion.closeStreamBucketsBefore(stream, arena, 10L) { bucket =>
+          if (bucket.startSeconds == 0L) retained = null
+        }
+
+        assertTrue(first.isClosed)
+        assertTrue(next.isOpen)
+        assertThrows(
+          classOf[IllegalStateException],
+          () => RiftRegion.streamBucketRegion(stream, first)
+        )
+
+        RiftRegion.closeAllStreamBuckets(stream, arena) { _ => () }
+        assertTrue(next.isClosed)
+        42
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def scopedRegionAllowsMutableLinkedListBuilder(): Unit = {
     RiftRegion.init(1)
     try {

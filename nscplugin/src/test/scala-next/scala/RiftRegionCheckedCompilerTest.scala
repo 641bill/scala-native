@@ -589,6 +589,43 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def streamBucketArenaCanAllocateRegionObjects(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    val arena = RiftRegion.streamBucketArena(60)
+      |    val bucket = RiftRegion.streamBucketFor(stream, arena, 42L)
+      |    val child = RiftRegion.streamBucketRegion(stream, bucket)
+      |    val event: Event^{stream} =
+      |      RiftRegion.alloc(new Event(41))(using child)
+      |    var retained: Event^{stream} = event
+      |
+      |    RiftRegion.closeStreamBucketsBefore(stream, arena, 60L) { _ =>
+      |      retained = null
+      |    }
+      |
+      |    42
+      |  }
+      |""".stripMargin)
+
+  @Test def streamBucketArenaCannotEscapeStream(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |def bad(): AnyRef =
+      |  RiftRegion.streaming { stream ?=>
+      |    RiftRegion.streamBucketArena(60)
+      |  }
+      |""".stripMargin,
+      "Capability `stream` outlives its scope"
+    )
+
   @Test def objectBufferCannotStoreInnerScopedValue(): Unit =
     assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
