@@ -224,6 +224,124 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
   }
 
+  /** Growable max-priority queue backed by region-owned arrays.
+   *
+   *  This is the first reusable checked ranking primitive. The queue object is
+   *  heap control metadata captured by the owning region; stored values and
+   *  backing arrays are region-owned. Priorities are primitive metadata kept in
+   *  a parallel region-owned `Long` array, so stream operators can express
+   *  top-k/ranking state without each benchmark hand-rolling its own checked
+   *  heap arrays.
+   */
+  final class RegionPriorityQueue[T <: Object] private[memory] (
+      private var items: Array[Object],
+      private var priorities: Array[Long]
+  ) {
+    private var used = 0
+
+    def length: Int = used
+
+    def capacity: Int = items.length
+
+    private[memory] def pushTrusted(
+        owner: RiftRegion^,
+        value: Object,
+        priority: Long
+    ): Unit = {
+      if (used >= items.length) growTrusted(owner)
+      val index = used
+      used += 1
+      items(index) = value
+      priorities(index) = priority
+      siftUp(index)
+    }
+
+    private[memory] def peekTrusted(): Object = {
+      if (used == 0)
+        throw new NoSuchElementException("Rift RegionPriorityQueue is empty")
+      items(0)
+    }
+
+    private[memory] def peekPriorityTrusted(): Long = {
+      if (used == 0)
+        throw new NoSuchElementException("Rift RegionPriorityQueue is empty")
+      priorities(0)
+    }
+
+    private[memory] def popTrusted(): Object = {
+      if (used == 0)
+        throw new NoSuchElementException("Rift RegionPriorityQueue is empty")
+
+      val result = items(0)
+      val last = used - 1
+      used = last
+      if (last > 0) {
+        items(0) = items(last)
+        priorities(0) = priorities(last)
+        items(last) = null
+        priorities(last) = 0L
+        siftDown(0)
+      } else {
+        items(0) = null
+        priorities(0) = 0L
+      }
+      result
+    }
+
+    private def growTrusted(owner: RiftRegion^): Unit = {
+      val oldItems = items
+      val oldPriorities = priorities
+      val nextCapacity =
+        if (oldItems.length == 0) 1 else oldItems.length * 2
+      val nextItems =
+        owner.alloc(new Array[Object](nextCapacity)).asInstanceOf[Array[Object]]
+      val nextPriorities = owner.alloc(new Array[Long](nextCapacity))
+
+      var i = 0
+      while (i < used) {
+        nextItems(i) = oldItems(i)
+        nextPriorities(i) = oldPriorities(i)
+        i += 1
+      }
+      items = nextItems
+      priorities = nextPriorities
+    }
+
+    private def siftUp(start: Int): Unit = {
+      var child = start
+      while (child > 0) {
+        val parent = (child - 1) >>> 1
+        if (priorities(parent) >= priorities(child)) return
+        swap(parent, child)
+        child = parent
+      }
+    }
+
+    private def siftDown(start: Int): Unit = {
+      var parent = start
+      while (true) {
+        val left = (parent << 1) + 1
+        if (left >= used) return
+        val right = left + 1
+        var best = left
+        if (right < used && priorities(right) > priorities(left))
+          best = right
+        if (priorities(parent) >= priorities(best)) return
+        swap(parent, best)
+        parent = best
+      }
+    }
+
+    private def swap(left: Int, right: Int): Unit = {
+      val leftItem = items(left)
+      val leftPriority = priorities(left)
+      items(left) = items(right)
+      priorities(left) = priorities(right)
+      items(right) = leftItem
+      priorities(right) = leftPriority
+    }
+  }
+
   /** Snapshot of the trusted runtime-epoch escape path.
    *
    *  This is the dynamic Yak-style side of Rift's comparison story, not the
@@ -711,6 +829,17 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     new RegionBuffer[T](items)
   }
 
+  /** Allocates a checked max-priority queue in the implicit region. */
+  def regionPriorityQueue[T <: Object](initialCapacity: Int = 4)(using
+      region: RiftRegion^
+  ): RegionPriorityQueue[T]^{region} = {
+    val capacity = if (initialCapacity <= 0) 1 else initialCapacity
+    val items: Array[Object] =
+      alloc(new Array[Object](capacity)).asInstanceOf[Array[Object]]
+    val priorities: Array[Long] = alloc(new Array[Long](capacity))
+    new RegionPriorityQueue[T](items, priorities)
+  }
+
   /** Appends `value` to a checked object buffer owned by `owner`. */
   def append[T <: Object](
       owner: RiftRegion^,
@@ -764,6 +893,50 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   ): Int =
     buffer.capacity
 
+  /** Pushes `value` into a checked max-priority queue owned by `owner`. */
+  def push[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionPriorityQueue[T]^{owner},
+      value: T^{owner},
+      priority: Long
+  ): Unit =
+    queue.pushTrusted(owner, value.asInstanceOf[Object], priority)
+
+  /** Reads the highest-priority value without removing it. */
+  def peek[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionPriorityQueue[T]^{owner}
+  ): T^{owner} =
+    queue.peekTrusted().asInstanceOf[T^{owner}]
+
+  /** Reads the highest priority without removing its value. */
+  def peekPriority[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionPriorityQueue[T]^{owner}
+  ): Long =
+    queue.peekPriorityTrusted()
+
+  /** Removes and returns the highest-priority value. */
+  def pop[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionPriorityQueue[T]^{owner}
+  ): T^{owner} =
+    queue.popTrusted().asInstanceOf[T^{owner}]
+
+  /** Returns the number of elements in a checked max-priority queue. */
+  def length[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionPriorityQueue[T]^{owner}
+  ): Int =
+    queue.length
+
+  /** Returns the current backing capacity of a checked max-priority queue. */
+  def capacity[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionPriorityQueue[T]^{owner}
+  ): Int =
+    queue.capacity
+
   /** Owner-token method syntax for checked object buffers.
    *
    *  These methods keep the same explicit owner in the type signature as the
@@ -810,6 +983,40 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     @targetName("regionBufferCapacity")
     def capacity[T <: Object](buffer: RegionBuffer[T]^{owner}): Int =
       RiftRegion.capacity(owner, buffer)
+
+    @targetName("pushToRegionPriorityQueue")
+    def push[T <: Object](
+        queue: RegionPriorityQueue[T]^{owner},
+        value: T^{owner},
+        priority: Long
+    ): Unit =
+      queue.pushTrusted(owner, value.asInstanceOf[Object], priority)
+
+    @targetName("peekFromRegionPriorityQueue")
+    def peek[T <: Object](
+        queue: RegionPriorityQueue[T]^{owner}
+    ): T^{owner} =
+      RiftRegion.peek(owner, queue)
+
+    @targetName("peekPriorityFromRegionPriorityQueue")
+    def peekPriority[T <: Object](
+        queue: RegionPriorityQueue[T]^{owner}
+    ): Long =
+      RiftRegion.peekPriority(owner, queue)
+
+    @targetName("popFromRegionPriorityQueue")
+    def pop[T <: Object](
+        queue: RegionPriorityQueue[T]^{owner}
+    ): T^{owner} =
+      RiftRegion.pop(owner, queue)
+
+    @targetName("regionPriorityQueueLength")
+    def length[T <: Object](queue: RegionPriorityQueue[T]^{owner}): Int =
+      RiftRegion.length(owner, queue)
+
+    @targetName("regionPriorityQueueCapacity")
+    def capacity[T <: Object](queue: RegionPriorityQueue[T]^{owner}): Int =
+      RiftRegion.capacity(owner, queue)
 
   /** Allocates an object in the implicit Rift region. */
   inline def alloc[T <: AnyRef](inline obj: T)(using
