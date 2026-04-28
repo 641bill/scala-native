@@ -6,6 +6,7 @@ import scala.language.experimental.captureChecking
 
 import scala.collection.mutable
 import scala.scalanative.memory.RiftRegion
+import scala.scalanative.runtime.SafeZoneAllocator
 
 final case class ProfitableArea(
     cellKey: Int,
@@ -22,40 +23,31 @@ trait Q2Engine {
   def close(): Unit = ()
 }
 
-final class Q2Heap extends Q2BucketedWindow(useRegions = false, RiftRegion.HPZone)
+final class Q2Heap
+    extends Q2BucketedWindow(DebsAllocator.Heap, RiftRegion.HPZone)
 
 final class Q2RiftWindows(kind: Int)
-    extends Q2BucketedWindow(useRegions = true, kind)
+    extends Q2BucketedWindow(DebsAllocator.Rift, kind)
+
+final class Q2SafeZone
+    extends Q2BucketedWindow(DebsAllocator.SafeZoneKind, RiftRegion.HPZone)
 
 private abstract class Q2BucketedWindow(
-    useRegions: Boolean,
-    regionKind: Int
+    allocatorKind: Int,
+    riftKind: Int
 ) extends Q2Engine {
   import Q2Support._
 
   private val profitBuckets = mutable.Queue.empty[ProfitBucket]
   private val emptyBuckets = mutable.Queue.empty[EmptyBucket]
-  private val rankRegion =
-    if (useRegions) RiftRegion.open(regionKind) else null
-  private val taxiIds = new TaxiIds(useRegions, rankRegion)
-  private val profitStatsByCell =
-    if (useRegions) rankRegion.alloc(new Array[ProfitStats](CellKeyCapacity))
-    else new Array[ProfitStats](CellKeyCapacity)
-  private val emptyCounts =
-    if (useRegions) rankRegion.alloc(new Array[Int](CellKeyCapacity))
-    else new Array[Int](CellKeyCapacity)
-  private val latestByCell =
-    if (useRegions) rankRegion.alloc(new Array[Long](CellKeyCapacity))
-    else new Array[Long](CellKeyCapacity)
-  private val rankByCell =
-    if (useRegions) rankRegion.alloc(new Array[ProfitableArea](CellKeyCapacity))
-    else new Array[ProfitableArea](CellKeyCapacity)
-  private val heapIndexByCell =
-    if (useRegions) rankRegion.alloc(new Array[Int](CellKeyCapacity))
-    else new Array[Int](CellKeyCapacity)
-  private val topIndexByCell =
-    if (useRegions) rankRegion.alloc(new Array[Int](CellKeyCapacity))
-    else new Array[Int](CellKeyCapacity)
+  private val rankAllocator = openAllocator()
+  private val taxiIds = new TaxiIds(rankAllocator)
+  private val profitStatsByCell = allocateProfitStatsArray(CellKeyCapacity)
+  private val emptyCounts = allocateIntArray(CellKeyCapacity)
+  private val latestByCell = allocateLongArray(CellKeyCapacity)
+  private val rankByCell = allocateAreaArray(CellKeyCapacity)
+  private val heapIndexByCell = allocateIntArray(CellKeyCapacity)
+  private val topIndexByCell = allocateIntArray(CellKeyCapacity)
   private var heapAreas = allocateAreaArray(InitialAreaRankCapacity)
   private var heapCellKeys = allocateIntArray(InitialAreaRankCapacity)
   private val topCandidateHeap = allocateIntArray(TopCandidateCapacity)
@@ -120,9 +112,7 @@ private abstract class Q2BucketedWindow(
     while (emptyBuckets.nonEmpty)
       closeEmptyBucket(emptyBuckets.dequeue())
 
-    if (useRegions) {
-      rankRegion.close()
-    }
+    rankAllocator.close()
     currentProfitBucket = null
     currentEmptyBucket = null
   }
@@ -250,8 +240,8 @@ private abstract class Q2BucketedWindow(
     if (currentProfitBucket != null && currentProfitBucket.startSeconds == dropoffSeconds)
       currentProfitBucket
     else {
-      val region = if (useRegions) RiftRegion.open(regionKind) else null
-      val bucket = new ProfitBucket(dropoffSeconds, region, null)
+      val allocator = openAllocator()
+      val bucket = new ProfitBucket(dropoffSeconds, allocator, null)
       profitBuckets.enqueue(bucket)
       currentProfitBucket = bucket
       bucket
@@ -262,22 +252,35 @@ private abstract class Q2BucketedWindow(
     if (currentEmptyBucket != null && currentEmptyBucket.startSeconds == dropoffSeconds)
       currentEmptyBucket
     else {
-      val region = if (useRegions) RiftRegion.open(regionKind) else null
-      val bucket = new EmptyBucket(dropoffSeconds, region, null)
+      val allocator = openAllocator()
+      val bucket = new EmptyBucket(dropoffSeconds, allocator, null)
       emptyBuckets.enqueue(bucket)
       currentEmptyBucket = bucket
       bucket
     }
   }
 
+  private def openAllocator(): DebsAllocator =
+    DebsAllocator.open(allocatorKind, riftKind)
+
   private def allocateProfitEntry(
       bucket: ProfitBucket,
       cellKey: Int,
       profit: Double
   ): ProfitEntry =
-    if (useRegions)
-      bucket.region.alloc(new ProfitEntry(cellKey, profit, bucket.head))
-    else new ProfitEntry(cellKey, profit, bucket.head)
+    bucket.allocator.kind match {
+      case DebsAllocator.Rift =>
+        bucket.allocator.riftRegion.alloc(
+          new ProfitEntry(cellKey, profit, bucket.head)
+        )
+      case DebsAllocator.SafeZoneKind =>
+        SafeZoneAllocator
+          .allocate(bucket.allocator.safeZone,
+                    new ProfitEntry(cellKey, profit, bucket.head))
+          .asInstanceOf[ProfitEntry]
+      case _ =>
+        new ProfitEntry(cellKey, profit, bucket.head)
+    }
 
   private def allocateEmptyEntry(
       bucket: EmptyBucket,
@@ -285,9 +288,19 @@ private abstract class Q2BucketedWindow(
       taxiKey: Int,
       cellKey: Int
   ): EmptyEntry =
-    if (useRegions)
-      bucket.region.alloc(new EmptyEntry(seq, taxiKey, cellKey, bucket.head))
-    else new EmptyEntry(seq, taxiKey, cellKey, bucket.head)
+    bucket.allocator.kind match {
+      case DebsAllocator.Rift =>
+        bucket.allocator.riftRegion.alloc(
+          new EmptyEntry(seq, taxiKey, cellKey, bucket.head)
+        )
+      case DebsAllocator.SafeZoneKind =>
+        SafeZoneAllocator
+          .allocate(bucket.allocator.safeZone,
+                    new EmptyEntry(seq, taxiKey, cellKey, bucket.head))
+          .asInstanceOf[EmptyEntry]
+      case _ =>
+        new EmptyEntry(seq, taxiKey, cellKey, bucket.head)
+    }
 
   private def allocateProfitableArea(
       cellKey: Int,
@@ -298,8 +311,31 @@ private abstract class Q2BucketedWindow(
   ): ProfitableArea =
     {
       val area =
-        if (useRegions)
-          rankRegion.alloc(
+        rankAllocator.kind match {
+          case DebsAllocator.Rift =>
+            rankAllocator.riftRegion.alloc(
+              new ProfitableArea(
+                cellKey,
+                emptyTaxis,
+                medianProfit,
+                profitability,
+                latestSeq
+              )
+            )
+          case DebsAllocator.SafeZoneKind =>
+            SafeZoneAllocator
+              .allocate(
+                rankAllocator.safeZone,
+                new ProfitableArea(
+                  cellKey,
+                  emptyTaxis,
+                  medianProfit,
+                  profitability,
+                  latestSeq
+                )
+              )
+              .asInstanceOf[ProfitableArea]
+          case _ =>
             new ProfitableArea(
               cellKey,
               emptyTaxis,
@@ -307,34 +343,82 @@ private abstract class Q2BucketedWindow(
               profitability,
               latestSeq
             )
-          )
-        else
-        new ProfitableArea(
-          cellKey,
-          emptyTaxis,
-          medianProfit,
-          profitability,
-          latestSeq
-        )
+        }
       Debs2015Counters.recordQ2RankCreated()
       area
     }
 
   private def allocateProfitStats(): ProfitStats =
-    if (useRegions) rankRegion.alloc(new ProfitStats(useRegions, rankRegion))
-    else new ProfitStats(useRegions = false, null)
+    rankAllocator.kind match {
+      case DebsAllocator.Rift =>
+        rankAllocator.riftRegion.alloc(new ProfitStats(rankAllocator))
+      case DebsAllocator.SafeZoneKind =>
+        SafeZoneAllocator
+          .allocate(rankAllocator.safeZone, new ProfitStats(rankAllocator))
+          .asInstanceOf[ProfitStats]
+      case _ =>
+        new ProfitStats(rankAllocator)
+    }
 
   private def allocateEmptyEntryArray(size: Int): Array[EmptyEntry] =
-    if (useRegions) rankRegion.alloc(new Array[EmptyEntry](size))
-    else new Array[EmptyEntry](size)
+    rankAllocator.kind match {
+      case DebsAllocator.Rift =>
+        rankAllocator.riftRegion.alloc(new Array[EmptyEntry](size))
+      case DebsAllocator.SafeZoneKind =>
+        SafeZoneAllocator
+          .allocate(rankAllocator.safeZone, new Array[EmptyEntry](size))
+          .asInstanceOf[Array[EmptyEntry]]
+      case _ =>
+        new Array[EmptyEntry](size)
+    }
 
   private def allocateAreaArray(size: Int): Array[ProfitableArea] =
-    if (useRegions) rankRegion.alloc(new Array[ProfitableArea](size))
-    else new Array[ProfitableArea](size)
+    rankAllocator.kind match {
+      case DebsAllocator.Rift =>
+        rankAllocator.riftRegion.alloc(new Array[ProfitableArea](size))
+      case DebsAllocator.SafeZoneKind =>
+        SafeZoneAllocator
+          .allocate(rankAllocator.safeZone, new Array[ProfitableArea](size))
+          .asInstanceOf[Array[ProfitableArea]]
+      case _ =>
+        new Array[ProfitableArea](size)
+    }
 
   private def allocateIntArray(size: Int): Array[Int] =
-    if (useRegions) rankRegion.alloc(new Array[Int](size))
-    else new Array[Int](size)
+    rankAllocator.kind match {
+      case DebsAllocator.Rift =>
+        rankAllocator.riftRegion.alloc(new Array[Int](size))
+      case DebsAllocator.SafeZoneKind =>
+        SafeZoneAllocator
+          .allocate(rankAllocator.safeZone, new Array[Int](size))
+          .asInstanceOf[Array[Int]]
+      case _ =>
+        new Array[Int](size)
+    }
+
+  private def allocateLongArray(size: Int): Array[Long] =
+    rankAllocator.kind match {
+      case DebsAllocator.Rift =>
+        rankAllocator.riftRegion.alloc(new Array[Long](size))
+      case DebsAllocator.SafeZoneKind =>
+        SafeZoneAllocator
+          .allocate(rankAllocator.safeZone, new Array[Long](size))
+          .asInstanceOf[Array[Long]]
+      case _ =>
+        new Array[Long](size)
+    }
+
+  private def allocateProfitStatsArray(size: Int): Array[ProfitStats] =
+    rankAllocator.kind match {
+      case DebsAllocator.Rift =>
+        rankAllocator.riftRegion.alloc(new Array[ProfitStats](size))
+      case DebsAllocator.SafeZoneKind =>
+        SafeZoneAllocator
+          .allocate(rankAllocator.safeZone, new Array[ProfitStats](size))
+          .asInstanceOf[Array[ProfitStats]]
+      case _ =>
+        new Array[ProfitStats](size)
+    }
 
   private def profitStats(cellKey: Int): ProfitStats =
     profitStatsByCell(cellKey)
@@ -434,9 +518,7 @@ private abstract class Q2BucketedWindow(
     else {
       var result = resultArrays(size)
       if (result == null) {
-        result =
-          if (useRegions) rankRegion.alloc(new Array[ProfitableArea](size))
-          else new Array[ProfitableArea](size)
+        result = allocateAreaArray(size)
         resultArrays(size) = result
         Debs2015Counters.recordQ2ResultArrayAlloc(size)
       }
@@ -601,23 +683,23 @@ private abstract class Q2BucketedWindow(
 
   private def closeProfitBucket(bucket: ProfitBucket): Unit = {
     bucket.head = null
-    if (useRegions) bucket.region.close()
+    bucket.allocator.close()
   }
 
   private def closeEmptyBucket(bucket: EmptyBucket): Unit = {
     bucket.head = null
-    if (useRegions) bucket.region.close()
+    bucket.allocator.close()
   }
 
   private final class ProfitBucket(
       val startSeconds: Long,
-      val region: RiftRegion,
+      val allocator: DebsAllocator,
       var head: ProfitEntry
   )
 
   private final class EmptyBucket(
       val startSeconds: Long,
-      val region: RiftRegion,
+      val allocator: DebsAllocator,
       var head: EmptyEntry
   )
 
@@ -640,8 +722,7 @@ private abstract class Q2BucketedWindow(
   // lower is a max-heap and upper is a min-heap; entries carry their heap/index
   // so window eviction can remove them without scanning a cell list.
   private final class ProfitStats(
-      useRegions: Boolean,
-      region: RiftRegion
+      allocator: DebsAllocator
   ) {
     private var lower = allocateEntryArray(InitialMedianHeapCapacity)
     private var upper = allocateEntryArray(InitialMedianHeapCapacity)
@@ -844,8 +925,16 @@ private abstract class Q2BucketedWindow(
     }
 
     private def allocateEntryArray(size: Int): Array[ProfitEntry] =
-      if (useRegions) region.alloc(new Array[ProfitEntry](size))
-      else new Array[ProfitEntry](size)
+      allocator.kind match {
+        case DebsAllocator.Rift =>
+          allocator.riftRegion.alloc(new Array[ProfitEntry](size))
+        case DebsAllocator.SafeZoneKind =>
+          SafeZoneAllocator
+            .allocate(allocator.safeZone, new Array[ProfitEntry](size))
+            .asInstanceOf[Array[ProfitEntry]]
+        case _ =>
+          new Array[ProfitEntry](size)
+      }
 
     private def compareProfit(left: ProfitEntry, right: ProfitEntry): Int =
       java.lang.Double.compare(left.profit, right.profit)
@@ -943,8 +1032,7 @@ object Q2Support {
   }
 
   private[debs2015] final class TaxiIds(
-      useRegions: Boolean,
-      region: RiftRegion
+      allocator: DebsAllocator
   ) {
     private var buckets = allocateEntryArray(InitialTaxiIdTableCapacity)
     private var nextId = 0
@@ -1009,13 +1097,29 @@ object Q2Support {
       hash & (buckets.length - 1)
 
     private def allocateEntryArray(size: Int): Array[TaxiIdEntry] =
-      if (useRegions) region.alloc(new Array[TaxiIdEntry](size))
-      else new Array[TaxiIdEntry](size)
+      allocator.kind match {
+        case DebsAllocator.Rift =>
+          allocator.riftRegion.alloc(new Array[TaxiIdEntry](size))
+        case DebsAllocator.SafeZoneKind =>
+          SafeZoneAllocator
+            .allocate(allocator.safeZone, new Array[TaxiIdEntry](size))
+            .asInstanceOf[Array[TaxiIdEntry]]
+        case _ =>
+          new Array[TaxiIdEntry](size)
+      }
 
     private def allocateTaxiId(trip: Trip): Array[Byte] = {
       val bytes =
-        if (useRegions) region.alloc(new Array[Byte](trip.taxiIdLength))
-        else new Array[Byte](trip.taxiIdLength)
+        allocator.kind match {
+          case DebsAllocator.Rift =>
+            allocator.riftRegion.alloc(new Array[Byte](trip.taxiIdLength))
+          case DebsAllocator.SafeZoneKind =>
+            SafeZoneAllocator
+              .allocate(allocator.safeZone, new Array[Byte](trip.taxiIdLength))
+              .asInstanceOf[Array[Byte]]
+          case _ =>
+            new Array[Byte](trip.taxiIdLength)
+        }
       trip.copyTaxiIdTo(bytes)
       bytes
     }
@@ -1026,8 +1130,16 @@ object Q2Support {
         id: Int,
         next: TaxiIdEntry
     ): TaxiIdEntry =
-      if (useRegions) region.alloc(new TaxiIdEntry(hash, taxiId, id, next))
-      else new TaxiIdEntry(hash, taxiId, id, next)
+      allocator.kind match {
+        case DebsAllocator.Rift =>
+          allocator.riftRegion.alloc(new TaxiIdEntry(hash, taxiId, id, next))
+        case DebsAllocator.SafeZoneKind =>
+          SafeZoneAllocator
+            .allocate(allocator.safeZone, new TaxiIdEntry(hash, taxiId, id, next))
+            .asInstanceOf[TaxiIdEntry]
+        case _ =>
+          new TaxiIdEntry(hash, taxiId, id, next)
+      }
   }
 
   private final class TaxiIdEntry(

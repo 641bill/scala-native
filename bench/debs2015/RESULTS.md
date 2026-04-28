@@ -3943,3 +3943,108 @@ Interpretation:
 - Do not pursue one child region per route as the next Q1 optimization. A
   better design needs either arena-sharing among active routes or region-backed
   rank/output snapshots without creating a region per route.
+
+## SafeZone RunBoth Control
+
+Date: 2026-04-28
+
+Purpose:
+
+- Add a fair closeable SafeZone DEBS mode for Q1/Q2 window and ranking data
+  structures.
+- Keep the heap/SafeZone/Rift logical query program aligned. Heap uses ordinary
+  `new`; SafeZone uses the same allocation sites with `SafeZoneAllocator`;
+  checked Rift uses the existing checked processors.
+- Separate current SafeZone roots bookkeeping (`SAFEZONE_ROOTS_MODE=0`) from
+  the improved roots baseline (`SAFEZONE_ROOTS_MODE=1`).
+
+Implementation note:
+
+- SafeZone now has explicit `SafeZone.open()` / `SafeZone.close(zone)` helpers
+  for benchmark controls with event-window lifetimes. Lexical `SafeZone { ... }`
+  remains preferred when lexical scope is enough.
+- `Q1SafeZone` and `Q2SafeZone` use closeable SafeZones for rank/control
+  lifetime and per-timestamp window buckets. RunBoth `safezone` mode keeps the
+  existing heap input/output/snapshot buffers; this first control isolates Q1/Q2
+  data-structure placement, not input/output buffer placement.
+- This is a single-run control at each input size, not a median-backed headline.
+
+Commands:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" compile
+
+DEBS2015_BOTH_MODES="heap safezone rift-checked" \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+SAFEZONE_ROOTS_MODE=0 \
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap safezone rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-safezone-current-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+SAFEZONE_ROOTS_MODE=1 \
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap safezone rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-safezone-improved-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+SAFEZONE_ROOTS_MODE=0 \
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap safezone rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-safezone-current-1000000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+SAFEZONE_ROOTS_MODE=1 \
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap safezone rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-safezone-improved-1000000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+All output comparisons matched heap after stripping only the measured latency
+column.
+
+Single-run rows:
+
+| Input | SafeZone roots mode | Mode | Elapsed ms | Real s | GC ms | RSS MiB | Q1 process ms | Q2 process ms | Close ms | Rift op ms |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100k | 0 | heap | 456.717 | 0.46 | 7.466 | 52.9 | 128.544 | 108.991 | 4.556 | 0.000 |
+| 100k | 0 | safezone | 471.189 | 0.47 | 6.388 | 40.4 | 142.277 | 116.189 | 6.672 | 0.000 |
+| 100k | 0 | rift-checked | 434.309 | 0.43 | 0.073 | 32.4 | 131.790 | 100.088 | 0.362 | 1.132 |
+| 100k | 1 | heap | 448.823 | 0.45 | 7.475 | 52.9 | 129.081 | 110.789 | 4.754 | 0.000 |
+| 100k | 1 | safezone | 455.314 | 0.45 | 6.257 | 40.4 | 137.516 | 109.453 | 5.498 | 0.000 |
+| 100k | 1 | rift-checked | 435.916 | 0.43 | 0.065 | 32.4 | 132.339 | 100.756 | 0.737 | 1.172 |
+| 1M | 0 | heap | 4394.733 | 4.40 | 18.960 | 153.7 | 1276.806 | 1091.211 | 6.738 | 0.000 |
+| 1M | 0 | safezone | 5078.097 | 5.08 | 53.805 | 103.1 | 1456.781 | 1476.210 | 113.514 | 0.000 |
+| 1M | 0 | rift-checked | 4264.676 | 4.26 | 2.066 | 63.6 | 1302.254 | 1037.664 | 1.457 | 5.913 |
+| 1M | 1 | heap | 4308.667 | 4.31 | 19.071 | 153.7 | 1269.144 | 1060.829 | 5.621 | 0.000 |
+| 1M | 1 | safezone | 4946.909 | 4.95 | 57.926 | 103.1 | 1423.601 | 1449.755 | 33.951 | 0.000 |
+| 1M | 1 | rift-checked | 4211.395 | 4.21 | 2.280 | 63.6 | 1278.963 | 1009.449 | 0.817 | 5.645 |
+
+Interpretation:
+
+- This closes the previous "SafeZone DEBS control missing" gap at the level of
+  a working same-shape benchmark mode.
+- SafeZone lowers RSS versus heap on the 1M bounded input (`153.7 MiB` heap to
+  `103.1 MiB` SafeZone), but it is slower than heap in both roots modes in this
+  single-run control.
+- `SAFEZONE_ROOTS_MODE=1` improves SafeZone close time materially on 1M
+  (`113.5 ms` to `34.0 ms`) but Q1/Q2 processing remains slower than heap and
+  checked Rift. This suggests the DEBS SafeZone gap is not only root removal;
+  allocation/copy/rooting overhead in the SafeZone object path still matters.
+- Checked Rift remains the best row here on elapsed time and RSS, but these are
+  not medians. The next evidence step is a 3-run 1M matrix including SafeZone
+  roots mode 1, then full-month SafeZone controls only if the bounded median is
+  stable enough to justify the runtime.
+- The control is also narrower than the trusted Rift byte-output modes:
+  SafeZone does not yet region-manage RunBoth input/output/snapshot buffers.
+  Do not use this table to claim SafeZone is globally worse; use it to compare
+  Q1/Q2 closeable data-structure placement under the current DEBS harness.

@@ -51,6 +51,19 @@ trait SafeZone {
 
 object SafeZone {
 
+  /** Opens a SafeZone for code that needs an explicit close boundary.
+   *
+   *  Prefer `SafeZone { ... }` when lexical scope is enough. This helper is
+   *  used by benchmark controls with event-window lifetimes that close on
+   *  eviction.
+   */
+  final def open(): SafeZone =
+    new MemorySafeZone(SafeZoneAllocator.Impl.open())
+
+  /** Closes a SafeZone opened with `open`. */
+  final def close(zone: SafeZone): Unit =
+    zone.close()
+
   /** Run given function with a fresh zone and destroy it afterwards. */
   final def apply[T](f: (SafeZone^) ?=> T): T = {
     val sz: SafeZone^ = new MemorySafeZone(SafeZoneAllocator.Impl.open())

@@ -88,9 +88,10 @@ object Debs2015Q1Runner {
       case "heap"             => new Q1Heap
       case "rift-hp"          => new Q1RiftBuckets(RiftRegion.HPZone)
       case "rift-streaming"   => new Q1RiftBuckets(RiftRegion.Streaming)
+      case "safezone"         => new Q1SafeZone
       case other =>
         throw new IllegalArgumentException(
-          s"unknown Q1 mode '$other'; expected heap, rift-hp, or rift-streaming"
+          s"unknown Q1 mode '$other'; expected heap, rift-hp, rift-streaming, or safezone"
         )
     }
 

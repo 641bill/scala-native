@@ -4,6 +4,7 @@ import scala.language.experimental.captureChecking
 
 import scala.collection.mutable
 import scala.scalanative.memory.RiftRegion
+import scala.scalanative.runtime.SafeZoneAllocator
 
 final case class Route(start: Cell, end: Cell) {
   def id: String = s"${start.id}->${end.id}"
@@ -21,18 +22,23 @@ trait Q1Engine {
   def close(): Unit = ()
 }
 
-final class Q1Heap extends Q1BucketedWindow(useRegions = false, RiftRegion.HPZone)
+final class Q1Heap
+    extends Q1BucketedWindow(DebsAllocator.Heap, RiftRegion.HPZone)
 
-final class Q1RiftBuckets(kind: Int) extends Q1BucketedWindow(useRegions = true, kind)
+final class Q1RiftBuckets(kind: Int)
+    extends Q1BucketedWindow(DebsAllocator.Rift, kind)
+
+final class Q1SafeZone
+    extends Q1BucketedWindow(DebsAllocator.SafeZoneKind, RiftRegion.HPZone)
 
 private abstract class Q1BucketedWindow(
-    useRegions: Boolean,
-    regionKind: Int
+    allocatorKind: Int,
+    riftKind: Int
 ) extends Q1Engine {
   import Q1Support._
 
   private val buckets = mutable.Queue.empty[Bucket]
-  private val routes = new RouteCounter(useRegions, regionKind)
+  private val routes = new RouteCounter(openAllocator())
   private var currentBucket: Bucket = null
   private var nextSeq = 0L
 
@@ -71,13 +77,16 @@ private abstract class Q1BucketedWindow(
     if (currentBucket != null && currentBucket.startSeconds == startSeconds)
       currentBucket
     else {
-      val region = if (useRegions) RiftRegion.open(regionKind) else null
-      val bucket = new Bucket(startSeconds, region, null)
+      val allocator = openAllocator()
+      val bucket = new Bucket(startSeconds, allocator, null)
       buckets.enqueue(bucket)
       currentBucket = bucket
       bucket
     }
   }
+
+  private def openAllocator(): DebsAllocator =
+    DebsAllocator.open(allocatorKind, riftKind)
 
   private def evictBefore(cutoffSeconds: Long): Unit = {
     while (buckets.nonEmpty && buckets.front.startSeconds < cutoffSeconds) {
@@ -93,15 +102,26 @@ private abstract class Q1BucketedWindow(
   }
 
   private def allocateEntry(bucket: Bucket, routeKey: Long): BucketWindowEntry =
-    if (useRegions) bucket.region.alloc(new BucketWindowEntry(routeKey, bucket.head))
-    else new BucketWindowEntry(routeKey, bucket.head)
+    bucket.allocator.kind match {
+      case DebsAllocator.Rift =>
+        bucket.allocator.riftRegion.alloc(
+          new BucketWindowEntry(routeKey, bucket.head)
+        )
+      case DebsAllocator.SafeZoneKind =>
+        SafeZoneAllocator
+          .allocate(bucket.allocator.safeZone,
+                    new BucketWindowEntry(routeKey, bucket.head))
+          .asInstanceOf[BucketWindowEntry]
+      case _ =>
+        new BucketWindowEntry(routeKey, bucket.head)
+    }
 
   private def closeBucket(bucket: Bucket): Unit =
-    if (useRegions) bucket.region.close()
+    bucket.allocator.close()
 
   private final class Bucket(
       val startSeconds: Long,
-      val region: RiftRegion,
+      val allocator: DebsAllocator,
       var head: BucketWindowEntry
   )
 
@@ -159,11 +179,8 @@ object Q1Support {
   }
 
   private[debs2015] final class RouteCounter(
-      useRegions: Boolean,
-      regionKind: Int
+      rankAllocator: DebsAllocator
   ) {
-    private val rankRegion =
-      if (useRegions) RiftRegion.open(regionKind) else null
     private var keys = allocateLongArray(InitialRouteTableCapacity)
     private var counts = allocateIntArray(InitialRouteTableCapacity)
     private var latestSecondsBySlot = allocateLongArray(InitialRouteTableCapacity)
@@ -255,7 +272,7 @@ object Q1Support {
         resultArrays(i) = null
         i += 1
       }
-      if (useRegions) rankRegion.close()
+      rankAllocator.close()
     }
 
     private def updateRank(slot: Int): Unit = {
@@ -291,9 +308,21 @@ object Q1Support {
     ): RankedRoute = {
       val route = allocateRoute(key)
       val ranked =
-        if (useRegions)
-          rankRegion.alloc(new RankedRoute(route, count, latestSeconds, latestSeq))
-        else new RankedRoute(route, count, latestSeconds, latestSeq)
+        rankAllocator.kind match {
+          case DebsAllocator.Rift =>
+            rankAllocator.riftRegion.alloc(
+              new RankedRoute(route, count, latestSeconds, latestSeq)
+            )
+          case DebsAllocator.SafeZoneKind =>
+            SafeZoneAllocator
+              .allocate(
+                rankAllocator.safeZone,
+                new RankedRoute(route, count, latestSeconds, latestSeq)
+              )
+              .asInstanceOf[RankedRoute]
+          case _ =>
+            new RankedRoute(route, count, latestSeconds, latestSeq)
+        }
       Debs2015Counters.recordQ1RankCreated()
       ranked
     }
@@ -304,11 +333,29 @@ object Q1Support {
       val endEast = ((key >>> 10) & RoutePartMask).toInt
       val endSouth = (key & RoutePartMask).toInt
 
-      if (useRegions) {
-        val start = rankRegion.alloc(new Cell(startEast, startSouth))
-        val end = rankRegion.alloc(new Cell(endEast, endSouth))
-        rankRegion.alloc(new Route(start, end))
-      } else Route(Cell(startEast, startSouth), Cell(endEast, endSouth))
+      rankAllocator.kind match {
+        case DebsAllocator.Rift =>
+          val start =
+            rankAllocator.riftRegion.alloc(new Cell(startEast, startSouth))
+          val end =
+            rankAllocator.riftRegion.alloc(new Cell(endEast, endSouth))
+          rankAllocator.riftRegion.alloc(new Route(start, end))
+        case DebsAllocator.SafeZoneKind =>
+          val start =
+            SafeZoneAllocator
+              .allocate(rankAllocator.safeZone,
+                        new Cell(startEast, startSouth))
+              .asInstanceOf[Cell]
+          val end =
+            SafeZoneAllocator
+              .allocate(rankAllocator.safeZone, new Cell(endEast, endSouth))
+              .asInstanceOf[Cell]
+          SafeZoneAllocator
+            .allocate(rankAllocator.safeZone, new Route(start, end))
+            .asInstanceOf[Route]
+        case _ =>
+          Route(Cell(startEast, startSouth), Cell(endEast, endSouth))
+      }
     }
 
     private def resultArray(size: Int): Array[RankedRoute] = {
@@ -316,9 +363,7 @@ object Q1Support {
       else {
         var result = resultArrays(size)
         if (result == null) {
-          result =
-            if (useRegions) rankRegion.alloc(new Array[RankedRoute](size))
-            else new Array[RankedRoute](size)
+          result = allocateRankResultArray(size)
           resultArrays(size) = result
           Debs2015Counters.recordQ1ResultArrayAlloc(size)
         }
@@ -327,16 +372,43 @@ object Q1Support {
     }
 
     private def allocateLongArray(size: Int): Array[Long] =
-      if (useRegions) rankRegion.alloc(new Array[Long](size))
-      else new Array[Long](size)
+      rankAllocator.kind match {
+        case DebsAllocator.Rift =>
+          rankAllocator.riftRegion.alloc(new Array[Long](size))
+        case DebsAllocator.SafeZoneKind =>
+          SafeZoneAllocator
+            .allocate(rankAllocator.safeZone, new Array[Long](size))
+            .asInstanceOf[Array[Long]]
+        case _ =>
+          new Array[Long](size)
+      }
 
     private def allocateIntArray(size: Int): Array[Int] =
-      if (useRegions) rankRegion.alloc(new Array[Int](size))
-      else new Array[Int](size)
+      rankAllocator.kind match {
+        case DebsAllocator.Rift =>
+          rankAllocator.riftRegion.alloc(new Array[Int](size))
+        case DebsAllocator.SafeZoneKind =>
+          SafeZoneAllocator
+            .allocate(rankAllocator.safeZone, new Array[Int](size))
+            .asInstanceOf[Array[Int]]
+        case _ =>
+          new Array[Int](size)
+      }
 
     private def allocateRankArray(size: Int): Array[RankedRoute] =
-      if (useRegions) rankRegion.alloc(new Array[RankedRoute](size))
-      else new Array[RankedRoute](size)
+      rankAllocator.kind match {
+        case DebsAllocator.Rift =>
+          rankAllocator.riftRegion.alloc(new Array[RankedRoute](size))
+        case DebsAllocator.SafeZoneKind =>
+          SafeZoneAllocator
+            .allocate(rankAllocator.safeZone, new Array[RankedRoute](size))
+            .asInstanceOf[Array[RankedRoute]]
+        case _ =>
+          new Array[RankedRoute](size)
+      }
+
+    private def allocateRankResultArray(size: Int): Array[RankedRoute] =
+      allocateRankArray(size)
 
     private def addRankHeap(slot: Int, ranked: RankedRoute): Unit = {
       ensureRankCapacity(heapSize + 1)
