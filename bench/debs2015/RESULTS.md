@@ -3909,3 +3909,37 @@ Interpretation:
 - Next controls: add/measure a DEBS SafeZone mode if feasible, and investigate
   why checked Q1/Q2 process phases are slower than heap before making further
   application-performance claims.
+
+## Rejected Q1 Route-Lifetime Child-Bucket Probe
+
+Date: 2026-04-28
+
+Question:
+
+- Could Q1 checked CPU overhead be reduced by allocating one region child bucket
+  per active route, mutating the route's `CheckedRankedRoute` while the route
+  remains active, and closing that route bucket when the route count returns to
+  zero?
+
+Result:
+
+- The source change compiled, but it was backed out and is not part of
+  `feature/rift`.
+- A 100k heap/checked RunBoth validation matched outputs, but the memory shape
+  was bad:
+
+| Input | Mode | Elapsed ms | Q1 process ms | GC ms | RSS bytes | Rift op ms | Rift opens | Active requested peak bytes | Q1 rank created |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100k | heap | 484.189 | 136.188 | 10.850 | 55492608 | 0.000 | 0 | 0 | 64672 |
+| 100k | route-bucket probe | 485.729 | 170.209 | 2.523 | 113721344 | 14.473 | 69220 | 23447464 | 64672 |
+
+Interpretation:
+
+- The idea successfully reduced checked Q1 rank creation from the current
+  child-event-bucket shape's `98005` at 100k back to heap scale (`64672`), but
+  it opened a child region for every active route lifetime.
+- Region open/close count and slab footprint became the problem: `rift_open`
+  jumped to `69220` on 100k rows and RSS rose to `113.7 MB`.
+- Do not pursue one child region per route as the next Q1 optimization. A
+  better design needs either arena-sharing among active routes or region-backed
+  rank/output snapshots without creating a region per route.
