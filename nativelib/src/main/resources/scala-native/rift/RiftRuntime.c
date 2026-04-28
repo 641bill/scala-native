@@ -51,6 +51,7 @@ typedef struct scalanative_rift_region {
     size_t alloc_raw_count;
     size_t alloc_object_count;
     size_t alloc_slow_count;
+    size_t alloc_raw_bytes;
     uint32_t kind;
     uint32_t slab_count;
 } scalanative_rift_region;
@@ -67,10 +68,22 @@ static _Atomic(size_t) scalanative_rift_stats_region_open_total_value = 0;
 static _Atomic(size_t) scalanative_rift_stats_region_close_total_value = 0;
 static _Atomic(size_t) scalanative_rift_stats_region_reset_total_value = 0;
 static _Atomic(size_t) scalanative_rift_stats_alloc_raw_total_value = 0;
+static _Atomic(size_t) scalanative_rift_stats_alloc_raw_bytes_total_value = 0;
 static _Atomic(size_t) scalanative_rift_stats_alloc_object_total_value = 0;
 static _Atomic(size_t) scalanative_rift_stats_alloc_slow_total_value = 0;
 static _Atomic(size_t) scalanative_rift_stats_mmap_slab_total_value = 0;
 static _Atomic(size_t) scalanative_rift_stats_mmap_bytes_total_value = 0;
+static _Atomic(size_t) scalanative_rift_stats_mmap_slab_current_value = 0;
+static _Atomic(size_t) scalanative_rift_stats_mmap_slab_peak_value = 0;
+static _Atomic(size_t) scalanative_rift_stats_mmap_bytes_current_value = 0;
+static _Atomic(size_t) scalanative_rift_stats_mmap_bytes_peak_value = 0;
+static _Atomic(size_t) scalanative_rift_stats_active_slab_current_value = 0;
+static _Atomic(size_t) scalanative_rift_stats_active_slab_peak_value = 0;
+static _Atomic(size_t) scalanative_rift_stats_active_bytes_current_value = 0;
+static _Atomic(size_t) scalanative_rift_stats_active_bytes_peak_value = 0;
+static _Atomic(size_t) scalanative_rift_stats_active_alloc_bytes_current_value =
+    0;
+static _Atomic(size_t) scalanative_rift_stats_active_alloc_bytes_peak_value = 0;
 static _Atomic(size_t) scalanative_rift_stats_tls_reuse_total_value = 0;
 static _Atomic(size_t) scalanative_rift_stats_pool_reuse_total_value = 0;
 static _Atomic(size_t) scalanative_rift_stats_region_op_ns_value = 0;
@@ -99,6 +112,91 @@ static inline uint64_t scalanative_rift_now_ns(void) {
 static inline void scalanative_rift_stats_add(_Atomic(size_t) *counter,
                                               size_t value) {
     atomic_fetch_add_explicit(counter, value, memory_order_relaxed);
+}
+
+static inline void scalanative_rift_stats_update_peak(
+    _Atomic(size_t) *counter, size_t candidate) {
+    size_t observed = atomic_load_explicit(counter, memory_order_relaxed);
+    while (candidate > observed &&
+           !atomic_compare_exchange_weak_explicit(
+               counter, &observed, candidate, memory_order_relaxed,
+               memory_order_relaxed)) {
+    }
+}
+
+static inline void scalanative_rift_stats_record_mmap(size_t bytes) {
+    size_t current_slabs = atomic_fetch_add_explicit(
+                               &scalanative_rift_stats_mmap_slab_current_value,
+                               1, memory_order_relaxed) +
+                           1;
+    size_t current_bytes = atomic_fetch_add_explicit(
+                               &scalanative_rift_stats_mmap_bytes_current_value,
+                               bytes, memory_order_relaxed) +
+                           bytes;
+
+    scalanative_rift_stats_add(&scalanative_rift_stats_mmap_slab_total_value,
+                               1);
+    scalanative_rift_stats_add(&scalanative_rift_stats_mmap_bytes_total_value,
+                               bytes);
+    scalanative_rift_stats_update_peak(
+        &scalanative_rift_stats_mmap_slab_peak_value, current_slabs);
+    scalanative_rift_stats_update_peak(
+        &scalanative_rift_stats_mmap_bytes_peak_value, current_bytes);
+}
+
+static inline void scalanative_rift_stats_record_munmap(size_t bytes) {
+    atomic_fetch_sub_explicit(&scalanative_rift_stats_mmap_slab_current_value,
+                              1, memory_order_relaxed);
+    atomic_fetch_sub_explicit(&scalanative_rift_stats_mmap_bytes_current_value,
+                              bytes, memory_order_relaxed);
+}
+
+static inline void scalanative_rift_stats_record_active_acquire(size_t bytes) {
+    size_t current_slabs = atomic_fetch_add_explicit(
+                               &scalanative_rift_stats_active_slab_current_value,
+                               1, memory_order_relaxed) +
+                           1;
+    size_t current_bytes = atomic_fetch_add_explicit(
+                               &scalanative_rift_stats_active_bytes_current_value,
+                               bytes, memory_order_relaxed) +
+                           bytes;
+
+    scalanative_rift_stats_update_peak(
+        &scalanative_rift_stats_active_slab_peak_value, current_slabs);
+    scalanative_rift_stats_update_peak(
+        &scalanative_rift_stats_active_bytes_peak_value, current_bytes);
+}
+
+static inline void scalanative_rift_stats_record_active_release(size_t bytes) {
+    atomic_fetch_sub_explicit(&scalanative_rift_stats_active_slab_current_value,
+                              1, memory_order_relaxed);
+    atomic_fetch_sub_explicit(&scalanative_rift_stats_active_bytes_current_value,
+                              bytes, memory_order_relaxed);
+}
+
+static inline void scalanative_rift_stats_record_alloc_bytes(
+    scalanative_rift_region *region, size_t bytes) {
+    size_t current;
+
+    if (region == NULL) return;
+    region->alloc_raw_bytes += bytes;
+    scalanative_rift_stats_add(
+        &scalanative_rift_stats_alloc_raw_bytes_total_value, bytes);
+    current = atomic_fetch_add_explicit(
+                  &scalanative_rift_stats_active_alloc_bytes_current_value,
+                  bytes, memory_order_relaxed) +
+              bytes;
+    scalanative_rift_stats_update_peak(
+        &scalanative_rift_stats_active_alloc_bytes_peak_value, current);
+}
+
+static inline void scalanative_rift_stats_release_alloc_bytes(
+    scalanative_rift_region *region) {
+    if (region == NULL || region->alloc_raw_bytes == 0) return;
+    atomic_fetch_sub_explicit(
+        &scalanative_rift_stats_active_alloc_bytes_current_value,
+        region->alloc_raw_bytes, memory_order_relaxed);
+    region->alloc_raw_bytes = 0;
 }
 
 static inline void scalanative_rift_stats_add_duration(
@@ -241,6 +339,7 @@ static void scalanative_rift_unmap_slab_chain(
     scalanative_rift_slab *head) {
     while (head != NULL) {
         scalanative_rift_slab *next = head->next;
+        scalanative_rift_stats_record_munmap(head->mapped_size);
         (void)munmap(head, head->mapped_size);
         head = next;
     }
@@ -329,10 +428,7 @@ static scalanative_rift_slab *scalanative_rift_mmap_slab_bytes(size_t bytes,
     slab->mapped_size = bytes;
     slab->flags = flags | SCALANATIVE_RIFT_SLAB_FLAG_ZEROED;
     slab->reserved = 0;
-    scalanative_rift_stats_add(&scalanative_rift_stats_mmap_slab_total_value,
-                               1);
-    scalanative_rift_stats_add(&scalanative_rift_stats_mmap_bytes_total_value,
-                               bytes);
+    scalanative_rift_stats_record_mmap(bytes);
     return slab;
 }
 
@@ -385,6 +481,7 @@ static void scalanative_rift_region_append_slab(
     region->bump = slab->data;
     region->end = slab->data + scalanative_rift_slab_usable_size(slab);
     region->slab_count++;
+    scalanative_rift_stats_record_active_acquire(slab->mapped_size);
 }
 
 static void scalanative_rift_region_flush_alloc_stats(
@@ -419,7 +516,9 @@ static void scalanative_rift_release_slab_chain(
     while (head != NULL) {
         scalanative_rift_slab *next = head->next;
 
+        scalanative_rift_stats_record_active_release(head->mapped_size);
         if (scalanative_rift_slab_is_huge(head)) {
+            scalanative_rift_stats_record_munmap(head->mapped_size);
             (void)munmap(head, head->mapped_size);
         } else if (scalanative_rift_slab_is_small(head)) {
             head->flags &= ~SCALANATIVE_RIFT_SLAB_FLAG_ZEROED;
@@ -505,6 +604,7 @@ static void *scalanative_rift_region_alloc_slow(
     }
 
     region->bump = (uint8_t *)n;
+    scalanative_rift_stats_record_alloc_bytes(region, size);
     {
         uint64_t end_ns = scalanative_rift_now_ns();
         scalanative_rift_stats_add_duration(
@@ -533,6 +633,7 @@ void scalanative_rift_shutdown(void) {
         scalanative_rift_slab *slab =
             scalanative_rift_tls_cache[--scalanative_rift_tls_count];
         scalanative_rift_tls_cache[scalanative_rift_tls_count] = NULL;
+        scalanative_rift_stats_record_munmap(slab->mapped_size);
         (void)munmap(slab, slab->mapped_size);
     }
 
@@ -547,11 +648,13 @@ void scalanative_rift_shutdown(void) {
 
     while (head != NULL) {
         scalanative_rift_slab *next = head->next;
+        scalanative_rift_stats_record_munmap(head->mapped_size);
         (void)munmap(head, head->mapped_size);
         head = next;
     }
     while (small_head != NULL) {
         scalanative_rift_slab *next = small_head->next;
+        scalanative_rift_stats_record_munmap(small_head->mapped_size);
         (void)munmap(small_head, small_head->mapped_size);
         small_head = next;
     }
@@ -582,6 +685,7 @@ void *scalanative_rift_region_open(uint32_t kind) {
     region->head = slab;
     region->kind = kind;
     region->slab_count = 1;
+    scalanative_rift_stats_record_active_acquire(slab->mapped_size);
     scalanative_rift_stats_add(&scalanative_rift_stats_region_open_total_value,
                                1);
     {
@@ -601,6 +705,7 @@ void scalanative_rift_region_close(void *rawregion) {
     if (region == NULL) return;
     start_ns = scalanative_rift_now_ns();
     scalanative_rift_region_flush_alloc_stats(region);
+    scalanative_rift_stats_release_alloc_bytes(region);
     scalanative_rift_release_slab_chain(region->head);
     free(region);
     scalanative_rift_stats_add(&scalanative_rift_stats_region_close_total_value,
@@ -624,6 +729,7 @@ void scalanative_rift_region_reset(void *rawregion) {
 
     start_ns = scalanative_rift_now_ns();
     scalanative_rift_region_flush_alloc_stats(region);
+    scalanative_rift_stats_release_alloc_bytes(region);
     first = region->head;
     rest = first->next;
     first->next = NULL;
@@ -667,6 +773,7 @@ void *scalanative_rift_region_alloc_raw(void *rawregion, size_t size,
     }
 
     region->bump = (uint8_t *)n;
+    scalanative_rift_stats_record_alloc_bytes(region, size);
     return (void *)p;
 }
 
@@ -706,6 +813,8 @@ void scalanative_rift_stats_reset(void) {
                           memory_order_relaxed);
     atomic_store_explicit(&scalanative_rift_stats_alloc_raw_total_value, 0,
                           memory_order_relaxed);
+    atomic_store_explicit(&scalanative_rift_stats_alloc_raw_bytes_total_value, 0,
+                          memory_order_relaxed);
     atomic_store_explicit(&scalanative_rift_stats_alloc_object_total_value, 0,
                           memory_order_relaxed);
     atomic_store_explicit(&scalanative_rift_stats_alloc_slow_total_value, 0,
@@ -714,6 +823,32 @@ void scalanative_rift_stats_reset(void) {
                           memory_order_relaxed);
     atomic_store_explicit(&scalanative_rift_stats_mmap_bytes_total_value, 0,
                           memory_order_relaxed);
+    atomic_store_explicit(
+        &scalanative_rift_stats_mmap_slab_peak_value,
+        atomic_load_explicit(&scalanative_rift_stats_mmap_slab_current_value,
+                             memory_order_relaxed),
+        memory_order_relaxed);
+    atomic_store_explicit(
+        &scalanative_rift_stats_mmap_bytes_peak_value,
+        atomic_load_explicit(&scalanative_rift_stats_mmap_bytes_current_value,
+                             memory_order_relaxed),
+        memory_order_relaxed);
+    atomic_store_explicit(
+        &scalanative_rift_stats_active_slab_peak_value,
+        atomic_load_explicit(&scalanative_rift_stats_active_slab_current_value,
+                             memory_order_relaxed),
+        memory_order_relaxed);
+    atomic_store_explicit(
+        &scalanative_rift_stats_active_bytes_peak_value,
+        atomic_load_explicit(&scalanative_rift_stats_active_bytes_current_value,
+                             memory_order_relaxed),
+        memory_order_relaxed);
+    atomic_store_explicit(
+        &scalanative_rift_stats_active_alloc_bytes_peak_value,
+        atomic_load_explicit(
+            &scalanative_rift_stats_active_alloc_bytes_current_value,
+            memory_order_relaxed),
+        memory_order_relaxed);
     atomic_store_explicit(&scalanative_rift_stats_tls_reuse_total_value, 0,
                           memory_order_relaxed);
     atomic_store_explicit(&scalanative_rift_stats_pool_reuse_total_value, 0,
@@ -740,10 +875,21 @@ SCALANATIVE_RIFT_STATS_GETTER(region_open_total)
 SCALANATIVE_RIFT_STATS_GETTER(region_close_total)
 SCALANATIVE_RIFT_STATS_GETTER(region_reset_total)
 SCALANATIVE_RIFT_STATS_GETTER(alloc_raw_total)
+SCALANATIVE_RIFT_STATS_GETTER(alloc_raw_bytes_total)
 SCALANATIVE_RIFT_STATS_GETTER(alloc_object_total)
 SCALANATIVE_RIFT_STATS_GETTER(alloc_slow_total)
 SCALANATIVE_RIFT_STATS_GETTER(mmap_slab_total)
 SCALANATIVE_RIFT_STATS_GETTER(mmap_bytes_total)
+SCALANATIVE_RIFT_STATS_GETTER(mmap_slab_current)
+SCALANATIVE_RIFT_STATS_GETTER(mmap_slab_peak)
+SCALANATIVE_RIFT_STATS_GETTER(mmap_bytes_current)
+SCALANATIVE_RIFT_STATS_GETTER(mmap_bytes_peak)
+SCALANATIVE_RIFT_STATS_GETTER(active_slab_current)
+SCALANATIVE_RIFT_STATS_GETTER(active_slab_peak)
+SCALANATIVE_RIFT_STATS_GETTER(active_bytes_current)
+SCALANATIVE_RIFT_STATS_GETTER(active_bytes_peak)
+SCALANATIVE_RIFT_STATS_GETTER(active_alloc_bytes_current)
+SCALANATIVE_RIFT_STATS_GETTER(active_alloc_bytes_peak)
 SCALANATIVE_RIFT_STATS_GETTER(tls_reuse_total)
 SCALANATIVE_RIFT_STATS_GETTER(pool_reuse_total)
 SCALANATIVE_RIFT_STATS_GETTER(region_op_ns)

@@ -88,10 +88,21 @@ metric_keys=(
   rift_close_total
   rift_reset_total
   rift_alloc_raw_total
+  rift_alloc_raw_bytes_total
   rift_alloc_object_total
   rift_alloc_slow_total
   rift_mmap_slab_total
   rift_mmap_bytes_total
+  rift_mmap_slab_current
+  rift_mmap_slab_peak
+  rift_mmap_bytes_current
+  rift_mmap_bytes_peak
+  rift_active_slab_current
+  rift_active_slab_peak
+  rift_active_bytes_current
+  rift_active_bytes_peak
+  rift_active_alloc_bytes_current
+  rift_active_alloc_bytes_peak
   rift_tls_reuse_total
   rift_pool_reuse_total
   rift_pool_slabs

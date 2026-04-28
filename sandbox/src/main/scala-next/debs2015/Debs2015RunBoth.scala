@@ -98,10 +98,21 @@ object Debs2015RunBothRunner {
       riftRegionCloseTotal: Long,
       riftRegionResetTotal: Long,
       riftAllocRawTotal: Long,
+      riftAllocRawBytesTotal: Long,
       riftAllocObjectTotal: Long,
       riftAllocSlowTotal: Long,
       riftMmapSlabTotal: Long,
       riftMmapBytesTotal: Long,
+      riftMmapSlabCurrent: Long,
+      riftMmapSlabPeak: Long,
+      riftMmapBytesCurrent: Long,
+      riftMmapBytesPeak: Long,
+      riftActiveSlabCurrent: Long,
+      riftActiveSlabPeak: Long,
+      riftActiveBytesCurrent: Long,
+      riftActiveBytesPeak: Long,
+      riftActiveAllocBytesCurrent: Long,
+      riftActiveAllocBytesPeak: Long,
       riftTlsReuseTotal: Long,
       riftPoolReuseTotal: Long,
       riftRegionOpNanos: Long,
@@ -115,9 +126,41 @@ object Debs2015RunBothRunner {
 
   private object RuntimeMetrics {
     val zero: RuntimeMetrics =
-      RuntimeMetrics(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
-        0L, 0L, 0L,
-        0L, 0L, 0L, 0L, 0L, 0L)
+      RuntimeMetrics(
+        gcCollections = 0L,
+        gcNanos = 0L,
+        gcAllocTotal = 0L,
+        gcAllocBytesTotal = 0L,
+        gcAllocNanos = 0L,
+        riftRegionOpenTotal = 0L,
+        riftRegionCloseTotal = 0L,
+        riftRegionResetTotal = 0L,
+        riftAllocRawTotal = 0L,
+        riftAllocRawBytesTotal = 0L,
+        riftAllocObjectTotal = 0L,
+        riftAllocSlowTotal = 0L,
+        riftMmapSlabTotal = 0L,
+        riftMmapBytesTotal = 0L,
+        riftMmapSlabCurrent = 0L,
+        riftMmapSlabPeak = 0L,
+        riftMmapBytesCurrent = 0L,
+        riftMmapBytesPeak = 0L,
+        riftActiveSlabCurrent = 0L,
+        riftActiveSlabPeak = 0L,
+        riftActiveBytesCurrent = 0L,
+        riftActiveBytesPeak = 0L,
+        riftActiveAllocBytesCurrent = 0L,
+        riftActiveAllocBytesPeak = 0L,
+        riftTlsReuseTotal = 0L,
+        riftPoolReuseTotal = 0L,
+        riftRegionOpNanos = 0L,
+        riftOpenNanos = 0L,
+        riftCloseNanos = 0L,
+        riftResetNanos = 0L,
+        riftSlowAllocNanos = 0L,
+        riftPoolSlabs = 0L,
+        riftPoolBytes = 0L
+      )
 
     private def rawSizeToLong(value: RawSize): Long =
       fromRawUSize(value).toLong
@@ -160,6 +203,8 @@ object Debs2015RunBothRunner {
             rawSizeToLong(RiftAllocator.Impl.statsRegionResetTotal()),
           riftAllocRawTotal =
             rawSizeToLong(RiftAllocator.Impl.statsAllocRawTotal()),
+          riftAllocRawBytesTotal =
+            rawSizeToLong(RiftAllocator.Impl.statsAllocRawBytesTotal()),
           riftAllocObjectTotal =
             rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal()),
           riftAllocSlowTotal =
@@ -168,6 +213,26 @@ object Debs2015RunBothRunner {
             rawSizeToLong(RiftAllocator.Impl.statsMmapSlabTotal()),
           riftMmapBytesTotal =
             rawSizeToLong(RiftAllocator.Impl.statsMmapBytesTotal()),
+          riftMmapSlabCurrent =
+            rawSizeToLong(RiftAllocator.Impl.statsMmapSlabCurrent()),
+          riftMmapSlabPeak =
+            rawSizeToLong(RiftAllocator.Impl.statsMmapSlabPeak()),
+          riftMmapBytesCurrent =
+            rawSizeToLong(RiftAllocator.Impl.statsMmapBytesCurrent()),
+          riftMmapBytesPeak =
+            rawSizeToLong(RiftAllocator.Impl.statsMmapBytesPeak()),
+          riftActiveSlabCurrent =
+            rawSizeToLong(RiftAllocator.Impl.statsActiveSlabCurrent()),
+          riftActiveSlabPeak =
+            rawSizeToLong(RiftAllocator.Impl.statsActiveSlabPeak()),
+          riftActiveBytesCurrent =
+            rawSizeToLong(RiftAllocator.Impl.statsActiveBytesCurrent()),
+          riftActiveBytesPeak =
+            rawSizeToLong(RiftAllocator.Impl.statsActiveBytesPeak()),
+          riftActiveAllocBytesCurrent =
+            rawSizeToLong(RiftAllocator.Impl.statsActiveAllocBytesCurrent()),
+          riftActiveAllocBytesPeak =
+            rawSizeToLong(RiftAllocator.Impl.statsActiveAllocBytesPeak()),
           riftTlsReuseTotal =
             rawSizeToLong(RiftAllocator.Impl.statsTlsReuseTotal()),
           riftPoolReuseTotal =
@@ -201,6 +266,8 @@ object Debs2015RunBothRunner {
           delta(end.riftRegionResetTotal, start.riftRegionResetTotal),
         riftAllocRawTotal =
           delta(end.riftAllocRawTotal, start.riftAllocRawTotal),
+        riftAllocRawBytesTotal =
+          delta(end.riftAllocRawBytesTotal, start.riftAllocRawBytesTotal),
         riftAllocObjectTotal =
           delta(end.riftAllocObjectTotal, start.riftAllocObjectTotal),
         riftAllocSlowTotal =
@@ -209,6 +276,16 @@ object Debs2015RunBothRunner {
           delta(end.riftMmapSlabTotal, start.riftMmapSlabTotal),
         riftMmapBytesTotal =
           delta(end.riftMmapBytesTotal, start.riftMmapBytesTotal),
+        riftMmapSlabCurrent = end.riftMmapSlabCurrent,
+        riftMmapSlabPeak = end.riftMmapSlabPeak,
+        riftMmapBytesCurrent = end.riftMmapBytesCurrent,
+        riftMmapBytesPeak = end.riftMmapBytesPeak,
+        riftActiveSlabCurrent = end.riftActiveSlabCurrent,
+        riftActiveSlabPeak = end.riftActiveSlabPeak,
+        riftActiveBytesCurrent = end.riftActiveBytesCurrent,
+        riftActiveBytesPeak = end.riftActiveBytesPeak,
+        riftActiveAllocBytesCurrent = end.riftActiveAllocBytesCurrent,
+        riftActiveAllocBytesPeak = end.riftActiveAllocBytesPeak,
         riftTlsReuseTotal =
           delta(end.riftTlsReuseTotal, start.riftTlsReuseTotal),
         riftPoolReuseTotal =
@@ -748,10 +825,21 @@ object Debs2015RunBothRunner {
         f"rift_close_total=${runtime.riftRegionCloseTotal}%d " +
         f"rift_reset_total=${runtime.riftRegionResetTotal}%d " +
         f"rift_alloc_raw_total=${runtime.riftAllocRawTotal}%d " +
+        f"rift_alloc_raw_bytes_total=${runtime.riftAllocRawBytesTotal}%d " +
         f"rift_alloc_object_total=${runtime.riftAllocObjectTotal}%d " +
         f"rift_alloc_slow_total=${runtime.riftAllocSlowTotal}%d " +
         f"rift_mmap_slab_total=${runtime.riftMmapSlabTotal}%d " +
         f"rift_mmap_bytes_total=${runtime.riftMmapBytesTotal}%d " +
+        f"rift_mmap_slab_current=${runtime.riftMmapSlabCurrent}%d " +
+        f"rift_mmap_slab_peak=${runtime.riftMmapSlabPeak}%d " +
+        f"rift_mmap_bytes_current=${runtime.riftMmapBytesCurrent}%d " +
+        f"rift_mmap_bytes_peak=${runtime.riftMmapBytesPeak}%d " +
+        f"rift_active_slab_current=${runtime.riftActiveSlabCurrent}%d " +
+        f"rift_active_slab_peak=${runtime.riftActiveSlabPeak}%d " +
+        f"rift_active_bytes_current=${runtime.riftActiveBytesCurrent}%d " +
+        f"rift_active_bytes_peak=${runtime.riftActiveBytesPeak}%d " +
+        f"rift_active_alloc_bytes_current=${runtime.riftActiveAllocBytesCurrent}%d " +
+        f"rift_active_alloc_bytes_peak=${runtime.riftActiveAllocBytesPeak}%d " +
         f"rift_tls_reuse_total=${runtime.riftTlsReuseTotal}%d " +
         f"rift_pool_reuse_total=${runtime.riftPoolReuseTotal}%d " +
         f"rift_pool_slabs=${runtime.riftPoolSlabs}%d " +

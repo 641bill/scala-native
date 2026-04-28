@@ -3634,3 +3634,96 @@ Interpretation:
 - This is the first median-backed full-month checked DEBS result after the pool
   cap and `ChildBucket` simplification. It still needs SafeZone controls and a
   memory-pressure follow-up before becoming a final Phase 5 claim.
+
+## Rift Mapped/Active Memory Diagnostics
+
+Date: 2026-04-28
+
+Purpose:
+
+- Diagnose why full-month checked RunBoth has higher RSS than heap even after
+  the closed-slab pool cap.
+- Separate closed-slab retention from currently active region slabs and from
+  application-requested region allocation bytes.
+- Keep the diagnosis in the runtime counters rather than inferring from RSS
+  alone.
+
+Implementation:
+
+- `RiftRuntime.c/h` now exposes current and peak mapped slab counters:
+  `rift_mmap_slab_current`, `rift_mmap_slab_peak`,
+  `rift_mmap_bytes_current`, and `rift_mmap_bytes_peak`.
+- The runtime also exposes current and peak active-region slab counters:
+  `rift_active_slab_current`, `rift_active_slab_peak`,
+  `rift_active_bytes_current`, and `rift_active_bytes_peak`.
+- Requested-allocation counters track raw bytes requested by region allocation:
+  `rift_alloc_raw_bytes_total`, `rift_active_alloc_bytes_current`, and
+  `rift_active_alloc_bytes_peak`.
+- `RunBoth` and `run_both_instrumented_matrix.sh` include these fields in the
+  metrics output.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile
+
+DEBS2015_LIMIT=100000 \
+DEBS2015_JOINED_OUTPUT=/tmp/debs2015-month1-100000.csv \
+  zsh bench/debs2015/join_nyc_taxi_sample.sh
+
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-requested-stats-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-full.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-requested-stats-fullmonth-checked \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+The 100k heap and checked outputs matched after stripping only latency. The
+full-month diagnostic was run as checked-only and therefore should be used as a
+memory attribution row, not a heap-vs-checked correctness comparison by itself.
+
+100k requested-memory validation:
+
+| Input | Mode | Elapsed ms | GC ms | RSS bytes | Mmap peak bytes | Active mapped peak bytes | Active requested peak bytes | Final mapped bytes | Pool bytes |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100k | heap | 501.220 | 10.326 | 55476224 | 0 | 0 | 0 | 0 | 0 |
+| 100k | rift-checked | 511.224 | 0.077 | 40239104 | 31817728 | 31670272 | 29575648 | 10010624 | 9748480 |
+
+Full-month checked requested-memory diagnostic:
+
+| Input | Mode | Elapsed s | GC s | RSS bytes | Mmap total bytes | Mmap peak bytes | Active mapped peak bytes | Active requested peak bytes | Final mapped bytes | Pool bytes |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| month 1 full | rift-checked | 73.457 | 0.083 | 1086668800 | 906346496 | 906346496 | 904790016 | 823153856 | 134479872 | 134217728 |
+
+Earlier active-only full-month diagnostic before requested-byte counters:
+
+| Input | Mode | Elapsed s | RSS bytes | Mmap peak bytes | Active mapped peak bytes | Final mapped bytes | Pool bytes |
+|---|---|---:|---:|---:|---:|---:|---:|
+| month 1 full | rift-checked | 66.857 | 1085194240 | 906346496 | 904790016 | 134479872 | 134217728 |
+
+Interpretation:
+
+- The closed-slab pool is not the main source of the full-month RSS regression:
+  final active bytes return to zero, and final mapped bytes are about the
+  configured `128 MiB` pool cap.
+- Peak RSS instead tracks peak mapped region memory. In the requested-byte run,
+  peak mapped bytes are `906.3 MB`, and peak active mapped bytes are
+  `904.8 MB`.
+- Most of that active mapped footprint is real live region payload under the
+  current lifetimes: peak active requested bytes are `823.2 MB`, leaving about
+  `81.6 MB` of slab/slack overhead at the peak.
+- Lowering the pool cap further may reduce final residency but will not fix
+  peak full-month RSS. The next memory-pressure step is lifetime attribution:
+  identify which checked Q1/Q2 region families are simultaneously live and
+  either shorten those lifetimes or make their storage more compact without
+  changing the logical DEBS algorithm.
+- This is a single full-month diagnostic, not a new headline performance
+  median. Keep the existing 3-run full-month elapsed median separate from this
+  attribution row.

@@ -32,6 +32,18 @@ void *scalanative_rift_region_alloc(void *region, void *info, size_t size);
 size_t scalanative_rift_pool_slab_count(void);
 size_t scalanative_rift_pool_resident_bytes(void);
 
+size_t scalanative_rift_stats_mmap_slab_current(void);
+size_t scalanative_rift_stats_mmap_slab_peak(void);
+size_t scalanative_rift_stats_mmap_bytes_current(void);
+size_t scalanative_rift_stats_mmap_bytes_peak(void);
+size_t scalanative_rift_stats_active_slab_current(void);
+size_t scalanative_rift_stats_active_slab_peak(void);
+size_t scalanative_rift_stats_active_bytes_current(void);
+size_t scalanative_rift_stats_active_bytes_peak(void);
+size_t scalanative_rift_stats_alloc_raw_bytes_total(void);
+size_t scalanative_rift_stats_active_alloc_bytes_current(void);
+size_t scalanative_rift_stats_active_alloc_bytes_peak(void);
+
 #ifdef __cplusplus
 }
 #endif

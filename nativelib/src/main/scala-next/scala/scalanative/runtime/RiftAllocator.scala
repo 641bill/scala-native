@@ -56,6 +56,9 @@ object RiftAllocator {
     @name("scalanative_rift_stats_alloc_raw_total")
     def statsAllocRawTotal(): RawSize = extern
 
+    @name("scalanative_rift_stats_alloc_raw_bytes_total")
+    def statsAllocRawBytesTotal(): RawSize = extern
+
     @name("scalanative_rift_stats_alloc_object_total")
     def statsAllocObjectTotal(): RawSize = extern
 
@@ -67,6 +70,36 @@ object RiftAllocator {
 
     @name("scalanative_rift_stats_mmap_bytes_total")
     def statsMmapBytesTotal(): RawSize = extern
+
+    @name("scalanative_rift_stats_mmap_slab_current")
+    def statsMmapSlabCurrent(): RawSize = extern
+
+    @name("scalanative_rift_stats_mmap_slab_peak")
+    def statsMmapSlabPeak(): RawSize = extern
+
+    @name("scalanative_rift_stats_mmap_bytes_current")
+    def statsMmapBytesCurrent(): RawSize = extern
+
+    @name("scalanative_rift_stats_mmap_bytes_peak")
+    def statsMmapBytesPeak(): RawSize = extern
+
+    @name("scalanative_rift_stats_active_slab_current")
+    def statsActiveSlabCurrent(): RawSize = extern
+
+    @name("scalanative_rift_stats_active_slab_peak")
+    def statsActiveSlabPeak(): RawSize = extern
+
+    @name("scalanative_rift_stats_active_bytes_current")
+    def statsActiveBytesCurrent(): RawSize = extern
+
+    @name("scalanative_rift_stats_active_bytes_peak")
+    def statsActiveBytesPeak(): RawSize = extern
+
+    @name("scalanative_rift_stats_active_alloc_bytes_current")
+    def statsActiveAllocBytesCurrent(): RawSize = extern
+
+    @name("scalanative_rift_stats_active_alloc_bytes_peak")
+    def statsActiveAllocBytesPeak(): RawSize = extern
 
     @name("scalanative_rift_stats_tls_reuse_total")
     def statsTlsReuseTotal(): RawSize = extern
