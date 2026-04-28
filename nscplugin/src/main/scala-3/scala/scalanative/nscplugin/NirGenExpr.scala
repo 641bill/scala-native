@@ -141,7 +141,8 @@ trait NirGenExpr(using Context) {
       (
         name == "objectBuffer" ||
           name == "regionBuffer" ||
-          name == "regionPriorityQueue"
+          name == "regionPriorityQueue" ||
+          name == "regionIndexedPriorityQueue"
       ) &&
         isRiftRegionCompanionOwner(sym)
     }
@@ -161,6 +162,13 @@ trait NirGenExpr(using Context) {
       val sym = calledSymbol(tree)
       val name = sym.name.toString
       (name == "push" || name == "pushToRegionPriorityQueue") &&
+        isRiftRegionCompanionOwner(sym)
+    }
+
+    private def isRiftRegionIndexedPriorityQueuePut(tree: Tree): Boolean = {
+      val sym = calledSymbol(tree)
+      val name = sym.name.toString
+      (name == "put" || name == "putToRegionIndexedPriorityQueue") &&
         isRiftRegionCompanionOwner(sym)
     }
 
@@ -311,6 +319,14 @@ trait NirGenExpr(using Context) {
             args
           )
         case _ if isRiftRegionPriorityQueuePush(app) =>
+          checkRiftObjectBufferAppend(args(args.length - 2))
+          genApplyMethod(
+            sym,
+            statically = sym.isClassConstructor,
+            qualifier,
+            args
+          )
+        case _ if isRiftRegionIndexedPriorityQueuePut(app) =>
           checkRiftObjectBufferAppend(args(args.length - 2))
           genApplyMethod(
             sym,

@@ -767,6 +767,98 @@ class RiftRegionCheckedCompilerTest {
       "cannot flow into capture set {outer}"
     )
 
+  @Test def regionIndexedPriorityQueueCanUpdatePriority(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Row(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val queue = RiftRegion.regionIndexedPriorityQueue[Row](8, 1)
+      |    val low: Row^{region} = RiftRegion.alloc(new Row(10))
+      |    val high: Row^{region} = RiftRegion.alloc(new Row(40))
+      |    region.put(queue, 1, low, 1L)
+      |    region.put(queue, 2, high, 3L)
+      |    region.updatePriority(queue, 1, 5L)
+      |    val existing = region.get(queue, 1)
+      |    val first = region.peek(queue)
+      |    first.value + existing.value + region.peekKey(queue) + region.length(queue)
+      |  }
+      |""".stripMargin)
+
+  @Test def regionIndexedPriorityQueueCanReplaceValueForKey(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Row(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val queue = RiftRegion.regionIndexedPriorityQueue[Row](4, 1)
+      |    val first: Row^{region} = RiftRegion.alloc(new Row(10))
+      |    val second: Row^{region} = RiftRegion.alloc(new Row(40))
+      |    RiftRegion.put(region, queue, 1, first, 1L)
+      |    RiftRegion.put(region, queue, 1, second, 2L)
+      |    val stored = RiftRegion.pop(region, queue)
+      |    stored.value + region.length(queue)
+      |  }
+      |""".stripMargin)
+
+  @Test def regionIndexedPriorityQueueCannotStoreHeapObject(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Row(val value: Int)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val queue = RiftRegion.regionIndexedPriorityQueue[Row](4, 1)
+      |    val row = new Row(10)
+      |    region.put(queue, 0, row, 1L)
+      |  }
+      |""".stripMargin,
+      "Rift checked object buffer cannot store an unrooted heap object"
+    )
+
+  @Test def regionIndexedPriorityQueueCanStoreHeapRoot(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val queue =
+      |      RiftRegion.regionIndexedPriorityQueue[RiftRegion.HeapRoot[Metadata]](4)
+      |    region.put(queue, 2, RiftRegion.root(new Metadata(40)), 5L)
+      |    region.peekPriority(queue).toInt + region.peek(queue).value.value
+      |  }
+      |""".stripMargin)
+
+  @Test def regionIndexedPriorityQueueCannotStoreInnerScopedValue(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Row(val value: Int)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { outer ?=>
+      |    val queue = RiftRegion.regionIndexedPriorityQueue[Row](4, 1)
+      |    RiftRegion.scoped { inner ?=>
+      |      val row: Row^{inner} = RiftRegion.alloc(new Row(10))
+      |      outer.put(queue, 0, row, 1L)
+      |    }
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set {outer}"
+    )
+
   @Test def streamingResetRegionArrayEpochCompiles(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking

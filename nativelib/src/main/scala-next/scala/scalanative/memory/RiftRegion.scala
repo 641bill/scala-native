@@ -342,6 +342,222 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
   }
 
+  /** Dense-key indexed max-priority queue backed by region-owned arrays.
+   *
+   *  This is the reusable checked shape for stream operators that keep durable
+   *  per-key region objects while updating their rank many times. Dense integer
+   *  keys map to heap positions through a region-owned index table; values and
+   *  priority/key arrays are region-owned. The queue object remains heap
+   *  control metadata captured by the owner region.
+   */
+  final class RegionIndexedPriorityQueue[T <: Object] private[memory] (
+      private var items: Array[Object],
+      private var priorities: Array[Long],
+      private var keys: Array[Int],
+      private val heapIndexByKey: Array[Int]
+  ) {
+    private var used = 0
+
+    def length: Int = used
+
+    def capacity: Int = items.length
+
+    def keyCapacity: Int = heapIndexByKey.length
+
+    private[memory] def putTrusted(
+        owner: RiftRegion^,
+        key: Int,
+        value: Object,
+        priority: Long
+    ): Unit = {
+      checkKey(key)
+      val slot = heapIndexByKey(key)
+      if (slot != 0) {
+        val index = slot - 1
+        items(index) = value
+        priorities(index) = priority
+        fixAt(index)
+      } else {
+        if (used >= items.length) growTrusted(owner)
+        val index = used
+        used += 1
+        items(index) = value
+        priorities(index) = priority
+        keys(index) = key
+        heapIndexByKey(key) = index + 1
+        siftUp(index)
+      }
+    }
+
+    private[memory] def updatePriorityTrusted(
+        key: Int,
+        priority: Long
+    ): Boolean = {
+      checkKey(key)
+      val slot = heapIndexByKey(key)
+      if (slot == 0) false
+      else {
+        val index = slot - 1
+        priorities(index) = priority
+        fixAt(index)
+        true
+      }
+    }
+
+    private[memory] def removeTrusted(key: Int): Boolean = {
+      checkKey(key)
+      val slot = heapIndexByKey(key)
+      if (slot == 0) false
+      else {
+        removeAt(slot - 1)
+        true
+      }
+    }
+
+    private[memory] def containsTrusted(key: Int): Boolean = {
+      checkKey(key)
+      heapIndexByKey(key) != 0
+    }
+
+    private[memory] def getTrusted(key: Int): Object = {
+      checkKey(key)
+      val slot = heapIndexByKey(key)
+      if (slot == 0)
+        throw new NoSuchElementException(
+          "Rift RegionIndexedPriorityQueue key is absent"
+        )
+      items(slot - 1)
+    }
+
+    private[memory] def peekTrusted(): Object = {
+      if (used == 0)
+        throw new NoSuchElementException(
+          "Rift RegionIndexedPriorityQueue is empty"
+        )
+      items(0)
+    }
+
+    private[memory] def peekKeyTrusted(): Int = {
+      if (used == 0)
+        throw new NoSuchElementException(
+          "Rift RegionIndexedPriorityQueue is empty"
+        )
+      keys(0)
+    }
+
+    private[memory] def peekPriorityTrusted(): Long = {
+      if (used == 0)
+        throw new NoSuchElementException(
+          "Rift RegionIndexedPriorityQueue is empty"
+        )
+      priorities(0)
+    }
+
+    private[memory] def popTrusted(): Object = {
+      if (used == 0)
+        throw new NoSuchElementException(
+          "Rift RegionIndexedPriorityQueue is empty"
+        )
+      val result = items(0)
+      removeAt(0)
+      result
+    }
+
+    private def checkKey(key: Int): Unit =
+      if (key < 0 || key >= heapIndexByKey.length)
+        throw new IndexOutOfBoundsException(key.toString)
+
+    private def growTrusted(owner: RiftRegion^): Unit = {
+      val oldItems = items
+      val oldPriorities = priorities
+      val oldKeys = keys
+      val nextCapacity =
+        if (oldItems.length == 0) 1 else oldItems.length * 2
+      val nextItems =
+        owner.alloc(new Array[Object](nextCapacity)).asInstanceOf[Array[Object]]
+      val nextPriorities = owner.alloc(new Array[Long](nextCapacity))
+      val nextKeys = owner.alloc(new Array[Int](nextCapacity))
+
+      var i = 0
+      while (i < used) {
+        nextItems(i) = oldItems(i)
+        nextPriorities(i) = oldPriorities(i)
+        nextKeys(i) = oldKeys(i)
+        i += 1
+      }
+      items = nextItems
+      priorities = nextPriorities
+      keys = nextKeys
+    }
+
+    private def removeAt(index: Int): Unit = {
+      val removedKey = keys(index)
+      heapIndexByKey(removedKey) = 0
+      val last = used - 1
+      used = last
+      if (index != last) {
+        items(index) = items(last)
+        priorities(index) = priorities(last)
+        keys(index) = keys(last)
+        heapIndexByKey(keys(index)) = index + 1
+        items(last) = null
+        priorities(last) = 0L
+        keys(last) = 0
+        fixAt(index)
+      } else {
+        items(index) = null
+        priorities(index) = 0L
+        keys(index) = 0
+      }
+    }
+
+    private def fixAt(index: Int): Unit = {
+      val beforeKey = keys(index)
+      siftUp(index)
+      val afterSlot = heapIndexByKey(beforeKey)
+      if (afterSlot != 0) siftDown(afterSlot - 1)
+    }
+
+    private def siftUp(start: Int): Unit = {
+      var child = start
+      while (child > 0) {
+        val parent = (child - 1) >>> 1
+        if (priorities(parent) >= priorities(child)) return
+        swap(parent, child)
+        child = parent
+      }
+    }
+
+    private def siftDown(start: Int): Unit = {
+      var parent = start
+      while (true) {
+        val left = (parent << 1) + 1
+        if (left >= used) return
+        val right = left + 1
+        var best = left
+        if (right < used && priorities(right) > priorities(left))
+          best = right
+        if (priorities(parent) >= priorities(best)) return
+        swap(parent, best)
+        parent = best
+      }
+    }
+
+    private def swap(left: Int, right: Int): Unit = {
+      val leftItem = items(left)
+      val leftPriority = priorities(left)
+      val leftKey = keys(left)
+      items(left) = items(right)
+      priorities(left) = priorities(right)
+      keys(left) = keys(right)
+      heapIndexByKey(keys(left)) = left + 1
+      items(right) = leftItem
+      priorities(right) = leftPriority
+      keys(right) = leftKey
+      heapIndexByKey(keys(right)) = right + 1
+    }
+  }
+
   /** Snapshot of the trusted runtime-epoch escape path.
    *
    *  This is the dynamic Yak-style side of Rift's comparison story, not the
@@ -840,6 +1056,27 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     new RegionPriorityQueue[T](items, priorities)
   }
 
+  /** Allocates a checked dense-key indexed max-priority queue. */
+  def regionIndexedPriorityQueue[T <: Object](
+      keyCapacity: Int,
+      initialCapacity: Int = 4
+  )(using region: RiftRegion^): RegionIndexedPriorityQueue[T]^{region} = {
+    if (keyCapacity <= 0)
+      throw new IllegalArgumentException("keyCapacity must be positive")
+    val capacity = if (initialCapacity <= 0) 1 else initialCapacity
+    val items: Array[Object] =
+      alloc(new Array[Object](capacity)).asInstanceOf[Array[Object]]
+    val priorities: Array[Long] = alloc(new Array[Long](capacity))
+    val keys: Array[Int] = alloc(new Array[Int](capacity))
+    val heapIndexByKey: Array[Int] = alloc(new Array[Int](keyCapacity))
+    new RegionIndexedPriorityQueue[T](
+      items,
+      priorities,
+      keys,
+      heapIndexByKey
+    )
+  }
+
   /** Appends `value` to a checked object buffer owned by `owner`. */
   def append[T <: Object](
       owner: RiftRegion^,
@@ -937,6 +1174,98 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   ): Int =
     queue.capacity
 
+  /** Inserts or replaces `value` for `key` in an indexed priority queue. */
+  def put[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionIndexedPriorityQueue[T]^{owner},
+      key: Int,
+      value: T^{owner},
+      priority: Long
+  ): Unit =
+    queue.putTrusted(owner, key, value.asInstanceOf[Object], priority)
+
+  /** Updates `key`'s priority if it is present. */
+  def updatePriority[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionIndexedPriorityQueue[T]^{owner},
+      key: Int,
+      priority: Long
+  ): Boolean =
+    queue.updatePriorityTrusted(key, priority)
+
+  /** Removes `key` if it is present. */
+  def remove[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionIndexedPriorityQueue[T]^{owner},
+      key: Int
+  ): Boolean =
+    queue.removeTrusted(key)
+
+  /** Returns true when `key` is present. */
+  def contains[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionIndexedPriorityQueue[T]^{owner},
+      key: Int
+  ): Boolean =
+    queue.containsTrusted(key)
+
+  /** Reads the value for `key`. */
+  def get[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionIndexedPriorityQueue[T]^{owner},
+      key: Int
+  ): T^{owner} =
+    queue.getTrusted(key).asInstanceOf[T^{owner}]
+
+  /** Reads the highest-priority indexed value without removing it. */
+  def peek[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionIndexedPriorityQueue[T]^{owner}
+  ): T^{owner} =
+    queue.peekTrusted().asInstanceOf[T^{owner}]
+
+  /** Reads the dense key of the highest-priority indexed value. */
+  def peekKey[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionIndexedPriorityQueue[T]^{owner}
+  ): Int =
+    queue.peekKeyTrusted()
+
+  /** Reads the highest indexed priority without removing its value. */
+  def peekPriority[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionIndexedPriorityQueue[T]^{owner}
+  ): Long =
+    queue.peekPriorityTrusted()
+
+  /** Removes and returns the highest-priority indexed value. */
+  def pop[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionIndexedPriorityQueue[T]^{owner}
+  ): T^{owner} =
+    queue.popTrusted().asInstanceOf[T^{owner}]
+
+  /** Returns the number of elements in an indexed priority queue. */
+  def length[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionIndexedPriorityQueue[T]^{owner}
+  ): Int =
+    queue.length
+
+  /** Returns the current heap backing capacity of an indexed priority queue. */
+  def capacity[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionIndexedPriorityQueue[T]^{owner}
+  ): Int =
+    queue.capacity
+
+  /** Returns the dense-key table capacity of an indexed priority queue. */
+  def keyCapacity[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionIndexedPriorityQueue[T]^{owner}
+  ): Int =
+    queue.keyCapacity
+
   /** Owner-token method syntax for checked object buffers.
    *
    *  These methods keep the same explicit owner in the type signature as the
@@ -1017,6 +1346,86 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     @targetName("regionPriorityQueueCapacity")
     def capacity[T <: Object](queue: RegionPriorityQueue[T]^{owner}): Int =
       RiftRegion.capacity(owner, queue)
+
+    @targetName("putToRegionIndexedPriorityQueue")
+    def put[T <: Object](
+        queue: RegionIndexedPriorityQueue[T]^{owner},
+        key: Int,
+        value: T^{owner},
+        priority: Long
+    ): Unit =
+      queue.putTrusted(owner, key, value.asInstanceOf[Object], priority)
+
+    @targetName("updateRegionIndexedPriorityQueuePriority")
+    def updatePriority[T <: Object](
+        queue: RegionIndexedPriorityQueue[T]^{owner},
+        key: Int,
+        priority: Long
+    ): Boolean =
+      RiftRegion.updatePriority(owner, queue, key, priority)
+
+    @targetName("removeFromRegionIndexedPriorityQueue")
+    def remove[T <: Object](
+        queue: RegionIndexedPriorityQueue[T]^{owner},
+        key: Int
+    ): Boolean =
+      RiftRegion.remove(owner, queue, key)
+
+    @targetName("containsInRegionIndexedPriorityQueue")
+    def contains[T <: Object](
+        queue: RegionIndexedPriorityQueue[T]^{owner},
+        key: Int
+    ): Boolean =
+      RiftRegion.contains(owner, queue, key)
+
+    @targetName("getFromRegionIndexedPriorityQueue")
+    def get[T <: Object](
+        queue: RegionIndexedPriorityQueue[T]^{owner},
+        key: Int
+    ): T^{owner} =
+      RiftRegion.get(owner, queue, key)
+
+    @targetName("peekFromRegionIndexedPriorityQueue")
+    def peek[T <: Object](
+        queue: RegionIndexedPriorityQueue[T]^{owner}
+    ): T^{owner} =
+      RiftRegion.peek(owner, queue)
+
+    @targetName("peekKeyFromRegionIndexedPriorityQueue")
+    def peekKey[T <: Object](
+        queue: RegionIndexedPriorityQueue[T]^{owner}
+    ): Int =
+      RiftRegion.peekKey(owner, queue)
+
+    @targetName("peekPriorityFromRegionIndexedPriorityQueue")
+    def peekPriority[T <: Object](
+        queue: RegionIndexedPriorityQueue[T]^{owner}
+    ): Long =
+      RiftRegion.peekPriority(owner, queue)
+
+    @targetName("popFromRegionIndexedPriorityQueue")
+    def pop[T <: Object](
+        queue: RegionIndexedPriorityQueue[T]^{owner}
+    ): T^{owner} =
+      RiftRegion.pop(owner, queue)
+
+    @targetName("regionIndexedPriorityQueueLength")
+    def length[T <: Object](
+        queue: RegionIndexedPriorityQueue[T]^{owner}
+    ): Int =
+      RiftRegion.length(owner, queue)
+
+    @targetName("regionIndexedPriorityQueueCapacity")
+    def capacity[T <: Object](
+        queue: RegionIndexedPriorityQueue[T]^{owner}
+    ): Int =
+      RiftRegion.capacity(owner, queue)
+
+    @targetName("regionIndexedPriorityQueueKeyCapacity")
+    def keyCapacity[T <: Object](
+        queue: RegionIndexedPriorityQueue[T]^{owner}
+    ): Int =
+      RiftRegion.keyCapacity(owner, queue)
 
   /** Allocates an object in the implicit Rift region. */
   inline def alloc[T <: AnyRef](inline obj: T)(using
