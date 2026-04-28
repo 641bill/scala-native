@@ -37,6 +37,8 @@ trait RiftRegion extends SafeZone {
   override def isOpen: Boolean
 
   override def isClosed: Boolean = !isOpen
+
+  private[memory] def setDiagnosticFamily(family: Int): Unit
 }
 
 object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
@@ -74,6 +76,10 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   def trustedOpen(kind: Int = HPZone): RiftRegion =
     open(kind)
 
+  /** Tags a region for opt-in benchmark diagnostics. */
+  def setDiagnosticFamily(region: RiftRegion, family: Int): Unit =
+    region.setDiagnosticFamily(family)
+
   private final class MemoryRiftRegion(
       private[scalanative] override val handle: RawPtr)
       extends RiftRegion {
@@ -98,6 +104,11 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     ): RawPtr = {
       checkOpen()
       RiftAllocator.Impl.alloc(handle, cls, size)
+    }
+
+    private[memory] override def setDiagnosticFamily(family: Int): Unit = {
+      checkOpen()
+      RiftAllocator.Impl.setFamily(handle, family)
     }
 
     override def reset(): Unit = {

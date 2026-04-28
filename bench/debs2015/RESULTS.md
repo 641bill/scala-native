@@ -3727,3 +3727,104 @@ Interpretation:
 - This is a single full-month diagnostic, not a new headline performance
   median. Keep the existing 3-run full-month elapsed median separate from this
   attribution row.
+
+## Checked Q1 Rank Lifetime Narrowing
+
+Date: 2026-04-28
+
+Purpose:
+
+- Act on the full-month family attribution finding.
+- Before this change, Q1 checked rank object graphs were allocated in the
+  parent checked stream. They were logically tied to the latest route event,
+  but physically lived until the end of the whole run.
+- Move those ordinary Scala rank objects into the current Q1 child bucket while
+  preserving the same logical Q1 ranking algorithm and checked owner-token
+  boundary.
+
+Implementation:
+
+- Added opt-in region-family attribution with
+  `DEBS2015_RIFT_FAMILY_STATS=1`.
+- Runtime counters now report per-family total requested bytes, peak active
+  mapped bytes, and peak active requested bytes.
+- `DebsRegionFamilies` labels input, snapshot, checked-parent, Q1-window,
+  Q2-profit-window, and Q2-empty-window regions for diagnostics.
+- `Debs2015Q1CheckedProcessingRun` now allocates `CheckedCell`,
+  `CheckedRoute`, and `CheckedRankedRoute` in the current Q1 child bucket via
+  `RiftRegion.childBucketRegion(stream, bucket.child)`.
+- The checked Q1 heap still keeps the same logical top-k ranking state; the
+  allocation lifetime of the rich route/rank object graph changes from
+  run-parent lifetime to latest-event bucket lifetime.
+
+Validation commands:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile
+
+DEBS2015_RIFT_FAMILY_STATS=1 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q1-rank-window-family-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_RIFT_FAMILY_STATS=1 \
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-full.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q1-rank-window-family-fullmonth-checked \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_LIMIT=1000000 \
+DEBS2015_JOINED_OUTPUT=/tmp/debs2015-month1-1000000.csv \
+  zsh bench/debs2015/join_nyc_taxi_sample.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q1-rank-window-1000000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+The 100k and 1M heap/checked runs matched outputs after stripping latency. The
+full-month checked output was also diffed against the earlier full-month heap
+output from `/tmp/debs2015-runboth-fullmonth-childbucket-repeat-b` after
+stripping latency; Q1 and Q2 matched.
+
+Family attribution before and after the Q1 rank lifetime change:
+
+| Input | Variant | RSS bytes | Active mapped peak | Active requested peak | Parent active requested peak | Q1-window active requested peak | Q1-window requested total |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 100k | before | 40239104 | 31670272 | 29575648 | 28130752 | 152304 | 2352120 |
+| 100k | after | 33947648 | 25804800 | 23570672 | 21404864 | 812288 | 12544640 |
+| month 1 full | before | 1086668800 | 904790016 | 823153856 | 808569032 | 455016 | 347706504 |
+| month 1 full | after | 613318656 | 261816320 | 180948200 | 164271664 | 2426752 | 1854434688 |
+
+Single-run non-family 1M sanity control after the change:
+
+| Input | Mode | Elapsed ms | GC ms | RSS bytes | Active requested peak | Rift op ms | Outputs |
+|---|---|---:|---:|---:|---:|---:|---|
+| 1M | heap | 4353.927 | 19.662 | 160088064 | 0 | 0.000 | matched |
+| 1M | rift-checked | 4209.383 | 2.124 | 66715648 | 34749280 | 5.819 | matched |
+
+Interpretation:
+
+- The earlier full-month RSS attribution was correct: Q1 checked rank objects
+  living in the parent stream were the dominant memory-retention problem.
+- Moving rank object graphs to child buckets reduces full-month peak active
+  requested bytes from `823.2 MB` to `180.9 MB`, and reduces full-month RSS
+  from about `1036 MiB` in the requested-byte diagnostic to about `585 MiB`.
+- Parent live requested bytes are still the largest family after the change
+  (`164.3 MB`), but they are now in the same scale as fixed long-lived control
+  arrays rather than unbounded rank-object accumulation.
+- Q1-window total requested bytes rises because updated rank objects now churn
+  in child buckets, but Q1-window live requested peak remains small
+  (`2.4 MB`) because those buckets close with the event window.
+- This is exactly the intended Phase 5 direction: ordinary Scala data objects
+  stay in regions, but their region lifetime now matches the data lifetime
+  more closely. It is not a hand-specialized DEBS algorithm change.
+- The 1M row is a single non-family sanity control, not a replacement for
+  medians. The next claim-level validation is a repeated heap/checked
+  full-month matrix, plus SafeZone controls.

@@ -581,6 +581,11 @@ object Debs2015Q2CheckedProcessingRunner {
         ) currentProfitBucket
         else {
           val child = RiftRegion.childBucket
+          DebsRegionFamilies.setChildBucket(
+            stream,
+            child,
+            DebsRegionFamilies.Q2ProfitWindow
+          )
           val bucket: ProfitBucket^{stream} =
             new ProfitBucket(child, dropoffSeconds, null, null)
           if (firstProfitBucket == null) {
@@ -601,6 +606,11 @@ object Debs2015Q2CheckedProcessingRunner {
         ) currentEmptyBucket
         else {
           val child = RiftRegion.childBucket
+          DebsRegionFamilies.setChildBucket(
+            stream,
+            child,
+            DebsRegionFamilies.Q2EmptyWindow
+          )
           val bucket: EmptyBucket^{stream} =
             new EmptyBucket(child, dropoffSeconds, null, null)
           if (firstEmptyBucket == null) {

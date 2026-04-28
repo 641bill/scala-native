@@ -60,6 +60,8 @@ trait RiftRegion extends SafeZone {
   private[memory] def retainHeapRoot[T <: AnyRef](
       value: T
   ): RiftRegion.HeapRoot[T]
+
+  private[memory] def setDiagnosticFamily(family: Int): Unit
 }
 
 object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
@@ -614,6 +616,15 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   def childBucket(using parent: StreamingRegion^): ChildBucket^{parent} =
     new ChildBucket(childStreaming)
 
+  /** Tags a region for opt-in benchmark diagnostics.
+   *
+   *  This does not change allocation or safety behavior. It only lets runtime
+   *  counters attribute active mapped/requested bytes to coarse benchmark
+   *  region families.
+   */
+  def setDiagnosticFamily(region: RiftRegion^, family: Int): Unit =
+    region.setDiagnosticFamily(family)
+
   /** Returns a child window's region using the parent stream as owner token.
    *
    *  This is intentionally explicit. Some stream operators keep child-window
@@ -866,6 +877,11 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       val root = new RiftRegion.HeapRoot(value)
       heapRoots = root.asInstanceOf[RiftRegion.HeapRoot[AnyRef]] :: heapRoots
       root
+    }
+
+    private[memory] override def setDiagnosticFamily(family: Int): Unit = {
+      checkOpen()
+      RiftAllocator.Impl.setFamily(handle, family)
     }
 
     override def reset(): Unit = {

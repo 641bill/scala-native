@@ -12,6 +12,8 @@ final class CsvLineReader(path: String, mode: String) {
   private val useRegions = mode.startsWith("rift-")
   private val region =
     if (useRegions) RiftRegion.open(regionKind(mode)) else null
+  if (useRegions)
+    DebsRegionFamilies.set(region, DebsRegionFamilies.Input)
 
   private val input = new FileInputStream(path)
   private val storage =

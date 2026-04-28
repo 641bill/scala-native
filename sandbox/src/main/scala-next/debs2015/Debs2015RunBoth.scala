@@ -120,6 +120,9 @@ object Debs2015RunBothRunner {
       riftCloseNanos: Long,
       riftResetNanos: Long,
       riftSlowAllocNanos: Long,
+      riftFamilyAllocRawBytesTotal: Array[Long],
+      riftFamilyActiveBytesPeak: Array[Long],
+      riftFamilyActiveAllocBytesPeak: Array[Long],
       riftPoolSlabs: Long,
       riftPoolBytes: Long
   )
@@ -158,6 +161,9 @@ object Debs2015RunBothRunner {
         riftCloseNanos = 0L,
         riftResetNanos = 0L,
         riftSlowAllocNanos = 0L,
+        riftFamilyAllocRawBytesTotal = DebsRegionFamilies.emptyLongs(),
+        riftFamilyActiveBytesPeak = DebsRegionFamilies.emptyLongs(),
+        riftFamilyActiveAllocBytesPeak = DebsRegionFamilies.emptyLongs(),
         riftPoolSlabs = 0L,
         riftPoolBytes = 0L
       )
@@ -170,6 +176,53 @@ object Debs2015RunBothRunner {
 
     private def delta(end: Long, start: Long): Long =
       if (end >= 0L && start >= 0L && end >= start) end - start else 0L
+
+    private def captureFamilyAllocRawBytesTotal(): Array[Long] = {
+      val result = DebsRegionFamilies.emptyLongs()
+      var family = 1
+      while (family < DebsRegionFamilies.Count) {
+        result(family) =
+          rawSizeToLong(
+            RiftAllocator.Impl.statsFamilyAllocRawBytesTotal(family)
+          )
+        family += 1
+      }
+      result
+    }
+
+    private def captureFamilyActiveBytesPeak(): Array[Long] = {
+      val result = DebsRegionFamilies.emptyLongs()
+      var family = 1
+      while (family < DebsRegionFamilies.Count) {
+        result(family) =
+          rawSizeToLong(RiftAllocator.Impl.statsFamilyActiveBytesPeak(family))
+        family += 1
+      }
+      result
+    }
+
+    private def captureFamilyActiveAllocBytesPeak(): Array[Long] = {
+      val result = DebsRegionFamilies.emptyLongs()
+      var family = 1
+      while (family < DebsRegionFamilies.Count) {
+        result(family) =
+          rawSizeToLong(
+            RiftAllocator.Impl.statsFamilyActiveAllocBytesPeak(family)
+          )
+        family += 1
+      }
+      result
+    }
+
+    private def deltaFamily(end: Array[Long], start: Array[Long]): Array[Long] = {
+      val result = DebsRegionFamilies.emptyLongs()
+      var family = 1
+      while (family < DebsRegionFamilies.Count) {
+        result(family) = delta(end(family), start(family))
+        family += 1
+      }
+      result
+    }
 
     def capture(includeRift: Boolean): RuntimeMetrics = {
       val gcCollections = nonNegative(GC.getStatsCollectionTotal().toLong)
@@ -244,6 +297,12 @@ object Debs2015RunBothRunner {
           riftResetNanos = rawSizeToLong(RiftAllocator.Impl.statsResetNanos()),
           riftSlowAllocNanos =
             rawSizeToLong(RiftAllocator.Impl.statsSlowAllocNanos()),
+          riftFamilyAllocRawBytesTotal =
+            captureFamilyAllocRawBytesTotal(),
+          riftFamilyActiveBytesPeak =
+            captureFamilyActiveBytesPeak(),
+          riftFamilyActiveAllocBytesPeak =
+            captureFamilyActiveAllocBytesPeak(),
           riftPoolSlabs = rawSizeToLong(RiftAllocator.Impl.poolSlabCount()),
           riftPoolBytes = rawSizeToLong(RiftAllocator.Impl.poolResidentBytes())
         )
@@ -297,6 +356,13 @@ object Debs2015RunBothRunner {
         riftResetNanos = delta(end.riftResetNanos, start.riftResetNanos),
         riftSlowAllocNanos =
           delta(end.riftSlowAllocNanos, start.riftSlowAllocNanos),
+        riftFamilyAllocRawBytesTotal =
+          deltaFamily(
+            end.riftFamilyAllocRawBytesTotal,
+            start.riftFamilyAllocRawBytesTotal
+          ),
+        riftFamilyActiveBytesPeak = end.riftFamilyActiveBytesPeak,
+        riftFamilyActiveAllocBytesPeak = end.riftFamilyActiveAllocBytesPeak,
         riftPoolSlabs = end.riftPoolSlabs,
         riftPoolBytes = end.riftPoolBytes
       )
@@ -581,7 +647,9 @@ object Debs2015RunBothRunner {
 
     try {
       snapshotRegion = RiftRegion.open(RiftRegion.Streaming)
+      DebsRegionFamilies.set(snapshotRegion, DebsRegionFamilies.Snapshot)
       RiftRegion.streaming { stream ?=>
+        DebsRegionFamilies.set(stream, DebsRegionFamilies.CheckedParent)
         Debs2015Q1CheckedProcessingRunner.withCheckedProcessor { q1 =>
           Debs2015Q2CheckedProcessingRunner.withCheckedProcessor { q2 =>
             val source = new CsvLineReader(inputPath, "rift-streaming")
@@ -844,6 +912,20 @@ object Debs2015RunBothRunner {
         f"rift_pool_reuse_total=${runtime.riftPoolReuseTotal}%d " +
         f"rift_pool_slabs=${runtime.riftPoolSlabs}%d " +
         f"rift_pool_bytes=${runtime.riftPoolBytes}%d " +
+        familyMetricFields("input", DebsRegionFamilies.Input, runtime) +
+        familyMetricFields("snapshot", DebsRegionFamilies.Snapshot, runtime) +
+        familyMetricFields("checked_parent", DebsRegionFamilies.CheckedParent, runtime) +
+        familyMetricFields("q1_window", DebsRegionFamilies.Q1Window, runtime) +
+        familyMetricFields(
+          "q2_profit_window",
+          DebsRegionFamilies.Q2ProfitWindow,
+          runtime
+        ) +
+        familyMetricFields(
+          "q2_empty_window",
+          DebsRegionFamilies.Q2EmptyWindow,
+          runtime
+        ) +
         f"diag_grid_q1_calls=${counters.gridQ1Calls}%d " +
         f"diag_grid_q1_hits=${counters.gridQ1Hits}%d " +
         f"diag_grid_q2_calls=${counters.gridQ2Calls}%d " +
@@ -896,6 +978,15 @@ object Debs2015RunBothRunner {
     f"phase_${name}_gc_alloc_total=${metrics.total(index)}%d " +
       f"phase_${name}_gc_alloc_bytes=${metrics.byteCount(index)}%d " +
       f"phase_${name}_gc_alloc_time_ns=${metrics.timeNanos(index)}%d "
+
+  private def familyMetricFields(
+      name: String,
+      family: Int,
+      metrics: RuntimeMetrics
+  ): String =
+    s"rift_family_${name}_alloc_raw_bytes_total=${metrics.riftFamilyAllocRawBytesTotal(family)} " +
+      s"rift_family_${name}_active_bytes_peak=${metrics.riftFamilyActiveBytesPeak(family)} " +
+      s"rift_family_${name}_active_alloc_bytes_peak=${metrics.riftFamilyActiveAllocBytesPeak(family)} "
 }
 
 @main def Debs2015RunBoth(

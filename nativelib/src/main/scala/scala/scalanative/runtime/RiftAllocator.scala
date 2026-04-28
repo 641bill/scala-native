@@ -26,6 +26,9 @@ object RiftAllocator {
     @name("scalanative_rift_region_reset")
     def reset(region: RawPtr): Unit = extern
 
+    @name("scalanative_rift_region_set_family")
+    def setFamily(region: RawPtr, family: Int): Unit = extern
+
     @name("scalanative_rift_region_alloc_raw")
     def allocRaw(region: RawPtr, size: RawSize, align: RawSize): RawPtr =
       extern
@@ -98,6 +101,21 @@ object RiftAllocator {
 
     @name("scalanative_rift_stats_active_alloc_bytes_peak")
     def statsActiveAllocBytesPeak(): RawSize = extern
+
+    @name("scalanative_rift_stats_family_alloc_raw_bytes_total")
+    def statsFamilyAllocRawBytesTotal(family: Int): RawSize = extern
+
+    @name("scalanative_rift_stats_family_active_bytes_current")
+    def statsFamilyActiveBytesCurrent(family: Int): RawSize = extern
+
+    @name("scalanative_rift_stats_family_active_bytes_peak")
+    def statsFamilyActiveBytesPeak(family: Int): RawSize = extern
+
+    @name("scalanative_rift_stats_family_active_alloc_bytes_current")
+    def statsFamilyActiveAllocBytesCurrent(family: Int): RawSize = extern
+
+    @name("scalanative_rift_stats_family_active_alloc_bytes_peak")
+    def statsFamilyActiveAllocBytesPeak(family: Int): RawSize = extern
 
     @name("scalanative_rift_stats_tls_reuse_total")
     def statsTlsReuseTotal(): RawSize = extern

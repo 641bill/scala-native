@@ -11,6 +11,7 @@ extern "C" {
 #define SCALANATIVE_RIFT_SLAB_SIZE (32 * 1024)
 #define SCALANATIVE_RIFT_DEFAULT_ALIGN 16
 #define SCALANATIVE_RIFT_TLS_SLAB_CACHE_MAX 8
+#define SCALANATIVE_RIFT_FAMILY_MAX 16
 
 typedef enum {
     SCALANATIVE_RIFT_KIND_HPZONE = 0,
@@ -24,6 +25,7 @@ void scalanative_rift_shutdown(void);
 void *scalanative_rift_region_open(uint32_t kind);
 void scalanative_rift_region_close(void *region);
 void scalanative_rift_region_reset(void *region);
+void scalanative_rift_region_set_family(void *region, uint32_t family);
 
 void *scalanative_rift_region_alloc_raw(void *region, size_t size,
                                         size_t align);
@@ -43,6 +45,11 @@ size_t scalanative_rift_stats_active_bytes_peak(void);
 size_t scalanative_rift_stats_alloc_raw_bytes_total(void);
 size_t scalanative_rift_stats_active_alloc_bytes_current(void);
 size_t scalanative_rift_stats_active_alloc_bytes_peak(void);
+size_t scalanative_rift_stats_family_alloc_raw_bytes_total(uint32_t family);
+size_t scalanative_rift_stats_family_active_bytes_current(uint32_t family);
+size_t scalanative_rift_stats_family_active_bytes_peak(uint32_t family);
+size_t scalanative_rift_stats_family_active_alloc_bytes_current(uint32_t family);
+size_t scalanative_rift_stats_family_active_alloc_bytes_peak(uint32_t family);
 
 #ifdef __cplusplus
 }

@@ -103,6 +103,24 @@ metric_keys=(
   rift_active_bytes_peak
   rift_active_alloc_bytes_current
   rift_active_alloc_bytes_peak
+  rift_family_input_alloc_raw_bytes_total
+  rift_family_input_active_bytes_peak
+  rift_family_input_active_alloc_bytes_peak
+  rift_family_snapshot_alloc_raw_bytes_total
+  rift_family_snapshot_active_bytes_peak
+  rift_family_snapshot_active_alloc_bytes_peak
+  rift_family_checked_parent_alloc_raw_bytes_total
+  rift_family_checked_parent_active_bytes_peak
+  rift_family_checked_parent_active_alloc_bytes_peak
+  rift_family_q1_window_alloc_raw_bytes_total
+  rift_family_q1_window_active_bytes_peak
+  rift_family_q1_window_active_alloc_bytes_peak
+  rift_family_q2_profit_window_alloc_raw_bytes_total
+  rift_family_q2_profit_window_active_bytes_peak
+  rift_family_q2_profit_window_active_alloc_bytes_peak
+  rift_family_q2_empty_window_alloc_raw_bytes_total
+  rift_family_q2_empty_window_active_bytes_peak
+  rift_family_q2_empty_window_active_alloc_bytes_peak
   rift_tls_reuse_total
   rift_pool_reuse_total
   rift_pool_slabs
