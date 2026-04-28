@@ -3967,7 +3967,8 @@ Implementation note:
   lifetime and per-timestamp window buckets. RunBoth `safezone` mode keeps the
   existing heap input/output/snapshot buffers; this first control isolates Q1/Q2
   data-structure placement, not input/output buffer placement.
-- This is a single-run control at each input size, not a median-backed headline.
+- The 100k rows below are single-run controls. The 1M rows now also have a
+  3-run median table.
 
 Commands:
 
@@ -4029,21 +4030,36 @@ Single-run rows:
 | 1M | 1 | safezone | 4946.909 | 4.95 | 57.926 | 103.1 | 1423.601 | 1449.755 | 33.951 | 0.000 |
 | 1M | 1 | rift-checked | 4211.395 | 4.21 | 2.280 | 63.6 | 1278.963 | 1009.449 | 0.817 | 5.645 |
 
+1M 3-run medians:
+
+| Input | SafeZone roots mode | Mode | Elapsed ms | Real s | GC ms | RSS MiB | Q1 process ms | Q2 process ms | Close ms | Rift op ms |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1M | 0 | heap | 4649.992 | 4.66 | 20.414 | 153.7 | 1365.304 | 1242.288 | 6.497 | 0.000 |
+| 1M | 0 | safezone | 5280.874 | 5.28 | 56.596 | 103.1 | 1497.004 | 1541.641 | 118.124 | 0.000 |
+| 1M | 0 | rift-checked | 4501.152 | 4.50 | 2.066 | 63.6 | 1370.778 | 1136.219 | 1.402 | 6.660 |
+| 1M | 1 | heap | 5029.882 | 5.04 | 21.506 | 153.7 | 1471.707 | 1404.597 | 5.952 | 0.000 |
+| 1M | 1 | safezone | 5576.947 | 5.58 | 57.926 | 103.1 | 1633.349 | 1731.239 | 34.876 | 0.000 |
+| 1M | 1 | rift-checked | 4702.930 | 4.70 | 2.293 | 63.6 | 1443.572 | 1224.279 | 1.587 | 7.661 |
+
 Interpretation:
 
 - This closes the previous "SafeZone DEBS control missing" gap at the level of
   a working same-shape benchmark mode.
-- SafeZone lowers RSS versus heap on the 1M bounded input (`153.7 MiB` heap to
-  `103.1 MiB` SafeZone), but it is slower than heap in both roots modes in this
-  single-run control.
-- `SAFEZONE_ROOTS_MODE=1` improves SafeZone close time materially on 1M
-  (`113.5 ms` to `34.0 ms`) but Q1/Q2 processing remains slower than heap and
-  checked Rift. This suggests the DEBS SafeZone gap is not only root removal;
-  allocation/copy/rooting overhead in the SafeZone object path still matters.
-- Checked Rift remains the best row here on elapsed time and RSS, but these are
-  not medians. The next evidence step is a 3-run 1M matrix including SafeZone
-  roots mode 1, then full-month SafeZone controls only if the bounded median is
-  stable enough to justify the runtime.
+- In the 1M medians, SafeZone lowers RSS versus heap (`153.7 MiB` heap to
+  `103.1 MiB` SafeZone), but it is slower than heap in both roots-mode
+  matrices.
+- `SAFEZONE_ROOTS_MODE=1` improves SafeZone close time materially in the 1M
+  medians (`118.1 ms` to `34.9 ms`) but Q1/Q2 processing remains slower than
+  heap and checked Rift. This suggests the DEBS SafeZone gap is not only root
+  removal; allocation/copy/rooting overhead in the SafeZone object path still
+  matters.
+- Checked Rift remains the best row here on elapsed time and RSS in both 1M
+  median matrices. Do not overinterpret differences between the roots-mode
+  groups themselves: the second 1M group was noisier for all modes, including
+  heap.
+- The next evidence step is either full-month SafeZone controls or checked
+  Q1/Q2 CPU attribution. Given the 1M SafeZone median gap, CPU attribution is
+  the more useful next implementation-facing step.
 - The control is also narrower than the trusted Rift byte-output modes:
   SafeZone does not yet region-manage RunBoth input/output/snapshot buffers.
   Do not use this table to claim SafeZone is globally worse; use it to compare
