@@ -3828,3 +3828,84 @@ Interpretation:
 - The 1M row is a single non-family sanity control, not a replacement for
   medians. The next claim-level validation is a repeated heap/checked
   full-month matrix, plus SafeZone controls.
+
+## Full-Month Heap/Checked Control After Q1 Rank Lifetime Fix
+
+Date: 2026-04-28
+
+Purpose:
+
+- Promote the Q1 rank lifetime fix from a checked-only memory diagnostic to a
+  repeated full-month heap/checked control.
+- Run without `DEBS2015_RIFT_FAMILY_STATS=1`; family counters are useful for
+  attribution, but should not be part of headline throughput controls.
+- Keep the same full-month input and same logical heap/Rift program. The only
+  changed placement is the checked Q1 rank object lifetime described above.
+
+Commands:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-full.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q1-rank-window-fullmonth-repeat-a \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-full.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q1-rank-window-fullmonth-repeat-b \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-full.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q1-rank-window-fullmonth-repeat-c \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+All three repeats matched heap/checked Q1 and Q2 outputs after stripping
+latency.
+
+Full-month rows:
+
+| Repeat | Mode | Elapsed s | Real s | User s | Sys s | GC s | RSS MiB | Rift op s | Active requested peak MiB | Q1 process s | Q2 process s |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| A | heap | 67.122 | 67.15 | 64.55 | 0.83 | 0.283 | 596.0 | 0.000 | 0.0 | 18.525 | 17.849 |
+| A | rift-checked | 66.558 | 66.60 | 66.04 | 0.39 | 0.117 | 613.3 | 0.779 | 172.6 | 20.305 | 18.607 |
+| B | heap | 64.879 | 64.91 | 64.40 | 0.40 | 0.285 | 595.9 | 0.000 | 0.0 | 18.537 | 17.735 |
+| B | rift-checked | 66.804 | 66.83 | 66.21 | 0.47 | 0.118 | 628.1 | 0.776 | 172.6 | 20.407 | 18.763 |
+| C | heap | 67.836 | 67.86 | 66.59 | 0.70 | 0.297 | 595.4 | 0.000 | 0.0 | 19.210 | 19.318 |
+| C | rift-checked | 66.843 | 66.87 | 66.16 | 0.52 | 0.115 | 546.1 | 0.790 | 172.6 | 20.413 | 18.954 |
+
+3-run medians:
+
+| Mode | Elapsed s | Real s | GC s | RSS MiB | Rift op s | Active requested peak MiB | Q1 process s | Q2 process s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 67.122 | 67.15 | 0.285 | 595.9 | 0.000 | 0.0 | 18.537 | 17.849 |
+| rift-checked | 66.804 | 66.83 | 0.117 | 613.3 | 0.779 | 172.6 | 20.407 | 18.763 |
+
+Interpretation:
+
+- The Q1 rank lifetime fix fixed the large checked RSS regression. The prior
+  full-month checked median RSS after the `ChildBucket` change was `866.6 MiB`;
+  this post-fix checked median is `613.3 MiB`, close to the heap median
+  `595.9 MiB`.
+- The post-fix checked elapsed median is only `0.318 s` faster than heap
+  (`0.47%`). Treat this as near-tie full-month throughput evidence, not a
+  strong elapsed win.
+- Checked still reduces measured GC collection time (`0.285 s` heap median to
+  `0.117 s` checked median), but the absolute collection-time delta is small
+  relative to total elapsed time.
+- Checked pays about `0.779 s` median Rift region-operation time and is slower
+  in Q1/Q2 process CPU phases. The full-month limit is now dominated by query
+  CPU and file I/O, not by GC collection time or runaway region retention.
+- This supports the current design direction narrowly: structured-lifetime
+  ordinary Scala objects can live in checked regions at full-month scale
+  without the previous RSS blow-up. It does not yet prove a large application
+  throughput win.
+- Next controls: add/measure a DEBS SafeZone mode if feasible, and investigate
+  why checked Q1/Q2 process phases are slower than heap before making further
+  application-performance claims.
