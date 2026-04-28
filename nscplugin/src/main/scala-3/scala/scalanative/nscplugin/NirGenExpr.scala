@@ -176,7 +176,8 @@ trait NirGenExpr(using Context) {
     private def isRiftStreamWindowIndexedRankPut(tree: Tree): Boolean = {
       val sym = calledSymbol(tree)
       val name = sym.name.toString
-      name == "putWindowRank" && isRiftRegionCompanionOwner(sym)
+      (name == "putWindowRank" || name == "putWindowRankInBucket") &&
+        isRiftRegionCompanionOwner(sym)
     }
 
     private def isStableStaticFieldSelect(tree: Select): Boolean =

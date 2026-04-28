@@ -637,7 +637,6 @@ object CheckedStreamWindowRankMatrixHelpers {
             val key = nodeKeys(node)
             val record = recordByKey(key)
             if (record != null && record.bucketStart == bucketStart) {
-              RiftRegion.removeWindowRank(stream, rank, key)
               recordByKey(key) = null
             }
             nodeKeys(node) = 0
@@ -705,9 +704,10 @@ object CheckedStreamWindowRankMatrixHelpers {
           record.lastValue = value
           recordByKey(key) = record
           addBucketNode(slot, key)
-          RiftRegion.putWindowRank(
+          RiftRegion.putWindowRankInBucket(
             stream,
             rank,
+            bucket,
             key,
             record,
             recordPriority(record)

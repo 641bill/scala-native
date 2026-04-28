@@ -143,6 +143,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       val startSeconds: Long
   ) {
     private[memory] var next: StreamBucket = null
+    private[memory] var ownedRankKeyHeadPlusOne: Int = 0
 
     def isOpen: Boolean =
       child.isOpen
@@ -178,14 +179,82 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    *  This combines the `StreamBucketArena` lifetime primitive with the
    *  checked dense-key ranking primitive. Values may be ordinary Scala objects
    *  allocated in a child bucket and deliberately widened to the parent stream
-   *  through `streamBucketRegion`. The operator still owns semantic cleanup:
-   *  keys whose values live in a closing bucket must be removed before the
-   *  bucket closes.
+   *  through `streamBucketRegion`. The preferred `putWindowRankInBucket` path
+   *  records which child bucket owns each key, so bucket close can unlink
+   *  parent-visible rank references before the child region closes.
    */
   final class StreamWindowIndexedRank[T <: Object] private[memory] (
       private[memory] val buckets: StreamBucketArena,
-      private[memory] val queue: RegionIndexedPriorityQueue[T]
-  )
+      private[memory] val queue: RegionIndexedPriorityQueue[T],
+      private[memory] val ownerPresentByKey: Array[Boolean],
+      private[memory] val ownerStartByKey: Array[Long],
+      private[memory] val nextOwnedKeyPlusOneByKey: Array[Int],
+      private[memory] val previousOwnedKeyPlusOneByKey: Array[Int]
+  ) {
+    private[memory] def linkOwnedKey(key: Int, bucket: StreamBucket): Unit = {
+      checkOwnedKey(key)
+      if (ownerPresentByKey(key)) unlinkOwnedKey(key)
+      ownerPresentByKey(key) = true
+      ownerStartByKey(key) = bucket.startSeconds
+      val keyPlusOne = key + 1
+      val oldHead = bucket.ownedRankKeyHeadPlusOne
+      nextOwnedKeyPlusOneByKey(key) = oldHead
+      previousOwnedKeyPlusOneByKey(key) = 0
+      if (oldHead != 0)
+        previousOwnedKeyPlusOneByKey(oldHead - 1) = keyPlusOne
+      bucket.ownedRankKeyHeadPlusOne = keyPlusOne
+    }
+
+    private[memory] def unlinkOwnedKey(key: Int): Unit = {
+      checkOwnedKey(key)
+      if (!ownerPresentByKey(key)) return
+
+      val startSeconds = ownerStartByKey(key)
+      var bucket = buckets.first
+      while (bucket != null && bucket.startSeconds != startSeconds)
+        bucket = bucket.next
+
+      if (bucket != null) {
+        val target = key + 1
+        val previous = previousOwnedKeyPlusOneByKey(key)
+        val next = nextOwnedKeyPlusOneByKey(key)
+        if (previous == 0) bucket.ownedRankKeyHeadPlusOne = next
+        else nextOwnedKeyPlusOneByKey(previous - 1) = next
+        if (next != 0) previousOwnedKeyPlusOneByKey(next - 1) = previous
+      }
+
+      ownerPresentByKey(key) = false
+      ownerStartByKey(key) = 0L
+      nextOwnedKeyPlusOneByKey(key) = 0
+      previousOwnedKeyPlusOneByKey(key) = 0
+    }
+
+    private[memory] def removeOwnedKeysForBucket(
+        bucket: StreamBucket
+    ): Unit = {
+      var current = bucket.ownedRankKeyHeadPlusOne
+      bucket.ownedRankKeyHeadPlusOne = 0
+      while (current != 0) {
+        val key = current - 1
+        val next = nextOwnedKeyPlusOneByKey(key)
+        if (
+          ownerPresentByKey(key) &&
+          ownerStartByKey(key) == bucket.startSeconds
+        ) {
+          queue.removeTrusted(key)
+          ownerPresentByKey(key) = false
+          ownerStartByKey(key) = 0L
+        }
+        nextOwnedKeyPlusOneByKey(key) = 0
+        previousOwnedKeyPlusOneByKey(key) = 0
+        current = next
+      }
+    }
+
+    private def checkOwnedKey(key: Int): Unit =
+      if (key < 0 || key >= ownerPresentByKey.length)
+        throw new IndexOutOfBoundsException(key.toString)
+  }
 
   /** A heap object explicitly retained by a live Rift region.
    *
@@ -1257,8 +1326,9 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   /** Allocates a checked stream-window indexed-rank collection.
    *
    *  The returned collection keeps parent-owned rank storage and a reusable
-   *  stream-bucket arena. It does not infer query semantics: callers still
-   *  remove keys and clear parent-visible references in the close callback.
+   *  stream-bucket arena. Use `putWindowRankInBucket` when ranked values live
+   *  in a child bucket; close then removes those keys before closing the child
+   *  region.
    */
   def streamWindowIndexedRank[T <: Object](
       bucketSeconds: Long,
@@ -1267,9 +1337,17 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   )(using parent: StreamingRegion^): StreamWindowIndexedRank[T]^{parent} = {
     val buckets = streamBucketArena(bucketSeconds)
     val queue = regionIndexedPriorityQueue[T](keyCapacity, initialCapacity)
+    val ownerPresentByKey = alloc(new Array[Boolean](keyCapacity))
+    val ownerStartByKey = alloc(new Array[Long](keyCapacity))
+    val nextOwnedKeyPlusOneByKey = alloc(new Array[Int](keyCapacity))
+    val previousOwnedKeyPlusOneByKey = alloc(new Array[Int](keyCapacity))
     new StreamWindowIndexedRank[T](
       buckets.asInstanceOf[StreamBucketArena],
-      queue.asInstanceOf[RegionIndexedPriorityQueue[T]]
+      queue.asInstanceOf[RegionIndexedPriorityQueue[T]],
+      ownerPresentByKey,
+      ownerStartByKey,
+      nextOwnedKeyPlusOneByKey,
+      previousOwnedKeyPlusOneByKey
     ).asInstanceOf[StreamWindowIndexedRank[T]^{parent}]
   }
 
@@ -1494,6 +1572,27 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       .asInstanceOf[RegionIndexedPriorityQueue[T]^{parent}]
       .putTrusted(parent, key, value.asInstanceOf[Object], priority)
 
+  /** Inserts or replaces a ranked value owned by `bucket`.
+   *
+   *  When the bucket closes, `closeWindowRankBucketsBefore` and
+   *  `closeAllWindowRankBuckets` remove the key from parent-owned rank state
+   *  before closing the bucket's child region.
+   */
+  def putWindowRankInBucket[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent},
+      bucket: StreamBucket^{parent},
+      key: Int,
+      value: T^{parent},
+      priority: Long
+  ): Unit = {
+    bucket.child.checkOpen()
+    rank.queue
+      .asInstanceOf[RegionIndexedPriorityQueue[T]^{parent}]
+      .putTrusted(parent, key, value.asInstanceOf[Object], priority)
+    rank.linkOwnedKey(key, bucket.asInstanceOf[StreamBucket])
+  }
+
   /** Updates `key`'s priority if it is present. */
   def updateWindowRankPriority[T <: Object](
       parent: StreamingRegion^,
@@ -1513,12 +1612,15 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent},
       key: Int
-  ): Boolean =
-    remove(
+  ): Boolean = {
+    val removed = remove(
       parent,
       rank.queue.asInstanceOf[RegionIndexedPriorityQueue[T]^{parent}],
       key
     )
+    if (removed) rank.unlinkOwnedKey(key)
+    removed
+  }
 
   /** Returns true when `key` is present. */
   def containsWindowRank[T <: Object](
@@ -1616,7 +1718,10 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       parent,
       rank.buckets.asInstanceOf[StreamBucketArena^{parent}],
       cutoffSeconds
-    )(cleanup)
+    ) { bucket =>
+      rank.removeOwnedKeysForBucket(bucket.asInstanceOf[StreamBucket])
+      cleanup(bucket)
+    }
 
   /** Closes every window-rank bucket. */
   def closeAllWindowRankBuckets[T <: Object](
@@ -1626,7 +1731,10 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     closeAllStreamBuckets(
       parent,
       rank.buckets.asInstanceOf[StreamBucketArena^{parent}]
-    )(cleanup)
+    ) { bucket =>
+      rank.removeOwnedKeysForBucket(bucket.asInstanceOf[StreamBucket])
+      cleanup(bucket)
+    }
 
   /** Owner-token method syntax for checked object buffers.
    *

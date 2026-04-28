@@ -656,6 +656,32 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def streamWindowIndexedRankInBucketAutoCleanupCompiles(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Row(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    val rank = RiftRegion.streamWindowIndexedRank[Row](10, 8, 1)
+      |    val bucket = RiftRegion.streamWindowBucketFor(stream, rank, 7L)
+      |    val child = RiftRegion.streamBucketRegion(stream, bucket)
+      |    val row: Row^{stream} =
+      |      RiftRegion.alloc(new Row(41))(using child)
+      |
+      |    RiftRegion.putWindowRankInBucket(stream, rank, bucket, 1, row, 1L)
+      |    val beforeClose = RiftRegion.peekWindowRank(stream, rank).value
+      |
+      |    RiftRegion.closeWindowRankBucketsBefore(stream, rank, 10L) { _ =>
+      |      ()
+      |    }
+      |
+      |    beforeClose + RiftRegion.windowRankLength(stream, rank)
+      |  }
+      |""".stripMargin)
+
   @Test def streamWindowIndexedRankCannotStoreDirectHeapObject(): Unit =
     assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
@@ -668,6 +694,24 @@ class RiftRegionCheckedCompilerTest {
       |    val rank = RiftRegion.streamWindowIndexedRank[Row](10, 8, 1)
       |    val row = new Row(41)
       |    RiftRegion.putWindowRank(stream, rank, 1, row, 1L)
+      |  }
+      |""".stripMargin,
+      "Rift checked object buffer cannot store an unrooted heap object"
+    )
+
+  @Test def streamWindowIndexedRankInBucketCannotStoreDirectHeapObject(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Row(val value: Int)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    val rank = RiftRegion.streamWindowIndexedRank[Row](10, 8, 1)
+      |    val bucket = RiftRegion.streamWindowBucketFor(stream, rank, 7L)
+      |    val row = new Row(41)
+      |    RiftRegion.putWindowRankInBucket(stream, rank, bucket, 1, row, 1L)
       |  }
       |""".stripMargin,
       "Rift checked object buffer cannot store an unrooted heap object"
