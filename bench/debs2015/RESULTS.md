@@ -4168,3 +4168,135 @@ Next implementation-facing options:
 - Keep SafeZone full-month controls optional. The 1M SafeZone process rows
   already show same operation counts but slower Q1/Q2 process under the
   current closeable SafeZone object path.
+
+## Checked Q1 Window Rank Arenas
+
+Date: 2026-04-28
+
+Purpose:
+
+- Reduce checked Q1 rank-object churn without changing the DEBS Q1 ranking
+  algorithm and without creating one child region per active route.
+- Keep ordinary Scala rank object graphs in regions. A
+  `CheckedRankedRoute` still owns `CheckedRoute` and `CheckedCell` objects;
+  this is not a primitive-only rewrite.
+- Use a bounded structured lifetime: Q1 rank objects now live in rank arenas
+  whose size matches the Q1 window (`30 min`). A rank arena closes only after
+  every event in the same interval has left the sliding window.
+
+Implementation note:
+
+- `Debs2015Q1CheckedProcessingRun.scala` now keeps separate Q1 event buckets
+  and Q1 rank buckets. Event buckets remain per dropoff second, so window
+  eviction is unchanged.
+- When a route refreshes inside the same rank-window arena, checked Q1 mutates
+  its existing `CheckedRankedRoute` and fixes the rank heap. When a route
+  refreshes in a later rank arena, checked Q1 allocates a new rank object graph
+  in that arena and replaces the heap entry.
+- This preserves the heap/Rift logical program shape: heap and checked still
+  maintain the same route table, rank heap, and top-k extraction. The
+  difference is allocation placement and lifetime.
+- A rejected 60-second rank-arena probe is not kept. It matched outputs and
+  kept RSS low, but only reduced 100k checked Q1 rank creation from `98005` to
+  `96918`, which was too weak to justify as the final shape.
+
+Commands:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" compile
+
+DEBS2015_PROCESS_DIAGNOSTICS=1 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q1-rankwindow-100k-rebuild \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_PROCESS_DIAGNOSTICS=1 \
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q1-rankwindow-1m \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+for run in 1 2 3; do
+  out="/tmp/debs2015-runboth-q1-rankwindow-1m-median/run-${run}"
+  mkdir -p "$out"
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_MODES="heap rift-checked" \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR="$out" \
+  DEBS2015_BOTH_SUMMARY="$out/summary.tsv" \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-full.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q1-rankwindow-fullmonth-single \
+DEBS2015_BOTH_SUMMARY=/tmp/debs2015-runboth-q1-rankwindow-fullmonth-single/summary.tsv \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+All output comparisons matched heap after stripping only the measured latency
+column.
+
+100k and 1M diagnostic rows:
+
+| Input | Mode | Elapsed ms | GC ms | RSS MiB | Rift op ms | Q1 process ms | Q2 process ms | Q1 rank created | Q1 rank refreshes | Active requested peak MiB |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100k | heap | 505.469 | 9.827 | 52.9 | 0.000 | 154.777 | 116.752 | 64672 | 98005 | 0.0 |
+| 100k | rift-checked | 462.174 | 0.066 | 32.8 | 1.364 | 146.364 | 106.891 | 77974 | 98005 | 22.7 |
+| 1M | heap | 4711.059 | 20.432 | 153.7 | 0.000 | 1424.788 | 1205.801 | 573523 | 979699 | 0.0 |
+| 1M | rift-checked | 4484.549 | 2.378 | 63.9 | 6.897 | 1437.485 | 1079.576 | 725262 | 979699 | 33.4 |
+
+1M non-diagnostic 3-run medians:
+
+| Mode | Elapsed ms | Real s | GC ms | RSS MiB | Rift op ms | Q1 process ms | Q2 process ms | Q1 rank created |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 4601.532 | 4.61 | 20.335 | 153.7 | 0.000 | 1406.251 | 1169.163 | 573523 |
+| rift-checked | 4610.413 | 4.61 | 2.304 | 63.9 | 7.577 | 1489.462 | 1175.684 | 725262 |
+
+Full-month single-run scale check:
+
+| Mode | Elapsed s | Real s | User+sys s | GC ms | RSS MiB | Rift op ms | Q1 process s | Q2 process s | Q1 rank created | Active requested peak MiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 72.445 | 72.48 | 70.65 | 304.485 | 594.4 | 0.000 | 20.726 | 20.853 | 6195167 | 0.0 |
+| rift-checked | 72.556 | 72.58 | 72.05 | 86.404 | 447.8 | 949.899 | 22.368 | 21.915 | 8842434 | 173.0 |
+
+Interpretation:
+
+- The window-rank arena fixes most of the checked Q1 churn regression without
+  falling back to primitive-only records. At 1M, checked Q1 rank objects fall
+  from the old per-refresh `979699` shape to `725262`; at full-month scale they
+  fall from the old checked `14487771` to `8842434`.
+- It does not fully reach heap rank-object creation (`573523` at 1M and
+  `6195167` full-month) because a route that remains active across rank-window
+  arena boundaries receives a new region object graph in the later arena. That
+  is the price of bounded region lifetime without one region per route.
+- The bounded 1M median is an elapsed near-tie, not a speedup claim:
+  checked is `8.881 ms` slower at median while still cutting GC collection time
+  by about `18 ms` and RSS by about `90 MiB`.
+- The full-month single-run scale check is stronger for memory than for
+  elapsed time: checked RSS is lower than heap in this row (`447.8 MiB` versus
+  `594.4 MiB`), and GC collection time is lower by about `218 ms`, but checked
+  still pays about `950 ms` of measured region operations and higher Q1/Q2
+  process CPU.
+- This is a general checked streaming-lifetime improvement: the pattern is a
+  reusable "event buckets plus coarser output/rank arenas" discipline. It is
+  not DEBS-specific algorithm cheating. The next framework step is to expose
+  this as a reusable checked window/ranking API instead of hand-encoding it in
+  Q1.
+
+Next implementation-facing options:
+
+- Move the same coarse-arena idea into a reusable checked rank/window
+  collection API so other streaming operators can allocate ordinary Scala
+  rank/output objects in bounded regions.
+- Investigate checked Q2 process overhead under identical operation counts.
+  The region lifetime now looks healthy; CPU overhead is the remaining limit.
+- Add static/checked close-discipline tests for the rank-arena shape. The
+  current code relies on the sorted-stream invariant and event eviction before
+  rank-arena close; the compiler still does not prove that invariant.

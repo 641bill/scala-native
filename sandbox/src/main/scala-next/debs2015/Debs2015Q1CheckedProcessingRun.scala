@@ -17,6 +17,9 @@ object Debs2015Q1CheckedProcessingRunner {
   private val InitialRouteTableCapacity = 1024
   private val InitialRouteRankCapacity = 1024
   private val TopCandidateCapacity = 24
+  // Rank arenas close only after every event in the same Q1 window interval has
+  // expired, so active route slots either point to a newer arena or have been removed.
+  private val RankBucketSeconds = Q1Support.WindowSeconds
 
   final case class Metrics(
       events: Long,
@@ -93,7 +96,8 @@ object Debs2015Q1CheckedProcessingRunner {
         val route: CheckedRoute^{stream},
         var count: Int,
         var latestSeconds: Long,
-        var latestSeq: Long
+        var latestSeq: Long,
+        val rankBucketStartSeconds: Long
     )
     final class Bucket(
         val child: RiftRegion.ChildBucket^{stream},
@@ -107,6 +111,11 @@ object Debs2015Q1CheckedProcessingRunner {
       var head: RouteEvent^{child.region} = null
       var tail: RouteEvent^{child.region} = null
     }
+    final class RankBucket(
+        val child: RiftRegion.ChildBucket^{stream},
+        val startSeconds: Long,
+        var next: RankBucket^{stream}
+    )
 
     def allocateLongArray(size: Int): Array[Long]^{stream} =
       RiftRegion.alloc(new Array[Long](size))
@@ -139,14 +148,15 @@ object Debs2015Q1CheckedProcessingRunner {
           key: Long,
           latestSeconds: Long,
           latestSeq: Long,
-          rankRegion: RiftRegion.StreamingRegion^{stream}
+          rankRegion: RiftRegion.StreamingRegion^{stream},
+          rankBucketStartSeconds: Long
       ): Unit = {
         val slot = insertSlot(key)
         if (keys(slot) == key) {
           counts(slot) += 1
           latestSecondsBySlot(slot) = latestSeconds
           latestSeqBySlot(slot) = latestSeq
-          refreshRank(slot, rankRegion)
+          refreshRank(slot, rankRegion, rankBucketStartSeconds)
         } else {
           if (keys(slot) == EmptyRouteKey) usedSize += 1
           keys(slot) = key
@@ -154,7 +164,7 @@ object Debs2015Q1CheckedProcessingRunner {
           latestSecondsBySlot(slot) = latestSeconds
           latestSeqBySlot(slot) = latestSeq
           activeSize += 1
-          refreshRank(slot, rankRegion)
+          refreshRank(slot, rankRegion, rankBucketStartSeconds)
         }
       }
 
@@ -214,26 +224,48 @@ object Debs2015Q1CheckedProcessingRunner {
 
       def size: Int = resultSize
 
+      def clearResult(): Unit = {
+        var i = 0
+        while (i < resultSize) {
+          result(i) = null
+          i += 1
+        }
+        resultSize = 0
+      }
+
       private def refreshRank(
           slot: Int,
-          rankRegion: RiftRegion.StreamingRegion^{stream}
+          rankRegion: RiftRegion.StreamingRegion^{stream},
+          rankBucketStartSeconds: Long
       ): Unit = {
         Debs2015ProcessDiagnostics.recordQ1RankRefresh()
-        val ranked =
-          allocateRankedRoute(
-            keys(slot),
-            counts(slot),
-            latestSecondsBySlot(slot),
-            latestSeqBySlot(slot),
-            rankRegion
-          )
-        val index = rankHeapIndex(slot)
-        rankBySlot(slot) = ranked
-        if (index >= 0) {
-          heapRanks(index) = ranked
+        val existing = rankBySlot(slot)
+        if (
+          existing != null &&
+          existing.rankBucketStartSeconds == rankBucketStartSeconds
+        ) {
+          existing.count = counts(slot)
+          existing.latestSeconds = latestSecondsBySlot(slot)
+          existing.latestSeq = latestSeqBySlot(slot)
           fixRankHeap(slot)
         } else {
-          addRankHeap(slot, ranked)
+          val ranked =
+            allocateRankedRoute(
+              keys(slot),
+              counts(slot),
+              latestSecondsBySlot(slot),
+              latestSeqBySlot(slot),
+              rankRegion,
+              rankBucketStartSeconds
+            )
+          val index = rankHeapIndex(slot)
+          rankBySlot(slot) = ranked
+          if (index >= 0) {
+            heapRanks(index) = ranked
+            fixRankHeap(slot)
+          } else {
+            addRankHeap(slot, ranked)
+          }
         }
       }
 
@@ -242,7 +274,8 @@ object Debs2015Q1CheckedProcessingRunner {
           count: Int,
           latestSeconds: Long,
           latestSeq: Long,
-          rankRegion: RiftRegion.StreamingRegion^{stream}
+          rankRegion: RiftRegion.StreamingRegion^{stream},
+          rankBucketStartSeconds: Long
       ): CheckedRankedRoute^{stream} = {
         val startEast = ((key >>> 30) & RoutePartMask).toInt
         val startSouth = ((key >>> 20) & RoutePartMask).toInt
@@ -261,7 +294,14 @@ object Debs2015Q1CheckedProcessingRunner {
           RiftRegion.alloc(new CheckedRoute(start, end))(using rankRegion)
         val ranked: CheckedRankedRoute^{stream} =
           RiftRegion.alloc(
-            new CheckedRankedRoute(key, route, count, latestSeconds, latestSeq)
+            new CheckedRankedRoute(
+              key,
+              route,
+              count,
+              latestSeconds,
+              latestSeq,
+              rankBucketStartSeconds
+            )
           )(using rankRegion)
         Debs2015Counters.recordQ1RankCreated()
         ranked
@@ -498,6 +538,9 @@ object Debs2015Q1CheckedProcessingRunner {
       private var firstBucket: Bucket^{stream} = null
       private var lastBucket: Bucket^{stream} = null
       private var currentBucket: Bucket^{stream} = null
+      private var firstRankBucket: RankBucket^{stream} = null
+      private var lastRankBucket: RankBucket^{stream} = null
+      private var currentRankBucket: RankBucket^{stream} = null
       private var nextSeq = 0L
 
       def process(trip: Trip): Int = {
@@ -514,7 +557,9 @@ object Debs2015Q1CheckedProcessingRunner {
             nextSeq += 1L
             val bucket = bucketFor(trip.dropoffSeconds)
             val bucketRegion = bucket.child.region
-            val rankRegion = RiftRegion.childBucketRegion(stream, bucket.child)
+            val rankBucket = rankBucketFor(trip.dropoffSeconds)
+            val rankRegion =
+              RiftRegion.childBucketRegion(stream, rankBucket.child)
             val event: bucket.RouteEvent^{bucketRegion} =
               RiftRegion.alloc(
                 new bucket.RouteEvent(key, null)
@@ -527,7 +572,13 @@ object Debs2015Q1CheckedProcessingRunner {
               bucket.tail.next = event
               bucket.tail = event
             }
-            routes.increment(key, trip.dropoffSeconds, seq, rankRegion)
+            routes.increment(
+              key,
+              trip.dropoffSeconds,
+              seq,
+              rankRegion,
+              rankBucket.startSeconds
+            )
           }
         }
 
@@ -541,6 +592,7 @@ object Debs2015Q1CheckedProcessingRunner {
         routes.size
 
       def close(): Unit = {
+        routes.clearResult()
         while (firstBucket != null) {
           val bucket = firstBucket
           firstBucket = bucket.next
@@ -551,8 +603,17 @@ object Debs2015Q1CheckedProcessingRunner {
             bucket.next = null
           }
         }
+        while (firstRankBucket != null) {
+          val bucket = firstRankBucket
+          firstRankBucket = bucket.next
+          RiftRegion.closeChildBucket(stream, bucket.child) {
+            bucket.next = null
+          }
+        }
         lastBucket = null
         currentBucket = null
+        lastRankBucket = null
+        currentRankBucket = null
       }
 
       private def bucketFor(dropoffSeconds: Long): Bucket^{stream} = {
@@ -581,7 +642,35 @@ object Debs2015Q1CheckedProcessingRunner {
         }
       }
 
-      private def evictBefore(cutoffSeconds: Long): Unit =
+      private def rankBucketFor(dropoffSeconds: Long): RankBucket^{stream} = {
+        val startSeconds =
+          (dropoffSeconds / RankBucketSeconds) * RankBucketSeconds
+        if (
+          currentRankBucket != null &&
+          currentRankBucket.startSeconds == startSeconds
+        ) currentRankBucket
+        else {
+          val child = RiftRegion.childBucket
+          DebsRegionFamilies.setChildBucket(
+            stream,
+            child,
+            DebsRegionFamilies.Q1Window
+          )
+          val bucket: RankBucket^{stream} =
+            new RankBucket(child, startSeconds, null)
+          if (firstRankBucket == null) {
+            firstRankBucket = bucket
+            lastRankBucket = bucket
+          } else {
+            lastRankBucket.next = bucket
+            lastRankBucket = bucket
+          }
+          currentRankBucket = bucket
+          bucket
+        }
+      }
+
+      private def evictBefore(cutoffSeconds: Long): Unit = {
         while (firstBucket != null && firstBucket.startSeconds < cutoffSeconds) {
           val bucket = firstBucket
           Debs2015ProcessDiagnostics.recordQ1BucketClose()
@@ -599,6 +688,29 @@ object Debs2015Q1CheckedProcessingRunner {
             bucket.next = null
           }
         }
+        closeRankBucketsBefore(cutoffSeconds)
+      }
+
+      private def closeRankBucketsBefore(cutoffSeconds: Long): Unit = {
+        if (
+          firstRankBucket == null ||
+          firstRankBucket.startSeconds + RankBucketSeconds > cutoffSeconds
+        ) return
+
+        routes.clearResult()
+        while (
+          firstRankBucket != null &&
+          firstRankBucket.startSeconds + RankBucketSeconds <= cutoffSeconds
+        ) {
+          val bucket = firstRankBucket
+          firstRankBucket = bucket.next
+          if (firstRankBucket == null) lastRankBucket = null
+          if (currentRankBucket eq bucket) currentRankBucket = null
+          RiftRegion.closeChildBucket(stream, bucket.child) {
+            bucket.next = null
+          }
+        }
+      }
     }
 
     val q1 = new CheckedQ1
