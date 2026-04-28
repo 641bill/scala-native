@@ -380,7 +380,8 @@ object Debs2015RunBothRunner {
       phases: PhaseMetrics,
       phaseGcAlloc: PhaseGcAllocMetrics,
       runtime: RuntimeMetrics,
-      counters: Debs2015Counters.Snapshot
+      counters: Debs2015Counters.Snapshot,
+      processDiagnostics: Debs2015ProcessDiagnostics.Snapshot
   ) {
     def elapsedMillis: Double = elapsedNanos.toDouble / 1000000.0
 
@@ -439,7 +440,9 @@ object Debs2015RunBothRunner {
       RiftAllocator.Impl.statsReset()
     }
     Debs2015Counters.reset()
+    Debs2015ProcessDiagnostics.reset()
     val counterStart = Debs2015Counters.snapshot()
+    val processDiagnosticsStart = Debs2015ProcessDiagnostics.snapshot()
     val runtimeStart = RuntimeMetrics.capture(usesRift)
     var runtimeEnd = runtimeStart
     val phaseGcAlloc =
@@ -605,7 +608,9 @@ object Debs2015RunBothRunner {
       ),
       phaseGcAlloc = phaseGcAlloc.result(),
       runtime = RuntimeMetrics.since(runtimeStart, runtimeEnd),
-      counters = Debs2015Counters.snapshot().since(counterStart)
+      counters = Debs2015Counters.snapshot().since(counterStart),
+      processDiagnostics =
+        Debs2015ProcessDiagnostics.snapshot().since(processDiagnosticsStart)
     )
   }
 
@@ -618,7 +623,9 @@ object Debs2015RunBothRunner {
     RiftRegion.init(0)
     RiftAllocator.Impl.statsReset()
     Debs2015Counters.reset()
+    Debs2015ProcessDiagnostics.reset()
     val counterStart = Debs2015Counters.snapshot()
+    val processDiagnosticsStart = Debs2015ProcessDiagnostics.snapshot()
     val runtimeStart = RuntimeMetrics.capture(includeRift = true)
     var runtimeEnd = runtimeStart
     val phaseGcAlloc =
@@ -805,7 +812,9 @@ object Debs2015RunBothRunner {
       ),
       phaseGcAlloc = phaseGcAlloc.result(),
       runtime = RuntimeMetrics.since(runtimeStart, runtimeEnd),
-      counters = Debs2015Counters.snapshot().since(counterStart)
+      counters = Debs2015Counters.snapshot().since(counterStart),
+      processDiagnostics =
+        Debs2015ProcessDiagnostics.snapshot().since(processDiagnosticsStart)
     )
   }
 
@@ -835,6 +844,7 @@ object Debs2015RunBothRunner {
     val phases = metrics.phases
     val phaseGcAlloc = metrics.phaseGcAlloc
     val counters = metrics.counters
+    val processDiagnostics = metrics.processDiagnostics
     val trackedNanos = phases.trackedNanos
     val untrackedNanos =
       if (metrics.elapsedNanos > trackedNanos) metrics.elapsedNanos - trackedNanos
@@ -936,6 +946,16 @@ object Debs2015RunBothRunner {
         f"diag_q1_top10_calls=${counters.q1Top10Calls}%d " +
         f"diag_q1_result_array_allocs=${counters.q1ResultArrayAllocs}%d " +
         f"diag_q1_result_array_slots=${counters.q1ResultArraySlots}%d " +
+        f"diag_q1_window_entries_created=${processDiagnostics.q1WindowEntriesCreated}%d " +
+        f"diag_q1_bucket_opens=${processDiagnostics.q1BucketOpens}%d " +
+        f"diag_q1_bucket_closes=${processDiagnostics.q1BucketCloses}%d " +
+        f"diag_q1_route_table_probe_steps=${processDiagnostics.q1RouteTableProbeSteps}%d " +
+        f"diag_q1_route_table_rehashes=${processDiagnostics.q1RouteTableRehashes}%d " +
+        f"diag_q1_route_table_rehash_slots=${processDiagnostics.q1RouteTableRehashSlots}%d " +
+        f"diag_q1_rank_refreshes=${processDiagnostics.q1RankRefreshes}%d " +
+        f"diag_q1_rank_heap_compares=${processDiagnostics.q1RankHeapCompares}%d " +
+        f"diag_q1_rank_heap_swaps=${processDiagnostics.q1RankHeapSwaps}%d " +
+        f"diag_q1_top_candidate_compares=${processDiagnostics.q1TopCandidateCompares}%d " +
         f"diag_q2_rank_adds=${counters.q2RankAdds}%d " +
         f"diag_q2_rank_removes=${counters.q2RankRemoves}%d " +
         f"diag_q2_rank_fixes=${counters.q2RankFixes}%d " +
@@ -947,6 +967,12 @@ object Debs2015RunBothRunner {
         f"diag_q2_top10_recomputes=${counters.q2Top10Recomputes}%d " +
         f"diag_q2_result_array_allocs=${counters.q2ResultArrayAllocs}%d " +
         f"diag_q2_result_array_slots=${counters.q2ResultArraySlots}%d " +
+        f"diag_q2_profit_entries_created=${processDiagnostics.q2ProfitEntriesCreated}%d " +
+        f"diag_q2_empty_entries_created=${processDiagnostics.q2EmptyEntriesCreated}%d " +
+        f"diag_q2_profit_bucket_opens=${processDiagnostics.q2ProfitBucketOpens}%d " +
+        f"diag_q2_profit_bucket_closes=${processDiagnostics.q2ProfitBucketCloses}%d " +
+        f"diag_q2_empty_bucket_opens=${processDiagnostics.q2EmptyBucketOpens}%d " +
+        f"diag_q2_empty_bucket_closes=${processDiagnostics.q2EmptyBucketCloses}%d " +
         f"diag_q2_median_computes=${counters.q2MedianComputes}%d " +
         f"diag_q2_median_values_sorted=${counters.q2MedianValuesSorted}%d " +
         f"diag_q2_median_reads=${counters.q2MedianReads}%d " +

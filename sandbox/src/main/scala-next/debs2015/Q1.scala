@@ -79,6 +79,7 @@ private abstract class Q1BucketedWindow(
     else {
       val allocator = openAllocator()
       val bucket = new Bucket(startSeconds, allocator, null)
+      Debs2015ProcessDiagnostics.recordQ1BucketOpen()
       buckets.enqueue(bucket)
       currentBucket = bucket
       bucket
@@ -102,22 +103,27 @@ private abstract class Q1BucketedWindow(
   }
 
   private def allocateEntry(bucket: Bucket, routeKey: Long): BucketWindowEntry =
-    bucket.allocator.kind match {
-      case DebsAllocator.Rift =>
-        bucket.allocator.riftRegion.alloc(
+    {
+      Debs2015ProcessDiagnostics.recordQ1WindowEntry()
+      bucket.allocator.kind match {
+        case DebsAllocator.Rift =>
+          bucket.allocator.riftRegion.alloc(
+            new BucketWindowEntry(routeKey, bucket.head)
+          )
+        case DebsAllocator.SafeZoneKind =>
+          SafeZoneAllocator
+            .allocate(bucket.allocator.safeZone,
+                      new BucketWindowEntry(routeKey, bucket.head))
+            .asInstanceOf[BucketWindowEntry]
+        case _ =>
           new BucketWindowEntry(routeKey, bucket.head)
-        )
-      case DebsAllocator.SafeZoneKind =>
-        SafeZoneAllocator
-          .allocate(bucket.allocator.safeZone,
-                    new BucketWindowEntry(routeKey, bucket.head))
-          .asInstanceOf[BucketWindowEntry]
-      case _ =>
-        new BucketWindowEntry(routeKey, bucket.head)
+      }
     }
 
-  private def closeBucket(bucket: Bucket): Unit =
+  private def closeBucket(bucket: Bucket): Unit = {
+    Debs2015ProcessDiagnostics.recordQ1BucketClose()
     bucket.allocator.close()
+  }
 
   private final class Bucket(
       val startSeconds: Long,
@@ -276,6 +282,7 @@ object Q1Support {
     }
 
     private def updateRank(slot: Int): Unit = {
+      Debs2015ProcessDiagnostics.recordQ1RankRefresh()
       val existing = rankBySlot(slot)
 
       val ranked =
@@ -478,6 +485,7 @@ object Q1Support {
     }
 
     private def swapRankHeap(left: Int, right: Int): Unit = {
+      Debs2015ProcessDiagnostics.recordQ1RankHeapSwap()
       val leftRank = heapRanks(left)
       val leftSlot = heapSlots(left)
       heapRanks(left) = heapRanks(right)
@@ -492,6 +500,7 @@ object Q1Support {
       var best = 0
       var i = 1
       while (i < candidateCount) {
+        Debs2015ProcessDiagnostics.recordQ1TopCandidateCompare()
         if (betterHeapIndex(topCandidateHeap(i), topCandidateHeap(best)))
           best = i
         i += 1
@@ -503,6 +512,7 @@ object Q1Support {
       compareHeapEntries(leftIndex, rightIndex) < 0
 
     private def compareHeapEntries(leftIndex: Int, rightIndex: Int): Int = {
+      Debs2015ProcessDiagnostics.recordQ1RankHeapCompare()
       val left = heapRanks(leftIndex)
       val right = heapRanks(rightIndex)
       if (left eq right) 0
@@ -554,6 +564,7 @@ object Q1Support {
       var slot = hash(key) & mask
       var firstDeleted = -1
       while (true) {
+        Debs2015ProcessDiagnostics.recordQ1RouteTableProbe()
         val current = keys(slot)
         if (current == key) return slot
         if (current == EmptyRouteKey)
@@ -569,6 +580,7 @@ object Q1Support {
       val mask = keys.length - 1
       var slot = hash(key) & mask
       while (true) {
+        Debs2015ProcessDiagnostics.recordQ1RouteTableProbe()
         val current = keys(slot)
         if (current == key) return slot
         if (current == EmptyRouteKey) return -1
@@ -578,6 +590,7 @@ object Q1Support {
     }
 
     private def rehash(newCapacity: Int): Unit = {
+      Debs2015ProcessDiagnostics.recordQ1RouteTableRehash(newCapacity)
       val oldKeys = keys
       val oldCounts = counts
       val oldLatestSeconds = latestSecondsBySlot
@@ -629,8 +642,11 @@ object Q1Support {
     private def insertSlotWithoutRehash(key: Long): Int = {
       val mask = keys.length - 1
       var slot = hash(key) & mask
-      while (keys(slot) != EmptyRouteKey)
+      while (keys(slot) != EmptyRouteKey) {
+        Debs2015ProcessDiagnostics.recordQ1RouteTableProbe()
         slot = (slot + 1) & mask
+      }
+      Debs2015ProcessDiagnostics.recordQ1RouteTableProbe()
       slot
     }
 

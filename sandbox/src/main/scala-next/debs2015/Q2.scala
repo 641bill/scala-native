@@ -242,6 +242,7 @@ private abstract class Q2BucketedWindow(
     else {
       val allocator = openAllocator()
       val bucket = new ProfitBucket(dropoffSeconds, allocator, null)
+      Debs2015ProcessDiagnostics.recordQ2ProfitBucketOpen()
       profitBuckets.enqueue(bucket)
       currentProfitBucket = bucket
       bucket
@@ -254,6 +255,7 @@ private abstract class Q2BucketedWindow(
     else {
       val allocator = openAllocator()
       val bucket = new EmptyBucket(dropoffSeconds, allocator, null)
+      Debs2015ProcessDiagnostics.recordQ2EmptyBucketOpen()
       emptyBuckets.enqueue(bucket)
       currentEmptyBucket = bucket
       bucket
@@ -268,18 +270,21 @@ private abstract class Q2BucketedWindow(
       cellKey: Int,
       profit: Double
   ): ProfitEntry =
-    bucket.allocator.kind match {
-      case DebsAllocator.Rift =>
-        bucket.allocator.riftRegion.alloc(
+    {
+      Debs2015ProcessDiagnostics.recordQ2ProfitEntry()
+      bucket.allocator.kind match {
+        case DebsAllocator.Rift =>
+          bucket.allocator.riftRegion.alloc(
+            new ProfitEntry(cellKey, profit, bucket.head)
+          )
+        case DebsAllocator.SafeZoneKind =>
+          SafeZoneAllocator
+            .allocate(bucket.allocator.safeZone,
+                      new ProfitEntry(cellKey, profit, bucket.head))
+            .asInstanceOf[ProfitEntry]
+        case _ =>
           new ProfitEntry(cellKey, profit, bucket.head)
-        )
-      case DebsAllocator.SafeZoneKind =>
-        SafeZoneAllocator
-          .allocate(bucket.allocator.safeZone,
-                    new ProfitEntry(cellKey, profit, bucket.head))
-          .asInstanceOf[ProfitEntry]
-      case _ =>
-        new ProfitEntry(cellKey, profit, bucket.head)
+      }
     }
 
   private def allocateEmptyEntry(
@@ -288,18 +293,21 @@ private abstract class Q2BucketedWindow(
       taxiKey: Int,
       cellKey: Int
   ): EmptyEntry =
-    bucket.allocator.kind match {
-      case DebsAllocator.Rift =>
-        bucket.allocator.riftRegion.alloc(
+    {
+      Debs2015ProcessDiagnostics.recordQ2EmptyEntry()
+      bucket.allocator.kind match {
+        case DebsAllocator.Rift =>
+          bucket.allocator.riftRegion.alloc(
+            new EmptyEntry(seq, taxiKey, cellKey, bucket.head)
+          )
+        case DebsAllocator.SafeZoneKind =>
+          SafeZoneAllocator
+            .allocate(bucket.allocator.safeZone,
+                      new EmptyEntry(seq, taxiKey, cellKey, bucket.head))
+            .asInstanceOf[EmptyEntry]
+        case _ =>
           new EmptyEntry(seq, taxiKey, cellKey, bucket.head)
-        )
-      case DebsAllocator.SafeZoneKind =>
-        SafeZoneAllocator
-          .allocate(bucket.allocator.safeZone,
-                    new EmptyEntry(seq, taxiKey, cellKey, bucket.head))
-          .asInstanceOf[EmptyEntry]
-      case _ =>
-        new EmptyEntry(seq, taxiKey, cellKey, bucket.head)
+      }
     }
 
   private def allocateProfitableArea(
@@ -682,11 +690,13 @@ private abstract class Q2BucketedWindow(
   }
 
   private def closeProfitBucket(bucket: ProfitBucket): Unit = {
+    Debs2015ProcessDiagnostics.recordQ2ProfitBucketClose()
     bucket.head = null
     bucket.allocator.close()
   }
 
   private def closeEmptyBucket(bucket: EmptyBucket): Unit = {
+    Debs2015ProcessDiagnostics.recordQ2EmptyBucketClose()
     bucket.head = null
     bucket.allocator.close()
   }

@@ -529,6 +529,7 @@ object Debs2015Q2CheckedProcessingRunner {
           firstProfitBucket.startSeconds < cutoffSeconds
         ) {
           val bucket = firstProfitBucket
+          Debs2015ProcessDiagnostics.recordQ2ProfitBucketClose()
           RiftRegion.closeChildBucket(stream, bucket.child) {
             var expired = bucket.head
             while (expired != null) {
@@ -554,6 +555,7 @@ object Debs2015Q2CheckedProcessingRunner {
           firstEmptyBucket.startSeconds < cutoffSeconds
         ) {
           val bucket = firstEmptyBucket
+          Debs2015ProcessDiagnostics.recordQ2EmptyBucketClose()
           RiftRegion.closeChildBucket(stream, bucket.child) {
             var expired = bucket.head
             while (expired != null) {
@@ -581,6 +583,7 @@ object Debs2015Q2CheckedProcessingRunner {
         ) currentProfitBucket
         else {
           val child = RiftRegion.childBucket
+          Debs2015ProcessDiagnostics.recordQ2ProfitBucketOpen()
           DebsRegionFamilies.setChildBucket(
             stream,
             child,
@@ -606,6 +609,7 @@ object Debs2015Q2CheckedProcessingRunner {
         ) currentEmptyBucket
         else {
           val child = RiftRegion.childBucket
+          Debs2015ProcessDiagnostics.recordQ2EmptyBucketOpen()
           DebsRegionFamilies.setChildBucket(
             stream,
             child,
@@ -629,6 +633,7 @@ object Debs2015Q2CheckedProcessingRunner {
           cellKey: Int,
           profit: Double
       ): ProfitEntry^{stream} = {
+        Debs2015ProcessDiagnostics.recordQ2ProfitEntry()
         val region = RiftRegion.childBucketRegion(stream, bucket.child)
         RiftRegion.alloc(new ProfitEntry(cellKey, profit, null))(using region)
       }
@@ -639,6 +644,7 @@ object Debs2015Q2CheckedProcessingRunner {
           taxiKey: Int,
           cellKey: Int
       ): EmptyEntry^{stream} = {
+        Debs2015ProcessDiagnostics.recordQ2EmptyEntry()
         val region = RiftRegion.childBucketRegion(stream, bucket.child)
         RiftRegion.alloc(new EmptyEntry(seq, taxiKey, cellKey, null))(using region)
       }
@@ -1029,6 +1035,7 @@ object Debs2015Q2CheckedProcessingRunner {
       }
 
       private def closeProfitBucket(bucket: ProfitBucket^{stream}): Unit = {
+        Debs2015ProcessDiagnostics.recordQ2ProfitBucketClose()
         RiftRegion.closeChildBucket(stream, bucket.child) {
           bucket.head = null
           bucket.next = null
@@ -1036,6 +1043,7 @@ object Debs2015Q2CheckedProcessingRunner {
       }
 
       private def closeEmptyBucket(bucket: EmptyBucket^{stream}): Unit = {
+        Debs2015ProcessDiagnostics.recordQ2EmptyBucketClose()
         RiftRegion.closeChildBucket(stream, bucket.child) {
           bucket.head = null
           bucket.next = null

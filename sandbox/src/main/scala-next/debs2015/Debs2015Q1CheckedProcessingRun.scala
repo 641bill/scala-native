@@ -218,6 +218,7 @@ object Debs2015Q1CheckedProcessingRunner {
           slot: Int,
           rankRegion: RiftRegion.StreamingRegion^{stream}
       ): Unit = {
+        Debs2015ProcessDiagnostics.recordQ1RankRefresh()
         val ranked =
           allocateRankedRoute(
             keys(slot),
@@ -337,6 +338,7 @@ object Debs2015Q1CheckedProcessingRunner {
       }
 
       private def swapRankHeap(left: Int, right: Int): Unit = {
+        Debs2015ProcessDiagnostics.recordQ1RankHeapSwap()
         val leftRank = heapRanks(left)
         val leftSlot = heapSlots(left)
         heapRanks(left) = heapRanks(right)
@@ -351,6 +353,7 @@ object Debs2015Q1CheckedProcessingRunner {
         var best = 0
         var i = 1
         while (i < candidateCount) {
+          Debs2015ProcessDiagnostics.recordQ1TopCandidateCompare()
           if (betterHeapIndex(topCandidateHeap(i), topCandidateHeap(best)))
             best = i
           i += 1
@@ -362,6 +365,7 @@ object Debs2015Q1CheckedProcessingRunner {
         compareHeapEntries(leftIndex, rightIndex) < 0
 
       private def compareHeapEntries(leftIndex: Int, rightIndex: Int): Int = {
+        Debs2015ProcessDiagnostics.recordQ1RankHeapCompare()
         val left = heapRanks(leftIndex)
         val right = heapRanks(rightIndex)
         if (left eq right) 0
@@ -402,6 +406,7 @@ object Debs2015Q1CheckedProcessingRunner {
         var slot = hash(key) & mask
         var firstDeleted = -1
         while (true) {
+          Debs2015ProcessDiagnostics.recordQ1RouteTableProbe()
           val current = keys(slot)
           if (current == key) return slot
           if (current == EmptyRouteKey)
@@ -417,6 +422,7 @@ object Debs2015Q1CheckedProcessingRunner {
         val mask = keys.length - 1
         var slot = hash(key) & mask
         while (true) {
+          Debs2015ProcessDiagnostics.recordQ1RouteTableProbe()
           val current = keys(slot)
           if (current == key) return slot
           if (current == EmptyRouteKey) return -1
@@ -426,6 +432,7 @@ object Debs2015Q1CheckedProcessingRunner {
       }
 
       private def rehash(newCapacity: Int): Unit = {
+        Debs2015ProcessDiagnostics.recordQ1RouteTableRehash(newCapacity)
         val oldKeys = keys
         val oldCounts = counts
         val oldLatestSeconds = latestSecondsBySlot
@@ -477,8 +484,11 @@ object Debs2015Q1CheckedProcessingRunner {
       private def insertSlotWithoutRehash(key: Long): Int = {
         val mask = keys.length - 1
         var slot = hash(key) & mask
-        while (keys(slot) != EmptyRouteKey)
+        while (keys(slot) != EmptyRouteKey) {
+          Debs2015ProcessDiagnostics.recordQ1RouteTableProbe()
           slot = (slot + 1) & mask
+        }
+        Debs2015ProcessDiagnostics.recordQ1RouteTableProbe()
         slot
       }
     }
@@ -509,6 +519,7 @@ object Debs2015Q1CheckedProcessingRunner {
               RiftRegion.alloc(
                 new bucket.RouteEvent(key, null)
               )(using bucketRegion)
+            Debs2015ProcessDiagnostics.recordQ1WindowEntry()
             if (bucket.head == null) {
               bucket.head = event
               bucket.tail = event
@@ -533,6 +544,7 @@ object Debs2015Q1CheckedProcessingRunner {
         while (firstBucket != null) {
           val bucket = firstBucket
           firstBucket = bucket.next
+          Debs2015ProcessDiagnostics.recordQ1BucketClose()
           RiftRegion.closeChildBucket(stream, bucket.child) {
             bucket.head = null
             bucket.tail = null
@@ -549,6 +561,7 @@ object Debs2015Q1CheckedProcessingRunner {
           currentBucket
         else {
           val child = RiftRegion.childBucket
+          Debs2015ProcessDiagnostics.recordQ1BucketOpen()
           DebsRegionFamilies.setChildBucket(
             stream,
             child,
@@ -571,6 +584,7 @@ object Debs2015Q1CheckedProcessingRunner {
       private def evictBefore(cutoffSeconds: Long): Unit =
         while (firstBucket != null && firstBucket.startSeconds < cutoffSeconds) {
           val bucket = firstBucket
+          Debs2015ProcessDiagnostics.recordQ1BucketClose()
           RiftRegion.closeChildBucket(stream, bucket.child) {
             var event = bucket.head
             while (event != null) {

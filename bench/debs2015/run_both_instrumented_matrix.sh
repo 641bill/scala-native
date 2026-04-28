@@ -135,6 +135,16 @@ metric_keys=(
   diag_q1_top10_calls
   diag_q1_result_array_allocs
   diag_q1_result_array_slots
+  diag_q1_window_entries_created
+  diag_q1_bucket_opens
+  diag_q1_bucket_closes
+  diag_q1_route_table_probe_steps
+  diag_q1_route_table_rehashes
+  diag_q1_route_table_rehash_slots
+  diag_q1_rank_refreshes
+  diag_q1_rank_heap_compares
+  diag_q1_rank_heap_swaps
+  diag_q1_top_candidate_compares
   diag_q2_rank_adds
   diag_q2_rank_removes
   diag_q2_rank_fixes
@@ -146,6 +156,12 @@ metric_keys=(
   diag_q2_top10_recomputes
   diag_q2_result_array_allocs
   diag_q2_result_array_slots
+  diag_q2_profit_entries_created
+  diag_q2_empty_entries_created
+  diag_q2_profit_bucket_opens
+  diag_q2_profit_bucket_closes
+  diag_q2_empty_bucket_opens
+  diag_q2_empty_bucket_closes
   diag_q2_median_computes
   diag_q2_median_values_sorted
   diag_q2_median_reads

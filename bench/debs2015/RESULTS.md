@@ -4064,3 +4064,107 @@ Interpretation:
   SafeZone does not yet region-manage RunBoth input/output/snapshot buffers.
   Do not use this table to claim SafeZone is globally worse; use it to compare
   Q1/Q2 closeable data-structure placement under the current DEBS harness.
+
+## Checked Q1/Q2 Process CPU Attribution
+
+Date: 2026-04-28
+
+Purpose:
+
+- Explain the remaining checked RunBoth Q1/Q2 process CPU cost without changing
+  the DEBS query algorithm.
+- Preserve the heap/Rift logical program shape: these counters measure the same
+  bucket, rank, median, taxi-id, and top-k operations that the benchmark already
+  performs.
+- Keep the new hot counters out of normal timing runs. The process counters are
+  emitted only when `DEBS2015_PROCESS_DIAGNOSTICS=1` is set; otherwise their
+  fields stay zero.
+
+Implementation note:
+
+- `Debs2015ProcessDiagnostics` adds counters for Q1/Q2 bucket opens/closes,
+  Q1 route-table probes/rehashes, Q1 rank heap comparisons/swaps/top-candidate
+  comparisons, Q1 rank refreshes, and Q1/Q2 window-entry creation.
+- These are diagnostic counters. They perturb elapsed time, especially on the
+  full-month input where Q1 does hundreds of millions of rank comparisons.
+  Do not compare the elapsed rows below against clean medians.
+
+Commands:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" compile
+
+DEBS2015_PROCESS_DIAGNOSTICS=1 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-cpu-diag-gated-sample \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_PROCESS_DIAGNOSTICS=1 \
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap safezone rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-cpu-diag-gated-1000000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_PROCESS_DIAGNOSTICS=1 \
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-full.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-cpu-diag-gated-fullmonth \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+All output comparisons matched heap after stripping only the measured latency
+column.
+
+1M bounded diagnostic:
+
+| Mode | Elapsed ms | GC ms | RSS MiB | Q1 process ms | Q2 process ms | Q1 rank created | Q1 rank refreshes | Q1 rank compares | Q1 rank swaps | Q2 rank fixes | Q2 median reads | Q2 rank compares | Q2 profit entries | Q2 empty entries |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 5073.933 | 21.210 | 153.8 | 1542.572 | 1390.357 | 573523 | 979699 | 52938682 | 3307611 | 3252279 | 3320865 | 7374791 | 981885 | 980494 |
+| safezone | 5454.008 | 58.726 | 103.1 | 1627.265 | 1619.647 | 573523 | 979699 | 52938682 | 3307611 | 3252279 | 3320865 | 7374791 | 981885 | 980494 |
+| rift-checked | 4509.958 | 2.270 | 63.6 | 1428.706 | 1115.974 | 979699 | 979699 | 52973807 | 3330054 | 3252279 | 3320865 | 7374791 | 981885 | 980494 |
+
+Full-month diagnostic:
+
+| Mode | Elapsed s | Real s | User+sys s | GC ms | RSS MiB | Q1 process s | Q2 process s | Read s | Q1 change s | Q2 change s | Rift op s | Q1 rank created | Q1 rank refreshes | Q1 rank compares | Q2 rank fixes | Q2 median reads | Q2 rank compares |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 74.599 | 74.63 | 72.64 | 318.618 | 591.5 | 21.555 | 21.900 | 8.033 | 1.697 | 2.722 | 0.000 | 6195167 | 14487771 | 773504600 | 52417178 | 52921114 | 97974914 |
+| rift-checked | 76.055 | 76.08 | 74.36 | 84.532 | 543.2 | 23.580 | 22.536 | 7.764 | 1.225 | 2.056 | 0.994 | 14487771 | 14487771 | 773584467 | 52417178 | 52921114 | 97974914 |
+
+Interpretation:
+
+- The bounded 1M diagnostic remains favorable to checked Rift: checked has
+  lower Q1/Q2 process times, far lower GC collection time, and much lower RSS
+  than heap and SafeZone in this single diagnostic run.
+- The full-month diagnostic confirms that the remaining process gap is not a
+  different Q2 algorithm. Q2 rank fixes, median reads, heap comparisons, profit
+  entries, and empty entries are identical between heap and checked.
+- Q1 has one real checked-shape cost: checked creates a fresh region
+  `CheckedRankedRoute` graph at every rank refresh so the object lives in the
+  current child-bucket lifetime. Full-month `q1_rank_created` rises from
+  `6195167` heap to `14487771` checked, matching `q1_rank_refreshes`.
+- Checked full-month Q1 process is about `2.025 s` slower and Q2 process about
+  `0.636 s` slower in this diagnostic row. Rift region operations account for
+  about `0.994 s`, while GC collection drops by about `234 ms`; the remaining
+  difference is ordinary CPU overhead from the checked region/object path and
+  Q1 rank-refresh allocation shape.
+- The clean post-fix full-month medians remain the performance row: heap
+  `67.122 s` versus checked `66.804 s`, with checked RSS close to heap. This
+  diagnostic explains limits; it does not replace that median.
+
+Next implementation-facing options:
+
+- Reduce Q1 rank-refresh object churn without opening one child region per
+  route. The rejected route-bucket probe showed that one-region-per-route
+  fixes churn but loses on region count and RSS.
+- Investigate why checked Q2's identical operation counts still cost more at
+  full-month scale. The likely suspects are region-backed object/array access
+  locality, checked wrapper shape, and allocation/close bookkeeping around
+  child buckets rather than median/rank algorithm differences.
+- Keep SafeZone full-month controls optional. The 1M SafeZone process rows
+  already show same operation counts but slower Q1/Q2 process under the
+  current closeable SafeZone object path.
