@@ -162,6 +162,16 @@ metric_keys=(
   diag_q2_profit_bucket_closes
   diag_q2_empty_bucket_opens
   diag_q2_empty_bucket_closes
+  diag_q2_cpu_evict_profit_ns
+  diag_q2_cpu_evict_empty_ns
+  diag_q2_cpu_taxi_lookup_ns
+  diag_q2_cpu_previous_empty_ns
+  diag_q2_cpu_profit_path_ns
+  diag_q2_cpu_profit_rank_ns
+  diag_q2_cpu_empty_path_ns
+  diag_q2_cpu_empty_rank_ns
+  diag_q2_cpu_top10_ns
+  diag_q2_cpu_recorded_ns
   diag_q2_median_computes
   diag_q2_median_values_sorted
   diag_q2_median_reads

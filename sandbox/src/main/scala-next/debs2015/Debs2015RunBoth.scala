@@ -381,7 +381,8 @@ object Debs2015RunBothRunner {
       phaseGcAlloc: PhaseGcAllocMetrics,
       runtime: RuntimeMetrics,
       counters: Debs2015Counters.Snapshot,
-      processDiagnostics: Debs2015ProcessDiagnostics.Snapshot
+      processDiagnostics: Debs2015ProcessDiagnostics.Snapshot,
+      q2CpuDiagnostics: Debs2015Q2CpuDiagnostics.Snapshot
   ) {
     def elapsedMillis: Double = elapsedNanos.toDouble / 1000000.0
 
@@ -441,8 +442,10 @@ object Debs2015RunBothRunner {
     }
     Debs2015Counters.reset()
     Debs2015ProcessDiagnostics.reset()
+    Debs2015Q2CpuDiagnostics.reset()
     val counterStart = Debs2015Counters.snapshot()
     val processDiagnosticsStart = Debs2015ProcessDiagnostics.snapshot()
+    val q2CpuDiagnosticsStart = Debs2015Q2CpuDiagnostics.snapshot()
     val runtimeStart = RuntimeMetrics.capture(usesRift)
     var runtimeEnd = runtimeStart
     val phaseGcAlloc =
@@ -610,7 +613,9 @@ object Debs2015RunBothRunner {
       runtime = RuntimeMetrics.since(runtimeStart, runtimeEnd),
       counters = Debs2015Counters.snapshot().since(counterStart),
       processDiagnostics =
-        Debs2015ProcessDiagnostics.snapshot().since(processDiagnosticsStart)
+        Debs2015ProcessDiagnostics.snapshot().since(processDiagnosticsStart),
+      q2CpuDiagnostics =
+        Debs2015Q2CpuDiagnostics.snapshot().since(q2CpuDiagnosticsStart)
     )
   }
 
@@ -624,8 +629,10 @@ object Debs2015RunBothRunner {
     RiftAllocator.Impl.statsReset()
     Debs2015Counters.reset()
     Debs2015ProcessDiagnostics.reset()
+    Debs2015Q2CpuDiagnostics.reset()
     val counterStart = Debs2015Counters.snapshot()
     val processDiagnosticsStart = Debs2015ProcessDiagnostics.snapshot()
+    val q2CpuDiagnosticsStart = Debs2015Q2CpuDiagnostics.snapshot()
     val runtimeStart = RuntimeMetrics.capture(includeRift = true)
     var runtimeEnd = runtimeStart
     val phaseGcAlloc =
@@ -814,7 +821,9 @@ object Debs2015RunBothRunner {
       runtime = RuntimeMetrics.since(runtimeStart, runtimeEnd),
       counters = Debs2015Counters.snapshot().since(counterStart),
       processDiagnostics =
-        Debs2015ProcessDiagnostics.snapshot().since(processDiagnosticsStart)
+        Debs2015ProcessDiagnostics.snapshot().since(processDiagnosticsStart),
+      q2CpuDiagnostics =
+        Debs2015Q2CpuDiagnostics.snapshot().since(q2CpuDiagnosticsStart)
     )
   }
 
@@ -845,6 +854,7 @@ object Debs2015RunBothRunner {
     val phaseGcAlloc = metrics.phaseGcAlloc
     val counters = metrics.counters
     val processDiagnostics = metrics.processDiagnostics
+    val q2CpuDiagnostics = metrics.q2CpuDiagnostics
     val trackedNanos = phases.trackedNanos
     val untrackedNanos =
       if (metrics.elapsedNanos > trackedNanos) metrics.elapsedNanos - trackedNanos
@@ -973,6 +983,16 @@ object Debs2015RunBothRunner {
         f"diag_q2_profit_bucket_closes=${processDiagnostics.q2ProfitBucketCloses}%d " +
         f"diag_q2_empty_bucket_opens=${processDiagnostics.q2EmptyBucketOpens}%d " +
         f"diag_q2_empty_bucket_closes=${processDiagnostics.q2EmptyBucketCloses}%d " +
+        f"diag_q2_cpu_evict_profit_ns=${q2CpuDiagnostics.evictProfitNanos}%d " +
+        f"diag_q2_cpu_evict_empty_ns=${q2CpuDiagnostics.evictEmptyNanos}%d " +
+        f"diag_q2_cpu_taxi_lookup_ns=${q2CpuDiagnostics.taxiLookupNanos}%d " +
+        f"diag_q2_cpu_previous_empty_ns=${q2CpuDiagnostics.previousEmptyNanos}%d " +
+        f"diag_q2_cpu_profit_path_ns=${q2CpuDiagnostics.profitPathNanos}%d " +
+        f"diag_q2_cpu_profit_rank_ns=${q2CpuDiagnostics.profitRankNanos}%d " +
+        f"diag_q2_cpu_empty_path_ns=${q2CpuDiagnostics.emptyPathNanos}%d " +
+        f"diag_q2_cpu_empty_rank_ns=${q2CpuDiagnostics.emptyRankNanos}%d " +
+        f"diag_q2_cpu_top10_ns=${q2CpuDiagnostics.top10Nanos}%d " +
+        f"diag_q2_cpu_recorded_ns=${q2CpuDiagnostics.recordedNanos}%d " +
         f"diag_q2_median_computes=${counters.q2MedianComputes}%d " +
         f"diag_q2_median_values_sorted=${counters.q2MedianValuesSorted}%d " +
         f"diag_q2_median_reads=${counters.q2MedianReads}%d " +

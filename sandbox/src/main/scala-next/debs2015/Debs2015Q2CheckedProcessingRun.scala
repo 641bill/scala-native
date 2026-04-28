@@ -455,17 +455,42 @@ object Debs2015Q2CheckedProcessingRunner {
       private var topCacheDirty = true
 
       def process(trip: Trip): Int = {
+        val q2CpuDiagnostics = Debs2015Q2CpuDiagnostics.enabled
+        var q2CpuStarted = 0L
+
+        if (q2CpuDiagnostics) q2CpuStarted = System.nanoTime()
         evictProfitBefore(trip.dropoffSeconds - ProfitWindowSeconds)
+        if (q2CpuDiagnostics)
+          Debs2015Q2CpuDiagnostics.recordEvictProfit(
+            System.nanoTime() - q2CpuStarted
+          )
+
+        if (q2CpuDiagnostics) q2CpuStarted = System.nanoTime()
         evictEmptyBefore(trip.dropoffSeconds - EmptyWindowSeconds)
+        if (q2CpuDiagnostics)
+          Debs2015Q2CpuDiagnostics.recordEvictEmpty(
+            System.nanoTime() - q2CpuStarted
+          )
 
         val seq = nextSeq
         nextSeq += 1L
+        if (q2CpuDiagnostics) q2CpuStarted = System.nanoTime()
         val taxiKey = taxiIds.idFor(trip)
+        if (q2CpuDiagnostics)
+          Debs2015Q2CpuDiagnostics.recordTaxiLookup(
+            System.nanoTime() - q2CpuStarted
+          )
 
+        if (q2CpuDiagnostics) q2CpuStarted = System.nanoTime()
         val previousEmpty = removeLatestEmpty(taxiKey)
         if (previousEmpty != null) removeEmpty(previousEmpty)
+        if (q2CpuDiagnostics)
+          Debs2015Q2CpuDiagnostics.recordPreviousEmpty(
+            System.nanoTime() - q2CpuStarted
+          )
 
         if (trip.hasValidProfit) {
+          if (q2CpuDiagnostics) q2CpuStarted = System.nanoTime()
           val pickupKey =
             Grid.Q2.cellKeyOrZero(trip.pickupLongitude, trip.pickupLatitude)
           if (pickupKey != 0) {
@@ -476,10 +501,24 @@ object Debs2015Q2CheckedProcessingRunner {
             bucket.head = entry
             profitStatsOrCreate(pickupKey).add(entry)
             updateLatest(pickupKey, seq)
+            if (q2CpuDiagnostics)
+              Debs2015Q2CpuDiagnostics.recordProfitPath(
+                System.nanoTime() - q2CpuStarted
+              )
+            if (q2CpuDiagnostics) q2CpuStarted = System.nanoTime()
             updateRank(pickupKey)
+            if (q2CpuDiagnostics)
+              Debs2015Q2CpuDiagnostics.recordProfitRank(
+                System.nanoTime() - q2CpuStarted
+              )
+          } else if (q2CpuDiagnostics) {
+            Debs2015Q2CpuDiagnostics.recordProfitPath(
+              System.nanoTime() - q2CpuStarted
+            )
           }
         }
 
+        if (q2CpuDiagnostics) q2CpuStarted = System.nanoTime()
         val dropoffKey =
           Grid.Q2.cellKeyOrZero(trip.dropoffLongitude, trip.dropoffLatitude)
         if (dropoffKey != 0) {
@@ -490,10 +529,30 @@ object Debs2015Q2CheckedProcessingRunner {
           updateLatestEmpty(taxiKey, entry)
           incrementEmpty(dropoffKey)
           updateLatest(dropoffKey, seq)
+          if (q2CpuDiagnostics)
+            Debs2015Q2CpuDiagnostics.recordEmptyPath(
+              System.nanoTime() - q2CpuStarted
+            )
+          if (q2CpuDiagnostics) q2CpuStarted = System.nanoTime()
           updateRank(dropoffKey)
+          if (q2CpuDiagnostics)
+            Debs2015Q2CpuDiagnostics.recordEmptyRank(
+              System.nanoTime() - q2CpuStarted
+            )
+        } else if (q2CpuDiagnostics) {
+          Debs2015Q2CpuDiagnostics.recordEmptyPath(
+            System.nanoTime() - q2CpuStarted
+          )
         }
 
-        top10()
+        if (q2CpuDiagnostics) {
+          q2CpuStarted = System.nanoTime()
+          val size = top10()
+          Debs2015Q2CpuDiagnostics.recordTop10(
+            System.nanoTime() - q2CpuStarted
+          )
+          size
+        } else top10()
       }
 
       def resultAt(index: Int): CheckedProfitableArea^{stream} =

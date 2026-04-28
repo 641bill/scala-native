@@ -4350,3 +4350,90 @@ Interpretation:
 - Next work should build higher-level checked rank/window collections on top
   of this primitive and investigate Q2 checked overhead under identical
   operation counts.
+
+## Q2 CPU Substep Diagnostics, 2026-04-28
+
+This checkpoint adds opt-in Q2 substep timers behind
+`DEBS2015_Q2_CPU_DIAGNOSTICS=1`. Normal RunBoth timing does not pay these
+`System.nanoTime()` calls; the fields stay zero unless the environment variable
+is set. The diagnostic is intentionally paired with
+`DEBS2015_PROCESS_DIAGNOSTICS=1` so operation counts and Q2 CPU buckets can be
+read from the same output row.
+
+What changed:
+
+- `Debs2015Q2CpuDiagnostics` records Q2 process time buckets for profit-window
+  eviction, empty-window eviction, taxi lookup, previous-empty removal,
+  profit-path update, profit-rank update, empty-path update, empty-rank update,
+  and top-10 extraction.
+- Heap and checked Q2 processors use the same probes around the same logical
+  operations. This is an attribution aid, not a new benchmark algorithm.
+- `Debs2015RunBoth` and `run_both_instrumented_matrix.sh` now emit
+  `diag_q2_cpu_*` fields in instrumented summaries.
+
+Validation:
+
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile`
+  passed.
+- 100k and 1M `heap`/`rift-checked` diagnostic RunBoth outputs matched after
+  stripping only the measured latency column.
+
+Commands:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+ENABLE_EXPERIMENTAL_COMPILER=1 \
+  sbt "project sandbox3_next" compile
+
+DEBS2015_Q2_CPU_DIAGNOSTICS=1 \
+DEBS2015_PROCESS_DIAGNOSTICS=1 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-q2-cpu-diag-100000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_Q2_CPU_DIAGNOSTICS=1 \
+DEBS2015_PROCESS_DIAGNOSTICS=1 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-q2-cpu-diag-1000000 \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+Diagnostic summary:
+
+| Input | Mode | Elapsed ms | GC ms | RSS MiB | Q2 process ms | Q2 recorded CPU ms | Taxi lookup ms | Profit path+rank ms | Empty path+rank ms | Evict profit/empty ms | Previous empty ms | Top-10 ms |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100k | heap | 527.875 | 10.939 | 52.9 | 145.822 | 126.175 | 39.486 | 31.601 | 16.160 | 24.708 | 8.543 | 5.676 |
+| 100k | rift-checked | 493.528 | 0.083 | 34.4 | 133.764 | 114.823 | 36.690 | 25.888 | 16.435 | 22.390 | 8.185 | 5.236 |
+| 1M | heap | 4899.388 | 21.190 | 153.8 | 1438.062 | 1246.509 | 413.551 | 270.328 | 161.952 | 255.464 | 99.959 | 45.257 |
+| 1M | rift-checked | 4730.741 | 5.596 | 66.0 | 1327.500 | 1142.533 | 364.274 | 263.884 | 158.739 | 225.805 | 86.023 | 43.809 |
+
+Interpretation:
+
+- The bounded-input Q2 same-operation concern did not reproduce in these
+  diagnostic rows. Checked Q2 process time is lower than heap at both 100k and
+  1M, and the recorded Q2 CPU substeps are lower overall.
+- Q2 operation counts remain aligned: rank fixes, median reads, rank
+  comparisons, profit entries, empty entries, taxi lookups, and changed-output
+  checks match heap.
+- The remaining checked cost visible in the 1M row is Q1 process CPU:
+  `rift-checked` Q1 process is `1479.082 ms` versus heap `1430.253 ms`, while
+  Q2 process is lower by about `110.6 ms`.
+- This is diagnostic evidence only. The inserted `System.nanoTime()` probes
+  perturb hot Q2 code, so these rows explain attribution but do not replace the
+  clean 3-run medians.
+
+Next implementation-facing options:
+
+- Treat bounded-sample Q2 same-operation overhead as not currently reproduced;
+  avoid over-optimizing Q2 until a clean or full-month diagnostic points to a
+  specific Q2 substep.
+- Continue the reusable checked stream/rank API path and reduce checked Q1
+  rank-container CPU overhead. That is where the current bounded diagnostic
+  still shows cost.
+- Add stronger compile/runtime probes for closing stream rank buckets only
+  after their rank entries have been removed, because the current reusable API
+  still relies on operator discipline for semantic cleanup.
