@@ -408,9 +408,11 @@ object CheckedAppendWindowMatrixHelpers {
             nextTotal,
             bucket.startSeconds
           )
-        }
+      }
 
       var currentStartSeconds = Long.MinValue
+      var currentBucket: RiftRegion.StreamBucket^{stream} = null
+      var currentBucketRegion: RiftRegion.StreamingRegion^{stream} = null
       var i = 0
       while (i < cfg.events) {
         val seed = mix(i * 1103515245 + 12345)
@@ -420,10 +422,13 @@ object CheckedAppendWindowMatrixHelpers {
         if (startSeconds != currentStartSeconds) {
           closeExpired(closeCutoff(startSeconds))
           currentStartSeconds = startSeconds
+          currentBucket =
+            RiftRegion.streamAppendWindowBucketFor(stream, window, startSeconds)
+          currentBucketRegion =
+            RiftRegion.streamBucketRegion(stream, currentBucket)
         }
-        val bucket =
-          RiftRegion.streamAppendWindowBucketFor(stream, window, startSeconds)
-        val bucketRegion = RiftRegion.streamBucketRegion(stream, bucket)
+        val bucket = currentBucket
+        val bucketRegion = currentBucketRegion
         val record: Record^{stream} =
           RiftRegion.alloc(new Record(key, value, value.toLong))(
             using bucketRegion
@@ -509,9 +514,11 @@ object CheckedAppendWindowMatrixHelpers {
           cutoffSeconds
         ) { (bucket, record) =>
           recordClosedEntry(bucket, record)
-        }
+      }
 
       var currentStartSeconds = Long.MinValue
+      var currentBucket: RiftRegion.StreamBucket^{stream} = null
+      var currentBucketRegion: RiftRegion.StreamingRegion^{stream} = null
       var i = 0
       while (i < cfg.events) {
         val seed = mix(i * 1103515245 + 12345)
@@ -521,14 +528,17 @@ object CheckedAppendWindowMatrixHelpers {
         if (startSeconds != currentStartSeconds) {
           closeExpired(closeCutoff(startSeconds))
           currentStartSeconds = startSeconds
+          bucketLookups += 1L
+          currentBucket =
+            RiftRegion.streamAppendWindowBucketFor(stream, window, startSeconds)
+          currentBucketRegion =
+            RiftRegion.streamBucketRegion(stream, currentBucket)
           bucketOpens += 1L
         } else {
           currentBucketHits += 1L
         }
-        bucketLookups += 1L
-        val bucket =
-          RiftRegion.streamAppendWindowBucketFor(stream, window, startSeconds)
-        val bucketRegion = RiftRegion.streamBucketRegion(stream, bucket)
+        val bucket = currentBucket
+        val bucketRegion = currentBucketRegion
         val record: Record^{stream} =
           RiftRegion.alloc(new Record(key, value, value.toLong))(
             using bucketRegion
@@ -574,6 +584,93 @@ object CheckedAppendWindowMatrixHelpers {
     if (CheckedAppendWindowConfig.apiDiagnostics)
       runRiftCheckedApiDiagnostic()
     else runRiftCheckedApiFast()
+
+  private def runRiftCheckedApiCursor(): Long = {
+    val cfg = CheckedAppendWindowConfig
+    val totals = new Array[Long](cfg.keySpace)
+    val checksum = RiftRegion.streaming { stream ?=>
+      final class Record(
+          val key: Int,
+          var value: Int,
+          var total: Long
+      ) extends RiftRegion.StreamAppendNode
+      val window =
+        RiftRegion.streamAppendWindow[Record](cfg.eventsPerBucket.toLong)
+      var running = 0L
+
+      def consume(
+          bucket: RiftRegion.StreamBucket^{stream},
+          cursor: RiftRegion.StreamAppendCursor[Record]^{stream}
+      ): Unit =
+        while (cursor.hasNext) {
+          val record: Record^{stream} = cursor.next()
+          val nextTotal =
+            (totals(record.key) + record.total) & 0xffffffffL
+          totals(record.key) = nextTotal
+          running = fold(
+            running,
+            record.key,
+            record.value,
+            nextTotal,
+            bucket.startSeconds
+          )
+        }
+
+      def closeExpired(cutoffSeconds: Long): Unit =
+        RiftRegion.closeAppendWindowBucketsBeforeWithCursor(
+          stream,
+          window,
+          cutoffSeconds
+        ) { (bucket, cursor) =>
+          consume(bucket, cursor)
+        }
+
+      var currentStartSeconds = Long.MinValue
+      var currentBucket: RiftRegion.StreamBucket^{stream} = null
+      var currentBucketRegion: RiftRegion.StreamingRegion^{stream} = null
+      var i = 0
+      while (i < cfg.events) {
+        val seed = mix(i * 1103515245 + 12345)
+        val key = seed % cfg.keySpace
+        val value = (mix(seed + 17) & 0xffff) + 1
+        val startSeconds = bucketStart(i)
+        if (startSeconds != currentStartSeconds) {
+          closeExpired(closeCutoff(startSeconds))
+          currentStartSeconds = startSeconds
+          currentBucket =
+            RiftRegion.streamAppendWindowBucketFor(stream, window, startSeconds)
+          currentBucketRegion =
+            RiftRegion.streamBucketRegion(stream, currentBucket)
+        }
+        val bucket = currentBucket
+        val bucketRegion = currentBucketRegion
+        val record: Record^{stream} =
+          RiftRegion.alloc(new Record(key, value, value.toLong))(
+            using bucketRegion
+          )
+        record.value += seed & 3
+        record.total += record.value.toLong
+        RiftRegion.appendWindow(stream, window, bucket, record)
+        if (i % cfg.sampleEvery == 0)
+          running = fold(
+            running,
+            record.key,
+            record.value,
+            record.total,
+            bucket.startSeconds
+          )
+        i += 1
+      }
+
+      RiftRegion.closeAllAppendWindowBucketsWithCursor(stream, window) {
+        (bucket, cursor) =>
+          consume(bucket, cursor)
+      }
+      running
+    }
+    checksumSink = checksum
+    checksum
+  }
 
   def runRiftTrusted(kind: Int): Long = {
     val cfg = CheckedAppendWindowConfig
@@ -677,6 +774,7 @@ object CheckedAppendWindowMatrixHelpers {
       case "heap"                   => runHeap()
       case "rift-checked"           => runRiftChecked()
       case "rift-checked-api"       => runRiftCheckedApi()
+      case "rift-checked-api-cursor" => runRiftCheckedApiCursor()
       case "rift-trusted-hp"        => runRiftTrusted(RiftRegion.HPZone)
       case "rift-trusted-streaming" => runRiftTrusted(RiftRegion.Streaming)
       case other =>
@@ -691,7 +789,8 @@ object CheckedAppendWindowMatrixHelpers {
   private def runModeName(mode: String): String =
     mode match {
       case "heap" | "rift-checked" | "rift-trusted-hp" |
-          "rift-trusted-streaming" | "rift-checked-api" =>
+          "rift-trusted-streaming" | "rift-checked-api" |
+          "rift-checked-api-cursor" =>
         mode
       case other =>
         throw new IllegalArgumentException(

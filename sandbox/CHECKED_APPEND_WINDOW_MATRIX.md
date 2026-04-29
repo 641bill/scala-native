@@ -30,6 +30,9 @@ The difference is allocation placement:
 - `rift-checked-api`: the same checked child-bucket placement through the
   reusable `RiftRegion.StreamAppendWindow` API, whose records extend
   `RiftRegion.StreamAppendNode`;
+- `rift-checked-api-cursor`: the same reusable API, but expired buckets are
+  drained through a close-time cursor so close callback dispatch is once per
+  bucket rather than once per entry;
 - `rift-trusted-hp`: trusted `RiftRegion.open(HPZone)` once per bucket;
 - `rift-trusted-streaming`: trusted `RiftRegion.open(Streaming)` once per
   bucket.
@@ -56,6 +59,7 @@ Modes:
 - `heap`
 - `rift-checked`
 - `rift-checked-api`
+- `rift-checked-api-cursor`
 - `rift-trusted-hp`
 - `rift-trusted-streaming`
 
@@ -122,15 +126,17 @@ CHECKED_APPEND_OUTPUT_DIR=/tmp/checked-append-window-1m-rss \
 Validation run on 2026-04-29:
 
 - `sandbox3_next/compile` passed after adding the harness.
-- `RiftRegionCheckedCompilerTest` passed `88/88` after adding the
+- `RiftRegionCheckedCompilerTest` passed `89/89` after adding the
   `StreamAppendWindow` compiler probes.
-- `RiftRegionCheckedTest` passed `34/34` after adding the
+- `RiftRegionCheckedTest` passed `35/35` after adding the
   `StreamAppendWindow` runtime probe.
 - The 20k smoke, 100k median, and 1M median matched checksums across all four
   original modes.
 - The follow-up reusable API runs matched checksums across all five modes.
 - The no-callback `streamBucketFor`/`streamAppendWindowBucketFor` follow-up
   also matched checksums across all five modes.
+- The cached bucket/region follow-up and cursor close follow-up matched
+  checksums across all six modes.
 - `CHECKED_APPEND_API_DIAG=1` was added after the no-callback gate still
   failed. Diagnostic elapsed times are not headline numbers.
 - The RSS-backed 100k and 1M runs were rerun outside the sandbox because macOS
@@ -175,6 +181,17 @@ No-callback bucket-lookup follow-up:
 | rift-trusted-hp | 0.979 | 0.000 | 0.036 | 20000 | 4 | 4 | 0 | 5980160 | 2522262741738122908 |
 | rift-trusted-streaming | 1.755 | 0.000 | 0.099 | 20000 | 4 | 4 | 0 | 5980160 | 2522262741738122908 |
 
+Cached bucket/region plus cursor close follow-up:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 1.224 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 6209536 | 2522262741738122908 |
+| rift-checked | 1.115 | 0.000 | 0.044 | 20000 | 5 | 5 | 0 | 6078464 | 2522262741738122908 |
+| rift-checked-api | 1.314 | 0.000 | 0.040 | 20000 | 5 | 5 | 0 | 6078464 | 2522262741738122908 |
+| rift-checked-api-cursor | 1.093 | 0.000 | 0.039 | 20000 | 5 | 5 | 0 | 6078464 | 2522262741738122908 |
+| rift-trusted-hp | 0.945 | 0.000 | 0.042 | 20000 | 4 | 4 | 0 | 6045696 | 2522262741738122908 |
+| rift-trusted-streaming | 0.932 | 0.000 | 0.035 | 20000 | 4 | 4 | 0 | 6045696 | 2522262741738122908 |
+
 Interpretation: the tiny smoke validates correctness only. Heap has no GC
 pressure at this size, so Rift overhead dominates elapsed time.
 
@@ -217,12 +234,23 @@ No-callback bucket-lookup follow-up:
 | rift-trusted-hp | 4.202 | 0.000 | 0.007 | 100000 | 4 | 4 | 0 | 15679488 | 4594055666086494054 |
 | rift-trusted-streaming | 4.319 | 0.000 | 0.009 | 100000 | 4 | 4 | 0 | 15745024 | 4594055666086494054 |
 
+Cached bucket/region plus cursor close follow-up:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 2.666 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 21315584 | 4594055666086494054 |
+| rift-checked | 3.367 | 0.000 | 0.008 | 100000 | 5 | 5 | 0 | 15777792 | 4594055666086494054 |
+| rift-checked-api | 4.602 | 0.000 | 0.008 | 100000 | 5 | 5 | 0 | 15777792 | 4594055666086494054 |
+| rift-checked-api-cursor | 4.137 | 0.000 | 0.008 | 100000 | 5 | 5 | 0 | 15777792 | 4594055666086494054 |
+| rift-trusted-hp | 4.181 | 0.000 | 0.007 | 100000 | 4 | 4 | 0 | 15679488 | 4594055666086494054 |
+| rift-trusted-streaming | 4.124 | 0.000 | 0.007 | 100000 | 4 | 4 | 0 | 15745024 | 4594055666086494054 |
+
 Interpretation: 100k is still below the useful allocation-pressure threshold.
 Heap is fastest, GC is not measurable, and Rift's main benefit is lower RSS.
-The reusable `StreamAppendWindow` API is correctness-valid but not
-performance-ready at this size. The no-callback follow-up improves
-`rift-checked-api` from `7.473 ms` to `6.841 ms`, but it remains much slower
-than manual checked.
+The reusable `StreamAppendWindow` API is correctness-valid but still not a
+100k speed win. The cached-bucket path improves `rift-checked-api` materially
+versus the original `7.473 ms`, and cursor close improves it further, but both
+remain slower than heap and manual checked at this scale.
 
 ## 1M 3-Run Median
 
@@ -263,6 +291,27 @@ No-callback bucket-lookup follow-up:
 | rift-trusted-hp | 42.558 | 0.000 | 0.091 | 1000000 | 40 | 40 | 0 | 47382528 | -2507118467295660905 |
 | rift-trusted-streaming | 42.142 | 0.000 | 0.077 | 1000000 | 40 | 40 | 0 | 47497216 | -2507118467295660905 |
 
+Cached bucket/region follow-up:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 38.559 | 11.581 | 0.000 | 0 | 0 | 0 | 0 | 74989568 | -2507118467295660905 |
+| rift-checked | 33.172 | 0.000 | 0.083 | 1000000 | 41 | 41 | 0 | 47497216 | -2507118467295660905 |
+| rift-checked-api | 39.372 | 0.000 | 0.084 | 1000000 | 41 | 41 | 0 | 47480832 | -2507118467295660905 |
+| rift-trusted-hp | 41.805 | 0.000 | 0.076 | 1000000 | 40 | 40 | 0 | 47349760 | -2507118467295660905 |
+| rift-trusted-streaming | 43.017 | 0.000 | 0.091 | 1000000 | 40 | 40 | 0 | 47480832 | -2507118467295660905 |
+
+Cached bucket/region plus cursor close follow-up:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 35.705 | 11.095 | 0.000 | 0 | 0 | 0 | 0 | 75022336 | -2507118467295660905 |
+| rift-checked | 32.367 | 0.000 | 0.077 | 1000000 | 41 | 41 | 0 | 47529984 | -2507118467295660905 |
+| rift-checked-api | 37.705 | 0.000 | 0.073 | 1000000 | 41 | 41 | 0 | 47529984 | -2507118467295660905 |
+| rift-checked-api-cursor | 34.708 | 0.000 | 0.074 | 1000000 | 41 | 41 | 0 | 47529984 | -2507118467295660905 |
+| rift-trusted-hp | 40.429 | 0.000 | 0.070 | 1000000 | 40 | 40 | 0 | 47366144 | -2507118467295660905 |
+| rift-trusted-streaming | 40.105 | 0.000 | 0.070 | 1000000 | 40 | 40 | 0 | 47497216 | -2507118467295660905 |
+
 Interpretation:
 
 - `rift-checked` is the useful row: it is about `9.2%` faster than heap on
@@ -276,12 +325,18 @@ Interpretation:
 - The result supports the Phase 7/8 direction: cheap checked append/window
   operators can beat Immix when the stream data objects are numerous enough and
   lifetimes are structured.
-- The reusable `StreamAppendWindow` API does not pass the performance gate yet:
-  no-callback `rift-checked-api` improves from `76.057 ms` to `66.023 ms` at
-  1M, but remains much slower than heap and the manual checked child-bucket
-  shape. Region-op time is still tiny, so the overhead is API/container CPU
-  and representation shape, not allocation or close.
-  Do not integrate this API into DEBS until the focused matrix is fixed.
+- The per-entry reusable `StreamAppendWindow` close API did not pass the
+  performance gate: no-callback `rift-checked-api` improved from `76.057 ms`
+  to `66.023 ms`, and cached bucket/region use improved it to `39.372 ms`, but
+  it remained slower than same-run heap and outside the 1.15x manual-checked
+  gate.
+- The cursor close API passes the focused 1M gate. `rift-checked-api-cursor`
+  is faster than same-run heap (`34.708 ms` versus `35.705 ms`), within 1.15x
+  of same-run manual checked (`32.367 ms`), keeps RSS far below heap and level
+  with manual checked, and keeps Rift op time below `1 ms`.
+- This supports `StreamAppendWindow` as a reusable checked operator primitive,
+  but DEBS should still wait for a deliberate integration step. The passing
+  shape is cursor close, not the older per-entry close callback.
 
 ## Opt-In API Diagnostics
 
@@ -300,14 +355,14 @@ interpretation only.
 
 | Input | bucket lookups | current-bucket hits | bucket opens | appends | close buckets | close entries | final live length |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 100k | 100000 | 99996 | 4 | 100000 | 4 | 100000 | 0 |
-| 1M | 1000000 | 999960 | 40 | 1000000 | 40 | 1000000 | 0 |
+| 100k | 4 | 99996 | 4 | 100000 | 4 | 100000 | 0 |
+| 1M | 40 | 999960 | 40 | 1000000 | 40 | 1000000 | 0 |
 
-Interpretation: the API mostly hits the current bucket and opens/closes only
-one bucket per `eventsPerBucket`. The remaining overhead is therefore not
-excessive region opens/closes or missed current-bucket reuse. The next likely
-targets are per-entry API/linking/callback shape and object representation
-around `StreamAppendNode`, not bucket lookup delegation alone.
+Interpretation: after benchmark-side bucket/region caching, actual API bucket
+lookups happen once per bucket, not once per event. The remaining per-entry API
+gap is close callback dispatch and intrusive-link traversal shape. Cursor close
+addresses that path by dispatching once per bucket and draining entries in a
+while loop owned by the callback.
 
 ## Caveats
 

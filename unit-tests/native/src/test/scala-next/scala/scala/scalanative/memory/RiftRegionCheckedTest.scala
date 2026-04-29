@@ -1280,6 +1280,53 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def streamAppendWindowCursorConsumesAndClosesBuckets(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val window = RiftRegion.streamAppendWindow[Event](10)
+        val firstBucket =
+          RiftRegion.streamAppendWindowBucketFor(stream, window, 7L)
+        val firstRegion = RiftRegion.streamBucketRegion(stream, firstBucket)
+        val first: Event^{stream} =
+          RiftRegion.alloc(new Event(20))(using firstRegion)
+        RiftRegion.appendWindow(stream, window, firstBucket, first)
+
+        val secondBucket =
+          RiftRegion.streamAppendWindowBucketFor(stream, window, 17L)
+        val secondRegion = RiftRegion.streamBucketRegion(stream, secondBucket)
+        val second: Event^{stream} =
+          RiftRegion.alloc(new Event(21))(using secondRegion)
+        RiftRegion.appendWindow(stream, window, secondBucket, second)
+
+        var sum = 0
+        RiftRegion.closeAppendWindowBucketsBeforeWithCursor(stream, window, 10L) {
+          (_, cursor) =>
+            while (cursor.hasNext) sum += cursor.next().value
+        }
+
+        assertTrue(firstBucket.isClosed)
+        assertFalse(secondBucket.isClosed)
+        assertEquals(1, RiftRegion.appendWindowLength(stream, window))
+
+        RiftRegion.closeAllAppendWindowBucketsWithCursor(stream, window) {
+          (_, cursor) =>
+            while (cursor.hasNext) sum += cursor.next().value
+        }
+
+        assertTrue(secondBucket.isClosed)
+        assertEquals(0, RiftRegion.appendWindowLength(stream, window))
+        sum + 1
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def scopedRegionAllowsMutableLinkedListBuilder(): Unit = {
     RiftRegion.init(1)
     try {

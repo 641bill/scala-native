@@ -8,7 +8,7 @@ output_dir=${CHECKED_APPEND_OUTPUT_DIR:-"/tmp/checked-append-window"}
 summary=${CHECKED_APPEND_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${CHECKED_APPEND_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${CHECKED_APPEND_MODES:-"heap rift-checked rift-checked-api rift-trusted-hp rift-trusted-streaming"}})
+modes=(${(z)${CHECKED_APPEND_MODES:-"heap rift-checked rift-checked-api rift-checked-api-cursor rift-trusted-hp rift-trusted-streaming"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"

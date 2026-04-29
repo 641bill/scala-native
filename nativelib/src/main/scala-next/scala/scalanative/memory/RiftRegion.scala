@@ -203,6 +203,28 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     private[memory] var totalLength: Int = 0
   }
 
+  /** Close-time cursor over records linked in one append-window bucket.
+   *
+   *  Cursor close drains amortize close callback dispatch to once per bucket.
+   *  `next()` also clears the hidden append link so parent metadata cannot keep
+   *  a chain of child-bucket records reachable after close cleanup completes.
+   */
+  final class StreamAppendCursor[T <: StreamAppendNode] private[memory] (
+      private[memory] var current: StreamAppendNode
+  ) {
+    def hasNext: Boolean =
+      current != null
+
+    def next(): T = {
+      if (current == null)
+        throw new NoSuchElementException("empty StreamAppendCursor")
+      val value = current.asInstanceOf[T]
+      current = value.appendNext
+      value.appendNext = null
+      value
+    }
+  }
+
   /** Checked indexed rank storage tied to stream-window child buckets.
    *
    *  This combines the `StreamBucketArena` lifetime primitive with the
@@ -2947,6 +2969,29 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
   }
 
+  private def consumeAppendWindowBucketWithCursor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamAppendWindow[T]^{parent},
+      bucket: StreamBucket^{parent},
+      onBucket: Function2[
+        StreamBucket^{parent},
+        StreamAppendCursor[T]^{parent},
+        Unit
+      ]
+  ): Unit = {
+    val head = bucket.appendHead.asInstanceOf[StreamAppendNode]
+    val removed = bucket.appendLength
+    bucket.appendHead = null
+    bucket.appendTail = null
+    bucket.appendLength = 0
+    window.totalLength -= removed
+
+    val cursor =
+      new StreamAppendCursor[T](head).asInstanceOf[StreamAppendCursor[T]^{parent}]
+    onBucket(bucket, cursor)
+    while (cursor.hasNext) cursor.next()
+  }
+
   /** Returns true if closing before `cutoffSeconds` would close a bucket. */
   def hasAppendWindowBucketsBefore[T <: StreamAppendNode](
       parent: StreamingRegion^,
@@ -2977,6 +3022,29 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       consumeAppendWindowBucket(parent, window, bucket, onEntry)
     }
 
+  /** Closes append-window buckets and drains each bucket through a cursor.
+   *
+   *  `onBucket` runs once per closed bucket after parent head/tail references
+   *  have been cleared. The cursor exposes the bucket's records before the
+   *  child region closes.
+   */
+  def closeAppendWindowBucketsBeforeWithCursor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamAppendWindow[T]^{parent},
+      cutoffSeconds: Long
+  )(onBucket: Function2[
+      StreamBucket^{parent},
+      StreamAppendCursor[T]^{parent},
+      Unit
+  ]): Unit =
+    closeStreamBucketsBefore(
+      parent,
+      window.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      cutoffSeconds
+    ) { bucket =>
+      consumeAppendWindowBucketWithCursor(parent, window, bucket, onBucket)
+    }
+
   /** Closes every append-window bucket. */
   def closeAllAppendWindowBuckets[T <: StreamAppendNode](
       parent: StreamingRegion^,
@@ -2987,6 +3055,22 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       window.buckets.asInstanceOf[StreamBucketArena^{parent}]
     ) { bucket =>
       consumeAppendWindowBucket(parent, window, bucket, onEntry)
+    }
+
+  /** Closes every append-window bucket and drains each bucket through a cursor. */
+  def closeAllAppendWindowBucketsWithCursor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamAppendWindow[T]^{parent}
+  )(onBucket: Function2[
+      StreamBucket^{parent},
+      StreamAppendCursor[T]^{parent},
+      Unit
+  ]): Unit =
+    closeAllStreamBuckets(
+      parent,
+      window.buckets.asInstanceOf[StreamBucketArena^{parent}]
+    ) { bucket =>
+      consumeAppendWindowBucketWithCursor(parent, window, bucket, onBucket)
     }
 
   /** Closes a child window after caller-owned parent metadata is unlinked.
