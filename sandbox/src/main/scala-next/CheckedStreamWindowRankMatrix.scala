@@ -1278,13 +1278,11 @@ object CheckedStreamWindowRankMatrixHelpers {
       i = 0
       while (i < cfg.events) {
         val bucketStart = bucketStartFor(i)
-        RiftRegion.closeWindowRankBucketsBeforeWithEntries(
+        RiftRegion.closeWindowRankBucketsBefore(
           stream,
           rank,
           cutoffFor(bucketStart)
-        ) { (_, _, _) =>
-          ()
-        } { bucket =>
+        ) { bucket =>
           clearBucket(bucket.startSeconds)
         }
         val bucket =
@@ -1382,10 +1380,7 @@ object CheckedStreamWindowRankMatrixHelpers {
         remaining -= 1
       }
 
-      RiftRegion.closeAllWindowRankBucketsWithEntries(stream, rank) {
-        (_, _, _) =>
-          ()
-      } { bucket =>
+      RiftRegion.closeAllWindowRankBuckets(stream, rank) { bucket =>
         clearBucket(bucket.startSeconds)
       }
 

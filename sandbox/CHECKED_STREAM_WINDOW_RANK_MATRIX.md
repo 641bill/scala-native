@@ -262,7 +262,8 @@ Configuration:
 This run uses `heap-long` and `rift-checked-long`, where keys are arbitrary
 `Long` values generated from the same event stream. Heap mode uses an
 open-addressed heap long-key rank queue; checked Rift uses
-`StreamWindowLongIndexedRank`.
+`StreamWindowLongIndexedRank`. The checked mode uses the no-entry close helper
+because the rank collection itself owns lookup state in this long-key shape.
 
 Configuration:
 
@@ -277,8 +278,8 @@ Configuration:
 
 | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| heap-long | 10.460 | 0.311 | 0.000 | 0 | 0 | 0 | 0 | 9895936 | -715513143181030887 |
-| rift-checked-long | 10.663 | 0.199 | 0.081 | 18679 | 21 | 21 | 0 | 13303808 | -715513143181030887 |
+| heap-long | 6.007 | 0.149 | 0.000 | 0 | 0 | 0 | 0 | 9879552 | -715513143181030887 |
+| rift-checked-long | 9.440 | 0.310 | 0.128 | 18679 | 21 | 21 | 0 | 13254656 | -715513143181030887 |
 
 ## Long-Key 100k Median
 
@@ -298,8 +299,8 @@ Configuration:
 
 | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| heap-long | 38.242 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 38846464 | -2863780563714953957 |
-| rift-checked-long | 54.574 | 0.974 | 0.281 | 82547 | 5 | 5 | 0 | 33898496 | -2863780563714953957 |
+| heap-long | 37.045 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 38830080 | -2863780563714953957 |
+| rift-checked-long | 49.450 | 0.000 | 0.178 | 82547 | 5 | 5 | 0 | 33882112 | -2863780563714953957 |
 
 ## Default Local Median
 
@@ -340,8 +341,8 @@ Configuration:
 
 | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| heap-long | 301.098 | 5.973 | 0.000 | 0 | 0 | 0 | 0 | 111411200 | 4222832129898301078 |
-| rift-checked-long | 421.502 | 5.710 | 0.358 | 826645 | 41 | 41 | 0 | 128253952 | 4222832129898301078 |
+| heap-long | 358.988 | 6.973 | 0.000 | 0 | 0 | 0 | 0 | 111394816 | 4222832129898301078 |
+| rift-checked-long | 503.906 | 5.470 | 0.491 | 826645 | 41 | 41 | 0 | 128286720 | 4222832129898301078 |
 
 ## Interpretation
 
@@ -376,12 +377,18 @@ Configuration:
   already-popped-key behavior, but it did not produce a measured speedup. The
   lexicographic API is a functionality step toward Q1-style ordering, not a
   speed claim.
+- The long-key mode uses the no-entry close helper because there is no
+  operator-side lookup table to clean. That improves the 100k checked median
+  compared with the first close-with-entry run (`49.450 ms` vs `54.574 ms`),
+  but it does not close the main gap.
 - The long-key default median is also not a speed win: `rift-checked-long` is
-  slower than `heap-long` (`421.502 ms` vs `301.098 ms`) and has higher RSS at
+  slower than `heap-long` (`503.906 ms` vs `358.988 ms`) and has higher RSS at
   1M events, although the 100k long-key row has lower checked RSS. This means
   the long-key stream-window API is functionally validated but should not be
   treated as ready to improve DEBS throughput without another container-CPU or
-  memory-layout pass.
+  memory-layout pass. The 1M absolute times moved between adjacent reruns, so
+  use the same-run ratio and checksum result rather than over-interpreting the
+  exact millisecond values.
 - The result is still useful because it validates the general pattern that
   bucket-lifetime records can be ordinary Scala objects, stored in checked
   region-backed ranking state, sampled during the stream, and automatically
