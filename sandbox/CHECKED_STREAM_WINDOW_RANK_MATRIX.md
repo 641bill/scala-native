@@ -516,7 +516,9 @@ TABLE_DIAG mode=rift-checked-table-long lookups=3000000 probes=4803987 inserts=1
 Derived 1M rates: `3.000` lookups/event, `4.804` probes/event, `0.719`
 replacements/event, `0.719` bucket moves/event, `1.862` heap sift steps/event,
 and `1.117` heap swaps/event. This profile does not identify one low-risk
-representation patch, so no post-profile optimization was applied.
+representation patch, so no post-profile optimization was applied. The fresh
+100k profile also did not reproduce the earlier strong `<= 43 ms` TableRank
+row; treat that 100k pass as unstable until rerun under controlled conditions.
 
 ## Interpretation
 

@@ -113,6 +113,10 @@ Derived counters:
 
 ## Interpretation
 
+- The fresh 100k profile does not reproduce the earlier strong 100k gate row:
+  `rift-checked-table-long` is `56.585 ms`, above the earlier `<= 43 ms`
+  threshold, though still slightly faster than same-run `rift-checked-long`.
+  Treat the earlier 100k pass as unstable under current local conditions.
 - The 1M focused gate still fails: `rift-checked-table-long` is faster than
   same-run `rift-checked-long` (`568.572 ms` vs `610.358 ms`) but remains about
   `1.30x` same-run `heap-long` (`437.702 ms`).
