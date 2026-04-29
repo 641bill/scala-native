@@ -459,6 +459,52 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def streamWindowIndexedRankReportsRemovedEntriesOnClose(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Row(val value: Int)
+
+        val rank = RiftRegion.streamWindowIndexedRank[Row](10, 8, 1)
+        val bucket = RiftRegion.streamWindowBucketFor(stream, rank, 7L)
+        val child = RiftRegion.streamBucketRegion(stream, bucket)
+        val row: Row^{stream} =
+          RiftRegion.alloc(new Row(37))(using child)
+        RiftRegion.putWindowRankInBucket(
+          stream,
+          rank,
+          bucket,
+          3,
+          row,
+          7L
+        )
+
+        var removedKey = -1
+        var removedValue = 0
+        var bucketCleanupRan = false
+        RiftRegion.closeWindowRankBucketsBeforeWithEntries(
+          stream,
+          rank,
+          10L
+        ) { (_, key, value) =>
+          removedKey = key
+          removedValue = value.value
+        } { _ =>
+          bucketCleanupRan = true
+        }
+
+        assertTrue(bucket.isClosed)
+        assertTrue(bucketCleanupRan)
+        assertEquals(0, RiftRegion.windowRankLength(stream, rank))
+        removedKey + removedValue
+      }
+
+      assertEquals(40, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def streamWindowIndexedRankMovesKeyBetweenBuckets(): Unit = {
     RiftRegion.init(1)
     try {
@@ -501,6 +547,59 @@ class RiftRegionCheckedTest {
       }
 
       assertEquals(43, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def streamWindowIndexedRankUpdatesKeyWithinSameBucket(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Row(val value: Int)
+
+        val rank = RiftRegion.streamWindowIndexedRank[Row](10, 8, 1)
+        val bucket = RiftRegion.streamWindowBucketFor(stream, rank, 7L)
+        val child = RiftRegion.streamBucketRegion(stream, bucket)
+        val first: Row^{stream} =
+          RiftRegion.alloc(new Row(20))(using child)
+        RiftRegion.putWindowRankInBucket(
+          stream,
+          rank,
+          bucket,
+          1,
+          first,
+          1L
+        )
+
+        val second: Row^{stream} =
+          RiftRegion.alloc(new Row(44))(using child)
+        RiftRegion.putWindowRankInBucket(
+          stream,
+          rank,
+          bucket,
+          1,
+          second,
+          9L
+        )
+
+        assertEquals(1, RiftRegion.windowRankLength(stream, rank))
+        assertEquals(1, RiftRegion.peekWindowRankKey(stream, rank))
+        val beforeClose = RiftRegion.getWindowRank(stream, rank, 1).value
+
+        var cleanupSawUnlinkedKey = false
+        RiftRegion.closeWindowRankBucketsBefore(stream, rank, 10L) { _ =>
+          cleanupSawUnlinkedKey =
+            !RiftRegion.containsWindowRank(stream, rank, 1)
+        }
+
+        assertTrue(bucket.isClosed)
+        assertTrue(cleanupSawUnlinkedKey)
+        assertEquals(0, RiftRegion.windowRankLength(stream, rank))
+        beforeClose
+      }
+
+      assertEquals(44, total)
     } finally {
       RiftRegion.shutdown()
     }

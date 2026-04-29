@@ -595,57 +595,20 @@ object CheckedStreamWindowRankMatrixHelpers {
         )
       val recordByKey: Array[Record^{stream}]^{stream} =
         RiftRegion.alloc(new Array[Record^{stream}](cfg.keyCapacity))
-      val nodeKeys: Array[Int]^{stream} =
-        RiftRegion.alloc(new Array[Int](cfg.events))
-      val nodeNext: Array[Int]^{stream} =
-        RiftRegion.alloc(new Array[Int](cfg.events))
       val slotCount = cfg.windowBuckets + 2
       val bucketStarts: Array[Long]^{stream} =
         RiftRegion.alloc(new Array[Long](slotCount))
-      val bucketHeads: Array[Int]^{stream} =
-        RiftRegion.alloc(new Array[Int](slotCount))
 
       var i = 0
-      while (i < nodeNext.length) {
-        nodeNext(i) = -1
-        i += 1
-      }
-      i = 0
       while (i < slotCount) {
         bucketStarts(i) = EmptyBucketStart
-        bucketHeads(i) = -1
         i += 1
-      }
-
-      var nodeUsed = 0
-
-      def addBucketNode(slot: Int, key: Int): Unit = {
-        if (nodeUsed >= nodeKeys.length)
-          throw new IllegalStateException("bucket node capacity exhausted")
-        nodeKeys(nodeUsed) = key
-        nodeNext(nodeUsed) = bucketHeads(slot)
-        bucketHeads(slot) = nodeUsed
-        nodeUsed += 1
       }
 
       def clearBucket(bucketStart: Long): Unit = {
         val slot = bucketSlot(bucketStart, slotCount)
-        if (bucketStarts(slot) == bucketStart) {
-          var node = bucketHeads(slot)
-          while (node >= 0) {
-            val next = nodeNext(node)
-            val key = nodeKeys(node)
-            val record = recordByKey(key)
-            if (record != null && record.bucketStart == bucketStart) {
-              recordByKey(key) = null
-            }
-            nodeKeys(node) = 0
-            nodeNext(node) = -1
-            node = next
-          }
+        if (bucketStarts(slot) == bucketStart)
           bucketStarts(slot) = EmptyBucketStart
-          bucketHeads(slot) = -1
-        }
       }
 
       def ensureBucketSlot(bucketStart: Long): Int = {
@@ -656,7 +619,6 @@ object CheckedStreamWindowRankMatrixHelpers {
               s"bucket slot reused before close old=${bucketStarts(slot)} new=$bucketStart"
             )
           bucketStarts(slot) = bucketStart
-          bucketHeads(slot) = -1
         }
         slot
       }
@@ -665,11 +627,14 @@ object CheckedStreamWindowRankMatrixHelpers {
       i = 0
       while (i < cfg.events) {
         val bucketStart = bucketStartFor(i)
-        RiftRegion.closeWindowRankBucketsBefore(
+        RiftRegion.closeWindowRankBucketsBeforeWithEntries(
           stream,
           rank,
           cutoffFor(bucketStart)
-        ) { bucket =>
+        ) { (_, key, record) =>
+          if (recordByKey(key).asInstanceOf[AnyRef] eq record.asInstanceOf[AnyRef])
+            recordByKey(key) = null
+        } { bucket =>
           clearBucket(bucket.startSeconds)
         }
         val bucket =
@@ -680,7 +645,7 @@ object CheckedStreamWindowRankMatrixHelpers {
           ) { opened =>
             ensureBucketSlot(opened.startSeconds)
           }
-        val slot = ensureBucketSlot(bucket.startSeconds)
+        ensureBucketSlot(bucket.startSeconds)
         val seed = mix(i * 131 + (bucketStart / cfg.bucketSeconds).toInt)
         val key = seed % cfg.keyCapacity
         val value = (mix(seed + 19) & 0xffff) + 1
@@ -703,7 +668,6 @@ object CheckedStreamWindowRankMatrixHelpers {
           record.total = value.toLong
           record.lastValue = value
           recordByKey(key) = record
-          addBucketNode(slot, key)
           RiftRegion.putWindowRankInBucket(
             stream,
             rank,
@@ -751,7 +715,11 @@ object CheckedStreamWindowRankMatrixHelpers {
         remaining -= 1
       }
 
-      RiftRegion.closeAllWindowRankBuckets(stream, rank) { bucket =>
+      RiftRegion.closeAllWindowRankBucketsWithEntries(stream, rank) {
+        (_, key, record) =>
+          if (recordByKey(key).asInstanceOf[AnyRef] eq record.asInstanceOf[AnyRef])
+            recordByKey(key) = null
+      } { bucket =>
         clearBucket(bucket.startSeconds)
       }
 

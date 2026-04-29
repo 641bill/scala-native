@@ -94,20 +94,24 @@ CHECKED_SWR_OUTPUT_DIR=/tmp/checked-stream-window-rank \
 
 ## Validation
 
-Validation run on 2026-04-28:
+Validation run on 2026-04-28 and updated on 2026-04-29:
 
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile`
   passed.
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"`
-  passed `69/69`.
+  passed `70/70`.
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"`
-  passed `19/19`.
+  passed `21/21`.
 - The smoke matrix native-linked `CheckedStreamWindowRankMatrix`.
 - The small heap and `rift-checked` smoke runs matched checksum
   `-3490531581377742567`.
 - After the auto-cleanup update, a 100k smoke matrix matched checksum
   `-476315670107920613`.
 - The post-auto-cleanup default local matrix matched checksum
+  `6881312641757835670`.
+- After the entry-cleanup update, a 100k 3-run smoke matched checksum
+  `-476315670107920613`.
+- The post-entry-cleanup default local matrix matched checksum
   `6881312641757835670`.
 
 ## Small Smoke Result
@@ -146,6 +150,26 @@ Configuration:
 | heap | 25.043 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 20578304 | -476315670107920613 |
 | rift-checked | 33.499 | 0.909 | 0.296 | 82548 | 5 | 5 | 0 | 30556160 | -476315670107920613 |
 
+## Entry-Cleanup Smoke Result
+
+This run uses `closeWindowRankBucketsBeforeWithEntries`, which reports the
+rank entries being unlinked so the checked operator can clean its side table
+without maintaining a second bucket-local key list.
+
+Configuration:
+
+- `CHECKED_SWR_EVENTS=100000`
+- `CHECKED_SWR_EVENTS_PER_BUCKET=25000`
+- `CHECKED_SWR_KEY_CAPACITY=65536`
+- `CHECKED_SWR_WINDOW_BUCKETS=8`
+- `CHECKED_SWR_BENCHMARK_RUNS=3`
+- `CHECKED_SWR_WARMUPS=1`
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 22.271 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 35176448 | -476315670107920613 |
+| rift-checked | 33.840 | 0.901 | 0.117 | 82545 | 5 | 5 | 0 | 29999104 | -476315670107920613 |
+
 ## Default Local Median
 
 Configuration:
@@ -163,8 +187,8 @@ Configuration:
 
 | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| heap | 207.038 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 145768448 | 6881312641757835670 |
-| rift-checked | 313.572 | 7.689 | 0.307 | 826646 | 41 | 41 | 0 | 94732288 | 6881312641757835670 |
+| heap | 200.304 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 145768448 | 6881312641757835670 |
+| rift-checked | 302.001 | 7.447 | 0.289 | 826643 | 41 | 41 | 0 | 87441408 | 6881312641757835670 |
 
 ## Interpretation
 
@@ -182,11 +206,16 @@ Configuration:
   this checkpoint: the 100k checked smoke took `1745.677 ms`. The committed
   version uses per-key previous/next links and reduces that smoke to
   `33.499 ms`.
+- A direct heap bucket-reference owner table was also tested and rejected: the
+  default checked median regressed to `341.705 ms`. The current entry-cleanup
+  path keeps the primitive owner tables and removes duplicate operator-side
+  bucket nodes in checked mode.
 - The default local median is still not a speed win: checked Rift is slower
-  (`313.572 ms` vs heap `207.038 ms`) even though measured Rift runtime
-  operation cost is low (`0.307 ms`) and peak RSS is lower. Compared with the
-  previous manual-cleanup median (`254.050 ms` checked), automatic cleanup
-  buys a stronger safety boundary but adds CPU overhead.
+  (`302.001 ms` vs heap `200.304 ms`) even though measured Rift runtime
+  operation cost is low (`0.289 ms`) and peak RSS is lower. The entry-cleanup
+  API improves the previous auto-cleanup default (`313.572 ms` checked) and RSS
+  (`94732288` bytes) by avoiding a second checked-side key list, but remains
+  slower than the previous manual-cleanup median (`254.050 ms` checked).
 - The result is still useful because it validates the general pattern that
   bucket-lifetime records can be ordinary Scala objects, stored in checked
   region-backed ranking state, sampled during the stream, and automatically
@@ -200,6 +229,6 @@ Configuration:
 - It does not include SafeZone, improved SafeZone, or Commix controls.
 - It is intended to decide whether the reusable checked stream-window rank API
   is worth integrating into DEBS or needs another API iteration first.
-- The harness still uses primitive bucket-list nodes in both heap and checked
-  modes for per-key record-table cleanup. The checked rank queue no longer
-  depends on those nodes for parent-rank unlinking.
+- Heap mode still uses primitive bucket-list nodes for per-key record-table
+  cleanup. Checked mode now uses `closeWindowRankBucketsBeforeWithEntries` for
+  that side-table cleanup and no longer maintains its own duplicate key list.

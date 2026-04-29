@@ -215,7 +215,6 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
         bucket = bucket.next
 
       if (bucket != null) {
-        val target = key + 1
         val previous = previousOwnedKeyPlusOneByKey(key)
         val next = nextOwnedKeyPlusOneByKey(key)
         if (previous == 0) bucket.ownedRankKeyHeadPlusOne = next
@@ -231,6 +230,12 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
 
     private[memory] def removeOwnedKeysForBucket(
         bucket: StreamBucket
+    ): Unit =
+      removeOwnedKeysForBucket(bucket, null)
+
+    private[memory] def removeOwnedKeysForBucket(
+        bucket: StreamBucket,
+        cleanup: (Int, Object) => Unit
     ): Unit = {
       var current = bucket.ownedRankKeyHeadPlusOne
       bucket.ownedRankKeyHeadPlusOne = 0
@@ -241,9 +246,15 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
           ownerPresentByKey(key) &&
           ownerStartByKey(key) == bucket.startSeconds
         ) {
-          queue.removeTrusted(key)
+          val value =
+            if (queue.containsTrusted(key)) {
+              val presentValue = queue.getTrusted(key)
+              queue.removeTrusted(key)
+              presentValue
+            } else null
           ownerPresentByKey(key) = false
           ownerStartByKey(key) = 0L
+          if (value != null && cleanup != null) cleanup(key, value)
         }
         nextOwnedKeyPlusOneByKey(key) = 0
         previousOwnedKeyPlusOneByKey(key) = 0
@@ -1723,6 +1734,32 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       cleanup(bucket)
     }
 
+  /** Closes window-rank buckets and reports each removed ranked entry.
+   *
+   *  This lets stream operators clean parent-side indexes while the framework
+   *  unlinks bucket-owned rank entries, avoiding a second per-bucket key list.
+   *  `cleanupEntry` runs after the key is removed from parent-owned rank state
+   *  but before the child bucket closes.
+   */
+  def closeWindowRankBucketsBeforeWithEntries[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent},
+      cutoffSeconds: Long
+  )(
+      cleanupEntry: (StreamBucket^{parent}, Int, T^{parent}) => Unit
+  )(cleanupBucket: StreamBucket^{parent} => Unit): Unit =
+    closeStreamBucketsBefore(
+      parent,
+      rank.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      cutoffSeconds
+    ) { bucket =>
+      rank.removeOwnedKeysForBucket(bucket.asInstanceOf[StreamBucket], {
+        (key, value) =>
+          cleanupEntry(bucket, key, value.asInstanceOf[T^{parent}])
+      })
+      cleanupBucket(bucket)
+    }
+
   /** Closes every window-rank bucket. */
   def closeAllWindowRankBuckets[T <: Object](
       parent: StreamingRegion^,
@@ -1734,6 +1771,24 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     ) { bucket =>
       rank.removeOwnedKeysForBucket(bucket.asInstanceOf[StreamBucket])
       cleanup(bucket)
+    }
+
+  /** Closes every window-rank bucket and reports each removed ranked entry. */
+  def closeAllWindowRankBucketsWithEntries[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent}
+  )(
+      cleanupEntry: (StreamBucket^{parent}, Int, T^{parent}) => Unit
+  )(cleanupBucket: StreamBucket^{parent} => Unit): Unit =
+    closeAllStreamBuckets(
+      parent,
+      rank.buckets.asInstanceOf[StreamBucketArena^{parent}]
+    ) { bucket =>
+      rank.removeOwnedKeysForBucket(bucket.asInstanceOf[StreamBucket], {
+        (key, value) =>
+          cleanupEntry(bucket, key, value.asInstanceOf[T^{parent}])
+      })
+      cleanupBucket(bucket)
     }
 
   /** Owner-token method syntax for checked object buffers.

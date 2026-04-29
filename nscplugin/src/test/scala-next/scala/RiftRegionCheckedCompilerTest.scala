@@ -682,6 +682,36 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def streamWindowIndexedRankCloseEntriesCompiles(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Row(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    val rank = RiftRegion.streamWindowIndexedRank[Row](10, 8, 1)
+      |    val bucket = RiftRegion.streamWindowBucketFor(stream, rank, 7L)
+      |    val child = RiftRegion.streamBucketRegion(stream, bucket)
+      |    val row: Row^{stream} =
+      |      RiftRegion.alloc(new Row(41))(using child)
+      |    RiftRegion.putWindowRankInBucket(stream, rank, bucket, 1, row, 1L)
+      |
+      |    var sum = 0
+      |    RiftRegion.closeWindowRankBucketsBeforeWithEntries(
+      |      stream,
+      |      rank,
+      |      10L
+      |    ) { (_, key, value) =>
+      |      sum += key + value.value
+      |    } { _ =>
+      |      ()
+      |    }
+      |    sum
+      |  }
+      |""".stripMargin)
+
   @Test def streamWindowIndexedRankCannotStoreDirectHeapObject(): Unit =
     assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
