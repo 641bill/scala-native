@@ -2973,11 +2973,10 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       parent: StreamingRegion^,
       window: StreamAppendWindow[T]^{parent},
       bucket: StreamBucket^{parent},
-      onBucket: Function2[
+      onBucket: (
         StreamBucket^{parent},
-        StreamAppendCursor[T]^{parent},
-        Unit
-      ]
+        StreamAppendCursor[T]^{parent}
+      ) => Unit
   ): Unit = {
     val head = bucket.appendHead.asInstanceOf[StreamAppendNode]
     val removed = bucket.appendLength
@@ -3032,11 +3031,10 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       parent: StreamingRegion^,
       window: StreamAppendWindow[T]^{parent},
       cutoffSeconds: Long
-  )(onBucket: Function2[
+  )(onBucket: (
       StreamBucket^{parent},
-      StreamAppendCursor[T]^{parent},
-      Unit
-  ]): Unit =
+      StreamAppendCursor[T]^{parent}
+  ) => Unit): Unit =
     closeStreamBucketsBefore(
       parent,
       window.buckets.asInstanceOf[StreamBucketArena^{parent}],
@@ -3061,11 +3059,10 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   def closeAllAppendWindowBucketsWithCursor[T <: StreamAppendNode](
       parent: StreamingRegion^,
       window: StreamAppendWindow[T]^{parent}
-  )(onBucket: Function2[
+  )(onBucket: (
       StreamBucket^{parent},
-      StreamAppendCursor[T]^{parent},
-      Unit
-  ]): Unit =
+      StreamAppendCursor[T]^{parent}
+  ) => Unit): Unit =
     closeAllStreamBuckets(
       parent,
       window.buckets.asInstanceOf[StreamBucketArena^{parent}]

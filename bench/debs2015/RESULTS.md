@@ -4437,3 +4437,84 @@ Next implementation-facing options:
 - Add stronger compile/runtime probes for closing stream rank buckets only
   after their rank entries have been removed, because the current reusable API
   still relies on operator discipline for semantic cleanup.
+
+## Q1 StreamAppendWindow Cursor Event Buckets, 2026-04-30
+
+This checkpoint applies the focused `StreamAppendWindow` cursor-close result
+to one DEBS application path: checked Q1's append-only event-window entries.
+It does not touch Q1 ranking/TableRank or Q2 ranking.
+
+What changed:
+
+- `Debs2015Q1CheckedProcessingRun` no longer hand-encodes Q1 event buckets as
+  a local `Bucket` class with path-dependent `RouteEvent.next` links.
+- Q1 event records now use `RiftRegion.StreamAppendWindow[RouteEvent]`, where
+  `RouteEvent` is an ordinary Scala class extending
+  `RiftRegion.StreamAppendNode`.
+- Event records are allocated in the current event bucket child region,
+  appended through `RiftRegion.appendWindow`, and consumed on eviction through
+  `closeAppendWindowBucketsBeforeWithCursor`.
+- End-of-run cleanup uses `closeAllAppendWindowBucketsWithCursor`.
+- The cursor close callback signature in `RiftRegion` was aligned with the
+  existing checked close-helper style so it can capture parent-owned operator
+  metadata during close cleanup.
+
+Validation:
+
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile`
+  passed.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"`
+  passed `89/89`.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"`
+  passed `35/35`.
+- `zsh bench/debs2015/run_q1_checked_processing_matrix.sh` matched heap output
+  on the sample input after stripping only the latency column.
+- 100k Q1 checked-processing output matched heap:
+
+```sh
+DEBS2015_Q1_CHECKED_PROCESSING_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_Q1_CHECKED_PROCESSING_DIR=/tmp/debs2015-q1-checked-processing-cursor-100k \
+  zsh bench/debs2015/run_q1_checked_processing_matrix.sh
+```
+
+- RunBoth sample output matched for `heap`, `rift-hp`, `rift-streaming`, and
+  `rift-checked`:
+
+```sh
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-cursor-sample \
+  zsh bench/debs2015/run_both_sample_matrix.sh
+```
+
+- 100k RunBoth output matched for `heap` and `rift-checked`:
+
+```sh
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-cursor-100k \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+  zsh bench/debs2015/run_both_sample_matrix.sh
+```
+
+100k single-run correctness/control rows:
+
+| Harness | Mode | Elapsed ms | GC ms | Rift op ms | Q1 process ms | Q2 process ms | Q1 outputs | Q2 outputs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| Q1 only | heap | 761.989 | n/a | n/a | n/a | n/a | 5942 | n/a |
+| Q1 only | checked-processing | 771.422 | n/a | n/a | n/a | n/a | 5942 | n/a |
+| RunBoth | heap | 979.461 | 15.857 | 0.000 | 291.974 | 249.467 | 5942 | 3246 |
+| RunBoth | rift-checked | 872.828 | 3.350 | 2.606 | 288.270 | 196.571 | 5942 | 3246 |
+
+Interpretation:
+
+- This is a controlled DEBS integration of the passing append/window cursor
+  shape, not a new DEBS median.
+- The heap and checked logical program remain aligned: both keep Q1 route
+  counts/ranking semantics, and only the checked event-window storage moves to
+  the reusable region-backed append/window primitive.
+- The old per-entry `StreamAppendWindow` close API remains a non-winning
+  focused-control shape; the integrated DEBS path uses cursor close.
+- The 100k RunBoth row is a single-run correctness/control result. It is
+  directionally favorable for checked Rift in this run, but should not replace
+  the existing 3-run bounded medians.
+- Next useful DEBS work is either a 1M median rerun for this Q1 event-window
+  integration or a similar controlled migration of another append/fold/window
+  subpath. Q1 TableRank/ranking remains gated out.
