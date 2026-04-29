@@ -143,6 +143,9 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     val startSeconds: Long
   ) {
     private[memory] var next: StreamBucket = null
+    private[memory] var appendHead: Object = null
+    private[memory] var appendTail: Object = null
+    private[memory] var appendLength: Int = 0
     private[memory] var ownedRankKeyHeadPlusOne: Int = 0
     private[memory] var ownedLongRankSlotHeadPlusOne: Int = 0
     private[memory] var ownedTableRankSlotHeadPlusOne: Int = 0
@@ -174,6 +177,30 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     private[memory] var first: StreamBucket = null
     private[memory] var last: StreamBucket = null
     private[memory] var current: StreamBucket = null
+  }
+
+  /** Base node for checked append-window streams.
+   *
+   *  The append-window primitive deliberately does not allocate a wrapper node
+   *  per event. User records extend this base class, and the framework owns
+   *  the hidden next pointer used to link records inside a child bucket.
+   */
+  abstract class StreamAppendNode {
+    private[memory] var appendNext: StreamAppendNode = null
+  }
+
+  /** Checked append/fold stream-window primitive.
+   *
+   *  This is the reusable version of the cheap child-bucket append pattern:
+   *  ordinary Scala records live in child bucket regions, while parent-owned
+   *  heap metadata keeps bucket heads/tails until structured close. Close
+   *  helpers clear those parent references and consume records before closing
+   *  each child region.
+   */
+  final class StreamAppendWindow[T <: StreamAppendNode] private[memory] (
+      private[memory] val buckets: StreamBucketArena
+  ) {
+    private[memory] var totalLength: Int = 0
   }
 
   /** Checked indexed rank storage tied to stream-window child buckets.
@@ -2652,6 +2679,14 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   ): StreamBucketArena^{parent} =
     new StreamBucketArena(bucketSeconds).asInstanceOf[StreamBucketArena^{parent}]
 
+  /** Opens a parent-captured append-window primitive. */
+  def streamAppendWindow[T <: StreamAppendNode](bucketSeconds: Long)(using
+      parent: StreamingRegion^
+  ): StreamAppendWindow[T]^{parent} =
+    new StreamAppendWindow[T](
+      streamBucketArena(bucketSeconds).asInstanceOf[StreamBucketArena]
+    ).asInstanceOf[StreamAppendWindow[T]^{parent}]
+
   /** Tags a region for opt-in benchmark diagnostics.
    *
    *  This does not change allocation or safety behavior. It only lets runtime
@@ -2800,6 +2835,132 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
     arena.last = null
     arena.current = null
+
+  /** Finds or opens the append-window bucket containing `timestampSeconds`. */
+  def streamAppendWindowBucketFor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamAppendWindow[T]^{parent},
+      timestampSeconds: Long
+  ): StreamBucket^{parent} =
+    streamAppendWindowBucketFor(parent, window, timestampSeconds)(_ => ())
+
+  /** Finds or opens the append-window bucket containing `timestampSeconds`. */
+  def streamAppendWindowBucketFor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamAppendWindow[T]^{parent},
+      timestampSeconds: Long
+  )(onOpen: StreamBucket^{parent} => Unit): StreamBucket^{parent} =
+    streamBucketFor(
+      parent,
+      window.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      timestampSeconds
+    )(onOpen)
+
+  /** Appends `value` to the linked list owned by `bucket`.
+   *
+   *  The value should be allocated in `bucket`'s child region and then widened
+   *  with the parent owner token. The compiler guard rejects direct heap values
+   *  passed here unless they are explicit `HeapRoot` handles.
+   */
+  def appendWindow[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamAppendWindow[T]^{parent},
+      bucket: StreamBucket^{parent},
+      value: T^{parent}
+  ): Unit = {
+    bucket.child.checkOpen()
+    value.appendNext = null
+    if (bucket.appendHead == null) {
+      bucket.appendHead = value.asInstanceOf[Object]
+      bucket.appendTail = value.asInstanceOf[Object]
+    } else {
+      bucket.appendTail
+        .asInstanceOf[StreamAppendNode]
+        .appendNext = value.asInstanceOf[StreamAppendNode]
+      bucket.appendTail = value.asInstanceOf[Object]
+    }
+    bucket.appendLength += 1
+    window.totalLength += 1
+  }
+
+  /** Returns the total number of live append-window records. */
+  def appendWindowLength[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamAppendWindow[T]^{parent}
+  ): Int =
+    window.totalLength
+
+  /** Returns the number of records currently linked to `bucket`. */
+  def appendWindowBucketLength[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamAppendWindow[T]^{parent},
+      bucket: StreamBucket^{parent}
+  ): Int =
+    bucket.appendLength
+
+  private def consumeAppendWindowBucket[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamAppendWindow[T]^{parent},
+      bucket: StreamBucket^{parent},
+      onEntry: Function2[StreamBucket^{parent}, T^{parent}, Unit]
+  ): Unit = {
+    var current = bucket.appendHead
+    val removed = bucket.appendLength
+    bucket.appendHead = null
+    bucket.appendTail = null
+    bucket.appendLength = 0
+    window.totalLength -= removed
+
+    while (current != null) {
+      val value = current.asInstanceOf[T^{parent}]
+      val next = value.appendNext.asInstanceOf[Object]
+      onEntry(bucket, value)
+      value.appendNext = null
+      current = next
+    }
+  }
+
+  /** Returns true if closing before `cutoffSeconds` would close a bucket. */
+  def hasAppendWindowBucketsBefore[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamAppendWindow[T]^{parent},
+      cutoffSeconds: Long
+  ): Boolean =
+    hasStreamBucketsBefore(
+      parent,
+      window.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      cutoffSeconds
+    )
+
+  /** Closes append-window buckets fully before `cutoffSeconds`.
+   *
+   *  `onEntry` runs once per linked record after the parent bucket head/tail
+   *  references have been cleared and before the child region closes.
+   */
+  def closeAppendWindowBucketsBefore[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamAppendWindow[T]^{parent},
+      cutoffSeconds: Long
+  )(onEntry: Function2[StreamBucket^{parent}, T^{parent}, Unit]): Unit =
+    closeStreamBucketsBefore(
+      parent,
+      window.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      cutoffSeconds
+    ) { bucket =>
+      consumeAppendWindowBucket(parent, window, bucket, onEntry)
+    }
+
+  /** Closes every append-window bucket. */
+  def closeAllAppendWindowBuckets[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamAppendWindow[T]^{parent}
+  )(onEntry: Function2[StreamBucket^{parent}, T^{parent}, Unit]): Unit =
+    closeAllStreamBuckets(
+      parent,
+      window.buckets.asInstanceOf[StreamBucketArena^{parent}]
+    ) { bucket =>
+      consumeAppendWindowBucket(parent, window, bucket, onEntry)
+    }
 
   /** Closes a child window after caller-owned parent metadata is unlinked.
    *

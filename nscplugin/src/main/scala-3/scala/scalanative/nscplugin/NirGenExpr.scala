@@ -151,7 +151,8 @@ trait NirGenExpr(using Context) {
           name == "streamWindowLongIndexedRank" ||
           name == "streamWindowLongIndexedRankLexicographic" ||
           name == "streamWindowTableRank" ||
-          name == "streamWindowTableRankLexicographic"
+          name == "streamWindowTableRankLexicographic" ||
+          name == "streamAppendWindow"
       ) &&
         isRiftRegionCompanionOwner(sym)
     }
@@ -195,6 +196,12 @@ trait NirGenExpr(using Context) {
           name == "putWindowRankInBucket" ||
           name == "putTableRankInBucket"
       ) &&
+        isRiftRegionCompanionOwner(sym)
+    }
+
+    private def isRiftStreamAppendWindowAppend(tree: Tree): Boolean = {
+      val sym = calledSymbol(tree)
+      sym.name.toString == "appendWindow" &&
         isRiftRegionCompanionOwner(sym)
     }
 
@@ -366,6 +373,14 @@ trait NirGenExpr(using Context) {
           )
         case _ if isRiftStreamWindowIndexedRankPut(app) =>
           checkRiftObjectBufferAppend(riftCheckedContainerValueArg(args))
+          genApplyMethod(
+            sym,
+            statically = sym.isClassConstructor,
+            qualifier,
+            args
+          )
+        case _ if isRiftStreamAppendWindowAppend(app) =>
+          checkRiftObjectBufferAppend(args.last)
           genApplyMethod(
             sym,
             statically = sym.isClassConstructor,

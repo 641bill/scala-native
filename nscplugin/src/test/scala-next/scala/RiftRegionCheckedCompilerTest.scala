@@ -1628,6 +1628,48 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def streamAppendWindowStoresChildBucketRecords(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    val window = RiftRegion.streamAppendWindow[Event](10)
+      |    val bucket = RiftRegion.streamAppendWindowBucketFor(stream, window, 7L)
+      |    val region = RiftRegion.streamBucketRegion(stream, bucket)
+      |    val event: Event^{stream} =
+      |      RiftRegion.alloc(new Event(41))(using region)
+      |    RiftRegion.appendWindow(stream, window, bucket, event)
+      |    var total = 0
+      |    RiftRegion.closeAppendWindowBucketsBefore(stream, window, 10L) {
+      |      (closedBucket, record) =>
+      |        total += record.value
+      |    }
+      |    total + RiftRegion.appendWindowLength(stream, window) + 1
+      |  }
+      |""".stripMargin)
+
+  @Test def streamAppendWindowRejectsDirectHeapRecord(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    val window = RiftRegion.streamAppendWindow[Event](10)
+      |    val bucket = RiftRegion.streamAppendWindowBucketFor(stream, window, 7L)
+      |    val event: Event^{stream} = new Event(41)
+      |    RiftRegion.appendWindow(stream, window, bucket, event)
+      |  }
+      |""".stripMargin,
+      "Rift checked object buffer cannot store an unrooted heap object"
+    )
+
   @Test def checkedMutableLinkedListBuilderCompiles(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking
