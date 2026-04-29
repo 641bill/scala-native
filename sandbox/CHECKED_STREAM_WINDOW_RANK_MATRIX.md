@@ -493,6 +493,31 @@ Interpretation:
   work; the rejected nullable lookup, unbounded probe-loop, post-sift lookup,
   and backward-shift deletion probes should not be repeated.
 
+## TableRank Profile Pack
+
+Source: `sandbox/TABLERANK_PROFILE.md`.
+
+Fresh profile runs after the checkpoint recorded same-run 100k and 1M
+non-diagnostic rows plus diagnostic-only `TABLE_DIAG` counters. The 1M
+non-diagnostic profile was:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|
+| heap-long | 437.702 | 8.367 | 0.000 | 0 | 111411200 |
+| rift-checked-long | 610.358 | 5.817 | 1.035 | 826645 | 128253952 |
+| rift-checked-table-long | 568.572 | 8.064 | 0.562 | 826631 | 126418944 |
+
+The 1M diagnostic counters are:
+
+```text
+TABLE_DIAG mode=rift-checked-table-long lookups=3000000 probes=4803987 inserts=107838 replacements=718777 priority_updates=173385 heap_sift_steps=1861921 heap_swaps=1116618 bucket_moves=718777 bucket_close_removals=107710 rehashes=0 topk_candidate_compares=0 table_active=0 table_used=65536 table_deleted=65536 table_capacity=131072 heap_used=0 heap_capacity=65536
+```
+
+Derived 1M rates: `3.000` lookups/event, `4.804` probes/event, `0.719`
+replacements/event, `0.719` bucket moves/event, `1.862` heap sift steps/event,
+and `1.117` heap swaps/event. This profile does not identify one low-risk
+representation patch, so no post-profile optimization was applied.
+
 ## Interpretation
 
 - This is a general stream-window rank benchmark, not a DEBS-specific
