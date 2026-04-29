@@ -2743,8 +2743,31 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       parent: StreamingRegion^,
       arena: StreamBucketArena^{parent},
       timestampSeconds: Long
-  ): StreamBucket^{parent} =
-    streamBucketFor(parent, arena, timestampSeconds)(_ => ())
+  ): StreamBucket^{parent} = {
+    val startSeconds =
+      Math.floorDiv(timestampSeconds, arena.bucketSeconds) * arena.bucketSeconds
+    val current = arena.current
+    if (
+      current != null &&
+      current.startSeconds == startSeconds &&
+      current.isOpen
+    )
+      current.asInstanceOf[StreamBucket^{parent}]
+    else {
+      val child = childBucket(using parent)
+      val arenaBucket: StreamBucket =
+        new StreamBucket(child, startSeconds).asInstanceOf[StreamBucket]
+      if (arena.first == null) {
+        arena.first = arenaBucket
+        arena.last = arenaBucket
+      } else {
+        arena.last.next = arenaBucket
+        arena.last = arenaBucket
+      }
+      arena.current = arenaBucket
+      arenaBucket.asInstanceOf[StreamBucket^{parent}]
+    }
+  }
 
   /** Finds or opens the stream bucket containing `timestampSeconds`.
    *
@@ -2842,7 +2865,11 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       window: StreamAppendWindow[T]^{parent},
       timestampSeconds: Long
   ): StreamBucket^{parent} =
-    streamAppendWindowBucketFor(parent, window, timestampSeconds)(_ => ())
+    streamBucketFor(
+      parent,
+      window.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      timestampSeconds
+    )
 
   /** Finds or opens the append-window bucket containing `timestampSeconds`. */
   def streamAppendWindowBucketFor[T <: StreamAppendNode](

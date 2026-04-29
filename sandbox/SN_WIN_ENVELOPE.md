@@ -55,7 +55,7 @@ adds too much container/callback overhead.
 | Checked StreamWindowRank long-key | 1M events | checked-long `503.906 ms` | heap-long `358.988 ms` | Checked-container overhead | Focused checked API evidence |
 | StreamWindowTableRank profile | 1M events | table-long `568.572 ms` | heap-long `437.702 ms` | Checked-container overhead | Profiled; gated out of DEBS |
 | Checked AppendWindow manual child-bucket | 1M events | checked `32.261 ms` | heap `35.513 ms` | Cheap checked operator win | New focused matrix |
-| Reusable `StreamAppendWindow` API | 1M events | checked-api `76.057 ms` | heap `37.424 ms` | Checked-container/API overhead | Correctness-valid, gated out of DEBS |
+| Reusable `StreamAppendWindow` API | 1M events | checked-api `66.023 ms` | heap `37.455 ms` | Checked-container/API overhead | Improved by no-callback fix, still gated out of DEBS |
 | DEBS RunBoth checked, bounded 1M | 3-run median | checked `5043.240 ms` | heap `5363.257 ms` | Application partial win, CPU-limited | Bounded real-data evidence |
 | DEBS RunBoth checked, full month | 3-run median | checked `66.804 s` | heap `67.122 s` | Near-tie throughput, memory validation | Full-month evidence, not large speedup |
 
@@ -88,12 +88,24 @@ The first reusable API version is not performance-ready:
 | rift-checked | 34.762 | 0.000 | 0.117 | 1000000 | 41 / 41 | 47546368 |
 | rift-checked-api | 76.057 | 0.000 | 0.092 | 1000000 | 41 / 41 | 83247104 |
 
+The no-callback bucket-lookup follow-up improves the API but does not clear the
+gate:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens/closes | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|
+| heap | 37.455 | 11.906 | 0.000 | 0 | 0 / 0 | 75038720 |
+| rift-checked | 33.157 | 0.000 | 0.084 | 1000000 | 41 / 41 | 47513600 |
+| rift-checked-api | 66.023 | 0.000 | 0.082 | 1000000 | 41 / 41 | 47513600 |
+
 `rift-checked-api` uses `RiftRegion.StreamAppendWindow` with records extending
 `RiftRegion.StreamAppendNode`. It matches checksums and passes compiler/runtime
-probes, but it is much slower and higher-RSS than both heap and the manual
-checked shape. Region operation time remains tiny, so the gap is API/container
-CPU and representation overhead, not allocation or close. Do not move this API
-into DEBS until a focused rerun clears the 1M gate.
+probes, but even after removing the no-callback `_ => ()` delegation it is
+much slower than both heap and the manual checked shape. Region operation time
+remains tiny, so the gap is API/container CPU and representation overhead, not
+allocation or close. Diagnostic counters show `1,000,000` bucket lookups,
+`999,960` current-bucket hits, `40` bucket opens, `1,000,000` appends, `40`
+closed buckets, `1,000,000` close entries, and final live length `0`. Do not
+move this API into DEBS until a focused rerun clears the 1M gate.
 
 The trusted modes losing here is also useful. It means the current win is not a
 generic "HPZone always beats heap" statement. It is a checked operator-shape
@@ -135,8 +147,9 @@ The strongest local categories are:
   `StreamWindowRank`, `StreamWindowLongIndexedRank`, and `StreamWindowTableRank`
   are functionally important, but not ready as throughput evidence.
 - The first reusable `StreamAppendWindow` API is also too expensive at 1M
-  despite matching the winning child-bucket lifetime shape. This is a warning
-  that framework APIs must be benchmarked separately from handwritten
+  despite matching the winning child-bucket lifetime shape. Removing
+  no-callback bucket-lookup delegation improved it, but not enough. This is a
+  warning that framework APIs must be benchmarked separately from handwritten
   benchmark logic before application integration.
 - DEBS full-month is currently a near-tie in elapsed time with much better
   memory/lifetime evidence than earlier checkpoints, not a large application

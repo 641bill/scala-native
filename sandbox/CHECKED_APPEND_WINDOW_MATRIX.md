@@ -129,6 +129,10 @@ Validation run on 2026-04-29:
 - The 20k smoke, 100k median, and 1M median matched checksums across all four
   original modes.
 - The follow-up reusable API runs matched checksums across all five modes.
+- The no-callback `streamBucketFor`/`streamAppendWindowBucketFor` follow-up
+  also matched checksums across all five modes.
+- `CHECKED_APPEND_API_DIAG=1` was added after the no-callback gate still
+  failed. Diagnostic elapsed times are not headline numbers.
 - The RSS-backed 100k and 1M runs were rerun outside the sandbox because macOS
   `/usr/bin/time -l` could not read RSS counters inside the sandbox.
 
@@ -160,6 +164,16 @@ Reusable node-API smoke after `StreamAppendWindow`:
 | rift-checked-api | 2.156 | 0.000 | 0.040 | 20000 | 5 | 5 | 0 | 6373376 | 2522262741738122908 |
 | rift-trusted-hp | 0.989 | 0.000 | 0.036 | 20000 | 4 | 4 | 0 | 6012928 | 2522262741738122908 |
 | rift-trusted-streaming | 1.007 | 0.000 | 0.046 | 20000 | 4 | 4 | 0 | 6012928 | 2522262741738122908 |
+
+No-callback bucket-lookup follow-up:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 0.614 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 6160384 | 2522262741738122908 |
+| rift-checked | 0.783 | 0.000 | 0.041 | 20000 | 5 | 5 | 0 | 6012928 | 2522262741738122908 |
+| rift-checked-api | 1.506 | 0.000 | 0.040 | 20000 | 5 | 5 | 0 | 6012928 | 2522262741738122908 |
+| rift-trusted-hp | 0.979 | 0.000 | 0.036 | 20000 | 4 | 4 | 0 | 5980160 | 2522262741738122908 |
+| rift-trusted-streaming | 1.755 | 0.000 | 0.099 | 20000 | 4 | 4 | 0 | 5980160 | 2522262741738122908 |
 
 Interpretation: the tiny smoke validates correctness only. Heap has no GC
 pressure at this size, so Rift overhead dominates elapsed time.
@@ -193,10 +207,22 @@ Reusable node-API 100k median:
 | rift-trusted-hp | 4.506 | 0.000 | 0.012 | 100000 | 4 | 4 | 0 | 15712256 | 4594055666086494054 |
 | rift-trusted-streaming | 4.315 | 0.000 | 0.008 | 100000 | 4 | 4 | 0 | 15777792 | 4594055666086494054 |
 
+No-callback bucket-lookup follow-up:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 2.872 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 21331968 | 4594055666086494054 |
+| rift-checked | 3.363 | 0.000 | 0.009 | 100000 | 5 | 5 | 0 | 15761408 | 4594055666086494054 |
+| rift-checked-api | 6.841 | 0.000 | 0.009 | 100000 | 5 | 5 | 0 | 15761408 | 4594055666086494054 |
+| rift-trusted-hp | 4.202 | 0.000 | 0.007 | 100000 | 4 | 4 | 0 | 15679488 | 4594055666086494054 |
+| rift-trusted-streaming | 4.319 | 0.000 | 0.009 | 100000 | 4 | 4 | 0 | 15745024 | 4594055666086494054 |
+
 Interpretation: 100k is still below the useful allocation-pressure threshold.
 Heap is fastest, GC is not measurable, and Rift's main benefit is lower RSS.
 The reusable `StreamAppendWindow` API is correctness-valid but not
-performance-ready at this size.
+performance-ready at this size. The no-callback follow-up improves
+`rift-checked-api` from `7.473 ms` to `6.841 ms`, but it remains much slower
+than manual checked.
 
 ## 1M 3-Run Median
 
@@ -227,6 +253,16 @@ Reusable node-API 1M median:
 | rift-trusted-hp | 42.671 | 0.000 | 0.090 | 1000000 | 40 | 40 | 0 | 47398912 | -2507118467295660905 |
 | rift-trusted-streaming | 42.352 | 0.000 | 0.082 | 1000000 | 40 | 40 | 0 | 47529984 | -2507118467295660905 |
 
+No-callback bucket-lookup follow-up:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 37.455 | 11.906 | 0.000 | 0 | 0 | 0 | 0 | 75038720 | -2507118467295660905 |
+| rift-checked | 33.157 | 0.000 | 0.084 | 1000000 | 41 | 41 | 0 | 47513600 | -2507118467295660905 |
+| rift-checked-api | 66.023 | 0.000 | 0.082 | 1000000 | 41 | 41 | 0 | 47513600 | -2507118467295660905 |
+| rift-trusted-hp | 42.558 | 0.000 | 0.091 | 1000000 | 40 | 40 | 0 | 47382528 | -2507118467295660905 |
+| rift-trusted-streaming | 42.142 | 0.000 | 0.077 | 1000000 | 40 | 40 | 0 | 47497216 | -2507118467295660905 |
+
 Interpretation:
 
 - `rift-checked` is the useful row: it is about `9.2%` faster than heap on
@@ -241,10 +277,37 @@ Interpretation:
   operators can beat Immix when the stream data objects are numerous enough and
   lifetimes are structured.
 - The reusable `StreamAppendWindow` API does not pass the performance gate yet:
-  `rift-checked-api` is `76.057 ms` at 1M, much slower than heap and the
-  manual checked child-bucket shape. Region-op time is still tiny, so the
-  overhead is API/container CPU and callback shape, not allocation or close.
+  no-callback `rift-checked-api` improves from `76.057 ms` to `66.023 ms` at
+  1M, but remains much slower than heap and the manual checked child-bucket
+  shape. Region-op time is still tiny, so the overhead is API/container CPU
+  and representation shape, not allocation or close.
   Do not integrate this API into DEBS until the focused matrix is fixed.
+
+## Opt-In API Diagnostics
+
+Command shape:
+
+```sh
+CHECKED_APPEND_API_DIAG=1 \
+CHECKED_APPEND_MODES="rift-checked-api" \
+CHECKED_APPEND_BENCHMARK_RUNS=1 \
+CHECKED_APPEND_WARMUPS=0 \
+  zsh sandbox/run_checked_append_window_matrix.sh
+```
+
+Diagnostic rows are single-run and perturbing. They are for counter
+interpretation only.
+
+| Input | bucket lookups | current-bucket hits | bucket opens | appends | close buckets | close entries | final live length |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 100k | 100000 | 99996 | 4 | 100000 | 4 | 100000 | 0 |
+| 1M | 1000000 | 999960 | 40 | 1000000 | 40 | 1000000 | 0 |
+
+Interpretation: the API mostly hits the current bucket and opens/closes only
+one bucket per `eventsPerBucket`. The remaining overhead is therefore not
+excessive region opens/closes or missed current-bucket reuse. The next likely
+targets are per-entry API/linking/callback shape and object representation
+around `StreamAppendNode`, not bucket lookup delegation alone.
 
 ## Caveats
 

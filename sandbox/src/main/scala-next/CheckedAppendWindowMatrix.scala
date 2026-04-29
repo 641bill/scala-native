@@ -34,6 +34,10 @@ object CheckedAppendWindowConfig {
   val sampleEvery: Int = envInt("CHECKED_APPEND_SAMPLE_EVERY", 4096)
   val warmupRuns: Int = envNonNegativeInt("CHECKED_APPEND_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("CHECKED_APPEND_BENCHMARK_RUNS", 3)
+  val apiDiagnostics: Boolean =
+    sys.env.get("CHECKED_APPEND_API_DIAG").exists(value =>
+      value.nonEmpty && value != "0"
+    )
 }
 
 object CheckedAppendWindowMatrixHelpers {
@@ -375,7 +379,7 @@ object CheckedAppendWindowMatrixHelpers {
     checksum
   }
 
-  def runRiftCheckedApi(): Long = {
+  private def runRiftCheckedApiFast(): Long = {
     val cfg = CheckedAppendWindowConfig
     val totals = new Array[Long](cfg.keySpace)
     val checksum = RiftRegion.streaming { stream ?=>
@@ -456,6 +460,120 @@ object CheckedAppendWindowMatrixHelpers {
     checksumSink = checksum
     checksum
   }
+
+  private def runRiftCheckedApiDiagnostic(): Long = {
+    val cfg = CheckedAppendWindowConfig
+    val totals = new Array[Long](cfg.keySpace)
+    val checksum = RiftRegion.streaming { stream ?=>
+      final class Record(
+          val key: Int,
+          var value: Int,
+          var total: Long
+      ) extends RiftRegion.StreamAppendNode
+      val window =
+        RiftRegion.streamAppendWindow[Record](cfg.eventsPerBucket.toLong)
+      var running = 0L
+      var bucketLookups = 0L
+      var currentBucketHits = 0L
+      var bucketOpens = 0L
+      var appends = 0L
+      var closeBuckets = 0L
+      var closeEntries = 0L
+      var lastClosedStartSeconds = Long.MinValue
+
+      def recordClosedEntry(
+          bucket: RiftRegion.StreamBucket^{stream},
+          record: Record^{stream}
+      ): Unit = {
+        if (bucket.startSeconds != lastClosedStartSeconds) {
+          closeBuckets += 1L
+          lastClosedStartSeconds = bucket.startSeconds
+        }
+        closeEntries += 1L
+        val nextTotal =
+          (totals(record.key) + record.total) & 0xffffffffL
+        totals(record.key) = nextTotal
+        running = fold(
+          running,
+          record.key,
+          record.value,
+          nextTotal,
+          bucket.startSeconds
+        )
+      }
+
+      def closeExpired(cutoffSeconds: Long): Unit =
+        RiftRegion.closeAppendWindowBucketsBefore(
+          stream,
+          window,
+          cutoffSeconds
+        ) { (bucket, record) =>
+          recordClosedEntry(bucket, record)
+        }
+
+      var currentStartSeconds = Long.MinValue
+      var i = 0
+      while (i < cfg.events) {
+        val seed = mix(i * 1103515245 + 12345)
+        val key = seed % cfg.keySpace
+        val value = (mix(seed + 17) & 0xffff) + 1
+        val startSeconds = bucketStart(i)
+        if (startSeconds != currentStartSeconds) {
+          closeExpired(closeCutoff(startSeconds))
+          currentStartSeconds = startSeconds
+          bucketOpens += 1L
+        } else {
+          currentBucketHits += 1L
+        }
+        bucketLookups += 1L
+        val bucket =
+          RiftRegion.streamAppendWindowBucketFor(stream, window, startSeconds)
+        val bucketRegion = RiftRegion.streamBucketRegion(stream, bucket)
+        val record: Record^{stream} =
+          RiftRegion.alloc(new Record(key, value, value.toLong))(
+            using bucketRegion
+          )
+        record.value += seed & 3
+        record.total += record.value.toLong
+        RiftRegion.appendWindow(stream, window, bucket, record)
+        appends += 1L
+        if (i % cfg.sampleEvery == 0)
+          running = fold(
+            running,
+            record.key,
+            record.value,
+            record.total,
+            bucket.startSeconds
+          )
+        i += 1
+      }
+
+      RiftRegion.closeAllAppendWindowBuckets(stream, window) {
+        (bucket, record) =>
+          recordClosedEntry(bucket, record)
+      }
+
+      val finalLiveLength = RiftRegion.appendWindowLength(stream, window)
+      println(
+        s"APPEND_API_DIAG mode=rift-checked-api " +
+          s"bucket_lookups=$bucketLookups " +
+          s"current_bucket_hits=$currentBucketHits " +
+          s"bucket_opens=$bucketOpens " +
+          s"appends=$appends " +
+          s"close_buckets=$closeBuckets " +
+          s"close_entries=$closeEntries " +
+          s"final_live_length=$finalLiveLength"
+      )
+      running
+    }
+    checksumSink = checksum
+    checksum
+  }
+
+  def runRiftCheckedApi(): Long =
+    if (CheckedAppendWindowConfig.apiDiagnostics)
+      runRiftCheckedApiDiagnostic()
+    else runRiftCheckedApiFast()
 
   def runRiftTrusted(kind: Int): Long = {
     val cfg = CheckedAppendWindowConfig
