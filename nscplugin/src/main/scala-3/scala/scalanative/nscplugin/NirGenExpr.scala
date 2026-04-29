@@ -149,7 +149,9 @@ trait NirGenExpr(using Context) {
           name == "streamWindowIndexedRank" ||
           name == "streamWindowIndexedRankLexicographic" ||
           name == "streamWindowLongIndexedRank" ||
-          name == "streamWindowLongIndexedRankLexicographic"
+          name == "streamWindowLongIndexedRankLexicographic" ||
+          name == "streamWindowTableRank" ||
+          name == "streamWindowTableRankLexicographic"
       ) &&
         isRiftRegionCompanionOwner(sym)
     }
@@ -188,7 +190,11 @@ trait NirGenExpr(using Context) {
     private def isRiftStreamWindowIndexedRankPut(tree: Tree): Boolean = {
       val sym = calledSymbol(tree)
       val name = sym.name.toString
-      (name == "putWindowRank" || name == "putWindowRankInBucket") &&
+      (
+        name == "putWindowRank" ||
+          name == "putWindowRankInBucket" ||
+          name == "putTableRankInBucket"
+      ) &&
         isRiftRegionCompanionOwner(sym)
     }
 

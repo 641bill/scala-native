@@ -56,6 +56,7 @@ Defaults:
 | `CHECKED_SWR_SAMPLE_EVERY` | `4096` |
 | `CHECKED_SWR_WARMUPS` | `1` |
 | `CHECKED_SWR_BENCHMARK_RUNS` | `3` |
+| `CHECKED_SWR_TABLE_DIAG` | `0` |
 
 Modes:
 
@@ -63,6 +64,14 @@ Modes:
 - `rift-checked`
 - `heap-long`
 - `rift-checked-long`
+- `rift-checked-table`
+- `rift-checked-table-long`
+
+`CHECKED_SWR_TABLE_DIAG=1` enables opt-in diagnostics for
+`StreamWindowTableRank`. Diagnostic runs print `TABLE_DIAG` lines to stdout
+and the mode run log with lookup/probe, insert/replace, priority-update,
+heap-sift/swap, bucket-move, bucket-close, rehash, and final load/deleted
+counters. Keep this off for headline timing rows.
 
 ## Commands
 
@@ -156,6 +165,23 @@ Validation run on 2026-04-28 and updated on 2026-04-29:
 - After the long-key matrix update, `sandbox3_next/compile` passed and the
   long-key 20k smoke, 100k 3-run matrix, and default 1M 3-run matrix matched
   heap-long and `rift-checked-long` checksums.
+- After the fused `StreamWindowTableRank` update,
+  `sandbox3_next/compile` passed, the checked compiler test suite passed
+  `85/85`, and the checked native runtime suite passed `32/32`.
+- The fused table-rank 20k smoke, 100k 3-run matrix, and 1M 3-run matrix
+  matched heap-long checksums. The 100k long-key gate passed; the 1M long-key
+  gate did not pass the strict within-15%-of-heap target.
+- After the fast bucket-close removal, directional heap-repair, and opt-in
+  diagnostics update, `sandbox3_next/compile` passed, the checked compiler test
+  suite passed `86/86`, and the checked native runtime suite passed `33/33`.
+- The post-update 20k smoke and 100k/1M focused matrices matched heap-long
+  checksums. The 100k long-key TableRank gate still passed, but the 1M gate
+  still failed and TableRank was intentionally not re-integrated into DEBS Q1.
+- `bench/debs2015/run_q1_checked_processing_matrix.sh` matched heap and
+  checked-processing sample output after the provisional DEBS Q1 TableRank
+  integration was backed out.
+- `CHECKED_SWR_TABLE_DIAG=1` was verified to print `TABLE_DIAG` counters from
+  `sandbox/run_checked_stream_window_rank_matrix.sh`.
 
 ## Small Smoke Result
 
@@ -302,6 +328,48 @@ Configuration:
 | heap-long | 37.045 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 38830080 | -2863780563714953957 |
 | rift-checked-long | 49.450 | 0.000 | 0.178 | 82547 | 5 | 5 | 0 | 33882112 | -2863780563714953957 |
 
+## Fused TableRank 20k Smoke
+
+This checkpoint adds `StreamWindowTableRank`, a fused parent-owned checked
+rank structure where one open-addressed table owns key lookup, value reference,
+priority, heap index, and bucket close links. The heap stores table-slot ids
+instead of duplicating key/value entries. Existing dense-key and long-key
+window-rank implementations remain as controls.
+
+Configuration:
+
+- `CHECKED_SWR_EVENTS=20000`
+- `CHECKED_SWR_EVENTS_PER_BUCKET=5000`
+- `CHECKED_SWR_KEY_CAPACITY=16384`
+- `CHECKED_SWR_LONG_KEY_SPACE=16384`
+- `CHECKED_SWR_WINDOW_BUCKETS=8`
+- `CHECKED_SWR_BENCHMARK_RUNS=1`
+- `CHECKED_SWR_WARMUPS=0`
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap-long | 7.498 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 11321344 | 2201034068585435575 |
+| rift-checked-table-long | 9.246 | 0.000 | 0.292 | 17781 | 5 | 5 | 0 | 16269312 | 2201034068585435575 |
+
+## Fused TableRank 100k Gate
+
+Same long-key stream shape as the long-key 100k median, with the fused
+TableRank path added as a control.
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap-long | 40.582 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 38780928 | -2863780563714953957 |
+| rift-checked-long | 54.018 | 0.000 | 0.215 | 82547 | 5 | 5 | 0 | 33931264 | -2863780563714953957 |
+| rift-checked-table-long | 41.069 | 0.000 | 0.164 | 82533 | 5 | 5 | 0 | 49938432 | -2863780563714953957 |
+
+Interpretation:
+
+- The 100k gate passes: `rift-checked-table-long` is below the planned
+  `43 ms` threshold and materially faster than the old checked-long control in
+  the same run.
+- RSS is higher than both heap-long and old checked-long at 100k, so this is
+  a CPU result, not a memory-footprint win.
+
 ## Default Local Median
 
 Configuration:
@@ -343,6 +411,87 @@ Configuration:
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | heap-long | 358.988 | 6.973 | 0.000 | 0 | 0 | 0 | 0 | 111394816 | 4222832129898301078 |
 | rift-checked-long | 503.906 | 5.470 | 0.491 | 826645 | 41 | 41 | 0 | 128286720 | 4222832129898301078 |
+
+## Fused TableRank 1M Gate
+
+Same default 1M long-key stream shape, with `rift-checked-table-long` added.
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap-long | 413.664 | 7.080 | 0.000 | 0 | 0 | 0 | 0 | 111443968 | 4222832129898301078 |
+| rift-checked-long | 568.427 | 5.821 | 0.449 | 826645 | 41 | 41 | 0 | 128335872 | 4222832129898301078 |
+| rift-checked-table-long | 491.918 | 5.927 | 0.475 | 826631 | 41 | 41 | 0 | 126468096 | 4222832129898301078 |
+
+Interpretation:
+
+- The 1M gate does not pass the strict target. `rift-checked-table-long`
+  improves over same-run old checked-long by about `13%`, and RSS is slightly
+  lower than old checked-long, but it is still about `19%` slower than
+  same-run heap-long.
+- Measured Rift runtime operation time remains below `1 ms`; the remaining
+  gap is checked container CPU/layout overhead, not slab allocation/close cost.
+- A follow-up probe that removed bounded probe counters from the fused table
+  lookup was rejected: same-run 1M `rift-checked-table-long` regressed to
+  `569.633 ms` with `0.713 ms` Rift op time. Keep the bounded probe loop.
+
+## Fused TableRank Fast-Close / Directional-Repair Follow-Up
+
+This checkpoint keeps `StreamWindowTableRank` as a focused framework primitive
+and backs it out of DEBS Q1 until the 1M gate clears. It adds two general
+container changes:
+
+- bucket-close fast remove: closing a known bucket removes table slots without
+  the normal owner-list unlink path or bucket scan;
+- directional heap removal: when a heap removal moves the last slot into a
+  hole, repair chooses `siftUp` or `siftDown` based on the moved slot and its
+  parent instead of running the old generic repair path.
+
+It also adds opt-in diagnostics with `CHECKED_SWR_TABLE_DIAG=1`. Diagnostics
+are intended for profile direction only, not headline elapsed results.
+
+20k smoke:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap-long | 11.297 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 11288576 | 2201034068585435575 |
+| rift-checked-table-long | 8.595 | 0.000 | 0.141 | 17781 | 5 | 5 | 0 | 16203776 | 2201034068585435575 |
+
+100k gate:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap-long | 34.620 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 38846464 | -2863780563714953957 |
+| rift-checked-long | 44.762 | 0.000 | 0.144 | 82547 | 5 | 5 | 0 | 33898496 | -2863780563714953957 |
+| rift-checked-table-long | 32.330 | 0.000 | 0.093 | 82533 | 5 | 5 | 0 | 49922048 | -2863780563714953957 |
+
+1M gate:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap-long | 300.667 | 4.252 | 0.000 | 0 | 0 | 0 | 0 | 111394816 | 4222832129898301078 |
+| rift-checked-long | 476.015 | 6.541 | 0.498 | 826645 | 41 | 41 | 0 | 128221184 | 4222832129898301078 |
+| rift-checked-table-long | 512.764 | 5.964 | 0.490 | 826631 | 41 | 41 | 0 | 126451712 | 4222832129898301078 |
+
+100k diagnostic counter sample, `CHECKED_SWR_TABLE_DIAG=1`, one run:
+
+```text
+TABLE_DIAG mode=rift-checked-table-long lookups=300000 probes=385422 inserts=52382 replacements=30135 priority_updates=17483 heap_sift_steps=266870 heap_swaps=168244 bucket_moves=30135 bucket_close_removals=52254 rehashes=0 topk_candidate_compares=0 table_active=0 table_used=52382 table_deleted=52382 table_capacity=131072 heap_used=0 heap_capacity=65536
+```
+
+Interpretation:
+
+- The 20k smoke matches checksum and the 100k gate remains strong:
+  `rift-checked-table-long` is faster than same-run heap-long and old
+  checked-long at 100k.
+- The 1M gate still fails. In this same run, TableRank is `1.71x` heap-long and
+  slower than old checked-long, although its RSS is slightly lower than old
+  checked-long and measured Rift op time remains below `1 ms`.
+- Because the 1M gate failed, the provisional DEBS Q1 TableRank integration was
+  reverted. DEBS checked runs continue to use the previous rank-arena path.
+- The next TableRank work should be profiling/result-pack work, not DEBS
+  reintegration. The most visible counters are probe count and heap repair
+  work; the rejected nullable lookup, unbounded probe-loop, post-sift lookup,
+  and backward-shift deletion probes should not be repeated.
 
 ## Interpretation
 
@@ -389,6 +538,11 @@ Configuration:
   memory-layout pass. The 1M absolute times moved between adjacent reruns, so
   use the same-run ratio and checksum result rather than over-interpreting the
   exact millisecond values.
+- The fused `StreamWindowTableRank` is a real framework improvement at 100k,
+  but it is not yet a full performance win. The fast-close/directional-repair
+  follow-up did not clear the 1M gate, so TableRank should be treated as an
+  experimental checked operator primitive whose next step is
+  profiling/reducing container CPU and RSS before broad DEBS integration.
 - The result is still useful because it validates the general pattern that
   bucket-lifetime records can be ordinary Scala objects, stored in checked
   region-backed ranking state, sampled during the stream, and automatically

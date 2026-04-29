@@ -43,6 +43,17 @@ object CheckedStreamWindowRankConfig {
       )
       .getOrElse(default)
 
+  private def envBoolean(name: String, default: Boolean): Boolean =
+    sys.env
+      .get(name)
+      .map(_.trim.toLowerCase)
+      .flatMap {
+        case "1" | "true" | "yes" | "on"  => Some(true)
+        case "0" | "false" | "no" | "off" => Some(false)
+        case _                            => None
+      }
+      .getOrElse(default)
+
   val events: Int = envInt("CHECKED_SWR_EVENTS", 1000000)
   val eventsPerBucket: Int = envInt("CHECKED_SWR_EVENTS_PER_BUCKET", 25000)
   val keyCapacity: Int = envInt("CHECKED_SWR_KEY_CAPACITY", 65536)
@@ -57,6 +68,8 @@ object CheckedStreamWindowRankConfig {
   val sampleEvery: Int = envInt("CHECKED_SWR_SAMPLE_EVERY", 4096)
   val warmupRuns: Int = envNonNegativeInt("CHECKED_SWR_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("CHECKED_SWR_BENCHMARK_RUNS", 3)
+  val tableDiagnostics: Boolean =
+    envBoolean("CHECKED_SWR_TABLE_DIAG", default = false)
 }
 
 object CheckedStreamWindowRankMatrixHelpers {
@@ -1390,24 +1403,209 @@ object CheckedStreamWindowRankMatrixHelpers {
     checksum
   }
 
+  def runRiftCheckedTable(useLongKeys: Boolean, modeName: String): Long = {
+    validateConfig()
+    val cfg = CheckedStreamWindowRankConfig
+    val checksum = RiftRegion.streaming { stream ?=>
+      final class Record(val key: Long, val bucketStart: Long) {
+        var count: Int = 0
+        var total: Long = 0L
+        var lastValue: Int = 0
+      }
+
+      def recordPriority(record: Record^{stream}): Long =
+        priority(record.key, record.count, record.total, record.lastValue)
+
+      val rank =
+        RiftRegion.streamWindowTableRank[Record](
+          cfg.bucketSeconds,
+          cfg.initialRankCapacity,
+          cfg.initialLongTableCapacity
+        )
+      if (cfg.tableDiagnostics) {
+        RiftRegion.setTableRankDiagnosticsEnabled(stream, rank, enabled = true)
+        RiftRegion.resetTableRankDiagnostics(stream, rank)
+      }
+      val slotCount = cfg.windowBuckets + 2
+      val bucketStarts: Array[Long]^{stream} =
+        RiftRegion.alloc(new Array[Long](slotCount))
+
+      var i = 0
+      while (i < slotCount) {
+        bucketStarts(i) = EmptyBucketStart
+        i += 1
+      }
+
+      def clearBucket(bucketStart: Long): Unit = {
+        val slot = bucketSlot(bucketStart, slotCount)
+        if (bucketStarts(slot) == bucketStart)
+          bucketStarts(slot) = EmptyBucketStart
+      }
+
+      def ensureBucketSlot(bucketStart: Long): Int = {
+        val slot = bucketSlot(bucketStart, slotCount)
+        if (bucketStarts(slot) != bucketStart) {
+          if (bucketStarts(slot) != EmptyBucketStart)
+            throw new IllegalStateException(
+              s"bucket slot reused before close old=${bucketStarts(slot)} new=$bucketStart"
+            )
+          bucketStarts(slot) = bucketStart
+        }
+        slot
+      }
+
+      var checksum = 0L
+      i = 0
+      while (i < cfg.events) {
+        val bucketStart = bucketStartFor(i)
+        RiftRegion.closeTableRankBucketsBefore(
+          stream,
+          rank,
+          cutoffFor(bucketStart)
+        ) { bucket =>
+          clearBucket(bucket.startSeconds)
+        }
+        val bucket =
+          RiftRegion.streamWindowBucketFor(
+            stream,
+            rank,
+            timestampFor(i)
+          ) { opened =>
+            ensureBucketSlot(opened.startSeconds)
+          }
+        ensureBucketSlot(bucket.startSeconds)
+        val seed = mix(i * 131 + (bucketStart / cfg.bucketSeconds).toInt)
+        val key =
+          if (useLongKeys) longKeyFor(seed) else (seed % cfg.keyCapacity).toLong
+        val value = (mix(seed + 19) & 0xffff) + 1
+        if (RiftRegion.containsTableRank(stream, rank, key)) {
+          val existing = RiftRegion.getTableRank(stream, rank, key)
+          if (existing.bucketStart == bucket.startSeconds) {
+            existing.count += 1
+            existing.total += value.toLong
+            existing.lastValue = value
+            RiftRegion.updateTableRankPriority(
+              stream,
+              rank,
+              key,
+              recordPriority(existing)
+            )
+          } else {
+            val child = RiftRegion.streamBucketRegion(stream, bucket)
+            val record: Record^{stream} =
+              RiftRegion.alloc(new Record(key, bucket.startSeconds))(
+                using child
+              )
+            record.count = 1
+            record.total = value.toLong
+            record.lastValue = value
+            RiftRegion.putTableRankInBucket(
+              stream,
+              rank,
+              bucket,
+              key,
+              record,
+              recordPriority(record)
+            )
+          }
+        } else {
+          val child = RiftRegion.streamBucketRegion(stream, bucket)
+          val record: Record^{stream} =
+            RiftRegion.alloc(new Record(key, bucket.startSeconds))(using child)
+          record.count = 1
+          record.total = value.toLong
+          record.lastValue = value
+          RiftRegion.putTableRankInBucket(
+            stream,
+            rank,
+            bucket,
+            key,
+            record,
+            recordPriority(record)
+          )
+        }
+
+        if (
+          RiftRegion.tableRankLength(stream, rank) > 0 &&
+          (i % cfg.sampleEvery) == 0
+        ) {
+          val record = RiftRegion.peekTableRank(stream, rank)
+          checksum =
+            foldRecord(
+              checksum,
+              RiftRegion.peekTableRankKey(stream, rank),
+              record.bucketStart,
+              record.count,
+              record.total,
+              record.lastValue,
+              RiftRegion.peekTableRankPriority(stream, rank)
+            )
+        }
+        i += 1
+      }
+
+      var remaining = math.min(cfg.topK, RiftRegion.tableRankLength(stream, rank))
+      while (remaining > 0) {
+        val record = RiftRegion.popTableRank(stream, rank)
+        checksum =
+          foldRecord(
+            checksum,
+            record.key,
+            record.bucketStart,
+            record.count,
+            record.total,
+            record.lastValue,
+            recordPriority(record)
+          )
+        remaining -= 1
+      }
+
+      RiftRegion.closeAllTableRankBuckets(stream, rank) { bucket =>
+        clearBucket(bucket.startSeconds)
+      }
+
+      if (cfg.tableDiagnostics)
+        println(
+          s"TABLE_DIAG mode=$modeName " +
+            RiftRegion.tableRankDiagnostics(stream, rank)
+        )
+
+      checksum
+    }
+    checksumSink = checksum
+    checksum
+  }
+
   private def runMode(mode: String): Long =
     mode match {
       case "heap"              => runHeap()
       case "heap-long"         => runHeapLong()
       case "rift-checked"      => runRiftChecked()
       case "rift-checked-long" => runRiftCheckedLong()
+      case "rift-checked-table" =>
+        runRiftCheckedTable(useLongKeys = false, mode)
+      case "rift-checked-table-long" =>
+        runRiftCheckedTable(useLongKeys = true, mode)
       case other =>
         throw new IllegalArgumentException(
-          s"unknown checked-stream-window-rank mode '$other'; expected heap, heap-long, rift-checked, or rift-checked-long"
+          s"unknown checked-stream-window-rank mode '$other'; expected heap, heap-long, rift-checked, rift-checked-long, rift-checked-table, or rift-checked-table-long"
         )
     }
 
   def runBenchmark(mode: String): Unit = {
     validateConfig()
     val cfg = CheckedStreamWindowRankConfig
-    val usesRift = mode == "rift-checked" || mode == "rift-checked-long"
+    val usesRift =
+      mode == "rift-checked" ||
+        mode == "rift-checked-long" ||
+        mode == "rift-checked-table" ||
+        mode == "rift-checked-table-long"
     val expectedChecksum =
-      if (mode == "heap-long" || mode == "rift-checked-long") runHeapLong()
+      if (
+        mode == "heap-long" ||
+        mode == "rift-checked-long" ||
+        mode == "rift-checked-table-long"
+      ) runHeapLong()
       else runHeap()
 
     var warmup = 0
@@ -1489,7 +1687,7 @@ object CheckedStreamWindowRankMatrixHelpers {
   def printConfig(mode: String): Unit = {
     val cfg = CheckedStreamWindowRankConfig
     println(
-      s"CONFIG mode=$mode runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} key_capacity=${cfg.keyCapacity} long_key_space=${cfg.longKeySpace} bucket_seconds=${cfg.bucketSeconds} window_buckets=${cfg.windowBuckets} top_k=${cfg.topK} sample_every=${cfg.sampleEvery} initial_rank_capacity=${cfg.initialRankCapacity} initial_long_table_capacity=${cfg.initialLongTableCapacity}"
+      s"CONFIG mode=$mode runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} key_capacity=${cfg.keyCapacity} long_key_space=${cfg.longKeySpace} bucket_seconds=${cfg.bucketSeconds} window_buckets=${cfg.windowBuckets} top_k=${cfg.topK} sample_every=${cfg.sampleEvery} initial_rank_capacity=${cfg.initialRankCapacity} initial_long_table_capacity=${cfg.initialLongTableCapacity} table_diag=${cfg.tableDiagnostics}"
     )
   }
 }
@@ -1499,14 +1697,20 @@ object CheckedStreamWindowRankMatrixHelpers {
     mode != "heap" &&
     mode != "heap-long" &&
     mode != "rift-checked" &&
-    mode != "rift-checked-long"
+    mode != "rift-checked-long" &&
+    mode != "rift-checked-table" &&
+    mode != "rift-checked-table-long"
   )
     throw new IllegalArgumentException(
-      s"unknown checked-stream-window-rank mode '$mode'; expected heap, heap-long, rift-checked, or rift-checked-long"
+      s"unknown checked-stream-window-rank mode '$mode'; expected heap, heap-long, rift-checked, rift-checked-long, rift-checked-table, or rift-checked-table-long"
     )
 
   CheckedStreamWindowRankMatrixHelpers.printConfig(mode)
-  val usesRift = mode == "rift-checked" || mode == "rift-checked-long"
+  val usesRift =
+    mode == "rift-checked" ||
+      mode == "rift-checked-long" ||
+      mode == "rift-checked-table" ||
+      mode == "rift-checked-table-long"
   if (usesRift) RiftRegion.init(0)
   try CheckedStreamWindowRankMatrixHelpers.runBenchmark(mode)
   finally if (usesRift) RiftRegion.shutdown()

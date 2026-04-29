@@ -629,6 +629,249 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def streamWindowTableRankMovesKeyBetweenBuckets(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Row(val value: Int)
+
+        val rank = RiftRegion.streamWindowTableRank[Row](10, 1, 4)
+        val firstBucket = RiftRegion.streamWindowBucketFor(stream, rank, 7L)
+        val firstChild = RiftRegion.streamBucketRegion(stream, firstBucket)
+        val first: Row^{stream} =
+          RiftRegion.alloc(new Row(20))(using firstChild)
+        RiftRegion.putTableRankInBucket(
+          stream,
+          rank,
+          firstBucket,
+          1234567890123L,
+          first,
+          1L
+        )
+
+        val secondBucket = RiftRegion.streamWindowBucketFor(stream, rank, 17L)
+        val secondChild = RiftRegion.streamBucketRegion(stream, secondBucket)
+        val second: Row^{stream} =
+          RiftRegion.alloc(new Row(43))(using secondChild)
+        RiftRegion.putTableRankInBucket(
+          stream,
+          rank,
+          secondBucket,
+          1234567890123L,
+          second,
+          9L
+        )
+
+        RiftRegion.closeTableRankBucketsBefore(stream, rank, 10L) { _ => () }
+
+        assertTrue(firstBucket.isClosed)
+        assertTrue(RiftRegion.containsTableRank(stream, rank, 1234567890123L))
+        assertEquals(1, RiftRegion.tableRankLength(stream, rank))
+        assertEquals(1234567890123L, RiftRegion.peekTableRankKey(stream, rank))
+        RiftRegion.getTableRank(stream, rank, 1234567890123L).value
+      }
+
+      assertEquals(43, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def streamWindowTableRankReportsRemovedEntriesOnClose(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Row(val value: Int)
+
+        val rank = RiftRegion.streamWindowTableRank[Row](10, 1, 4)
+        val bucket = RiftRegion.streamWindowBucketFor(stream, rank, 7L)
+        val child = RiftRegion.streamBucketRegion(stream, bucket)
+        val row: Row^{stream} =
+          RiftRegion.alloc(new Row(37))(using child)
+        RiftRegion.putTableRankInBucket(
+          stream,
+          rank,
+          bucket,
+          -3L,
+          row,
+          7L
+        )
+
+        var removedKey = 0L
+        var removedValue = 0
+        var bucketCleanupRan = false
+        RiftRegion.closeTableRankBucketsBeforeWithEntries(
+          stream,
+          rank,
+          10L
+        ) { (_, key, value) =>
+          removedKey = key
+          removedValue = value.value
+        } { _ =>
+          bucketCleanupRan = true
+        }
+
+        assertTrue(bucket.isClosed)
+        assertTrue(bucketCleanupRan)
+        assertEquals(0, RiftRegion.tableRankLength(stream, rank))
+        removedKey.toInt + removedValue
+      }
+
+      assertEquals(34, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def streamWindowTableRankSupportsLexicographicPriorities(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Row(val value: Int)
+
+        val rank = RiftRegion.streamWindowTableRankLexicographic[Row](10, 1, 4)
+        val bucket = RiftRegion.streamWindowBucketFor(stream, rank, 7L)
+        val child = RiftRegion.streamBucketRegion(stream, bucket)
+        val older: Row^{stream} =
+          RiftRegion.alloc(new Row(10))(using child)
+        val newer: Row^{stream} =
+          RiftRegion.alloc(new Row(20))(using child)
+        val lowerKey: Row^{stream} =
+          RiftRegion.alloc(new Row(30))(using child)
+
+        RiftRegion.putTableRankInBucket(
+          stream,
+          rank,
+          bucket,
+          4L,
+          older,
+          5L,
+          100L,
+          10L,
+          -4L
+        )
+        RiftRegion.putTableRankInBucket(
+          stream,
+          rank,
+          bucket,
+          6L,
+          newer,
+          5L,
+          110L,
+          20L,
+          -6L
+        )
+        RiftRegion.putTableRankInBucket(
+          stream,
+          rank,
+          bucket,
+          2L,
+          lowerKey,
+          5L,
+          110L,
+          20L,
+          -2L
+        )
+
+        assertEquals(2L, RiftRegion.peekTableRankKey(stream, rank))
+        assertEquals(30, RiftRegion.peekTableRank(stream, rank).value)
+
+        assertTrue(
+          RiftRegion.updateTableRankPriority(
+            stream,
+            rank,
+            4L,
+            6L,
+            1L,
+            1L,
+            -4L
+          )
+        )
+        assertEquals(4L, RiftRegion.peekTableRankKey(stream, rank))
+        RiftRegion.popTableRank(stream, rank).value
+      }
+
+      assertEquals(10, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def streamWindowTableRankCopiesTopKWithoutRemovingEntries(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Row(val value: Int)
+
+        val rank = RiftRegion.streamWindowTableRank[Row](10, 1, 4)
+        val bucket = RiftRegion.streamWindowBucketFor(stream, rank, 7L)
+        val child = RiftRegion.streamBucketRegion(stream, bucket)
+        val low: Row^{stream} =
+          RiftRegion.alloc(new Row(10))(using child)
+        val high: Row^{stream} =
+          RiftRegion.alloc(new Row(30))(using child)
+        val middle: Row^{stream} =
+          RiftRegion.alloc(new Row(20))(using child)
+
+        RiftRegion.putTableRankInBucket(stream, rank, bucket, 1L, low, 1L)
+        RiftRegion.putTableRankInBucket(stream, rank, bucket, 3L, high, 3L)
+        RiftRegion.putTableRankInBucket(stream, rank, bucket, 2L, middle, 2L)
+
+        val result: Array[Row^{stream}]^{stream} =
+          RiftRegion.alloc(new Array[Row^{stream}](2))
+        val candidates: Array[Int]^{stream} =
+          RiftRegion.alloc(new Array[Int](2))
+        val copied =
+          RiftRegion.copyTableRankTopK(stream, rank, result, candidates, 2)
+
+        assertEquals(2, copied)
+        assertEquals(30, result(0).value)
+        assertEquals(20, result(1).value)
+        assertEquals(3, RiftRegion.tableRankLength(stream, rank))
+        assertTrue(RiftRegion.removeTableRank(stream, rank, 3L))
+        assertEquals(2L, RiftRegion.peekTableRankKey(stream, rank))
+
+        result(0).value + result(1).value + RiftRegion.tableRankLength(stream, rank)
+      }
+
+      assertEquals(52, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def streamWindowTableRankDiagnosticsAreOptIn(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Row(val value: Int)
+
+        val rank = RiftRegion.streamWindowTableRank[Row](10, 1, 4)
+        RiftRegion.setTableRankDiagnosticsEnabled(stream, rank, enabled = true)
+        RiftRegion.resetTableRankDiagnostics(stream, rank)
+        val bucket = RiftRegion.streamWindowBucketFor(stream, rank, 7L)
+        val child = RiftRegion.streamBucketRegion(stream, bucket)
+        val row: Row^{stream} =
+          RiftRegion.alloc(new Row(41))(using child)
+
+        RiftRegion.putTableRankInBucket(stream, rank, bucket, 1L, row, 1L)
+        RiftRegion.updateTableRankPriority(stream, rank, 1L, 2L)
+        assertTrue(RiftRegion.containsTableRank(stream, rank, 1L))
+        RiftRegion.closeTableRankBucketsBefore(stream, rank, 10L) { _ => () }
+
+        val diagnostics = RiftRegion.tableRankDiagnostics(stream, rank)
+        assertTrue(diagnostics.contains("lookups="))
+        assertTrue(diagnostics.contains("bucket_close_removals=1"))
+        assertTrue(diagnostics.contains("table_active=0"))
+        42
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def streamWindowIndexedRankRanksAndClosesBucket(): Unit = {
     RiftRegion.init(1)
     try {

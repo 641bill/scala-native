@@ -145,6 +145,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     private[memory] var next: StreamBucket = null
     private[memory] var ownedRankKeyHeadPlusOne: Int = 0
     private[memory] var ownedLongRankSlotHeadPlusOne: Int = 0
+    private[memory] var ownedTableRankSlotHeadPlusOne: Int = 0
 
     def isOpen: Boolean =
       child.isOpen
@@ -476,6 +477,771 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       x *= 0xc4ceb9fe1a85ec53L
       x ^= x >>> 33
       x.toInt
+    }
+  }
+
+  /** Fused long-key stream-window rank storage.
+   *
+   *  This experimental checked primitive removes the separate long-key rank
+   *  queue plus owner table used by `StreamWindowLongIndexedRank`. One
+   *  open-addressed table owns lookup, values, priorities, heap positions, and
+   *  bucket-owner links. The binary heap stores table slots, so bucket close can
+   *  unlink parent-visible state by slot before the child bucket closes.
+   */
+  final class StreamWindowTableRank[T <: Object] private[memory] (
+      private[memory] val buckets: StreamBucketArena,
+      private var keys: Array[Long],
+      private var states: Array[Byte],
+      private var items: Array[Object],
+      private var priorities: Array[Long],
+      private var priority2s: Array[Long],
+      private var priority3s: Array[Long],
+      private var priority4s: Array[Long],
+      private var heapSlots: Array[Int],
+      private var heapIndexPlusOneBySlot: Array[Int],
+      private var bucketStartBySlot: Array[Long],
+      private var nextOwnedSlotPlusOneBySlot: Array[Int],
+      private var previousOwnedSlotPlusOneBySlot: Array[Int]
+  ) {
+    private final val Empty: Byte = 0
+    private final val Used: Byte = 1
+    private final val Deleted: Byte = 2
+
+    private var heapUsed = 0
+    private var tableActive = 0
+    private var tableUsed = 0
+
+    private var diagnosticsEnabled = false
+    private var diagnosticLookups = 0L
+    private var diagnosticProbes = 0L
+    private var diagnosticInserts = 0L
+    private var diagnosticReplacements = 0L
+    private var diagnosticPriorityUpdates = 0L
+    private var diagnosticHeapSiftSteps = 0L
+    private var diagnosticHeapSwaps = 0L
+    private var diagnosticBucketMoves = 0L
+    private var diagnosticBucketCloseRemovals = 0L
+    private var diagnosticRehashes = 0L
+    private var diagnosticTopKCandidateCompares = 0L
+
+    def length: Int = heapUsed
+
+    def capacity: Int = heapSlots.length
+
+    def tableCapacity: Int = keys.length
+
+    private[memory] def setDiagnosticsEnabled(enabled: Boolean): Unit =
+      diagnosticsEnabled = enabled
+
+    private[memory] def resetDiagnostics(): Unit = {
+      diagnosticLookups = 0L
+      diagnosticProbes = 0L
+      diagnosticInserts = 0L
+      diagnosticReplacements = 0L
+      diagnosticPriorityUpdates = 0L
+      diagnosticHeapSiftSteps = 0L
+      diagnosticHeapSwaps = 0L
+      diagnosticBucketMoves = 0L
+      diagnosticBucketCloseRemovals = 0L
+      diagnosticRehashes = 0L
+      diagnosticTopKCandidateCompares = 0L
+    }
+
+    private[memory] def diagnosticSummaryTrusted(): String =
+      "lookups=" + diagnosticLookups +
+        " probes=" + diagnosticProbes +
+        " inserts=" + diagnosticInserts +
+        " replacements=" + diagnosticReplacements +
+        " priority_updates=" + diagnosticPriorityUpdates +
+        " heap_sift_steps=" + diagnosticHeapSiftSteps +
+        " heap_swaps=" + diagnosticHeapSwaps +
+        " bucket_moves=" + diagnosticBucketMoves +
+        " bucket_close_removals=" + diagnosticBucketCloseRemovals +
+        " rehashes=" + diagnosticRehashes +
+        " topk_candidate_compares=" + diagnosticTopKCandidateCompares +
+        " table_active=" + tableActive +
+        " table_used=" + tableUsed +
+        " table_deleted=" + (tableUsed - tableActive) +
+        " table_capacity=" + keys.length +
+        " heap_used=" + heapUsed +
+        " heap_capacity=" + heapSlots.length
+
+    private[memory] def putTrusted(
+        owner: RiftRegion^,
+        bucket: StreamBucket,
+        key: Long,
+        value: Object,
+        priority: Long
+    ): Unit = {
+      val existing = findExistingSlot(key)
+      if (existing >= 0)
+        replaceSlot(existing, bucket, value, priority)
+      else {
+        ensureInsertCapacity(owner)
+        val slot = findInsertSlot(key)
+        insertSlot(owner, slot, bucket, key, value)
+        setPriority(slot, priority)
+        addHeapSlot(owner, slot)
+      }
+    }
+
+    private[memory] def putTrusted(
+        owner: RiftRegion^,
+        bucket: StreamBucket,
+        key: Long,
+        value: Object,
+        priority1: Long,
+        priority2: Long,
+        priority3: Long,
+        priority4: Long
+    ): Unit = {
+      checkLexicographicPriorities()
+      val existing = findExistingSlot(key)
+      if (existing >= 0)
+        replaceSlot(existing, bucket, value, priority1, priority2, priority3, priority4)
+      else {
+        ensureInsertCapacity(owner)
+        val slot = findInsertSlot(key)
+        insertSlot(owner, slot, bucket, key, value)
+        setPriorities(slot, priority1, priority2, priority3, priority4)
+        addHeapSlot(owner, slot)
+      }
+    }
+
+    private[memory] def updatePriorityTrusted(
+        key: Long,
+        priority: Long
+    ): Boolean = {
+      val slot = findExistingSlot(key)
+      if (slot < 0) false
+      else {
+        if (diagnosticsEnabled) diagnosticPriorityUpdates += 1L
+        val oldPriority = priorities(slot)
+        setPriority(slot, priority)
+        fixAfterPriorityChange(
+          heapIndexPlusOneBySlot(slot) - 1,
+          priority > oldPriority,
+          priority < oldPriority
+        )
+        true
+      }
+    }
+
+    private[memory] def updatePriorityTrusted(
+        key: Long,
+        priority1: Long,
+        priority2: Long,
+        priority3: Long,
+        priority4: Long
+    ): Boolean = {
+      checkLexicographicPriorities()
+      val slot = findExistingSlot(key)
+      if (slot < 0) false
+      else {
+        if (diagnosticsEnabled) diagnosticPriorityUpdates += 1L
+        val improves =
+          priorityTupleBetter(
+            priority1,
+            priority2,
+            priority3,
+            priority4,
+            priorities(slot),
+            priority2s(slot),
+            priority3s(slot),
+            priority4s(slot)
+          )
+        val worsens =
+          priorityTupleBetter(
+            priorities(slot),
+            priority2s(slot),
+            priority3s(slot),
+            priority4s(slot),
+            priority1,
+            priority2,
+            priority3,
+            priority4
+          )
+        setPriorities(slot, priority1, priority2, priority3, priority4)
+        fixAfterPriorityChange(heapIndexPlusOneBySlot(slot) - 1, improves, worsens)
+        true
+      }
+    }
+
+    private[memory] def removeTrusted(key: Long): Boolean = {
+      val slot = findExistingSlot(key)
+      if (slot < 0) false
+      else {
+        removeSlot(slot)
+        true
+      }
+    }
+
+    private[memory] inline def removeWithValueTrusted(key: Long): Object = {
+      val slot = findExistingSlot(key)
+      if (slot < 0) null
+      else {
+        val result = items(slot)
+        removeSlot(slot)
+        result
+      }
+    }
+
+    private[memory] def containsTrusted(key: Long): Boolean =
+      findExistingSlot(key) >= 0
+
+    private[memory] def getTrusted(key: Long): Object = {
+      val slot = findExistingSlot(key)
+      if (slot < 0)
+        throw new NoSuchElementException(
+          "Rift StreamWindowTableRank key is absent"
+        )
+      items(slot)
+    }
+
+    private[memory] def peekTrusted(): Object = {
+      if (heapUsed == 0)
+        throw new NoSuchElementException(
+          "Rift StreamWindowTableRank is empty"
+        )
+      items(heapSlots(0))
+    }
+
+    private[memory] def peekKeyTrusted(): Long = {
+      if (heapUsed == 0)
+        throw new NoSuchElementException(
+          "Rift StreamWindowTableRank is empty"
+        )
+      keys(heapSlots(0))
+    }
+
+    private[memory] def peekPriorityTrusted(): Long = {
+      if (heapUsed == 0)
+        throw new NoSuchElementException(
+          "Rift StreamWindowTableRank is empty"
+        )
+      priorities(heapSlots(0))
+    }
+
+    private[memory] def popTrusted(): Object = {
+      if (heapUsed == 0)
+        throw new NoSuchElementException(
+          "Rift StreamWindowTableRank is empty"
+        )
+      val slot = heapSlots(0)
+      val result = items(slot)
+      removeSlot(slot)
+      result
+    }
+
+    private[memory] def copyTopKTrusted(
+        result: Array[Object],
+        candidateHeap: Array[Int],
+        max: Int
+    ): Int = {
+      val limit = math.min(math.min(max, result.length), heapUsed)
+      if (limit <= 0) 0
+      else {
+        if (candidateHeap.length < limit)
+          throw new IllegalArgumentException(
+            "Rift StreamWindowTableRank top-k candidate heap is too small"
+          )
+
+        var candidateCount = 1
+        candidateHeap(0) = 0
+        var i = 0
+        while (i < limit) {
+          val candidateSlot = bestCopyCandidate(candidateHeap, candidateCount)
+          val heapPosition = candidateHeap(candidateSlot)
+          candidateCount -= 1
+          candidateHeap(candidateSlot) = candidateHeap(candidateCount)
+
+          result(i) = items(heapSlots(heapPosition))
+
+          if (i + 1 < limit) {
+            val left = (heapPosition << 1) + 1
+            if (left < heapUsed) {
+              candidateHeap(candidateCount) = left
+              candidateCount += 1
+            }
+            val right = left + 1
+            if (right < heapUsed) {
+              candidateHeap(candidateCount) = right
+              candidateCount += 1
+            }
+          }
+          i += 1
+        }
+        limit
+      }
+    }
+
+    private[memory] def removeOwnedKeysForBucket(
+        bucket: StreamBucket
+    ): Unit =
+      removeOwnedKeysForBucket(bucket, null)
+
+    private[memory] def removeOwnedKeysForBucket(
+        bucket: StreamBucket,
+        cleanup: (Long, Object) => Unit
+    ): Unit = {
+      var current = bucket.ownedTableRankSlotHeadPlusOne
+      bucket.ownedTableRankSlotHeadPlusOne = 0
+      while (current != 0) {
+        val slot = current - 1
+        val next = nextOwnedSlotPlusOneBySlot(slot)
+        if (states(slot) == Used && bucketStartBySlot(slot) == bucket.startSeconds) {
+          val key = keys(slot)
+          val value = items(slot)
+          if (diagnosticsEnabled) diagnosticBucketCloseRemovals += 1L
+          removeBucketOwnedSlot(slot)
+          if (value != null && cleanup != null) cleanup(key, value)
+        } else {
+          nextOwnedSlotPlusOneBySlot(slot) = 0
+          previousOwnedSlotPlusOneBySlot(slot) = 0
+        }
+        current = next
+      }
+    }
+
+    private def replaceSlot(
+        slot: Int,
+        bucket: StreamBucket,
+        value: Object,
+        priority: Long
+    ): Unit = {
+      if (diagnosticsEnabled) diagnosticReplacements += 1L
+      items(slot) = value
+      val oldPriority = priorities(slot)
+      setPriority(slot, priority)
+      moveSlotToBucket(slot, bucket)
+      fixAfterPriorityChange(
+        heapIndexPlusOneBySlot(slot) - 1,
+        priority > oldPriority,
+        priority < oldPriority
+      )
+    }
+
+    private def replaceSlot(
+        slot: Int,
+        bucket: StreamBucket,
+        value: Object,
+        priority1: Long,
+        priority2: Long,
+        priority3: Long,
+        priority4: Long
+    ): Unit = {
+      if (diagnosticsEnabled) diagnosticReplacements += 1L
+      items(slot) = value
+      val improves =
+        priorityTupleBetter(
+          priority1,
+          priority2,
+          priority3,
+          priority4,
+          priorities(slot),
+          priority2s(slot),
+          priority3s(slot),
+          priority4s(slot)
+        )
+      val worsens =
+        priorityTupleBetter(
+          priorities(slot),
+          priority2s(slot),
+          priority3s(slot),
+          priority4s(slot),
+          priority1,
+          priority2,
+          priority3,
+          priority4
+        )
+      setPriorities(slot, priority1, priority2, priority3, priority4)
+      moveSlotToBucket(slot, bucket)
+      fixAfterPriorityChange(heapIndexPlusOneBySlot(slot) - 1, improves, worsens)
+    }
+
+    private def insertSlot(
+        owner: RiftRegion^,
+        slot: Int,
+        bucket: StreamBucket,
+        key: Long,
+        value: Object
+    ): Unit = {
+      if (diagnosticsEnabled) diagnosticInserts += 1L
+      if (states(slot) == Empty) tableUsed += 1
+      if (states(slot) != Used) tableActive += 1
+      states(slot) = Used
+      keys(slot) = key
+      items(slot) = value
+      bucketStartBySlot(slot) = bucket.startSeconds
+      linkSlotToBucket(slot, bucket)
+    }
+
+    private def moveSlotToBucket(slot: Int, bucket: StreamBucket): Unit =
+      if (bucketStartBySlot(slot) != bucket.startSeconds) {
+        if (diagnosticsEnabled) diagnosticBucketMoves += 1L
+        unlinkSlotFromBucket(slot)
+        bucketStartBySlot(slot) = bucket.startSeconds
+        linkSlotToBucket(slot, bucket)
+      }
+
+    private def removeSlot(slot: Int): Unit = {
+      val heapIndex = heapIndexPlusOneBySlot(slot) - 1
+      if (heapIndex >= 0) removeHeapAt(heapIndex)
+      unlinkSlotFromBucket(slot)
+      states(slot) = Deleted
+      items(slot) = null
+      clearPriorities(slot)
+      bucketStartBySlot(slot) = 0L
+      nextOwnedSlotPlusOneBySlot(slot) = 0
+      previousOwnedSlotPlusOneBySlot(slot) = 0
+      tableActive -= 1
+    }
+
+    private def removeBucketOwnedSlot(slot: Int): Unit = {
+      val heapIndex = heapIndexPlusOneBySlot(slot) - 1
+      if (heapIndex >= 0) removeHeapAt(heapIndex)
+      states(slot) = Deleted
+      items(slot) = null
+      clearPriorities(slot)
+      bucketStartBySlot(slot) = 0L
+      nextOwnedSlotPlusOneBySlot(slot) = 0
+      previousOwnedSlotPlusOneBySlot(slot) = 0
+      tableActive -= 1
+    }
+
+    private def ensureInsertCapacity(owner: RiftRegion^): Unit = {
+      val deleted = tableUsed - tableActive
+      if (deleted * 4 > keys.length)
+        rehashTable(owner, keys.length)
+      else if ((tableUsed + 1) * 4 >= keys.length * 3)
+        rehashTable(owner, keys.length << 1)
+    }
+
+    private def addHeapSlot(owner: RiftRegion^, slot: Int): Unit = {
+      if (heapUsed >= heapSlots.length) growHeap(owner)
+      val index = heapUsed
+      heapUsed += 1
+      heapSlots(index) = slot
+      heapIndexPlusOneBySlot(slot) = index + 1
+      siftUp(index)
+    }
+
+    private def growHeap(owner: RiftRegion^): Unit = {
+      val oldHeapSlots = heapSlots
+      val nextCapacity =
+        if (oldHeapSlots.length == 0) 1 else oldHeapSlots.length * 2
+      val nextHeapSlots = owner.alloc(new Array[Int](nextCapacity))
+      var i = 0
+      while (i < heapUsed) {
+        nextHeapSlots(i) = oldHeapSlots(i)
+        i += 1
+      }
+      heapSlots = nextHeapSlots
+    }
+
+    private def rehashTable(owner: RiftRegion^, requestedCapacity: Int): Unit = {
+      if (diagnosticsEnabled) diagnosticRehashes += 1L
+      val oldKeys = keys
+      val oldStates = states
+      val oldItems = items
+      val oldPriorities = priorities
+      val oldPriority2s = priority2s
+      val oldPriority3s = priority3s
+      val oldPriority4s = priority4s
+      val oldBucketStartBySlot = bucketStartBySlot
+
+      keys = owner.alloc(new Array[Long](requestedCapacity))
+      states = owner.alloc(new Array[Byte](requestedCapacity))
+      items = owner.alloc(new Array[Object](requestedCapacity)).asInstanceOf[Array[Object]]
+      priorities = owner.alloc(new Array[Long](requestedCapacity))
+      priority2s =
+        if (oldPriority2s == null) null
+        else owner.alloc(new Array[Long](requestedCapacity))
+      priority3s =
+        if (oldPriority3s == null) null
+        else owner.alloc(new Array[Long](requestedCapacity))
+      priority4s =
+        if (oldPriority4s == null) null
+        else owner.alloc(new Array[Long](requestedCapacity))
+      heapIndexPlusOneBySlot = owner.alloc(new Array[Int](requestedCapacity))
+      bucketStartBySlot = owner.alloc(new Array[Long](requestedCapacity))
+      nextOwnedSlotPlusOneBySlot = owner.alloc(new Array[Int](requestedCapacity))
+      previousOwnedSlotPlusOneBySlot =
+        owner.alloc(new Array[Int](requestedCapacity))
+
+      tableActive = 0
+      tableUsed = 0
+      heapUsed = 0
+
+      var bucket = buckets.first
+      while (bucket != null) {
+        bucket.ownedTableRankSlotHeadPlusOne = 0
+        bucket = bucket.next
+      }
+
+      var i = 0
+      while (i < oldKeys.length) {
+        if (oldStates(i) == Used) {
+          val slot = findInsertSlot(oldKeys(i))
+          if (states(slot) == Empty) tableUsed += 1
+          tableActive += 1
+          states(slot) = Used
+          keys(slot) = oldKeys(i)
+          items(slot) = oldItems(i)
+          priorities(slot) = oldPriorities(i)
+          if (priority2s != null) priority2s(slot) = oldPriority2s(i)
+          if (priority3s != null) priority3s(slot) = oldPriority3s(i)
+          if (priority4s != null) priority4s(slot) = oldPriority4s(i)
+          bucketStartBySlot(slot) = oldBucketStartBySlot(i)
+          val ownerBucket = findBucket(bucketStartBySlot(slot))
+          if (ownerBucket != null) linkSlotToBucket(slot, ownerBucket)
+          heapSlots(heapUsed) = slot
+          heapIndexPlusOneBySlot(slot) = heapUsed + 1
+          heapUsed += 1
+        }
+        i += 1
+      }
+      heapify()
+    }
+
+    private def heapify(): Unit = {
+      var index = (heapUsed >>> 1) - 1
+      while (index >= 0) {
+        siftDown(index)
+        index -= 1
+      }
+    }
+
+    private def removeHeapAt(index: Int): Unit = {
+      val removedSlot = heapSlots(index)
+      heapIndexPlusOneBySlot(removedSlot) = 0
+      val last = heapUsed - 1
+      heapUsed = last
+      if (index != last) {
+        val movedSlot = heapSlots(last)
+        heapSlots(index) = movedSlot
+        heapIndexPlusOneBySlot(movedSlot) = index + 1
+        heapSlots(last) = 0
+        fixMovedHeapAt(index)
+      } else {
+        heapSlots(index) = 0
+      }
+    }
+
+    private def fixMovedHeapAt(index: Int): Unit =
+      if (index >= 0 && index < heapUsed) {
+        val parent = (index - 1) >>> 1
+        if (index > 0 && betterHeap(index, parent)) siftUp(index)
+        else siftDown(index)
+      }
+
+    private def fixAt(index: Int): Unit =
+      if (index >= 0 && index < heapUsed) {
+        val afterUp = siftUp(index)
+        siftDown(afterUp)
+      }
+
+    private def fixAfterPriorityChange(
+        index: Int,
+        improves: Boolean,
+        worsens: Boolean
+    ): Unit =
+      if (index >= 0 && index < heapUsed) {
+        if (improves) siftUp(index)
+        else if (worsens) siftDown(index)
+      }
+
+    private def siftUp(start: Int): Int = {
+      var child = start
+      while (child > 0) {
+        if (diagnosticsEnabled) diagnosticHeapSiftSteps += 1L
+        val parent = (child - 1) >>> 1
+        if (!betterHeap(child, parent)) return child
+        swapHeap(parent, child)
+        child = parent
+      }
+      child
+    }
+
+    private def siftDown(start: Int): Int = {
+      var parent = start
+      while (true) {
+        val left = (parent << 1) + 1
+        if (left >= heapUsed) return parent
+        if (diagnosticsEnabled) diagnosticHeapSiftSteps += 1L
+        val right = left + 1
+        var best = left
+        if (right < heapUsed && betterHeap(right, left))
+          best = right
+        if (!betterHeap(best, parent)) return parent
+        swapHeap(parent, best)
+        parent = best
+      }
+      parent
+    }
+
+    private def betterHeap(leftIndex: Int, rightIndex: Int): Boolean =
+      betterSlot(heapSlots(leftIndex), heapSlots(rightIndex))
+
+    private def bestCopyCandidate(
+        candidateHeap: Array[Int],
+        candidateCount: Int
+    ): Int = {
+      var best = 0
+      var i = 1
+      while (i < candidateCount) {
+        if (diagnosticsEnabled) diagnosticTopKCandidateCompares += 1L
+        if (betterHeap(candidateHeap(i), candidateHeap(best)))
+          best = i
+        i += 1
+      }
+      best
+    }
+
+    private def betterSlot(left: Int, right: Int): Boolean =
+      if (priorities(left) != priorities(right))
+        priorities(left) > priorities(right)
+      else if (priority2s == null) false
+      else if (priority2s(left) != priority2s(right))
+        priority2s(left) > priority2s(right)
+      else if (priority3s(left) != priority3s(right))
+        priority3s(left) > priority3s(right)
+      else if (priority4s(left) != priority4s(right))
+        priority4s(left) > priority4s(right)
+      else false
+
+    private def priorityTupleBetter(
+        left1: Long,
+        left2: Long,
+        left3: Long,
+        left4: Long,
+        right1: Long,
+        right2: Long,
+        right3: Long,
+        right4: Long
+    ): Boolean =
+      if (left1 != right1) left1 > right1
+      else if (left2 != right2) left2 > right2
+      else if (left3 != right3) left3 > right3
+      else if (left4 != right4) left4 > right4
+      else false
+
+    private def swapHeap(left: Int, right: Int): Unit = {
+      if (diagnosticsEnabled) diagnosticHeapSwaps += 1L
+      val leftSlot = heapSlots(left)
+      heapSlots(left) = heapSlots(right)
+      heapIndexPlusOneBySlot(heapSlots(left)) = left + 1
+      heapSlots(right) = leftSlot
+      heapIndexPlusOneBySlot(leftSlot) = right + 1
+    }
+
+    private def linkSlotToBucket(slot: Int, bucket: StreamBucket): Unit = {
+      val slotPlusOne = slot + 1
+      val oldHead = bucket.ownedTableRankSlotHeadPlusOne
+      nextOwnedSlotPlusOneBySlot(slot) = oldHead
+      previousOwnedSlotPlusOneBySlot(slot) = 0
+      if (oldHead != 0)
+        previousOwnedSlotPlusOneBySlot(oldHead - 1) = slotPlusOne
+      bucket.ownedTableRankSlotHeadPlusOne = slotPlusOne
+    }
+
+    private def unlinkSlotFromBucket(slot: Int): Unit = {
+      val bucket = findBucket(bucketStartBySlot(slot))
+      if (bucket != null) {
+        val previous = previousOwnedSlotPlusOneBySlot(slot)
+        val next = nextOwnedSlotPlusOneBySlot(slot)
+        if (previous == 0) bucket.ownedTableRankSlotHeadPlusOne = next
+        else nextOwnedSlotPlusOneBySlot(previous - 1) = next
+        if (next != 0) previousOwnedSlotPlusOneBySlot(next - 1) = previous
+      }
+      nextOwnedSlotPlusOneBySlot(slot) = 0
+      previousOwnedSlotPlusOneBySlot(slot) = 0
+    }
+
+    private def findBucket(startSeconds: Long): StreamBucket = {
+      var bucket = buckets.first
+      while (bucket != null && bucket.startSeconds != startSeconds)
+        bucket = bucket.next
+      bucket
+    }
+
+    private def findExistingSlot(key: Long): Int = {
+      if (diagnosticsEnabled) diagnosticLookups += 1L
+      val mask = keys.length - 1
+      var slot = hashKey(key) & mask
+      var probes = 0
+      while (probes < keys.length) {
+        if (diagnosticsEnabled) diagnosticProbes += 1L
+        val state = states(slot)
+        if (state == Empty) return -1
+        if (state == Used && keys(slot) == key) return slot
+        slot = (slot + 1) & mask
+        probes += 1
+      }
+      -1
+    }
+
+    private def findInsertSlot(key: Long): Int = {
+      if (diagnosticsEnabled) diagnosticLookups += 1L
+      val mask = keys.length - 1
+      var slot = hashKey(key) & mask
+      var firstDeleted = -1
+      var probes = 0
+      while (probes < keys.length) {
+        if (diagnosticsEnabled) diagnosticProbes += 1L
+        val state = states(slot)
+        if (state == Empty)
+          return if (firstDeleted >= 0) firstDeleted else slot
+        if (state == Deleted && firstDeleted < 0) firstDeleted = slot
+        if (state == Used && keys(slot) == key) return slot
+        slot = (slot + 1) & mask
+        probes += 1
+      }
+      if (firstDeleted >= 0) firstDeleted
+      else throw new IllegalStateException("Rift table rank is full")
+    }
+
+    private def hashKey(key: Long): Int = {
+      var x = key
+      x ^= x >>> 33
+      x *= 0xff51afd7ed558ccdL
+      x ^= x >>> 33
+      x *= 0xc4ceb9fe1a85ec53L
+      x ^= x >>> 33
+      x.toInt
+    }
+
+    private def checkLexicographicPriorities(): Unit =
+      if (priority2s == null || priority3s == null || priority4s == null)
+        throw new IllegalStateException(
+          "Rift StreamWindowTableRank was not allocated for lexicographic priorities"
+        )
+
+    private def setPriority(slot: Int, priority: Long): Unit = {
+      priorities(slot) = priority
+      if (priority2s != null) priority2s(slot) = 0L
+      if (priority3s != null) priority3s(slot) = 0L
+      if (priority4s != null) priority4s(slot) = 0L
+    }
+
+    private def setPriorities(
+        slot: Int,
+        priority1: Long,
+        priority2: Long,
+        priority3: Long,
+        priority4: Long
+    ): Unit = {
+      priorities(slot) = priority1
+      priority2s(slot) = priority2
+      priority3s(slot) = priority3
+      priority4s(slot) = priority4
+    }
+
+    private def clearPriorities(slot: Int): Unit = {
+      priorities(slot) = 0L
+      if (priority2s != null) priority2s(slot) = 0L
+      if (priority3s != null) priority3s(slot) = 0L
+      if (priority4s != null) priority4s(slot) = 0L
     }
   }
 
@@ -2365,6 +3131,90 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     ).asInstanceOf[StreamWindowLongIndexedRank[T]^{parent}]
   }
 
+  /** Allocates an experimental fused stream-window rank for arbitrary long
+   *  keys. The table owns lookup, rank heap positions, values, priorities, and
+   *  bucket cleanup links.
+   */
+  def streamWindowTableRank[T <: Object](
+      bucketSeconds: Long,
+      initialRankCapacity: Int = 4,
+      initialTableCapacity: Int = 16
+  )(using parent: StreamingRegion^): StreamWindowTableRank[T]^{parent} = {
+    val heapCapacity =
+      if (initialRankCapacity <= 0) 1 else initialRankCapacity
+    val tableCapacity =
+      longIndexedTableCapacity(heapCapacity, initialTableCapacity)
+    val buckets = streamBucketArena(bucketSeconds)
+    val keys = alloc(new Array[Long](tableCapacity))
+    val states = alloc(new Array[Byte](tableCapacity))
+    val items =
+      alloc(new Array[Object](tableCapacity)).asInstanceOf[Array[Object]]
+    val priorities = alloc(new Array[Long](tableCapacity))
+    val heapSlots = alloc(new Array[Int](heapCapacity))
+    val heapIndexPlusOneBySlot = alloc(new Array[Int](tableCapacity))
+    val bucketStartBySlot = alloc(new Array[Long](tableCapacity))
+    val nextOwnedSlotPlusOneBySlot = alloc(new Array[Int](tableCapacity))
+    val previousOwnedSlotPlusOneBySlot = alloc(new Array[Int](tableCapacity))
+    new StreamWindowTableRank[T](
+      buckets.asInstanceOf[StreamBucketArena],
+      keys,
+      states,
+      items,
+      priorities,
+      null,
+      null,
+      null,
+      heapSlots,
+      heapIndexPlusOneBySlot,
+      bucketStartBySlot,
+      nextOwnedSlotPlusOneBySlot,
+      previousOwnedSlotPlusOneBySlot
+    ).asInstanceOf[StreamWindowTableRank[T]^{parent}]
+  }
+
+  /** Allocates an experimental fused stream-window rank whose table stores
+   *  four lexicographic priority components.
+   */
+  def streamWindowTableRankLexicographic[T <: Object](
+      bucketSeconds: Long,
+      initialRankCapacity: Int = 4,
+      initialTableCapacity: Int = 16
+  )(using parent: StreamingRegion^): StreamWindowTableRank[T]^{parent} = {
+    val heapCapacity =
+      if (initialRankCapacity <= 0) 1 else initialRankCapacity
+    val tableCapacity =
+      longIndexedTableCapacity(heapCapacity, initialTableCapacity)
+    val buckets = streamBucketArena(bucketSeconds)
+    val keys = alloc(new Array[Long](tableCapacity))
+    val states = alloc(new Array[Byte](tableCapacity))
+    val items =
+      alloc(new Array[Object](tableCapacity)).asInstanceOf[Array[Object]]
+    val priorities = alloc(new Array[Long](tableCapacity))
+    val priority2s = alloc(new Array[Long](tableCapacity))
+    val priority3s = alloc(new Array[Long](tableCapacity))
+    val priority4s = alloc(new Array[Long](tableCapacity))
+    val heapSlots = alloc(new Array[Int](heapCapacity))
+    val heapIndexPlusOneBySlot = alloc(new Array[Int](tableCapacity))
+    val bucketStartBySlot = alloc(new Array[Long](tableCapacity))
+    val nextOwnedSlotPlusOneBySlot = alloc(new Array[Int](tableCapacity))
+    val previousOwnedSlotPlusOneBySlot = alloc(new Array[Int](tableCapacity))
+    new StreamWindowTableRank[T](
+      buckets.asInstanceOf[StreamBucketArena],
+      keys,
+      states,
+      items,
+      priorities,
+      priority2s,
+      priority3s,
+      priority4s,
+      heapSlots,
+      heapIndexPlusOneBySlot,
+      bucketStartBySlot,
+      nextOwnedSlotPlusOneBySlot,
+      previousOwnedSlotPlusOneBySlot
+    ).asInstanceOf[StreamWindowTableRank[T]^{parent}]
+  }
+
   /** Appends `value` to a checked object buffer owned by `owner`. */
   def append[T <: Object](
       owner: RiftRegion^,
@@ -3329,6 +4179,266 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   def closeAllWindowRankBucketsWithEntries[T <: Object](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent}
+  )(
+      cleanupEntry: (StreamBucket^{parent}, Long, T^{parent}) => Unit
+  )(cleanupBucket: StreamBucket^{parent} => Unit): Unit =
+    closeAllStreamBuckets(
+      parent,
+      rank.buckets.asInstanceOf[StreamBucketArena^{parent}]
+    ) { bucket =>
+      rank.removeOwnedKeysForBucket(bucket.asInstanceOf[StreamBucket], {
+        (key, value) =>
+          cleanupEntry(bucket, key, value.asInstanceOf[T^{parent}])
+      })
+      cleanupBucket(bucket)
+    }
+
+  /** Finds or opens the fused table-rank bucket containing timestamp. */
+  def streamWindowBucketFor[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent},
+      timestampSeconds: Long
+  ): StreamBucket^{parent} =
+    streamWindowBucketFor(parent, rank, timestampSeconds)(_ => ())
+
+  /** Finds or opens the fused table-rank bucket containing timestamp. */
+  def streamWindowBucketFor[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent},
+      timestampSeconds: Long
+  )(onOpen: StreamBucket^{parent} => Unit): StreamBucket^{parent} =
+    streamBucketFor(
+      parent,
+      rank.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      timestampSeconds
+    )(onOpen)
+
+  /** Inserts or replaces a fused table-rank value owned by `bucket`. */
+  def putTableRankInBucket[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent},
+      bucket: StreamBucket^{parent},
+      key: Long,
+      value: T^{parent},
+      priority: Long
+  ): Unit = {
+    bucket.child.checkOpen()
+    rank.putTrusted(
+      parent,
+      bucket.asInstanceOf[StreamBucket],
+      key,
+      value.asInstanceOf[Object],
+      priority
+    )
+  }
+
+  /** Inserts or replaces a fused table-rank value using lexicographic
+   *  priorities.
+   */
+  def putTableRankInBucket[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent},
+      bucket: StreamBucket^{parent},
+      key: Long,
+      value: T^{parent},
+      priority1: Long,
+      priority2: Long,
+      priority3: Long,
+      priority4: Long
+  ): Unit = {
+    bucket.child.checkOpen()
+    rank.putTrusted(
+      parent,
+      bucket.asInstanceOf[StreamBucket],
+      key,
+      value.asInstanceOf[Object],
+      priority1,
+      priority2,
+      priority3,
+      priority4
+    )
+  }
+
+  /** Updates a fused table-rank priority if the key is present. */
+  def updateTableRankPriority[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent},
+      key: Long,
+      priority: Long
+  ): Boolean =
+    rank.updatePriorityTrusted(key, priority)
+
+  /** Updates a fused table-rank lexicographic priority if the key is present. */
+  def updateTableRankPriority[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent},
+      key: Long,
+      priority1: Long,
+      priority2: Long,
+      priority3: Long,
+      priority4: Long
+  ): Boolean =
+    rank.updatePriorityTrusted(key, priority1, priority2, priority3, priority4)
+
+  /** Removes a fused table-rank key if it is present. */
+  def removeTableRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent},
+      key: Long
+  ): Boolean =
+    rank.removeTrusted(key)
+
+  /** Returns true when a table-rank key is present. */
+  def containsTableRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent},
+      key: Long
+  ): Boolean =
+    rank.containsTrusted(key)
+
+  /** Reads the ranked value for a table-rank key. */
+  def getTableRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent},
+      key: Long
+  ): T^{parent} =
+    rank.getTrusted(key).asInstanceOf[T^{parent}]
+
+  /** Reads the highest-priority table-ranked value without removing it. */
+  def peekTableRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent}
+  ): T^{parent} =
+    rank.peekTrusted().asInstanceOf[T^{parent}]
+
+  /** Reads the key of the highest-priority table-ranked value. */
+  def peekTableRankKey[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent}
+  ): Long =
+    rank.peekKeyTrusted()
+
+  /** Reads the highest table-rank priority without removing the value. */
+  def peekTableRankPriority[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent}
+  ): Long =
+    rank.peekPriorityTrusted()
+
+  /** Removes and returns the highest-priority table-ranked value. */
+  def popTableRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent}
+  ): T^{parent} =
+    rank.popTrusted().asInstanceOf[T^{parent}]
+
+  /** Copies the best table-ranked values into `result` without mutating rank. */
+  def copyTableRankTopK[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent},
+      result: Array[T^{parent}]^{parent},
+      candidateHeap: Array[Int]^{parent},
+      max: Int
+  ): Int =
+    rank.copyTopKTrusted(
+      result.asInstanceOf[Array[Object]],
+      candidateHeap.asInstanceOf[Array[Int]],
+      max
+    )
+
+  /** Enables or disables opt-in diagnostics for a fused table-rank. */
+  def setTableRankDiagnosticsEnabled[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent},
+      enabled: Boolean
+  ): Unit =
+    rank.setDiagnosticsEnabled(enabled)
+
+  /** Clears opt-in diagnostics counters for a fused table-rank. */
+  def resetTableRankDiagnostics[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent}
+  ): Unit =
+    rank.resetDiagnostics()
+
+  /** Returns a compact diagnostics summary for a fused table-rank. */
+  def tableRankDiagnostics[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent}
+  ): String =
+    rank.diagnosticSummaryTrusted()
+
+  /** Returns the number of table-ranked values. */
+  def tableRankLength[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent}
+  ): Int =
+    rank.length
+
+  /** Returns true if closing before `cutoffSeconds` would close a bucket. */
+  def hasTableRankBucketsBefore[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent},
+      cutoffSeconds: Long
+  ): Boolean =
+    hasStreamBucketsBefore(
+      parent,
+      rank.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      cutoffSeconds
+    )
+
+  /** Closes fused table-rank buckets fully before `cutoffSeconds`. */
+  def closeTableRankBucketsBefore[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent},
+      cutoffSeconds: Long
+  )(cleanup: StreamBucket^{parent} => Unit): Unit =
+    closeStreamBucketsBefore(
+      parent,
+      rank.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      cutoffSeconds
+    ) { bucket =>
+      rank.removeOwnedKeysForBucket(bucket.asInstanceOf[StreamBucket])
+      cleanup(bucket)
+    }
+
+  /** Closes fused table-rank buckets and reports removed entries. */
+  def closeTableRankBucketsBeforeWithEntries[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent},
+      cutoffSeconds: Long
+  )(
+      cleanupEntry: (StreamBucket^{parent}, Long, T^{parent}) => Unit
+  )(cleanupBucket: StreamBucket^{parent} => Unit): Unit =
+    closeStreamBucketsBefore(
+      parent,
+      rank.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      cutoffSeconds
+    ) { bucket =>
+      rank.removeOwnedKeysForBucket(bucket.asInstanceOf[StreamBucket], {
+        (key, value) =>
+          cleanupEntry(bucket, key, value.asInstanceOf[T^{parent}])
+      })
+      cleanupBucket(bucket)
+    }
+
+  /** Closes every fused table-rank bucket. */
+  def closeAllTableRankBuckets[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent}
+  )(cleanup: StreamBucket^{parent} => Unit): Unit =
+    closeAllStreamBuckets(
+      parent,
+      rank.buckets.asInstanceOf[StreamBucketArena^{parent}]
+    ) { bucket =>
+      rank.removeOwnedKeysForBucket(bucket.asInstanceOf[StreamBucket])
+      cleanup(bucket)
+    }
+
+  /** Closes every fused table-rank bucket and reports removed entries. */
+  def closeAllTableRankBucketsWithEntries[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowTableRank[T]^{parent}
   )(
       cleanupEntry: (StreamBucket^{parent}, Long, T^{parent}) => Unit
   )(cleanupBucket: StreamBucket^{parent} => Unit): Unit =

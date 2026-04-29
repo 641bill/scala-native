@@ -102,6 +102,7 @@ run_mode() {
   fi
 
   max_rss_bytes=$(read_max_rss_bytes "${time_log}")
+  grep "^TABLE_DIAG mode=${mode}" "${run_log}" || true
   grep "^RESULT name=checked-stream-window-rank-" "${run_log}"
   echo "CHECKED_SWR_RSS_RESULT mode=${mode} max_rss_bytes=${max_rss_bytes}"
   write_result_row "${mode}" "${run_log}" "${max_rss_bytes}"
