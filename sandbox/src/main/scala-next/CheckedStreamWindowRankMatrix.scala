@@ -46,10 +46,13 @@ object CheckedStreamWindowRankConfig {
   val events: Int = envInt("CHECKED_SWR_EVENTS", 1000000)
   val eventsPerBucket: Int = envInt("CHECKED_SWR_EVENTS_PER_BUCKET", 25000)
   val keyCapacity: Int = envInt("CHECKED_SWR_KEY_CAPACITY", 65536)
+  val longKeySpace: Int = envInt("CHECKED_SWR_LONG_KEY_SPACE", 65536)
   val bucketSeconds: Long = envLong("CHECKED_SWR_BUCKET_SECONDS", 60L)
   val windowBuckets: Int = envInt("CHECKED_SWR_WINDOW_BUCKETS", 8)
   val initialRankCapacity: Int =
     envInt("CHECKED_SWR_INITIAL_RANK_CAPACITY", 1024)
+  val initialLongTableCapacity: Int =
+    envInt("CHECKED_SWR_INITIAL_LONG_TABLE_CAPACITY", 131072)
   val topK: Int = envInt("CHECKED_SWR_TOP_K", 128)
   val sampleEvery: Int = envInt("CHECKED_SWR_SAMPLE_EVERY", 4096)
   val warmupRuns: Int = envNonNegativeInt("CHECKED_SWR_WARMUPS", 1)
@@ -62,6 +65,12 @@ object CheckedStreamWindowRankMatrixHelpers {
   @volatile private var checksumSink = 0L
 
   private final class HeapRecord(val key: Int, val bucketStart: Long) {
+    var count: Int = 0
+    var total: Long = 0L
+    var lastValue: Int = 0
+  }
+
+  private final class HeapLongRecord(val key: Long, val bucketStart: Long) {
     var count: Int = 0
     var total: Long = 0L
     var lastValue: Int = 0
@@ -249,6 +258,285 @@ object CheckedStreamWindowRankMatrixHelpers {
     }
   }
 
+  private final class HeapLongIndexedPriorityQueue[T <: Object](
+      initialCapacity: Int,
+      initialTableCapacity: Int
+  ) {
+    private final val Empty: Byte = 0
+    private final val Used: Byte = 1
+    private final val Deleted: Byte = 2
+
+    private val capacity = if (initialCapacity <= 0) 1 else initialCapacity
+    private var items = new Array[Object](capacity)
+    private var priorities = new Array[Long](capacity)
+    private var heapKeys = new Array[Long](capacity)
+    private var tableKeys =
+      new Array[Long](longTableCapacity(capacity, initialTableCapacity))
+    private var tableStates = new Array[Byte](tableKeys.length)
+    private var heapIndexPlusOneBySlot = new Array[Int](tableKeys.length)
+    private var used = 0
+    private var tableActive = 0
+    private var tableUsed = 0
+
+    def length: Int = used
+
+    def contains(key: Long): Boolean =
+      findExistingSlot(key) >= 0
+
+    def get(key: Long): T = {
+      val slot = findExistingSlot(key)
+      if (slot < 0)
+        throw new NoSuchElementException("long key is absent")
+      items(heapIndexPlusOneBySlot(slot) - 1).asInstanceOf[T]
+    }
+
+    def put(key: Long, value: T, priority: Long): Unit = {
+      val slot = findExistingSlot(key)
+      if (slot >= 0) {
+        val index = heapIndexPlusOneBySlot(slot) - 1
+        items(index) = value
+        priorities(index) = priority
+        fixAt(index)
+      } else {
+        ensureTableCapacity()
+        val insertSlot = findInsertSlot(key)
+        insertTableSlot(insertSlot, key)
+        if (used >= items.length) growHeap()
+        val index = used
+        used += 1
+        items(index) = value
+        priorities(index) = priority
+        heapKeys(index) = key
+        heapIndexPlusOneBySlot(insertSlot) = index + 1
+        siftUp(index)
+      }
+    }
+
+    def updatePriority(key: Long, priority: Long): Boolean = {
+      val slot = findExistingSlot(key)
+      if (slot < 0) false
+      else {
+        val index = heapIndexPlusOneBySlot(slot) - 1
+        priorities(index) = priority
+        fixAt(index)
+        true
+      }
+    }
+
+    def remove(key: Long): Boolean = {
+      val slot = findExistingSlot(key)
+      if (slot < 0) false
+      else {
+        removeAt(heapIndexPlusOneBySlot(slot) - 1)
+        true
+      }
+    }
+
+    def peek(): T = {
+      if (used == 0)
+        throw new NoSuchElementException(
+          "HeapLongIndexedPriorityQueue is empty"
+        )
+      items(0).asInstanceOf[T]
+    }
+
+    def peekKey(): Long = {
+      if (used == 0)
+        throw new NoSuchElementException(
+          "HeapLongIndexedPriorityQueue is empty"
+        )
+      heapKeys(0)
+    }
+
+    def peekPriority(): Long = {
+      if (used == 0)
+        throw new NoSuchElementException(
+          "HeapLongIndexedPriorityQueue is empty"
+        )
+      priorities(0)
+    }
+
+    def pop(): T = {
+      if (used == 0)
+        throw new NoSuchElementException(
+          "HeapLongIndexedPriorityQueue is empty"
+        )
+      val result = items(0)
+      removeAt(0)
+      result.asInstanceOf[T]
+    }
+
+    private def ensureTableCapacity(): Unit =
+      if ((tableUsed + 1) * 4 >= tableKeys.length * 3) {
+        val compactOnly = tableActive * 2 < tableUsed
+        val nextCapacity =
+          if (compactOnly) tableKeys.length else tableKeys.length << 1
+        rehashTable(nextCapacity)
+      }
+
+    private def growHeap(): Unit = {
+      val nextItems = new Array[Object](items.length * 2)
+      val nextPriorities = new Array[Long](priorities.length * 2)
+      val nextHeapKeys = new Array[Long](heapKeys.length * 2)
+      var i = 0
+      while (i < used) {
+        nextItems(i) = items(i)
+        nextPriorities(i) = priorities(i)
+        nextHeapKeys(i) = heapKeys(i)
+        i += 1
+      }
+      items = nextItems
+      priorities = nextPriorities
+      heapKeys = nextHeapKeys
+    }
+
+    private def rehashTable(nextCapacity: Int): Unit = {
+      tableKeys = new Array[Long](nextCapacity)
+      tableStates = new Array[Byte](nextCapacity)
+      heapIndexPlusOneBySlot = new Array[Int](nextCapacity)
+      tableActive = 0
+      tableUsed = 0
+
+      var index = 0
+      while (index < used) {
+        val slot = findInsertSlot(heapKeys(index))
+        insertTableSlot(slot, heapKeys(index))
+        heapIndexPlusOneBySlot(slot) = index + 1
+        index += 1
+      }
+    }
+
+    private def removeAt(index: Int): Unit = {
+      val removedKey = heapKeys(index)
+      removeTableKey(removedKey)
+      val last = used - 1
+      used = last
+      if (index != last) {
+        items(index) = items(last)
+        priorities(index) = priorities(last)
+        heapKeys(index) = heapKeys(last)
+        updateTableHeapIndex(heapKeys(index), index)
+        items(last) = null
+        priorities(last) = 0L
+        heapKeys(last) = 0L
+        fixAt(index)
+      } else {
+        items(index) = null
+        priorities(index) = 0L
+        heapKeys(index) = 0L
+      }
+    }
+
+    private def fixAt(index: Int): Unit = {
+      val beforeKey = heapKeys(index)
+      siftUp(index)
+      val slot = findExistingSlot(beforeKey)
+      if (slot >= 0) siftDown(heapIndexPlusOneBySlot(slot) - 1)
+    }
+
+    private def siftUp(start: Int): Unit = {
+      var child = start
+      while (child > 0) {
+        val parent = (child - 1) >>> 1
+        if (priorities(parent) >= priorities(child)) return
+        swap(parent, child)
+        child = parent
+      }
+    }
+
+    private def siftDown(start: Int): Unit = {
+      var parent = start
+      while (true) {
+        val left = (parent << 1) + 1
+        if (left >= used) return
+        val right = left + 1
+        var best = left
+        if (right < used && priorities(right) > priorities(left))
+          best = right
+        if (priorities(parent) >= priorities(best)) return
+        swap(parent, best)
+        parent = best
+      }
+    }
+
+    private def swap(left: Int, right: Int): Unit = {
+      val leftItem = items(left)
+      val leftPriority = priorities(left)
+      val leftKey = heapKeys(left)
+      items(left) = items(right)
+      priorities(left) = priorities(right)
+      heapKeys(left) = heapKeys(right)
+      updateTableHeapIndex(heapKeys(left), left)
+      items(right) = leftItem
+      priorities(right) = leftPriority
+      heapKeys(right) = leftKey
+      updateTableHeapIndex(heapKeys(right), right)
+    }
+
+    private def findExistingSlot(key: Long): Int = {
+      val mask = tableKeys.length - 1
+      var slot = hashKey(key) & mask
+      var probes = 0
+      while (probes < tableKeys.length) {
+        val state = tableStates(slot)
+        if (state == Empty) return -1
+        if (state == Used && tableKeys(slot) == key) return slot
+        slot = (slot + 1) & mask
+        probes += 1
+      }
+      -1
+    }
+
+    private def findInsertSlot(key: Long): Int = {
+      val mask = tableKeys.length - 1
+      var slot = hashKey(key) & mask
+      var firstDeleted = -1
+      var probes = 0
+      while (probes < tableKeys.length) {
+        val state = tableStates(slot)
+        if (state == Empty)
+          return if (firstDeleted >= 0) firstDeleted else slot
+        if (state == Deleted && firstDeleted < 0) firstDeleted = slot
+        if (state == Used && tableKeys(slot) == key) return slot
+        slot = (slot + 1) & mask
+        probes += 1
+      }
+      if (firstDeleted >= 0) firstDeleted
+      else throw new IllegalStateException("heap long indexed table is full")
+    }
+
+    private def insertTableSlot(slot: Int, key: Long): Unit = {
+      if (tableStates(slot) == Empty) tableUsed += 1
+      if (tableStates(slot) != Used) tableActive += 1
+      tableStates(slot) = Used
+      tableKeys(slot) = key
+    }
+
+    private def removeTableKey(key: Long): Unit = {
+      val slot = findExistingSlot(key)
+      if (slot >= 0) {
+        tableStates(slot) = Deleted
+        heapIndexPlusOneBySlot(slot) = 0
+        tableActive -= 1
+      }
+    }
+
+    private def updateTableHeapIndex(key: Long, index: Int): Unit = {
+      val slot = findExistingSlot(key)
+      if (slot >= 0) heapIndexPlusOneBySlot(slot) = index + 1
+    }
+
+    private def hashKey(key: Long): Int = {
+      var x = key
+      x ^= x >>> 33
+      x *= 0xff51afd7ed558ccdL
+      x ^= x >>> 33
+      x *= 0xc4ceb9fe1a85ec53L
+      x ^= x >>> 33
+      x.toInt
+    }
+  }
+
   final case class RuntimeSample(
       gcCollections: Long,
       gcNanos: Long,
@@ -332,14 +620,22 @@ object CheckedStreamWindowRankMatrixHelpers {
       total: Long,
       lastValue: Int
   ): Long =
+    priority(key.toLong, count, total, lastValue)
+
+  private def priority(
+      key: Long,
+      count: Int,
+      total: Long,
+      lastValue: Int
+  ): Long =
     (count.toLong << 48) ^
       ((total & 0xffffffffL) << 16) ^
       ((lastValue & 0xff).toLong << 8) ^
-      (key & 0xff).toLong
+      (key & 0xffL)
 
   private def foldRecord(
       checksum: Long,
-      key: Int,
+      key: Long,
       bucketStart: Long,
       count: Int,
       total: Long,
@@ -353,6 +649,26 @@ object CheckedStreamWindowRankMatrixHelpers {
       total ^
       lastValue.toLong ^
       rankPriority
+
+  private def longTableCapacity(
+      initialCapacity: Int,
+      initialTableCapacity: Int
+  ): Int = {
+    val requested =
+      math.max(4, math.max(initialTableCapacity, initialCapacity * 2))
+    var capacity = 1
+    while (capacity < requested) capacity <<= 1
+    capacity
+  }
+
+  private def longKeyFor(seed: Int): Long = {
+    val cfg = CheckedStreamWindowRankConfig
+    val base = seed % cfg.longKeySpace
+    val a = base & 0xffff
+    val b = (base * 31 + 17) & 0xffff
+    val c = (base * 131 + 19) & 0xffff
+    (a.toLong << 32) | (b.toLong << 16) | c.toLong
+  }
 
   private def bucketStartFor(eventIndex: Int): Long = {
     val cfg = CheckedStreamWindowRankConfig
@@ -403,6 +719,10 @@ object CheckedStreamWindowRankMatrixHelpers {
     if (cfg.keyCapacity <= 0)
       throw new IllegalArgumentException(
         "CHECKED_SWR_KEY_CAPACITY must be positive"
+      )
+    if (cfg.longKeySpace <= 0)
+      throw new IllegalArgumentException(
+        "CHECKED_SWR_LONG_KEY_SPACE must be positive"
       )
   }
 
@@ -574,6 +894,184 @@ object CheckedStreamWindowRankMatrixHelpers {
     checksum
   }
 
+  def runHeapLong(): Long = {
+    validateConfig()
+    val cfg = CheckedStreamWindowRankConfig
+    val nodeKeys = new Array[Long](cfg.events)
+    val nodeNext = new Array[Int](cfg.events)
+    val slotCount = cfg.windowBuckets + 2
+    val bucketStarts = new Array[Long](slotCount)
+    val bucketHeads = new Array[Int](slotCount)
+    val rank =
+      new HeapLongIndexedPriorityQueue[HeapLongRecord](
+        cfg.initialRankCapacity,
+        cfg.initialLongTableCapacity
+      )
+
+    var i = 0
+    while (i < nodeNext.length) {
+      nodeNext(i) = -1
+      i += 1
+    }
+    i = 0
+    while (i < slotCount) {
+      bucketStarts(i) = EmptyBucketStart
+      bucketHeads(i) = -1
+      i += 1
+    }
+
+    var nodeUsed = 0
+
+    def addBucketNode(slot: Int, key: Long): Unit = {
+      if (nodeUsed >= nodeKeys.length)
+        throw new IllegalStateException("bucket node capacity exhausted")
+      nodeKeys(nodeUsed) = key
+      nodeNext(nodeUsed) = bucketHeads(slot)
+      bucketHeads(slot) = nodeUsed
+      nodeUsed += 1
+    }
+
+    def clearBucket(bucketStart: Long): Unit = {
+      val slot = bucketSlot(bucketStart, slotCount)
+      if (bucketStarts(slot) == bucketStart) {
+        var node = bucketHeads(slot)
+        while (node >= 0) {
+          val next = nodeNext(node)
+          val key = nodeKeys(node)
+          if (rank.contains(key)) {
+            val record = rank.get(key)
+            if (record.bucketStart == bucketStart)
+              rank.remove(key)
+          }
+          nodeKeys(node) = 0L
+          nodeNext(node) = -1
+          node = next
+        }
+        bucketStarts(slot) = EmptyBucketStart
+        bucketHeads(slot) = -1
+      }
+    }
+
+    def closeBefore(cutoffSeconds: Long): Unit = {
+      var slot = 0
+      while (slot < slotCount) {
+        val start = bucketStarts(slot)
+        if (
+          start != EmptyBucketStart &&
+          start + cfg.bucketSeconds <= cutoffSeconds
+        )
+          clearBucket(start)
+        slot += 1
+      }
+    }
+
+    def ensureBucket(bucketStart: Long): Int = {
+      val slot = bucketSlot(bucketStart, slotCount)
+      if (bucketStarts(slot) != bucketStart) {
+        if (bucketStarts(slot) != EmptyBucketStart)
+          throw new IllegalStateException(
+            s"bucket slot reused before close old=${bucketStarts(slot)} new=$bucketStart"
+          )
+        bucketStarts(slot) = bucketStart
+        bucketHeads(slot) = -1
+      }
+      slot
+    }
+
+    var checksum = 0L
+    i = 0
+    while (i < cfg.events) {
+      val bucketStart = bucketStartFor(i)
+      closeBefore(cutoffFor(bucketStart))
+      val slot = ensureBucket(bucketStart)
+      val seed = mix(i * 131 + (bucketStart / cfg.bucketSeconds).toInt)
+      val key = longKeyFor(seed)
+      val value = (mix(seed + 19) & 0xffff) + 1
+      if (rank.contains(key)) {
+        val existing = rank.get(key)
+        if (existing.bucketStart == bucketStart) {
+          existing.count += 1
+          existing.total += value.toLong
+          existing.lastValue = value
+          rank.updatePriority(
+            key,
+            priority(
+              existing.key,
+              existing.count,
+              existing.total,
+              existing.lastValue
+            )
+          )
+        } else {
+          val record = new HeapLongRecord(key, bucketStart)
+          record.count = 1
+          record.total = value.toLong
+          record.lastValue = value
+          addBucketNode(slot, key)
+          rank.put(
+            key,
+            record,
+            priority(record.key, record.count, record.total, value)
+          )
+        }
+      } else {
+        val record = new HeapLongRecord(key, bucketStart)
+        record.count = 1
+        record.total = value.toLong
+        record.lastValue = value
+        addBucketNode(slot, key)
+        rank.put(
+          key,
+          record,
+          priority(record.key, record.count, record.total, value)
+        )
+      }
+
+      if (rank.length > 0 && (i % cfg.sampleEvery) == 0) {
+        val record = rank.peek()
+        checksum =
+          foldRecord(
+            checksum,
+            rank.peekKey(),
+            record.bucketStart,
+            record.count,
+            record.total,
+            record.lastValue,
+            rank.peekPriority()
+          )
+      }
+      i += 1
+    }
+
+    var remaining = math.min(cfg.topK, rank.length)
+    while (remaining > 0) {
+      val record = rank.pop()
+      val rankPriority =
+        priority(record.key, record.count, record.total, record.lastValue)
+      checksum =
+        foldRecord(
+          checksum,
+          record.key,
+          record.bucketStart,
+          record.count,
+          record.total,
+          record.lastValue,
+          rankPriority
+        )
+      remaining -= 1
+    }
+
+    i = 0
+    while (i < slotCount) {
+      val start = bucketStarts(i)
+      if (start != EmptyBucketStart) clearBucket(start)
+      i += 1
+    }
+
+    checksumSink = checksum
+    checksum
+  }
+
   def runRiftChecked(): Long = {
     validateConfig()
     val cfg = CheckedStreamWindowRankConfig
@@ -729,21 +1227,193 @@ object CheckedStreamWindowRankMatrixHelpers {
     checksum
   }
 
+  def runRiftCheckedLong(): Long = {
+    validateConfig()
+    val cfg = CheckedStreamWindowRankConfig
+    val checksum = RiftRegion.streaming { stream ?=>
+      final class Record(val key: Long, val bucketStart: Long) {
+        var count: Int = 0
+        var total: Long = 0L
+        var lastValue: Int = 0
+      }
+
+      def recordPriority(record: Record^{stream}): Long =
+        priority(record.key, record.count, record.total, record.lastValue)
+
+      val rank =
+        RiftRegion.streamWindowLongIndexedRank[Record](
+          cfg.bucketSeconds,
+          cfg.initialRankCapacity,
+          cfg.initialLongTableCapacity
+        )
+      val slotCount = cfg.windowBuckets + 2
+      val bucketStarts: Array[Long]^{stream} =
+        RiftRegion.alloc(new Array[Long](slotCount))
+
+      var i = 0
+      while (i < slotCount) {
+        bucketStarts(i) = EmptyBucketStart
+        i += 1
+      }
+
+      def clearBucket(bucketStart: Long): Unit = {
+        val slot = bucketSlot(bucketStart, slotCount)
+        if (bucketStarts(slot) == bucketStart)
+          bucketStarts(slot) = EmptyBucketStart
+      }
+
+      def ensureBucketSlot(bucketStart: Long): Int = {
+        val slot = bucketSlot(bucketStart, slotCount)
+        if (bucketStarts(slot) != bucketStart) {
+          if (bucketStarts(slot) != EmptyBucketStart)
+            throw new IllegalStateException(
+              s"bucket slot reused before close old=${bucketStarts(slot)} new=$bucketStart"
+            )
+          bucketStarts(slot) = bucketStart
+        }
+        slot
+      }
+
+      var checksum = 0L
+      i = 0
+      while (i < cfg.events) {
+        val bucketStart = bucketStartFor(i)
+        RiftRegion.closeWindowRankBucketsBeforeWithEntries(
+          stream,
+          rank,
+          cutoffFor(bucketStart)
+        ) { (_, _, _) =>
+          ()
+        } { bucket =>
+          clearBucket(bucket.startSeconds)
+        }
+        val bucket =
+          RiftRegion.streamWindowBucketFor(
+            stream,
+            rank,
+            timestampFor(i)
+          ) { opened =>
+            ensureBucketSlot(opened.startSeconds)
+          }
+        ensureBucketSlot(bucket.startSeconds)
+        val seed = mix(i * 131 + (bucketStart / cfg.bucketSeconds).toInt)
+        val key = longKeyFor(seed)
+        val value = (mix(seed + 19) & 0xffff) + 1
+        if (RiftRegion.containsWindowRank(stream, rank, key)) {
+          val existing = RiftRegion.getWindowRank(stream, rank, key)
+          if (existing.bucketStart == bucket.startSeconds) {
+            existing.count += 1
+            existing.total += value.toLong
+            existing.lastValue = value
+            RiftRegion.updateWindowRankPriority(
+              stream,
+              rank,
+              key,
+              recordPriority(existing)
+            )
+          } else {
+            val child = RiftRegion.streamBucketRegion(stream, bucket)
+            val record: Record^{stream} =
+              RiftRegion.alloc(new Record(key, bucket.startSeconds))(
+                using child
+              )
+            record.count = 1
+            record.total = value.toLong
+            record.lastValue = value
+            RiftRegion.putWindowRankInBucket(
+              stream,
+              rank,
+              bucket,
+              key,
+              record,
+              recordPriority(record)
+            )
+          }
+        } else {
+          val child = RiftRegion.streamBucketRegion(stream, bucket)
+          val record: Record^{stream} =
+            RiftRegion.alloc(new Record(key, bucket.startSeconds))(using child)
+          record.count = 1
+          record.total = value.toLong
+          record.lastValue = value
+          RiftRegion.putWindowRankInBucket(
+            stream,
+            rank,
+            bucket,
+            key,
+            record,
+            recordPriority(record)
+          )
+        }
+
+        if (
+          RiftRegion.windowRankLength(stream, rank) > 0 &&
+          (i % cfg.sampleEvery) == 0
+        ) {
+          val record = RiftRegion.peekWindowRank(stream, rank)
+          checksum =
+            foldRecord(
+              checksum,
+              RiftRegion.peekWindowRankKey(stream, rank),
+              record.bucketStart,
+              record.count,
+              record.total,
+              record.lastValue,
+              RiftRegion.peekWindowRankPriority(stream, rank)
+            )
+        }
+        i += 1
+      }
+
+      var remaining =
+        math.min(cfg.topK, RiftRegion.windowRankLength(stream, rank))
+      while (remaining > 0) {
+        val record = RiftRegion.popWindowRank(stream, rank)
+        checksum =
+          foldRecord(
+            checksum,
+            record.key,
+            record.bucketStart,
+            record.count,
+            record.total,
+            record.lastValue,
+            recordPriority(record)
+          )
+        remaining -= 1
+      }
+
+      RiftRegion.closeAllWindowRankBucketsWithEntries(stream, rank) {
+        (_, _, _) =>
+          ()
+      } { bucket =>
+        clearBucket(bucket.startSeconds)
+      }
+
+      checksum
+    }
+    checksumSink = checksum
+    checksum
+  }
+
   private def runMode(mode: String): Long =
     mode match {
-      case "heap"         => runHeap()
-      case "rift-checked" => runRiftChecked()
+      case "heap"              => runHeap()
+      case "heap-long"         => runHeapLong()
+      case "rift-checked"      => runRiftChecked()
+      case "rift-checked-long" => runRiftCheckedLong()
       case other =>
         throw new IllegalArgumentException(
-          s"unknown checked-stream-window-rank mode '$other'; expected heap or rift-checked"
+          s"unknown checked-stream-window-rank mode '$other'; expected heap, heap-long, rift-checked, or rift-checked-long"
         )
     }
 
   def runBenchmark(mode: String): Unit = {
     validateConfig()
     val cfg = CheckedStreamWindowRankConfig
-    val usesRift = mode == "rift-checked"
-    val expectedChecksum = runHeap()
+    val usesRift = mode == "rift-checked" || mode == "rift-checked-long"
+    val expectedChecksum =
+      if (mode == "heap-long" || mode == "rift-checked-long") runHeapLong()
+      else runHeap()
 
     var warmup = 0
     while (warmup < cfg.warmupRuns) {
@@ -824,19 +1494,24 @@ object CheckedStreamWindowRankMatrixHelpers {
   def printConfig(mode: String): Unit = {
     val cfg = CheckedStreamWindowRankConfig
     println(
-      s"CONFIG mode=$mode runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} key_capacity=${cfg.keyCapacity} bucket_seconds=${cfg.bucketSeconds} window_buckets=${cfg.windowBuckets} top_k=${cfg.topK} sample_every=${cfg.sampleEvery} initial_rank_capacity=${cfg.initialRankCapacity}"
+      s"CONFIG mode=$mode runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} key_capacity=${cfg.keyCapacity} long_key_space=${cfg.longKeySpace} bucket_seconds=${cfg.bucketSeconds} window_buckets=${cfg.windowBuckets} top_k=${cfg.topK} sample_every=${cfg.sampleEvery} initial_rank_capacity=${cfg.initialRankCapacity} initial_long_table_capacity=${cfg.initialLongTableCapacity}"
     )
   }
 }
 
 @main def CheckedStreamWindowRankMatrix(mode: String = "heap"): Unit = {
-  if (mode != "heap" && mode != "rift-checked")
+  if (
+    mode != "heap" &&
+    mode != "heap-long" &&
+    mode != "rift-checked" &&
+    mode != "rift-checked-long"
+  )
     throw new IllegalArgumentException(
-      s"unknown checked-stream-window-rank mode '$mode'; expected heap or rift-checked"
+      s"unknown checked-stream-window-rank mode '$mode'; expected heap, heap-long, rift-checked, or rift-checked-long"
     )
 
   CheckedStreamWindowRankMatrixHelpers.printConfig(mode)
-  val usesRift = mode == "rift-checked"
+  val usesRift = mode == "rift-checked" || mode == "rift-checked-long"
   if (usesRift) RiftRegion.init(0)
   try CheckedStreamWindowRankMatrixHelpers.runBenchmark(mode)
   finally if (usesRift) RiftRegion.shutdown()

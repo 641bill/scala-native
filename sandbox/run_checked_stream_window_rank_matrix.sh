@@ -8,6 +8,7 @@ output_dir=${CHECKED_SWR_OUTPUT_DIR:-"/tmp/checked-stream-window-rank"}
 summary=${CHECKED_SWR_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${CHECKED_SWR_BUILD:-1}
 platform=$(uname -s)
+modes=(${(z)${CHECKED_SWR_MODES:-"heap rift-checked"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"
@@ -107,8 +108,9 @@ run_mode() {
 }
 
 write_summary_header
-run_mode "heap"
-run_mode "rift-checked"
+for mode in "${modes[@]}"; do
+  run_mode "${mode}"
+done
 
 echo
 echo "Checked StreamWindowIndexedRank matrix complete"

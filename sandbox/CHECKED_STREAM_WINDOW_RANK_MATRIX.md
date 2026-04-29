@@ -47,9 +47,11 @@ Defaults:
 | `CHECKED_SWR_EVENTS` | `1000000` |
 | `CHECKED_SWR_EVENTS_PER_BUCKET` | `25000` |
 | `CHECKED_SWR_KEY_CAPACITY` | `65536` |
+| `CHECKED_SWR_LONG_KEY_SPACE` | `65536` |
 | `CHECKED_SWR_BUCKET_SECONDS` | `60` |
 | `CHECKED_SWR_WINDOW_BUCKETS` | `8` |
 | `CHECKED_SWR_INITIAL_RANK_CAPACITY` | `1024` |
+| `CHECKED_SWR_INITIAL_LONG_TABLE_CAPACITY` | `131072` |
 | `CHECKED_SWR_TOP_K` | `128` |
 | `CHECKED_SWR_SAMPLE_EVERY` | `4096` |
 | `CHECKED_SWR_WARMUPS` | `1` |
@@ -59,6 +61,8 @@ Modes:
 
 - `heap`
 - `rift-checked`
+- `heap-long`
+- `rift-checked-long`
 
 ## Commands
 
@@ -76,6 +80,7 @@ cd /Users/siyaoliu/rift/scala-native-rift
 CHECKED_SWR_EVENTS=20000 \
 CHECKED_SWR_EVENTS_PER_BUCKET=1000 \
 CHECKED_SWR_KEY_CAPACITY=4096 \
+CHECKED_SWR_LONG_KEY_SPACE=4096 \
 CHECKED_SWR_WINDOW_BUCKETS=4 \
 CHECKED_SWR_BENCHMARK_RUNS=1 \
 CHECKED_SWR_WARMUPS=0 \
@@ -89,6 +94,33 @@ Default local median:
 cd /Users/siyaoliu/rift/scala-native-rift
 CHECKED_SWR_BUILD=0 \
 CHECKED_SWR_OUTPUT_DIR=/tmp/checked-stream-window-rank \
+  zsh sandbox/run_checked_stream_window_rank_matrix.sh
+```
+
+Long-key 100k median:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+CHECKED_SWR_BUILD=0 \
+CHECKED_SWR_EVENTS=100000 \
+CHECKED_SWR_EVENTS_PER_BUCKET=25000 \
+CHECKED_SWR_KEY_CAPACITY=65536 \
+CHECKED_SWR_LONG_KEY_SPACE=65536 \
+CHECKED_SWR_WINDOW_BUCKETS=8 \
+CHECKED_SWR_BENCHMARK_RUNS=3 \
+CHECKED_SWR_WARMUPS=1 \
+CHECKED_SWR_MODES="heap-long rift-checked-long" \
+CHECKED_SWR_OUTPUT_DIR=/tmp/checked-stream-window-long-rank-100000-rss \
+  zsh sandbox/run_checked_stream_window_rank_matrix.sh
+```
+
+Long-key default local median:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+CHECKED_SWR_BUILD=0 \
+CHECKED_SWR_MODES="heap-long rift-checked-long" \
+CHECKED_SWR_OUTPUT_DIR=/tmp/checked-stream-window-long-rank-1000000 \
   zsh sandbox/run_checked_stream_window_rank_matrix.sh
 ```
 
@@ -121,6 +153,9 @@ Validation run on 2026-04-28 and updated on 2026-04-29:
   checksum `-476315670107920613`.
 - The post-lexicographic priority default local matrix matched checksum
   `6881312641757835670`.
+- After the long-key matrix update, `sandbox3_next/compile` passed and the
+  long-key 20k smoke, 100k 3-run matrix, and default 1M 3-run matrix matched
+  heap-long and `rift-checked-long` checksums.
 
 ## Small Smoke Result
 
@@ -222,6 +257,50 @@ Configuration:
 | heap | 22.211 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 35209216 | -476315670107920613 |
 | rift-checked | 37.404 | 0.908 | 0.110 | 82545 | 5 | 5 | 0 | 30031872 | -476315670107920613 |
 
+## Long-Key Smoke Result
+
+This run uses `heap-long` and `rift-checked-long`, where keys are arbitrary
+`Long` values generated from the same event stream. Heap mode uses an
+open-addressed heap long-key rank queue; checked Rift uses
+`StreamWindowLongIndexedRank`.
+
+Configuration:
+
+- `CHECKED_SWR_EVENTS=20000`
+- `CHECKED_SWR_EVENTS_PER_BUCKET=1000`
+- `CHECKED_SWR_KEY_CAPACITY=4096`
+- `CHECKED_SWR_LONG_KEY_SPACE=4096`
+- `CHECKED_SWR_WINDOW_BUCKETS=4`
+- `CHECKED_SWR_TOP_K=128`
+- `CHECKED_SWR_BENCHMARK_RUNS=1`
+- `CHECKED_SWR_WARMUPS=0`
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap-long | 10.460 | 0.311 | 0.000 | 0 | 0 | 0 | 0 | 9895936 | -715513143181030887 |
+| rift-checked-long | 10.663 | 0.199 | 0.081 | 18679 | 21 | 21 | 0 | 13303808 | -715513143181030887 |
+
+## Long-Key 100k Median
+
+Configuration:
+
+- `CHECKED_SWR_EVENTS=100000`
+- `CHECKED_SWR_EVENTS_PER_BUCKET=25000`
+- `CHECKED_SWR_KEY_CAPACITY=65536`
+- `CHECKED_SWR_LONG_KEY_SPACE=65536`
+- `CHECKED_SWR_WINDOW_BUCKETS=8`
+- `CHECKED_SWR_INITIAL_RANK_CAPACITY=1024`
+- `CHECKED_SWR_INITIAL_LONG_TABLE_CAPACITY=131072`
+- `CHECKED_SWR_TOP_K=128`
+- `CHECKED_SWR_SAMPLE_EVERY=4096`
+- `CHECKED_SWR_BENCHMARK_RUNS=3`
+- `CHECKED_SWR_WARMUPS=1`
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap-long | 38.242 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 38846464 | -2863780563714953957 |
+| rift-checked-long | 54.574 | 0.974 | 0.281 | 82547 | 5 | 5 | 0 | 33898496 | -2863780563714953957 |
+
 ## Default Local Median
 
 Configuration:
@@ -242,6 +321,28 @@ Configuration:
 | heap | 205.849 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 145801216 | 6881312641757835670 |
 | rift-checked | 329.761 | 7.523 | 0.352 | 826643 | 41 | 41 | 0 | 87457792 | 6881312641757835670 |
 
+## Long-Key Default Local Median
+
+Configuration:
+
+- `CHECKED_SWR_EVENTS=1000000`
+- `CHECKED_SWR_EVENTS_PER_BUCKET=25000`
+- `CHECKED_SWR_KEY_CAPACITY=65536`
+- `CHECKED_SWR_LONG_KEY_SPACE=65536`
+- `CHECKED_SWR_BUCKET_SECONDS=60`
+- `CHECKED_SWR_WINDOW_BUCKETS=8`
+- `CHECKED_SWR_INITIAL_RANK_CAPACITY=1024`
+- `CHECKED_SWR_INITIAL_LONG_TABLE_CAPACITY=131072`
+- `CHECKED_SWR_TOP_K=128`
+- `CHECKED_SWR_SAMPLE_EVERY=4096`
+- `CHECKED_SWR_BENCHMARK_RUNS=3`
+- `CHECKED_SWR_WARMUPS=1`
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap-long | 301.098 | 5.973 | 0.000 | 0 | 0 | 0 | 0 | 111411200 | 4222832129898301078 |
+| rift-checked-long | 421.502 | 5.710 | 0.358 | 826645 | 41 | 41 | 0 | 128253952 | 4222832129898301078 |
+
 ## Interpretation
 
 - This is a general stream-window rank benchmark, not a DEBS-specific
@@ -250,8 +351,10 @@ Configuration:
   Scala objects in regions while control metadata stays explicit.
 - The first version used dense integer keys and one `Long` priority. The
   lexicographic priority API now covers Q1-style count/time/sequence/key
-  tie-breakers while keeping dense keys and the same close discipline. Hash-keyed
-  indexing remains open.
+  tie-breakers while keeping dense keys and the same close discipline.
+  Long-key modes now exercise the hash-keyed stream-window rank path with
+  arbitrary `Long` keys, so packed route-style keys no longer require a
+  benchmark-specific dense remapping layer.
 - The auto-cleanup path strengthens close discipline: the rank collection now
   tracks bucket-owned keys and removes them before closing child regions. This
   is a framework-level improvement, not a DEBS-specific cleanup convention.
@@ -273,6 +376,12 @@ Configuration:
   already-popped-key behavior, but it did not produce a measured speedup. The
   lexicographic API is a functionality step toward Q1-style ordering, not a
   speed claim.
+- The long-key default median is also not a speed win: `rift-checked-long` is
+  slower than `heap-long` (`421.502 ms` vs `301.098 ms`) and has higher RSS at
+  1M events, although the 100k long-key row has lower checked RSS. This means
+  the long-key stream-window API is functionally validated but should not be
+  treated as ready to improve DEBS throughput without another container-CPU or
+  memory-layout pass.
 - The result is still useful because it validates the general pattern that
   bucket-lifetime records can be ordinary Scala objects, stored in checked
   region-backed ranking state, sampled during the stream, and automatically
