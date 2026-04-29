@@ -483,6 +483,9 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   final class RegionIndexedPriorityQueue[T <: Object] private[memory] (
       private var items: Array[Object],
       private var priorities: Array[Long],
+      private var priority2s: Array[Long],
+      private var priority3s: Array[Long],
+      private var priority4s: Array[Long],
       private var keys: Array[Int],
       private val heapIndexByKey: Array[Int]
   ) {
@@ -505,14 +508,43 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       if (slot != 0) {
         val index = slot - 1
         items(index) = value
-        priorities(index) = priority
+        setPriority(index, priority)
         fixAt(index)
       } else {
         if (used >= items.length) growTrusted(owner)
         val index = used
         used += 1
         items(index) = value
-        priorities(index) = priority
+        setPriority(index, priority)
+        keys(index) = key
+        heapIndexByKey(key) = index + 1
+        siftUp(index)
+      }
+    }
+
+    private[memory] def putTrusted(
+        owner: RiftRegion^,
+        key: Int,
+        value: Object,
+        priority1: Long,
+        priority2: Long,
+        priority3: Long,
+        priority4: Long
+    ): Unit = {
+      checkKey(key)
+      checkLexicographicPriorities()
+      val slot = heapIndexByKey(key)
+      if (slot != 0) {
+        val index = slot - 1
+        items(index) = value
+        setPriorities(index, priority1, priority2, priority3, priority4)
+        fixAt(index)
+      } else {
+        if (used >= items.length) growTrusted(owner)
+        val index = used
+        used += 1
+        items(index) = value
+        setPriorities(index, priority1, priority2, priority3, priority4)
         keys(index) = key
         heapIndexByKey(key) = index + 1
         siftUp(index)
@@ -528,7 +560,26 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       if (slot == 0) false
       else {
         val index = slot - 1
-        priorities(index) = priority
+        setPriority(index, priority)
+        fixAt(index)
+        true
+      }
+    }
+
+    private[memory] def updatePriorityTrusted(
+        key: Int,
+        priority1: Long,
+        priority2: Long,
+        priority3: Long,
+        priority4: Long
+    ): Boolean = {
+      checkKey(key)
+      checkLexicographicPriorities()
+      val slot = heapIndexByKey(key)
+      if (slot == 0) false
+      else {
+        val index = slot - 1
+        setPriorities(index, priority1, priority2, priority3, priority4)
         fixAt(index)
         true
       }
@@ -612,23 +663,38 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     private def growTrusted(owner: RiftRegion^): Unit = {
       val oldItems = items
       val oldPriorities = priorities
+      val oldPriority2s = priority2s
+      val oldPriority3s = priority3s
+      val oldPriority4s = priority4s
       val oldKeys = keys
       val nextCapacity =
         if (oldItems.length == 0) 1 else oldItems.length * 2
       val nextItems =
         owner.alloc(new Array[Object](nextCapacity)).asInstanceOf[Array[Object]]
       val nextPriorities = owner.alloc(new Array[Long](nextCapacity))
+      val nextPriority2s =
+        if (oldPriority2s == null) null else owner.alloc(new Array[Long](nextCapacity))
+      val nextPriority3s =
+        if (oldPriority3s == null) null else owner.alloc(new Array[Long](nextCapacity))
+      val nextPriority4s =
+        if (oldPriority4s == null) null else owner.alloc(new Array[Long](nextCapacity))
       val nextKeys = owner.alloc(new Array[Int](nextCapacity))
 
       var i = 0
       while (i < used) {
         nextItems(i) = oldItems(i)
         nextPriorities(i) = oldPriorities(i)
+        if (nextPriority2s != null) nextPriority2s(i) = oldPriority2s(i)
+        if (nextPriority3s != null) nextPriority3s(i) = oldPriority3s(i)
+        if (nextPriority4s != null) nextPriority4s(i) = oldPriority4s(i)
         nextKeys(i) = oldKeys(i)
         i += 1
       }
       items = nextItems
       priorities = nextPriorities
+      priority2s = nextPriority2s
+      priority3s = nextPriority3s
+      priority4s = nextPriority4s
       keys = nextKeys
     }
 
@@ -639,16 +705,16 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       used = last
       if (index != last) {
         items(index) = items(last)
-        priorities(index) = priorities(last)
+        copyPriorities(index, last)
         keys(index) = keys(last)
         heapIndexByKey(keys(index)) = index + 1
         items(last) = null
-        priorities(last) = 0L
+        clearPriorities(last)
         keys(last) = 0
         fixAt(index)
       } else {
         items(index) = null
-        priorities(index) = 0L
+        clearPriorities(index)
         keys(index) = 0
       }
     }
@@ -664,7 +730,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       var child = start
       while (child > 0) {
         val parent = (child - 1) >>> 1
-        if (priorities(parent) >= priorities(child)) return
+        if (!better(child, parent)) return
         swap(parent, child)
         child = parent
       }
@@ -677,26 +743,84 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
         if (left >= used) return
         val right = left + 1
         var best = left
-        if (right < used && priorities(right) > priorities(left))
+        if (right < used && better(right, left))
           best = right
-        if (priorities(parent) >= priorities(best)) return
+        if (!better(best, parent)) return
         swap(parent, best)
         parent = best
       }
     }
 
+    private def better(left: Int, right: Int): Boolean =
+      if (priorities(left) != priorities(right))
+        priorities(left) > priorities(right)
+      else if (priority2s == null) false
+      else if (priority2s(left) != priority2s(right))
+        priority2s(left) > priority2s(right)
+      else if (priority3s(left) != priority3s(right))
+        priority3s(left) > priority3s(right)
+      else if (priority4s(left) != priority4s(right))
+        priority4s(left) > priority4s(right)
+      else false
+
     private def swap(left: Int, right: Int): Unit = {
       val leftItem = items(left)
       val leftPriority = priorities(left)
+      val leftPriority2 = if (priority2s == null) 0L else priority2s(left)
+      val leftPriority3 = if (priority3s == null) 0L else priority3s(left)
+      val leftPriority4 = if (priority4s == null) 0L else priority4s(left)
       val leftKey = keys(left)
       items(left) = items(right)
-      priorities(left) = priorities(right)
+      copyPriorities(left, right)
       keys(left) = keys(right)
       heapIndexByKey(keys(left)) = left + 1
       items(right) = leftItem
       priorities(right) = leftPriority
+      if (priority2s != null) priority2s(right) = leftPriority2
+      if (priority3s != null) priority3s(right) = leftPriority3
+      if (priority4s != null) priority4s(right) = leftPriority4
       keys(right) = leftKey
       heapIndexByKey(keys(right)) = right + 1
+    }
+
+    private def checkLexicographicPriorities(): Unit =
+      if (priority2s == null || priority3s == null || priority4s == null)
+        throw new IllegalStateException(
+          "Rift RegionIndexedPriorityQueue was not allocated for lexicographic priorities"
+        )
+
+    private def setPriority(index: Int, priority: Long): Unit = {
+      priorities(index) = priority
+      if (priority2s != null) priority2s(index) = 0L
+      if (priority3s != null) priority3s(index) = 0L
+      if (priority4s != null) priority4s(index) = 0L
+    }
+
+    private def setPriorities(
+        index: Int,
+        priority1: Long,
+        priority2: Long,
+        priority3: Long,
+        priority4: Long
+    ): Unit = {
+      priorities(index) = priority1
+      priority2s(index) = priority2
+      priority3s(index) = priority3
+      priority4s(index) = priority4
+    }
+
+    private def copyPriorities(to: Int, from: Int): Unit = {
+      priorities(to) = priorities(from)
+      if (priority2s != null) priority2s(to) = priority2s(from)
+      if (priority3s != null) priority3s(to) = priority3s(from)
+      if (priority4s != null) priority4s(to) = priority4s(from)
+    }
+
+    private def clearPriorities(index: Int): Unit = {
+      priorities(index) = 0L
+      if (priority2s != null) priority2s(index) = 0L
+      if (priority3s != null) priority3s(index) = 0L
+      if (priority4s != null) priority4s(index) = 0L
     }
   }
 
@@ -1336,6 +1460,38 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     new RegionIndexedPriorityQueue[T](
       items,
       priorities,
+      null,
+      null,
+      null,
+      keys,
+      heapIndexByKey
+    )
+  }
+
+  /** Allocates a checked dense-key indexed queue with four lexicographic
+   *  priority components. Larger components rank first at each level.
+   */
+  def regionIndexedPriorityQueueLexicographic[T <: Object](
+      keyCapacity: Int,
+      initialCapacity: Int = 4
+  )(using region: RiftRegion^): RegionIndexedPriorityQueue[T]^{region} = {
+    if (keyCapacity <= 0)
+      throw new IllegalArgumentException("keyCapacity must be positive")
+    val capacity = if (initialCapacity <= 0) 1 else initialCapacity
+    val items: Array[Object] =
+      alloc(new Array[Object](capacity)).asInstanceOf[Array[Object]]
+    val priorities: Array[Long] = alloc(new Array[Long](capacity))
+    val priority2s: Array[Long] = alloc(new Array[Long](capacity))
+    val priority3s: Array[Long] = alloc(new Array[Long](capacity))
+    val priority4s: Array[Long] = alloc(new Array[Long](capacity))
+    val keys: Array[Int] = alloc(new Array[Int](capacity))
+    val heapIndexByKey: Array[Int] = alloc(new Array[Int](keyCapacity))
+    new RegionIndexedPriorityQueue[T](
+      items,
+      priorities,
+      priority2s,
+      priority3s,
+      priority4s,
       keys,
       heapIndexByKey
     )
@@ -1355,6 +1511,31 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   )(using parent: StreamingRegion^): StreamWindowIndexedRank[T]^{parent} = {
     val buckets = streamBucketArena(bucketSeconds)
     val queue = regionIndexedPriorityQueue[T](keyCapacity, initialCapacity)
+    val ownerPresentByKey = alloc(new Array[Boolean](keyCapacity))
+    val ownerStartByKey = alloc(new Array[Long](keyCapacity))
+    val nextOwnedKeyPlusOneByKey = alloc(new Array[Int](keyCapacity))
+    val previousOwnedKeyPlusOneByKey = alloc(new Array[Int](keyCapacity))
+    new StreamWindowIndexedRank[T](
+      buckets.asInstanceOf[StreamBucketArena],
+      queue.asInstanceOf[RegionIndexedPriorityQueue[T]],
+      ownerPresentByKey,
+      ownerStartByKey,
+      nextOwnedKeyPlusOneByKey,
+      previousOwnedKeyPlusOneByKey
+    ).asInstanceOf[StreamWindowIndexedRank[T]^{parent}]
+  }
+
+  /** Allocates a checked stream-window rank whose dense-key queue uses four
+   *  lexicographic priority components.
+   */
+  def streamWindowIndexedRankLexicographic[T <: Object](
+      bucketSeconds: Long,
+      keyCapacity: Int,
+      initialCapacity: Int = 4
+  )(using parent: StreamingRegion^): StreamWindowIndexedRank[T]^{parent} = {
+    val buckets = streamBucketArena(bucketSeconds)
+    val queue =
+      regionIndexedPriorityQueueLexicographic[T](keyCapacity, initialCapacity)
     val ownerPresentByKey = alloc(new Array[Boolean](keyCapacity))
     val ownerStartByKey = alloc(new Array[Long](keyCapacity))
     val nextOwnedKeyPlusOneByKey = alloc(new Array[Int](keyCapacity))
@@ -1476,6 +1657,29 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   ): Unit =
     queue.putTrusted(owner, key, value.asInstanceOf[Object], priority)
 
+  /** Inserts or replaces `value` with four lexicographic priority components.
+   *  Larger components rank first at each tie-break level.
+   */
+  def put[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionIndexedPriorityQueue[T]^{owner},
+      key: Int,
+      value: T^{owner},
+      priority1: Long,
+      priority2: Long,
+      priority3: Long,
+      priority4: Long
+  ): Unit =
+    queue.putTrusted(
+      owner,
+      key,
+      value.asInstanceOf[Object],
+      priority1,
+      priority2,
+      priority3,
+      priority4
+    )
+
   /** Updates `key`'s priority if it is present. */
   def updatePriority[T <: Object](
       owner: RiftRegion^,
@@ -1484,6 +1688,24 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       priority: Long
   ): Boolean =
     queue.updatePriorityTrusted(key, priority)
+
+  /** Updates `key`'s lexicographic priority if it is present. */
+  def updatePriority[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionIndexedPriorityQueue[T]^{owner},
+      key: Int,
+      priority1: Long,
+      priority2: Long,
+      priority3: Long,
+      priority4: Long
+  ): Boolean =
+    queue.updatePriorityTrusted(
+      key,
+      priority1,
+      priority2,
+      priority3,
+      priority4
+    )
 
   /** Removes `key` if it is present. */
   def remove[T <: Object](
@@ -1590,6 +1812,29 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       .asInstanceOf[RegionIndexedPriorityQueue[T]^{parent}]
       .putTrusted(parent, key, value.asInstanceOf[Object], priority)
 
+  /** Inserts or replaces a ranked value using four lexicographic priorities. */
+  def putWindowRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent},
+      key: Int,
+      value: T^{parent},
+      priority1: Long,
+      priority2: Long,
+      priority3: Long,
+      priority4: Long
+  ): Unit =
+    rank.queue
+      .asInstanceOf[RegionIndexedPriorityQueue[T]^{parent}]
+      .putTrusted(
+        parent,
+        key,
+        value.asInstanceOf[Object],
+        priority1,
+        priority2,
+        priority3,
+        priority4
+      )
+
   /** Inserts or replaces a ranked value owned by `bucket`.
    *
    *  When the bucket closes, `closeWindowRankBucketsBefore` and
@@ -1611,6 +1856,35 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     rank.linkOwnedKey(key, bucket.asInstanceOf[StreamBucket])
   }
 
+  /** Inserts or replaces a ranked value owned by `bucket` using four
+   *  lexicographic priority components.
+   */
+  def putWindowRankInBucket[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent},
+      bucket: StreamBucket^{parent},
+      key: Int,
+      value: T^{parent},
+      priority1: Long,
+      priority2: Long,
+      priority3: Long,
+      priority4: Long
+  ): Unit = {
+    bucket.child.checkOpen()
+    rank.queue
+      .asInstanceOf[RegionIndexedPriorityQueue[T]^{parent}]
+      .putTrusted(
+        parent,
+        key,
+        value.asInstanceOf[Object],
+        priority1,
+        priority2,
+        priority3,
+        priority4
+      )
+    rank.linkOwnedKey(key, bucket.asInstanceOf[StreamBucket])
+  }
+
   /** Updates `key`'s priority if it is present. */
   def updateWindowRankPriority[T <: Object](
       parent: StreamingRegion^,
@@ -1623,6 +1897,26 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       rank.queue.asInstanceOf[RegionIndexedPriorityQueue[T]^{parent}],
       key,
       priority
+    )
+
+  /** Updates `key`'s lexicographic priority if it is present. */
+  def updateWindowRankPriority[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowIndexedRank[T]^{parent},
+      key: Int,
+      priority1: Long,
+      priority2: Long,
+      priority3: Long,
+      priority4: Long
+  ): Boolean =
+    updatePriority(
+      parent,
+      rank.queue.asInstanceOf[RegionIndexedPriorityQueue[T]^{parent}],
+      key,
+      priority1,
+      priority2,
+      priority3,
+      priority4
     )
 
   /** Removes `key` if it is present. */
@@ -1888,6 +2182,26 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     ): Unit =
       queue.putTrusted(owner, key, value.asInstanceOf[Object], priority)
 
+    @targetName("putLexicographicToRegionIndexedPriorityQueue")
+    def put[T <: Object](
+        queue: RegionIndexedPriorityQueue[T]^{owner},
+        key: Int,
+        value: T^{owner},
+        priority1: Long,
+        priority2: Long,
+        priority3: Long,
+        priority4: Long
+    ): Unit =
+      queue.putTrusted(
+        owner,
+        key,
+        value.asInstanceOf[Object],
+        priority1,
+        priority2,
+        priority3,
+        priority4
+      )
+
     @targetName("updateRegionIndexedPriorityQueuePriority")
     def updatePriority[T <: Object](
         queue: RegionIndexedPriorityQueue[T]^{owner},
@@ -1895,6 +2209,25 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
         priority: Long
     ): Boolean =
       RiftRegion.updatePriority(owner, queue, key, priority)
+
+    @targetName("updateRegionIndexedPriorityQueueLexicographicPriority")
+    def updatePriority[T <: Object](
+        queue: RegionIndexedPriorityQueue[T]^{owner},
+        key: Int,
+        priority1: Long,
+        priority2: Long,
+        priority3: Long,
+        priority4: Long
+    ): Boolean =
+      RiftRegion.updatePriority(
+        owner,
+        queue,
+        key,
+        priority1,
+        priority2,
+        priority3,
+        priority4
+      )
 
     @targetName("removeFromRegionIndexedPriorityQueue")
     def remove[T <: Object](

@@ -99,9 +99,9 @@ Validation run on 2026-04-28 and updated on 2026-04-29:
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile`
   passed.
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"`
-  passed `70/70`.
+  passed `72/72`.
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"`
-  passed `22/22`.
+  passed `23/23`.
 - The smoke matrix native-linked `CheckedStreamWindowRankMatrix`.
 - The small heap and `rift-checked` smoke runs matched checksum
   `-3490531581377742567`.
@@ -116,6 +116,10 @@ Validation run on 2026-04-28 and updated on 2026-04-29:
 - After the remove-with-value queue primitive update, a 100k 3-run smoke
   matched checksum `-476315670107920613`.
 - The post-remove-with-value default local matrix matched checksum
+  `6881312641757835670`.
+- After the lexicographic priority API update, a 100k 3-run smoke matched
+  checksum `-476315670107920613`.
+- The post-lexicographic priority default local matrix matched checksum
   `6881312641757835670`.
 
 ## Small Smoke Result
@@ -196,6 +200,28 @@ Configuration:
 | heap | 25.360 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 35225600 | -476315670107920613 |
 | rift-checked | 38.823 | 1.021 | 0.162 | 82545 | 5 | 5 | 0 | 30015488 | -476315670107920613 |
 
+## Lexicographic Priority API Control Result
+
+This checkpoint adds `regionIndexedPriorityQueueLexicographic` and
+`streamWindowIndexedRankLexicographic`. The existing matrix still uses the
+single-`Long` priority path; this control checks that the shared queue changes
+do not break the current stream-window rank harness. Separate compiler/runtime
+tests exercise the new four-component lexicographic path directly.
+
+Configuration:
+
+- `CHECKED_SWR_EVENTS=100000`
+- `CHECKED_SWR_EVENTS_PER_BUCKET=25000`
+- `CHECKED_SWR_KEY_CAPACITY=65536`
+- `CHECKED_SWR_WINDOW_BUCKETS=8`
+- `CHECKED_SWR_BENCHMARK_RUNS=3`
+- `CHECKED_SWR_WARMUPS=1`
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 22.211 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 35209216 | -476315670107920613 |
+| rift-checked | 37.404 | 0.908 | 0.110 | 82545 | 5 | 5 | 0 | 30031872 | -476315670107920613 |
+
 ## Default Local Median
 
 Configuration:
@@ -213,8 +239,8 @@ Configuration:
 
 | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| heap | 258.839 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 145784832 | 6881312641757835670 |
-| rift-checked | 355.671 | 8.005 | 0.374 | 826643 | 41 | 41 | 0 | 87441408 | 6881312641757835670 |
+| heap | 205.849 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 145801216 | 6881312641757835670 |
+| rift-checked | 329.761 | 7.523 | 0.352 | 826643 | 41 | 41 | 0 | 87457792 | 6881312641757835670 |
 
 ## Interpretation
 
@@ -222,9 +248,10 @@ Configuration:
   optimization.
 - It tests the design goal that structured-lifetime stream data can be ordinary
   Scala objects in regions while control metadata stays explicit.
-- The first version uses dense integer keys and one `Long` priority, matching
-  the current `StreamWindowIndexedRank` API. Richer Q1/Q2 integration may need
-  comparator/tie-breaker support and hash-keyed indexing.
+- The first version used dense integer keys and one `Long` priority. The
+  lexicographic priority API now covers Q1-style count/time/sequence/key
+  tie-breakers while keeping dense keys and the same close discipline. Hash-keyed
+  indexing remains open.
 - The auto-cleanup path strengthens close discipline: the rank collection now
   tracks bucket-owned keys and removes them before closing child regions. This
   is a framework-level improvement, not a DEBS-specific cleanup convention.
@@ -237,14 +264,15 @@ Configuration:
   path keeps the primitive owner tables and removes duplicate operator-side
   bucket nodes in checked mode.
 - The default local median is still not a speed win: checked Rift is slower
-  (`355.671 ms` vs heap `258.839 ms`) even though measured Rift runtime
-  operation cost is low (`0.374 ms`) and peak RSS is lower. The entry-cleanup
+  (`329.761 ms` vs heap `205.849 ms`) even though measured Rift runtime
+  operation cost is low (`0.352 ms`) and peak RSS is lower. The entry-cleanup
   API improved the previous auto-cleanup default (`313.572 ms` checked) and RSS
   (`94732288` bytes) by avoiding a second checked-side key list, but remained
   slower than the previous manual-cleanup median (`254.050 ms` checked). The
   remove-with-value primitive is a simpler close path and validates the
-  already-popped-key behavior, but it did not produce a measured speedup in the
-  current noisy local matrix.
+  already-popped-key behavior, but it did not produce a measured speedup. The
+  lexicographic API is a functionality step toward Q1-style ordering, not a
+  speed claim.
 - The result is still useful because it validates the general pattern that
   bucket-lifetime records can be ordinary Scala objects, stored in checked
   region-backed ranking state, sampled during the stream, and automatically

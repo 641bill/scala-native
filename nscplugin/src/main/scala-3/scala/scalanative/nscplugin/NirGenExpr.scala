@@ -231,6 +231,10 @@ trait NirGenExpr(using Context) {
           value.srcPos
         )
 
+    private def riftCheckedContainerValueArg(args: List[Tree]): Tree =
+      if args.length >= 7 then args(args.length - 5)
+      else args(args.length - 2)
+
     private def calledSymbol(tree: Tree): Symbol =
       tree match {
         case Apply(fun, _)     => calledSymbol(fun)
@@ -335,7 +339,7 @@ trait NirGenExpr(using Context) {
             args
           )
         case _ if isRiftRegionIndexedPriorityQueuePut(app) =>
-          checkRiftObjectBufferAppend(args(args.length - 2))
+          checkRiftObjectBufferAppend(riftCheckedContainerValueArg(args))
           genApplyMethod(
             sym,
             statically = sym.isClassConstructor,
@@ -343,7 +347,7 @@ trait NirGenExpr(using Context) {
             args
           )
         case _ if isRiftStreamWindowIndexedRankPut(app) =>
-          checkRiftObjectBufferAppend(args(args.length - 2))
+          checkRiftObjectBufferAppend(riftCheckedContainerValueArg(args))
           genApplyMethod(
             sym,
             statically = sym.isClassConstructor,

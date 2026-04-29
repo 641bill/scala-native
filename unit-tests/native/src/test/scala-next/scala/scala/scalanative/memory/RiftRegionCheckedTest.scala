@@ -543,6 +543,81 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def streamWindowIndexedRankSupportsLexicographicPriorities(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Row(val value: Int)
+
+        val rank =
+          RiftRegion.streamWindowIndexedRankLexicographic[Row](10, 8, 1)
+        val bucket = RiftRegion.streamWindowBucketFor(stream, rank, 7L)
+        val child = RiftRegion.streamBucketRegion(stream, bucket)
+        val oldest: Row^{stream} =
+          RiftRegion.alloc(new Row(10))(using child)
+        val newer: Row^{stream} =
+          RiftRegion.alloc(new Row(20))(using child)
+        val lowerKey: Row^{stream} =
+          RiftRegion.alloc(new Row(30))(using child)
+
+        RiftRegion.putWindowRankInBucket(
+          stream,
+          rank,
+          bucket,
+          4,
+          oldest,
+          5L,
+          100L,
+          10L,
+          -4L
+        )
+        RiftRegion.putWindowRankInBucket(
+          stream,
+          rank,
+          bucket,
+          6,
+          newer,
+          5L,
+          110L,
+          20L,
+          -6L
+        )
+        RiftRegion.putWindowRankInBucket(
+          stream,
+          rank,
+          bucket,
+          2,
+          lowerKey,
+          5L,
+          110L,
+          20L,
+          -2L
+        )
+
+        assertEquals(2, RiftRegion.peekWindowRankKey(stream, rank))
+        assertEquals(30, RiftRegion.peekWindowRank(stream, rank).value)
+
+        assertTrue(
+          RiftRegion.updateWindowRankPriority(
+            stream,
+            rank,
+            4,
+            6L,
+            1L,
+            1L,
+            -4L
+          )
+        )
+        assertEquals(4, RiftRegion.peekWindowRankKey(stream, rank))
+        RiftRegion.popWindowRank(stream, rank).value
+      }
+
+      assertEquals(10, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def streamWindowIndexedRankMovesKeyBetweenBuckets(): Unit = {
     RiftRegion.init(1)
     try {
