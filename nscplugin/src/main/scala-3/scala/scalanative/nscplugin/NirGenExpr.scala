@@ -147,7 +147,9 @@ trait NirGenExpr(using Context) {
           name == "regionLongIndexedPriorityQueue" ||
           name == "regionLongIndexedPriorityQueueLexicographic" ||
           name == "streamWindowIndexedRank" ||
-          name == "streamWindowIndexedRankLexicographic"
+          name == "streamWindowIndexedRankLexicographic" ||
+          name == "streamWindowLongIndexedRank" ||
+          name == "streamWindowLongIndexedRankLexicographic"
       ) &&
         isRiftRegionCompanionOwner(sym)
     }

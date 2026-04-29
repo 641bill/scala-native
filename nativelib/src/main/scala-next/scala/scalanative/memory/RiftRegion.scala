@@ -139,11 +139,12 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    *  must be unlinked or consumed before the bucket is closed.
    */
   final class StreamBucket private[memory] (
-      private[memory] val child: ChildBucket^,
-      val startSeconds: Long
+    private[memory] val child: ChildBucket^,
+    val startSeconds: Long
   ) {
     private[memory] var next: StreamBucket = null
     private[memory] var ownedRankKeyHeadPlusOne: Int = 0
+    private[memory] var ownedLongRankSlotHeadPlusOne: Int = 0
 
     def isOpen: Boolean =
       child.isOpen
@@ -260,6 +261,222 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     private def checkOwnedKey(key: Int): Unit =
       if (key < 0 || key >= ownerPresentByKey.length)
         throw new IndexOutOfBoundsException(key.toString)
+  }
+
+  /** Long-key indexed rank storage tied to stream-window child buckets.
+   *
+   *  This is the hash-keyed sibling of `StreamWindowIndexedRank`. It keeps the
+   *  rank queue and bucket-owner table in region-owned arrays so stream
+   *  operators can use meaningful packed `Long` keys without adding a dense
+   *  remapping layer. Bucket close unlinks parent-visible rank references
+   *  before the child region is closed.
+   */
+  final class StreamWindowLongIndexedRank[T <: Object] private[memory] (
+      private[memory] val buckets: StreamBucketArena,
+      private[memory] val queue: RegionLongIndexedPriorityQueue[T],
+      private var ownerKeys: Array[Long],
+      private var ownerStates: Array[Byte],
+      private var ownerStartBySlot: Array[Long],
+      private var nextOwnedSlotPlusOneBySlot: Array[Int],
+      private var previousOwnedSlotPlusOneBySlot: Array[Int]
+  ) {
+    private final val Empty: Byte = 0
+    private final val Used: Byte = 1
+    private final val Deleted: Byte = 2
+
+    private var ownerActive = 0
+    private var ownerUsed = 0
+
+    private[memory] def linkOwnedKey(
+        owner: RiftRegion^,
+        key: Long,
+        bucket: StreamBucket
+    ): Unit = {
+      val existing = findExistingOwnerSlot(key)
+      if (existing >= 0) {
+        unlinkOwnerSlotFromBucket(existing)
+        ownerStartBySlot(existing) = bucket.startSeconds
+        linkOwnerSlotToBucket(existing, bucket)
+      } else {
+        ensureOwnerCapacity(owner)
+        val slot = findInsertOwnerSlot(key)
+        insertOwnerSlot(slot, key)
+        ownerStartBySlot(slot) = bucket.startSeconds
+        linkOwnerSlotToBucket(slot, bucket)
+      }
+    }
+
+    private[memory] def unlinkOwnedKey(key: Long): Unit = {
+      val slot = findExistingOwnerSlot(key)
+      if (slot >= 0) {
+        unlinkOwnerSlotFromBucket(slot)
+        markOwnerSlotDeleted(slot)
+      }
+    }
+
+    private[memory] def removeOwnedKeysForBucket(
+        bucket: StreamBucket
+    ): Unit =
+      removeOwnedKeysForBucket(bucket, null)
+
+    private[memory] def removeOwnedKeysForBucket(
+        bucket: StreamBucket,
+        cleanup: (Long, Object) => Unit
+    ): Unit = {
+      var current = bucket.ownedLongRankSlotHeadPlusOne
+      bucket.ownedLongRankSlotHeadPlusOne = 0
+      while (current != 0) {
+        val slot = current - 1
+        val next = nextOwnedSlotPlusOneBySlot(slot)
+        if (
+          ownerStates(slot) == Used &&
+          ownerStartBySlot(slot) == bucket.startSeconds
+        ) {
+          val key = ownerKeys(slot)
+          val value = queue.removeWithValueTrusted(key)
+          markOwnerSlotDeleted(slot)
+          if (value != null && cleanup != null) cleanup(key, value)
+        }
+        nextOwnedSlotPlusOneBySlot(slot) = 0
+        previousOwnedSlotPlusOneBySlot(slot) = 0
+        current = next
+      }
+    }
+
+    private def ensureOwnerCapacity(owner: RiftRegion^): Unit =
+      if ((ownerUsed + 1) * 4 >= ownerKeys.length * 3) {
+        val compactOnly = ownerActive * 2 < ownerUsed
+        val nextCapacity =
+          if (compactOnly) ownerKeys.length else ownerKeys.length << 1
+        rehashOwnerTable(owner, nextCapacity)
+      }
+
+    private def rehashOwnerTable(
+        owner: RiftRegion^,
+        nextCapacity: Int
+    ): Unit = {
+      val oldKeys = ownerKeys
+      val oldStates = ownerStates
+      val oldStartBySlot = ownerStartBySlot
+
+      ownerKeys = owner.alloc(new Array[Long](nextCapacity))
+      ownerStates = owner.alloc(new Array[Byte](nextCapacity))
+      ownerStartBySlot = owner.alloc(new Array[Long](nextCapacity))
+      nextOwnedSlotPlusOneBySlot = owner.alloc(new Array[Int](nextCapacity))
+      previousOwnedSlotPlusOneBySlot =
+        owner.alloc(new Array[Int](nextCapacity))
+      ownerActive = 0
+      ownerUsed = 0
+
+      var bucket = buckets.first
+      while (bucket != null) {
+        bucket.ownedLongRankSlotHeadPlusOne = 0
+        bucket = bucket.next
+      }
+
+      var index = 0
+      while (index < oldKeys.length) {
+        if (oldStates(index) == Used) {
+          val key = oldKeys(index)
+          val slot = findInsertOwnerSlot(key)
+          insertOwnerSlot(slot, key)
+          ownerStartBySlot(slot) = oldStartBySlot(index)
+          val ownerBucket = findBucket(ownerStartBySlot(slot))
+          if (ownerBucket != null) linkOwnerSlotToBucket(slot, ownerBucket)
+        }
+        index += 1
+      }
+    }
+
+    private def linkOwnerSlotToBucket(
+        slot: Int,
+        bucket: StreamBucket
+    ): Unit = {
+      val slotPlusOne = slot + 1
+      val oldHead = bucket.ownedLongRankSlotHeadPlusOne
+      nextOwnedSlotPlusOneBySlot(slot) = oldHead
+      previousOwnedSlotPlusOneBySlot(slot) = 0
+      if (oldHead != 0)
+        previousOwnedSlotPlusOneBySlot(oldHead - 1) = slotPlusOne
+      bucket.ownedLongRankSlotHeadPlusOne = slotPlusOne
+    }
+
+    private def unlinkOwnerSlotFromBucket(slot: Int): Unit = {
+      val bucket = findBucket(ownerStartBySlot(slot))
+      if (bucket != null) {
+        val previous = previousOwnedSlotPlusOneBySlot(slot)
+        val next = nextOwnedSlotPlusOneBySlot(slot)
+        if (previous == 0) bucket.ownedLongRankSlotHeadPlusOne = next
+        else nextOwnedSlotPlusOneBySlot(previous - 1) = next
+        if (next != 0) previousOwnedSlotPlusOneBySlot(next - 1) = previous
+      }
+      nextOwnedSlotPlusOneBySlot(slot) = 0
+      previousOwnedSlotPlusOneBySlot(slot) = 0
+    }
+
+    private def markOwnerSlotDeleted(slot: Int): Unit = {
+      ownerStates(slot) = Deleted
+      ownerStartBySlot(slot) = 0L
+      nextOwnedSlotPlusOneBySlot(slot) = 0
+      previousOwnedSlotPlusOneBySlot(slot) = 0
+      ownerActive -= 1
+    }
+
+    private def findBucket(startSeconds: Long): StreamBucket = {
+      var bucket = buckets.first
+      while (bucket != null && bucket.startSeconds != startSeconds)
+        bucket = bucket.next
+      bucket
+    }
+
+    private def findExistingOwnerSlot(key: Long): Int = {
+      val mask = ownerKeys.length - 1
+      var slot = hashKey(key) & mask
+      var probes = 0
+      while (probes < ownerKeys.length) {
+        val state = ownerStates(slot)
+        if (state == Empty) return -1
+        if (state == Used && ownerKeys(slot) == key) return slot
+        slot = (slot + 1) & mask
+        probes += 1
+      }
+      -1
+    }
+
+    private def findInsertOwnerSlot(key: Long): Int = {
+      val mask = ownerKeys.length - 1
+      var slot = hashKey(key) & mask
+      var firstDeleted = -1
+      var probes = 0
+      while (probes < ownerKeys.length) {
+        val state = ownerStates(slot)
+        if (state == Empty)
+          return if (firstDeleted >= 0) firstDeleted else slot
+        if (state == Deleted && firstDeleted < 0) firstDeleted = slot
+        if (state == Used && ownerKeys(slot) == key) return slot
+        slot = (slot + 1) & mask
+        probes += 1
+      }
+      if (firstDeleted >= 0) firstDeleted
+      else throw new IllegalStateException("Rift long rank owner table is full")
+    }
+
+    private def insertOwnerSlot(slot: Int, key: Long): Unit = {
+      if (ownerStates(slot) == Empty) ownerUsed += 1
+      if (ownerStates(slot) != Used) ownerActive += 1
+      ownerStates(slot) = Used
+      ownerKeys(slot) = key
+    }
+
+    private def hashKey(key: Long): Int = {
+      var x = key
+      x ^= x >>> 33
+      x *= 0xff51afd7ed558ccdL
+      x ^= x >>> 33
+      x *= 0xc4ceb9fe1a85ec53L
+      x ^= x >>> 33
+      x.toInt
+    }
   }
 
   /** A heap object explicitly retained by a live Rift region.
@@ -951,6 +1168,17 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       else {
         removeAt(heapIndexPlusOneBySlot(slot) - 1)
         true
+      }
+    }
+
+    private[memory] inline def removeWithValueTrusted(key: Long): Object = {
+      val slot = findExistingSlot(key)
+      if (slot < 0) null
+      else {
+        val index = heapIndexPlusOneBySlot(slot) - 1
+        val result = items(index)
+        removeAt(index)
+        result
       }
     }
 
@@ -2072,6 +2300,71 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     ).asInstanceOf[StreamWindowIndexedRank[T]^{parent}]
   }
 
+  /** Allocates a checked stream-window rank for arbitrary long keys. */
+  def streamWindowLongIndexedRank[T <: Object](
+      bucketSeconds: Long,
+      initialCapacity: Int = 4,
+      initialTableCapacity: Int = 16
+  )(using parent: StreamingRegion^): StreamWindowLongIndexedRank[T]^{parent} = {
+    val buckets = streamBucketArena(bucketSeconds)
+    val queue =
+      regionLongIndexedPriorityQueue[T](initialCapacity, initialTableCapacity)
+    val tableCapacity =
+      longIndexedTableCapacity(
+        if (initialCapacity <= 0) 1 else initialCapacity,
+        initialTableCapacity
+      )
+    val ownerKeys = alloc(new Array[Long](tableCapacity))
+    val ownerStates = alloc(new Array[Byte](tableCapacity))
+    val ownerStartBySlot = alloc(new Array[Long](tableCapacity))
+    val nextOwnedSlotPlusOneBySlot = alloc(new Array[Int](tableCapacity))
+    val previousOwnedSlotPlusOneBySlot = alloc(new Array[Int](tableCapacity))
+    new StreamWindowLongIndexedRank[T](
+      buckets.asInstanceOf[StreamBucketArena],
+      queue.asInstanceOf[RegionLongIndexedPriorityQueue[T]],
+      ownerKeys,
+      ownerStates,
+      ownerStartBySlot,
+      nextOwnedSlotPlusOneBySlot,
+      previousOwnedSlotPlusOneBySlot
+    ).asInstanceOf[StreamWindowLongIndexedRank[T]^{parent}]
+  }
+
+  /** Allocates a checked long-key stream-window rank with four lexicographic
+   *  priority components.
+   */
+  def streamWindowLongIndexedRankLexicographic[T <: Object](
+      bucketSeconds: Long,
+      initialCapacity: Int = 4,
+      initialTableCapacity: Int = 16
+  )(using parent: StreamingRegion^): StreamWindowLongIndexedRank[T]^{parent} = {
+    val buckets = streamBucketArena(bucketSeconds)
+    val queue =
+      regionLongIndexedPriorityQueueLexicographic[T](
+        initialCapacity,
+        initialTableCapacity
+      )
+    val tableCapacity =
+      longIndexedTableCapacity(
+        if (initialCapacity <= 0) 1 else initialCapacity,
+        initialTableCapacity
+      )
+    val ownerKeys = alloc(new Array[Long](tableCapacity))
+    val ownerStates = alloc(new Array[Byte](tableCapacity))
+    val ownerStartBySlot = alloc(new Array[Long](tableCapacity))
+    val nextOwnedSlotPlusOneBySlot = alloc(new Array[Int](tableCapacity))
+    val previousOwnedSlotPlusOneBySlot = alloc(new Array[Int](tableCapacity))
+    new StreamWindowLongIndexedRank[T](
+      buckets.asInstanceOf[StreamBucketArena],
+      queue.asInstanceOf[RegionLongIndexedPriorityQueue[T]],
+      ownerKeys,
+      ownerStates,
+      ownerStartBySlot,
+      nextOwnedSlotPlusOneBySlot,
+      previousOwnedSlotPlusOneBySlot
+    ).asInstanceOf[StreamWindowLongIndexedRank[T]^{parent}]
+  }
+
   /** Appends `value` to a checked object buffer owned by `owner`. */
   def append[T <: Object](
       owner: RiftRegion^,
@@ -2735,6 +3028,309 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       rank: StreamWindowIndexedRank[T]^{parent}
   )(
       cleanupEntry: (StreamBucket^{parent}, Int, T^{parent}) => Unit
+  )(cleanupBucket: StreamBucket^{parent} => Unit): Unit =
+    closeAllStreamBuckets(
+      parent,
+      rank.buckets.asInstanceOf[StreamBucketArena^{parent}]
+    ) { bucket =>
+      rank.removeOwnedKeysForBucket(bucket.asInstanceOf[StreamBucket], {
+        (key, value) =>
+          cleanupEntry(bucket, key, value.asInstanceOf[T^{parent}])
+      })
+      cleanupBucket(bucket)
+    }
+
+  /** Finds or opens the long-key window-rank bucket containing timestamp. */
+  def streamWindowBucketFor[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent},
+      timestampSeconds: Long
+  ): StreamBucket^{parent} =
+    streamWindowBucketFor(parent, rank, timestampSeconds)(_ => ())
+
+  /** Finds or opens the long-key window-rank bucket containing timestamp. */
+  def streamWindowBucketFor[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent},
+      timestampSeconds: Long
+  )(onOpen: StreamBucket^{parent} => Unit): StreamBucket^{parent} =
+    streamBucketFor(
+      parent,
+      rank.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      timestampSeconds
+    )(onOpen)
+
+  /** Inserts or replaces a long-key ranked value for `key`. */
+  def putWindowRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent},
+      key: Long,
+      value: T^{parent},
+      priority: Long
+  ): Unit =
+    rank.queue
+      .asInstanceOf[RegionLongIndexedPriorityQueue[T]^{parent}]
+      .putTrusted(parent, key, value.asInstanceOf[Object], priority)
+
+  /** Inserts or replaces a long-key ranked value using lexicographic
+   *  priorities.
+   */
+  def putWindowRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent},
+      key: Long,
+      value: T^{parent},
+      priority1: Long,
+      priority2: Long,
+      priority3: Long,
+      priority4: Long
+  ): Unit =
+    rank.queue
+      .asInstanceOf[RegionLongIndexedPriorityQueue[T]^{parent}]
+      .putTrusted(
+        parent,
+        key,
+        value.asInstanceOf[Object],
+        priority1,
+        priority2,
+        priority3,
+        priority4
+      )
+
+  /** Inserts or replaces a long-key ranked value owned by `bucket`. */
+  def putWindowRankInBucket[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent},
+      bucket: StreamBucket^{parent},
+      key: Long,
+      value: T^{parent},
+      priority: Long
+  ): Unit = {
+    bucket.child.checkOpen()
+    rank.queue
+      .asInstanceOf[RegionLongIndexedPriorityQueue[T]^{parent}]
+      .putTrusted(parent, key, value.asInstanceOf[Object], priority)
+    rank.linkOwnedKey(parent, key, bucket.asInstanceOf[StreamBucket])
+  }
+
+  /** Inserts or replaces a long-key ranked value owned by `bucket` using
+   *  lexicographic priorities.
+   */
+  def putWindowRankInBucket[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent},
+      bucket: StreamBucket^{parent},
+      key: Long,
+      value: T^{parent},
+      priority1: Long,
+      priority2: Long,
+      priority3: Long,
+      priority4: Long
+  ): Unit = {
+    bucket.child.checkOpen()
+    rank.queue
+      .asInstanceOf[RegionLongIndexedPriorityQueue[T]^{parent}]
+      .putTrusted(
+        parent,
+        key,
+        value.asInstanceOf[Object],
+        priority1,
+        priority2,
+        priority3,
+        priority4
+      )
+    rank.linkOwnedKey(parent, key, bucket.asInstanceOf[StreamBucket])
+  }
+
+  /** Updates a long-key rank priority if the key is present. */
+  def updateWindowRankPriority[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent},
+      key: Long,
+      priority: Long
+  ): Boolean =
+    updatePriority(
+      parent,
+      rank.queue.asInstanceOf[RegionLongIndexedPriorityQueue[T]^{parent}],
+      key,
+      priority
+    )
+
+  /** Updates a long-key lexicographic rank priority if the key is present. */
+  def updateWindowRankPriority[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent},
+      key: Long,
+      priority1: Long,
+      priority2: Long,
+      priority3: Long,
+      priority4: Long
+  ): Boolean =
+    updatePriority(
+      parent,
+      rank.queue.asInstanceOf[RegionLongIndexedPriorityQueue[T]^{parent}],
+      key,
+      priority1,
+      priority2,
+      priority3,
+      priority4
+    )
+
+  /** Removes a long key if it is present. */
+  def removeWindowRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent},
+      key: Long
+  ): Boolean = {
+    val removed = remove(
+      parent,
+      rank.queue.asInstanceOf[RegionLongIndexedPriorityQueue[T]^{parent}],
+      key
+    )
+    if (removed) rank.unlinkOwnedKey(key)
+    removed
+  }
+
+  /** Returns true when a long key is present. */
+  def containsWindowRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent},
+      key: Long
+  ): Boolean =
+    contains(
+      parent,
+      rank.queue.asInstanceOf[RegionLongIndexedPriorityQueue[T]^{parent}],
+      key
+    )
+
+  /** Reads the ranked value for a long key. */
+  def getWindowRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent},
+      key: Long
+  ): T^{parent} =
+    get(
+      parent,
+      rank.queue.asInstanceOf[RegionLongIndexedPriorityQueue[T]^{parent}],
+      key
+    )
+
+  /** Reads the highest-priority long-key ranked value without removing it. */
+  def peekWindowRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent}
+  ): T^{parent} =
+    peek(
+      parent,
+      rank.queue.asInstanceOf[RegionLongIndexedPriorityQueue[T]^{parent}]
+    )
+
+  /** Reads the long key of the highest-priority ranked value. */
+  def peekWindowRankKey[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent}
+  ): Long =
+    peekKey(
+      parent,
+      rank.queue.asInstanceOf[RegionLongIndexedPriorityQueue[T]^{parent}]
+    )
+
+  /** Reads the highest priority without removing the ranked value. */
+  def peekWindowRankPriority[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent}
+  ): Long =
+    peekPriority(
+      parent,
+      rank.queue.asInstanceOf[RegionLongIndexedPriorityQueue[T]^{parent}]
+    )
+
+  /** Removes and returns the highest-priority long-key ranked value. */
+  def popWindowRank[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent}
+  ): T^{parent} =
+    pop(
+      parent,
+      rank.queue.asInstanceOf[RegionLongIndexedPriorityQueue[T]^{parent}]
+    )
+
+  /** Returns the number of long-key ranked values. */
+  def windowRankLength[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent}
+  ): Int =
+    length(
+      parent,
+      rank.queue.asInstanceOf[RegionLongIndexedPriorityQueue[T]^{parent}]
+    )
+
+  /** Returns true if closing before `cutoffSeconds` would close a bucket. */
+  def hasWindowRankBucketsBefore[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent},
+      cutoffSeconds: Long
+  ): Boolean =
+    hasStreamBucketsBefore(
+      parent,
+      rank.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      cutoffSeconds
+    )
+
+  /** Closes long-key window-rank buckets fully before `cutoffSeconds`. */
+  def closeWindowRankBucketsBefore[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent},
+      cutoffSeconds: Long
+  )(cleanup: StreamBucket^{parent} => Unit): Unit =
+    closeStreamBucketsBefore(
+      parent,
+      rank.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      cutoffSeconds
+    ) { bucket =>
+      rank.removeOwnedKeysForBucket(bucket.asInstanceOf[StreamBucket])
+      cleanup(bucket)
+    }
+
+  /** Closes long-key window-rank buckets and reports removed entries. */
+  def closeWindowRankBucketsBeforeWithEntries[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent},
+      cutoffSeconds: Long
+  )(
+      cleanupEntry: (StreamBucket^{parent}, Long, T^{parent}) => Unit
+  )(cleanupBucket: StreamBucket^{parent} => Unit): Unit =
+    closeStreamBucketsBefore(
+      parent,
+      rank.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      cutoffSeconds
+    ) { bucket =>
+      rank.removeOwnedKeysForBucket(bucket.asInstanceOf[StreamBucket], {
+        (key, value) =>
+          cleanupEntry(bucket, key, value.asInstanceOf[T^{parent}])
+      })
+      cleanupBucket(bucket)
+    }
+
+  /** Closes every long-key window-rank bucket. */
+  def closeAllWindowRankBuckets[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent}
+  )(cleanup: StreamBucket^{parent} => Unit): Unit =
+    closeAllStreamBuckets(
+      parent,
+      rank.buckets.asInstanceOf[StreamBucketArena^{parent}]
+    ) { bucket =>
+      rank.removeOwnedKeysForBucket(bucket.asInstanceOf[StreamBucket])
+      cleanup(bucket)
+    }
+
+  /** Closes every long-key window-rank bucket and reports removed entries. */
+  def closeAllWindowRankBucketsWithEntries[T <: Object](
+      parent: StreamingRegion^,
+      rank: StreamWindowLongIndexedRank[T]^{parent}
+  )(
+      cleanupEntry: (StreamBucket^{parent}, Long, T^{parent}) => Unit
   )(cleanupBucket: StreamBucket^{parent} => Unit): Unit =
     closeAllStreamBuckets(
       parent,
