@@ -824,6 +824,442 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
   }
 
+  /** Long-key indexed max-priority queue backed by region-owned arrays.
+   *
+   *  This is the hash-keyed counterpart to `RegionIndexedPriorityQueue`: it
+   *  keeps the ranked values in a binary heap and maps arbitrary `Long` keys to
+   *  heap positions through an open-addressed region-owned table.
+   */
+  final class RegionLongIndexedPriorityQueue[T <: Object] private[memory] (
+      private var items: Array[Object],
+      private var priorities: Array[Long],
+      private var priority2s: Array[Long],
+      private var priority3s: Array[Long],
+      private var priority4s: Array[Long],
+      private var heapKeys: Array[Long],
+      private var tableKeys: Array[Long],
+      private var tableStates: Array[Byte],
+      private var heapIndexPlusOneBySlot: Array[Int]
+  ) {
+    private final val Empty: Byte = 0
+    private final val Used: Byte = 1
+    private final val Deleted: Byte = 2
+
+    private var used = 0
+    private var tableActive = 0
+    private var tableUsed = 0
+
+    def length: Int = used
+
+    def capacity: Int = items.length
+
+    def tableCapacity: Int = tableKeys.length
+
+    private[memory] def putTrusted(
+        owner: RiftRegion^,
+        key: Long,
+        value: Object,
+        priority: Long
+    ): Unit = {
+      val slot = findExistingSlot(key)
+      if (slot >= 0) {
+        val index = heapIndexPlusOneBySlot(slot) - 1
+        items(index) = value
+        setPriority(index, priority)
+        fixAt(index)
+      } else {
+        ensureTableCapacity(owner)
+        val insertSlot = findInsertSlot(key)
+        insertTableSlot(insertSlot, key)
+        if (used >= items.length) growHeapTrusted(owner)
+        val index = used
+        used += 1
+        items(index) = value
+        setPriority(index, priority)
+        heapKeys(index) = key
+        heapIndexPlusOneBySlot(insertSlot) = index + 1
+        siftUp(index)
+      }
+    }
+
+    private[memory] def putTrusted(
+        owner: RiftRegion^,
+        key: Long,
+        value: Object,
+        priority1: Long,
+        priority2: Long,
+        priority3: Long,
+        priority4: Long
+    ): Unit = {
+      checkLexicographicPriorities()
+      val slot = findExistingSlot(key)
+      if (slot >= 0) {
+        val index = heapIndexPlusOneBySlot(slot) - 1
+        items(index) = value
+        setPriorities(index, priority1, priority2, priority3, priority4)
+        fixAt(index)
+      } else {
+        ensureTableCapacity(owner)
+        val insertSlot = findInsertSlot(key)
+        insertTableSlot(insertSlot, key)
+        if (used >= items.length) growHeapTrusted(owner)
+        val index = used
+        used += 1
+        items(index) = value
+        setPriorities(index, priority1, priority2, priority3, priority4)
+        heapKeys(index) = key
+        heapIndexPlusOneBySlot(insertSlot) = index + 1
+        siftUp(index)
+      }
+    }
+
+    private[memory] def updatePriorityTrusted(
+        key: Long,
+        priority: Long
+    ): Boolean = {
+      val slot = findExistingSlot(key)
+      if (slot < 0) false
+      else {
+        val index = heapIndexPlusOneBySlot(slot) - 1
+        setPriority(index, priority)
+        fixAt(index)
+        true
+      }
+    }
+
+    private[memory] def updatePriorityTrusted(
+        key: Long,
+        priority1: Long,
+        priority2: Long,
+        priority3: Long,
+        priority4: Long
+    ): Boolean = {
+      checkLexicographicPriorities()
+      val slot = findExistingSlot(key)
+      if (slot < 0) false
+      else {
+        val index = heapIndexPlusOneBySlot(slot) - 1
+        setPriorities(index, priority1, priority2, priority3, priority4)
+        fixAt(index)
+        true
+      }
+    }
+
+    private[memory] def removeTrusted(key: Long): Boolean = {
+      val slot = findExistingSlot(key)
+      if (slot < 0) false
+      else {
+        removeAt(heapIndexPlusOneBySlot(slot) - 1)
+        true
+      }
+    }
+
+    private[memory] def containsTrusted(key: Long): Boolean =
+      findExistingSlot(key) >= 0
+
+    private[memory] def getTrusted(key: Long): Object = {
+      val slot = findExistingSlot(key)
+      if (slot < 0)
+        throw new NoSuchElementException(
+          "Rift RegionLongIndexedPriorityQueue key is absent"
+        )
+      items(heapIndexPlusOneBySlot(slot) - 1)
+    }
+
+    private[memory] def peekTrusted(): Object = {
+      if (used == 0)
+        throw new NoSuchElementException(
+          "Rift RegionLongIndexedPriorityQueue is empty"
+        )
+      items(0)
+    }
+
+    private[memory] def peekKeyTrusted(): Long = {
+      if (used == 0)
+        throw new NoSuchElementException(
+          "Rift RegionLongIndexedPriorityQueue is empty"
+        )
+      heapKeys(0)
+    }
+
+    private[memory] def peekPriorityTrusted(): Long = {
+      if (used == 0)
+        throw new NoSuchElementException(
+          "Rift RegionLongIndexedPriorityQueue is empty"
+        )
+      priorities(0)
+    }
+
+    private[memory] def popTrusted(): Object = {
+      if (used == 0)
+        throw new NoSuchElementException(
+          "Rift RegionLongIndexedPriorityQueue is empty"
+        )
+      val result = items(0)
+      removeAt(0)
+      result
+    }
+
+    private def ensureTableCapacity(owner: RiftRegion^): Unit =
+      if ((tableUsed + 1) * 4 >= tableKeys.length * 3) {
+        val compactOnly = tableActive * 2 < tableUsed
+        val nextCapacity =
+          if (compactOnly) tableKeys.length else tableKeys.length << 1
+        rehashTableTrusted(owner, nextCapacity)
+      }
+
+    private def growHeapTrusted(owner: RiftRegion^): Unit = {
+      val oldItems = items
+      val oldPriorities = priorities
+      val oldPriority2s = priority2s
+      val oldPriority3s = priority3s
+      val oldPriority4s = priority4s
+      val oldHeapKeys = heapKeys
+      val nextCapacity =
+        if (oldItems.length == 0) 1 else oldItems.length * 2
+      val nextItems =
+        owner.alloc(new Array[Object](nextCapacity)).asInstanceOf[Array[Object]]
+      val nextPriorities = owner.alloc(new Array[Long](nextCapacity))
+      val nextPriority2s =
+        if (oldPriority2s == null) null
+        else owner.alloc(new Array[Long](nextCapacity))
+      val nextPriority3s =
+        if (oldPriority3s == null) null
+        else owner.alloc(new Array[Long](nextCapacity))
+      val nextPriority4s =
+        if (oldPriority4s == null) null
+        else owner.alloc(new Array[Long](nextCapacity))
+      val nextHeapKeys = owner.alloc(new Array[Long](nextCapacity))
+
+      var i = 0
+      while (i < used) {
+        nextItems(i) = oldItems(i)
+        nextPriorities(i) = oldPriorities(i)
+        if (nextPriority2s != null) nextPriority2s(i) = oldPriority2s(i)
+        if (nextPriority3s != null) nextPriority3s(i) = oldPriority3s(i)
+        if (nextPriority4s != null) nextPriority4s(i) = oldPriority4s(i)
+        nextHeapKeys(i) = oldHeapKeys(i)
+        i += 1
+      }
+      items = nextItems
+      priorities = nextPriorities
+      priority2s = nextPriority2s
+      priority3s = nextPriority3s
+      priority4s = nextPriority4s
+      heapKeys = nextHeapKeys
+    }
+
+    private def rehashTableTrusted(
+        owner: RiftRegion^,
+        nextCapacity: Int
+    ): Unit = {
+      val nextKeys = owner.alloc(new Array[Long](nextCapacity))
+      val nextStates = owner.alloc(new Array[Byte](nextCapacity))
+      val nextIndexes = owner.alloc(new Array[Int](nextCapacity))
+      tableKeys = nextKeys
+      tableStates = nextStates
+      heapIndexPlusOneBySlot = nextIndexes
+      tableActive = 0
+      tableUsed = 0
+
+      var index = 0
+      while (index < used) {
+        val slot = findInsertSlot(heapKeys(index))
+        insertTableSlot(slot, heapKeys(index))
+        heapIndexPlusOneBySlot(slot) = index + 1
+        index += 1
+      }
+    }
+
+    private def removeAt(index: Int): Unit = {
+      val removedKey = heapKeys(index)
+      removeTableKey(removedKey)
+      val last = used - 1
+      used = last
+      if (index != last) {
+        items(index) = items(last)
+        copyPriorities(index, last)
+        heapKeys(index) = heapKeys(last)
+        updateTableHeapIndex(heapKeys(index), index)
+        items(last) = null
+        clearPriorities(last)
+        heapKeys(last) = 0L
+        fixAt(index)
+      } else {
+        items(index) = null
+        clearPriorities(index)
+        heapKeys(index) = 0L
+      }
+    }
+
+    private def fixAt(index: Int): Unit = {
+      val beforeKey = heapKeys(index)
+      siftUp(index)
+      val slot = findExistingSlot(beforeKey)
+      if (slot >= 0) siftDown(heapIndexPlusOneBySlot(slot) - 1)
+    }
+
+    private def siftUp(start: Int): Unit = {
+      var child = start
+      while (child > 0) {
+        val parent = (child - 1) >>> 1
+        if (!better(child, parent)) return
+        swap(parent, child)
+        child = parent
+      }
+    }
+
+    private def siftDown(start: Int): Unit = {
+      var parent = start
+      while (true) {
+        val left = (parent << 1) + 1
+        if (left >= used) return
+        val right = left + 1
+        var best = left
+        if (right < used && better(right, left))
+          best = right
+        if (!better(best, parent)) return
+        swap(parent, best)
+        parent = best
+      }
+    }
+
+    private def better(left: Int, right: Int): Boolean =
+      if (priorities(left) != priorities(right))
+        priorities(left) > priorities(right)
+      else if (priority2s == null) false
+      else if (priority2s(left) != priority2s(right))
+        priority2s(left) > priority2s(right)
+      else if (priority3s(left) != priority3s(right))
+        priority3s(left) > priority3s(right)
+      else if (priority4s(left) != priority4s(right))
+        priority4s(left) > priority4s(right)
+      else false
+
+    private def swap(left: Int, right: Int): Unit = {
+      val leftItem = items(left)
+      val leftPriority = priorities(left)
+      val leftPriority2 = if (priority2s == null) 0L else priority2s(left)
+      val leftPriority3 = if (priority3s == null) 0L else priority3s(left)
+      val leftPriority4 = if (priority4s == null) 0L else priority4s(left)
+      val leftKey = heapKeys(left)
+      items(left) = items(right)
+      copyPriorities(left, right)
+      heapKeys(left) = heapKeys(right)
+      updateTableHeapIndex(heapKeys(left), left)
+      items(right) = leftItem
+      priorities(right) = leftPriority
+      if (priority2s != null) priority2s(right) = leftPriority2
+      if (priority3s != null) priority3s(right) = leftPriority3
+      if (priority4s != null) priority4s(right) = leftPriority4
+      heapKeys(right) = leftKey
+      updateTableHeapIndex(heapKeys(right), right)
+    }
+
+    private def findExistingSlot(key: Long): Int = {
+      val mask = tableKeys.length - 1
+      var slot = hashKey(key) & mask
+      var probes = 0
+      while (probes < tableKeys.length) {
+        val state = tableStates(slot)
+        if (state == Empty) return -1
+        if (state == Used && tableKeys(slot) == key) return slot
+        slot = (slot + 1) & mask
+        probes += 1
+      }
+      -1
+    }
+
+    private def findInsertSlot(key: Long): Int = {
+      val mask = tableKeys.length - 1
+      var slot = hashKey(key) & mask
+      var firstDeleted = -1
+      var probes = 0
+      while (probes < tableKeys.length) {
+        val state = tableStates(slot)
+        if (state == Empty)
+          return if (firstDeleted >= 0) firstDeleted else slot
+        if (state == Deleted && firstDeleted < 0) firstDeleted = slot
+        if (state == Used && tableKeys(slot) == key) return slot
+        slot = (slot + 1) & mask
+        probes += 1
+      }
+      if (firstDeleted >= 0) firstDeleted
+      else throw new IllegalStateException("Rift long indexed table is full")
+    }
+
+    private def insertTableSlot(slot: Int, key: Long): Unit = {
+      if (tableStates(slot) == Empty) tableUsed += 1
+      if (tableStates(slot) != Used) tableActive += 1
+      tableStates(slot) = Used
+      tableKeys(slot) = key
+    }
+
+    private def removeTableKey(key: Long): Unit = {
+      val slot = findExistingSlot(key)
+      if (slot >= 0) {
+        tableStates(slot) = Deleted
+        heapIndexPlusOneBySlot(slot) = 0
+        tableActive -= 1
+      }
+    }
+
+    private def updateTableHeapIndex(key: Long, index: Int): Unit = {
+      val slot = findExistingSlot(key)
+      if (slot >= 0) heapIndexPlusOneBySlot(slot) = index + 1
+    }
+
+    private def hashKey(key: Long): Int = {
+      var x = key
+      x ^= x >>> 33
+      x *= 0xff51afd7ed558ccdL
+      x ^= x >>> 33
+      x *= 0xc4ceb9fe1a85ec53L
+      x ^= x >>> 33
+      x.toInt
+    }
+
+    private def checkLexicographicPriorities(): Unit =
+      if (priority2s == null || priority3s == null || priority4s == null)
+        throw new IllegalStateException(
+          "Rift RegionLongIndexedPriorityQueue was not allocated for lexicographic priorities"
+        )
+
+    private def setPriority(index: Int, priority: Long): Unit = {
+      priorities(index) = priority
+      if (priority2s != null) priority2s(index) = 0L
+      if (priority3s != null) priority3s(index) = 0L
+      if (priority4s != null) priority4s(index) = 0L
+    }
+
+    private def setPriorities(
+        index: Int,
+        priority1: Long,
+        priority2: Long,
+        priority3: Long,
+        priority4: Long
+    ): Unit = {
+      priorities(index) = priority1
+      priority2s(index) = priority2
+      priority3s(index) = priority3
+      priority4s(index) = priority4
+    }
+
+    private def copyPriorities(to: Int, from: Int): Unit = {
+      priorities(to) = priorities(from)
+      if (priority2s != null) priority2s(to) = priority2s(from)
+      if (priority3s != null) priority3s(to) = priority3s(from)
+      if (priority4s != null) priority4s(to) = priority4s(from)
+    }
+
+    private def clearPriorities(index: Int): Unit = {
+      priorities(index) = 0L
+      if (priority2s != null) priority2s(index) = 0L
+      if (priority3s != null) priority3s(index) = 0L
+      if (priority4s != null) priority4s(index) = 0L
+    }
+  }
+
   /** Snapshot of the trusted runtime-epoch escape path.
    *
    *  This is the dynamic Yak-style side of Rift's comparison story, not the
@@ -1497,6 +1933,92 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
   }
 
+  private def longIndexedTableCapacity(
+      initialCapacity: Int,
+      initialTableCapacity: Int
+  ): Int = {
+    var requested = if (initialTableCapacity <= 0) 4 else initialTableCapacity
+    val heapBased =
+      if (initialCapacity > Int.MaxValue / 2) Int.MaxValue
+      else initialCapacity * 2
+    if (requested < heapBased) requested = heapBased
+    if (requested < 4) requested = 4
+    if (requested > (1 << 30))
+      throw new IllegalArgumentException("initialTableCapacity is too large")
+
+    var capacity = 4
+    while (capacity < requested) capacity <<= 1
+    capacity
+  }
+
+  /** Allocates a checked long-key indexed max-priority queue.
+   *
+   *  Use this when keys are already meaningful stream identifiers, such as a
+   *  packed route id, and forcing them through a dense side table would add
+   *  benchmark-specific plumbing.
+   */
+  def regionLongIndexedPriorityQueue[T <: Object](
+      initialCapacity: Int = 4,
+      initialTableCapacity: Int = 16
+  )(using region: RiftRegion^): RegionLongIndexedPriorityQueue[T]^{region} = {
+    val capacity = if (initialCapacity <= 0) 1 else initialCapacity
+    val tableCapacity =
+      longIndexedTableCapacity(capacity, initialTableCapacity)
+    val items: Array[Object] =
+      alloc(new Array[Object](capacity)).asInstanceOf[Array[Object]]
+    val priorities: Array[Long] = alloc(new Array[Long](capacity))
+    val heapKeys: Array[Long] = alloc(new Array[Long](capacity))
+    val tableKeys: Array[Long] = alloc(new Array[Long](tableCapacity))
+    val tableStates: Array[Byte] = alloc(new Array[Byte](tableCapacity))
+    val heapIndexPlusOneBySlot: Array[Int] =
+      alloc(new Array[Int](tableCapacity))
+    new RegionLongIndexedPriorityQueue[T](
+      items,
+      priorities,
+      null,
+      null,
+      null,
+      heapKeys,
+      tableKeys,
+      tableStates,
+      heapIndexPlusOneBySlot
+    )
+  }
+
+  /** Allocates a checked long-key indexed queue with four lexicographic
+   *  priority components. Larger components rank first at each level.
+   */
+  def regionLongIndexedPriorityQueueLexicographic[T <: Object](
+      initialCapacity: Int = 4,
+      initialTableCapacity: Int = 16
+  )(using region: RiftRegion^): RegionLongIndexedPriorityQueue[T]^{region} = {
+    val capacity = if (initialCapacity <= 0) 1 else initialCapacity
+    val tableCapacity =
+      longIndexedTableCapacity(capacity, initialTableCapacity)
+    val items: Array[Object] =
+      alloc(new Array[Object](capacity)).asInstanceOf[Array[Object]]
+    val priorities: Array[Long] = alloc(new Array[Long](capacity))
+    val priority2s: Array[Long] = alloc(new Array[Long](capacity))
+    val priority3s: Array[Long] = alloc(new Array[Long](capacity))
+    val priority4s: Array[Long] = alloc(new Array[Long](capacity))
+    val heapKeys: Array[Long] = alloc(new Array[Long](capacity))
+    val tableKeys: Array[Long] = alloc(new Array[Long](tableCapacity))
+    val tableStates: Array[Byte] = alloc(new Array[Byte](tableCapacity))
+    val heapIndexPlusOneBySlot: Array[Int] =
+      alloc(new Array[Int](tableCapacity))
+    new RegionLongIndexedPriorityQueue[T](
+      items,
+      priorities,
+      priority2s,
+      priority3s,
+      priority4s,
+      heapKeys,
+      tableKeys,
+      tableStates,
+      heapIndexPlusOneBySlot
+    )
+  }
+
   /** Allocates a checked stream-window indexed-rank collection.
    *
    *  The returned collection keeps parent-owned rank storage and a reusable
@@ -1779,6 +2301,139 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       queue: RegionIndexedPriorityQueue[T]^{owner}
   ): Int =
     queue.keyCapacity
+
+  /** Inserts or replaces `value` for a long key in an indexed queue. */
+  def put[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionLongIndexedPriorityQueue[T]^{owner},
+      key: Long,
+      value: T^{owner},
+      priority: Long
+  ): Unit =
+    queue.putTrusted(owner, key, value.asInstanceOf[Object], priority)
+
+  /** Inserts or replaces `value` with four lexicographic priority components.
+   *  Larger components rank first at each tie-break level.
+   */
+  def put[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionLongIndexedPriorityQueue[T]^{owner},
+      key: Long,
+      value: T^{owner},
+      priority1: Long,
+      priority2: Long,
+      priority3: Long,
+      priority4: Long
+  ): Unit =
+    queue.putTrusted(
+      owner,
+      key,
+      value.asInstanceOf[Object],
+      priority1,
+      priority2,
+      priority3,
+      priority4
+    )
+
+  /** Updates `key`'s priority if it is present. */
+  def updatePriority[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionLongIndexedPriorityQueue[T]^{owner},
+      key: Long,
+      priority: Long
+  ): Boolean =
+    queue.updatePriorityTrusted(key, priority)
+
+  /** Updates `key`'s lexicographic priority if it is present. */
+  def updatePriority[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionLongIndexedPriorityQueue[T]^{owner},
+      key: Long,
+      priority1: Long,
+      priority2: Long,
+      priority3: Long,
+      priority4: Long
+  ): Boolean =
+    queue.updatePriorityTrusted(
+      key,
+      priority1,
+      priority2,
+      priority3,
+      priority4
+    )
+
+  /** Removes `key` if it is present. */
+  def remove[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionLongIndexedPriorityQueue[T]^{owner},
+      key: Long
+  ): Boolean =
+    queue.removeTrusted(key)
+
+  /** Returns true when `key` is present. */
+  def contains[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionLongIndexedPriorityQueue[T]^{owner},
+      key: Long
+  ): Boolean =
+    queue.containsTrusted(key)
+
+  /** Reads the value for `key`. */
+  def get[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionLongIndexedPriorityQueue[T]^{owner},
+      key: Long
+  ): T^{owner} =
+    queue.getTrusted(key).asInstanceOf[T^{owner}]
+
+  /** Reads the highest-priority long-key indexed value without removing it. */
+  def peek[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionLongIndexedPriorityQueue[T]^{owner}
+  ): T^{owner} =
+    queue.peekTrusted().asInstanceOf[T^{owner}]
+
+  /** Reads the long key of the highest-priority indexed value. */
+  def peekKey[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionLongIndexedPriorityQueue[T]^{owner}
+  ): Long =
+    queue.peekKeyTrusted()
+
+  /** Reads the highest indexed priority without removing its value. */
+  def peekPriority[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionLongIndexedPriorityQueue[T]^{owner}
+  ): Long =
+    queue.peekPriorityTrusted()
+
+  /** Removes and returns the highest-priority indexed value. */
+  def pop[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionLongIndexedPriorityQueue[T]^{owner}
+  ): T^{owner} =
+    queue.popTrusted().asInstanceOf[T^{owner}]
+
+  /** Returns the number of elements in a long-key indexed priority queue. */
+  def length[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionLongIndexedPriorityQueue[T]^{owner}
+  ): Int =
+    queue.length
+
+  /** Returns the current heap backing capacity of a long-key indexed queue. */
+  def capacity[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionLongIndexedPriorityQueue[T]^{owner}
+  ): Int =
+    queue.capacity
+
+  /** Returns the hash-table capacity of a long-key indexed queue. */
+  def tableCapacity[T <: Object](
+      owner: RiftRegion^,
+      queue: RegionLongIndexedPriorityQueue[T]^{owner}
+  ): Int =
+    queue.tableCapacity
 
   /** Finds or opens the window-rank bucket containing `timestampSeconds`. */
   def streamWindowBucketFor[T <: Object](
@@ -2291,6 +2946,125 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
         queue: RegionIndexedPriorityQueue[T]^{owner}
     ): Int =
       RiftRegion.keyCapacity(owner, queue)
+
+    @targetName("putToRegionLongIndexedPriorityQueue")
+    def put[T <: Object](
+        queue: RegionLongIndexedPriorityQueue[T]^{owner},
+        key: Long,
+        value: T^{owner},
+        priority: Long
+    ): Unit =
+      queue.putTrusted(owner, key, value.asInstanceOf[Object], priority)
+
+    @targetName("putLexicographicToRegionLongIndexedPriorityQueue")
+    def put[T <: Object](
+        queue: RegionLongIndexedPriorityQueue[T]^{owner},
+        key: Long,
+        value: T^{owner},
+        priority1: Long,
+        priority2: Long,
+        priority3: Long,
+        priority4: Long
+    ): Unit =
+      queue.putTrusted(
+        owner,
+        key,
+        value.asInstanceOf[Object],
+        priority1,
+        priority2,
+        priority3,
+        priority4
+      )
+
+    @targetName("updateRegionLongIndexedPriorityQueuePriority")
+    def updatePriority[T <: Object](
+        queue: RegionLongIndexedPriorityQueue[T]^{owner},
+        key: Long,
+        priority: Long
+    ): Boolean =
+      RiftRegion.updatePriority(owner, queue, key, priority)
+
+    @targetName("updateRegionLongIndexedPriorityQueueLexicographicPriority")
+    def updatePriority[T <: Object](
+        queue: RegionLongIndexedPriorityQueue[T]^{owner},
+        key: Long,
+        priority1: Long,
+        priority2: Long,
+        priority3: Long,
+        priority4: Long
+    ): Boolean =
+      RiftRegion.updatePriority(
+        owner,
+        queue,
+        key,
+        priority1,
+        priority2,
+        priority3,
+        priority4
+      )
+
+    @targetName("removeFromRegionLongIndexedPriorityQueue")
+    def remove[T <: Object](
+        queue: RegionLongIndexedPriorityQueue[T]^{owner},
+        key: Long
+    ): Boolean =
+      RiftRegion.remove(owner, queue, key)
+
+    @targetName("containsInRegionLongIndexedPriorityQueue")
+    def contains[T <: Object](
+        queue: RegionLongIndexedPriorityQueue[T]^{owner},
+        key: Long
+    ): Boolean =
+      RiftRegion.contains(owner, queue, key)
+
+    @targetName("getFromRegionLongIndexedPriorityQueue")
+    def get[T <: Object](
+        queue: RegionLongIndexedPriorityQueue[T]^{owner},
+        key: Long
+    ): T^{owner} =
+      RiftRegion.get(owner, queue, key)
+
+    @targetName("peekFromRegionLongIndexedPriorityQueue")
+    def peek[T <: Object](
+        queue: RegionLongIndexedPriorityQueue[T]^{owner}
+    ): T^{owner} =
+      RiftRegion.peek(owner, queue)
+
+    @targetName("peekKeyFromRegionLongIndexedPriorityQueue")
+    def peekKey[T <: Object](
+        queue: RegionLongIndexedPriorityQueue[T]^{owner}
+    ): Long =
+      RiftRegion.peekKey(owner, queue)
+
+    @targetName("peekPriorityFromRegionLongIndexedPriorityQueue")
+    def peekPriority[T <: Object](
+        queue: RegionLongIndexedPriorityQueue[T]^{owner}
+    ): Long =
+      RiftRegion.peekPriority(owner, queue)
+
+    @targetName("popFromRegionLongIndexedPriorityQueue")
+    def pop[T <: Object](
+        queue: RegionLongIndexedPriorityQueue[T]^{owner}
+    ): T^{owner} =
+      RiftRegion.pop(owner, queue)
+
+    @targetName("regionLongIndexedPriorityQueueLength")
+    def length[T <: Object](
+        queue: RegionLongIndexedPriorityQueue[T]^{owner}
+    ): Int =
+      RiftRegion.length(owner, queue)
+
+    @targetName("regionLongIndexedPriorityQueueCapacity")
+    def capacity[T <: Object](
+        queue: RegionLongIndexedPriorityQueue[T]^{owner}
+    ): Int =
+      RiftRegion.capacity(owner, queue)
+
+    @targetName("regionLongIndexedPriorityQueueTableCapacity")
+    def tableCapacity[T <: Object](
+        queue: RegionLongIndexedPriorityQueue[T]^{owner}
+    ): Int =
+      RiftRegion.tableCapacity(owner, queue)
 
   /** Allocates an object in the implicit Rift region. */
   inline def alloc[T <: AnyRef](inline obj: T)(using

@@ -363,6 +363,85 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def regionLongIndexedPriorityQueueRanksAndRehashes(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.scoped { region ?=>
+        val queue =
+          RiftRegion.regionLongIndexedPriorityQueueLexicographic[
+            RiftCheckedLeaf
+          ](1, 4)
+        val ten: RiftCheckedLeaf^{region} =
+          RiftRegion.alloc(new RiftCheckedLeaf(10))
+        val twenty: RiftCheckedLeaf^{region} =
+          RiftRegion.alloc(new RiftCheckedLeaf(20))
+        val thirty: RiftCheckedLeaf^{region} =
+          RiftRegion.alloc(new RiftCheckedLeaf(30))
+        val forty: RiftCheckedLeaf^{region} =
+          RiftRegion.alloc(new RiftCheckedLeaf(40))
+
+        region.put(queue, 10L, ten, 5L, 100L, 10L, -10L)
+        region.put(queue, 20L, twenty, 5L, 110L, 20L, -20L)
+        region.put(queue, 30L, thirty, 5L, 110L, 20L, -30L)
+        region.put(queue, 40L, forty, 1L, 0L, 0L, -40L)
+
+        assertTrue(region.tableCapacity(queue) >= 8)
+        assertEquals(4, region.length(queue))
+        assertEquals(20L, region.peekKey(queue))
+        assertEquals(20, region.peek(queue).value)
+
+        assertTrue(
+          region.updatePriority(queue, 10L, 6L, 0L, 0L, -10L)
+        )
+        assertEquals(10L, region.peekKey(queue))
+        assertEquals(10, region.pop(queue).value)
+
+        assertTrue(region.remove(queue, 20L))
+        assertFalse(region.contains(queue, 20L))
+        assertEquals(30, region.get(queue, 30L).value)
+        assertEquals(2, region.length(queue))
+
+        42
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def regionLongIndexedPriorityQueueReplacesValuesForKey(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.scoped { region ?=>
+        val queue =
+          RiftRegion.regionLongIndexedPriorityQueue[RiftCheckedLeaf](1, 4)
+        val oldValue: RiftCheckedLeaf^{region} =
+          RiftRegion.alloc(new RiftCheckedLeaf(10))
+        val newValue: RiftCheckedLeaf^{region} =
+          RiftRegion.alloc(new RiftCheckedLeaf(40))
+        val other: RiftCheckedLeaf^{region} =
+          RiftRegion.alloc(new RiftCheckedLeaf(2))
+
+        RiftRegion.put(region, queue, 1234567890123L, oldValue, 1L)
+        RiftRegion.put(region, queue, 1234567890123L, newValue, 5L)
+        RiftRegion.put(region, queue, -7L, other, 3L)
+
+        assertEquals(2, RiftRegion.length(region, queue))
+        assertEquals(1234567890123L, RiftRegion.peekKey(region, queue))
+        assertEquals(40, RiftRegion.get(region, queue, 1234567890123L).value)
+        assertTrue(RiftRegion.updatePriority(region, queue, -7L, 6L))
+        assertEquals(-7L, RiftRegion.peekKey(region, queue))
+
+        RiftRegion.pop(region, queue).value
+      }
+
+      assertEquals(2, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def streamWindowIndexedRankRanksAndClosesBucket(): Unit = {
     RiftRegion.init(1)
     try {

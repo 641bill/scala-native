@@ -139,11 +139,15 @@ trait NirGenExpr(using Context) {
       val sym = calledSymbol(tree)
       val name = sym.name.toString
       (
-        name == "objectBuffer" ||
+          name == "objectBuffer" ||
           name == "regionBuffer" ||
           name == "regionPriorityQueue" ||
           name == "regionIndexedPriorityQueue" ||
-          name == "streamWindowIndexedRank"
+          name == "regionIndexedPriorityQueueLexicographic" ||
+          name == "regionLongIndexedPriorityQueue" ||
+          name == "regionLongIndexedPriorityQueueLexicographic" ||
+          name == "streamWindowIndexedRank" ||
+          name == "streamWindowIndexedRankLexicographic"
       ) &&
         isRiftRegionCompanionOwner(sym)
     }
@@ -169,7 +173,13 @@ trait NirGenExpr(using Context) {
     private def isRiftRegionIndexedPriorityQueuePut(tree: Tree): Boolean = {
       val sym = calledSymbol(tree)
       val name = sym.name.toString
-      (name == "put" || name == "putToRegionIndexedPriorityQueue") &&
+      (
+        name == "put" ||
+          name == "putToRegionIndexedPriorityQueue" ||
+          name == "putLexicographicToRegionIndexedPriorityQueue" ||
+          name == "putToRegionLongIndexedPriorityQueue" ||
+          name == "putLexicographicToRegionLongIndexedPriorityQueue"
+      ) &&
         isRiftRegionCompanionOwner(sym)
     }
 
