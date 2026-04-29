@@ -246,12 +246,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
           ownerPresentByKey(key) &&
           ownerStartByKey(key) == bucket.startSeconds
         ) {
-          val value =
-            if (queue.containsTrusted(key)) {
-              val presentValue = queue.getTrusted(key)
-              queue.removeTrusted(key)
-              presentValue
-            } else null
+          val value = queue.removeWithValueTrusted(key)
           ownerPresentByKey(key) = false
           ownerStartByKey(key) = 0L
           if (value != null && cleanup != null) cleanup(key, value)
@@ -546,6 +541,18 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       else {
         removeAt(slot - 1)
         true
+      }
+    }
+
+    private[memory] inline def removeWithValueTrusted(key: Int): Object = {
+      checkKey(key)
+      val slot = heapIndexByKey(key)
+      if (slot == 0) null
+      else {
+        val index = slot - 1
+        val result = items(index)
+        removeAt(index)
+        result
       }
     }
 

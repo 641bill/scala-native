@@ -505,6 +505,44 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def streamWindowIndexedRankCloseEntriesSkipsAlreadyPoppedKeys(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Row(val value: Int)
+
+        val rank = RiftRegion.streamWindowIndexedRank[Row](10, 8, 1)
+        val bucket = RiftRegion.streamWindowBucketFor(stream, rank, 7L)
+        val child = RiftRegion.streamBucketRegion(stream, bucket)
+        val row: Row^{stream} =
+          RiftRegion.alloc(new Row(41))(using child)
+        RiftRegion.putWindowRankInBucket(
+          stream,
+          rank,
+          bucket,
+          1,
+          row,
+          7L
+        )
+
+        val popped = RiftRegion.popWindowRank(stream, rank).value
+        var removedEntries = 0
+        RiftRegion.closeAllWindowRankBucketsWithEntries(stream, rank) {
+          (_, _, _) =>
+            removedEntries += 1
+        } { _ => () }
+
+        assertTrue(bucket.isClosed)
+        assertEquals(0, RiftRegion.windowRankLength(stream, rank))
+        popped + removedEntries
+      }
+
+      assertEquals(41, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def streamWindowIndexedRankMovesKeyBetweenBuckets(): Unit = {
     RiftRegion.init(1)
     try {

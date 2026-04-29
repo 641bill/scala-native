@@ -101,7 +101,7 @@ Validation run on 2026-04-28 and updated on 2026-04-29:
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"`
   passed `70/70`.
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"`
-  passed `21/21`.
+  passed `22/22`.
 - The smoke matrix native-linked `CheckedStreamWindowRankMatrix`.
 - The small heap and `rift-checked` smoke runs matched checksum
   `-3490531581377742567`.
@@ -112,6 +112,10 @@ Validation run on 2026-04-28 and updated on 2026-04-29:
 - After the entry-cleanup update, a 100k 3-run smoke matched checksum
   `-476315670107920613`.
 - The post-entry-cleanup default local matrix matched checksum
+  `6881312641757835670`.
+- After the remove-with-value queue primitive update, a 100k 3-run smoke
+  matched checksum `-476315670107920613`.
+- The post-remove-with-value default local matrix matched checksum
   `6881312641757835670`.
 
 ## Small Smoke Result
@@ -170,6 +174,28 @@ Configuration:
 | heap | 22.271 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 35176448 | -476315670107920613 |
 | rift-checked | 33.840 | 0.901 | 0.117 | 82545 | 5 | 5 | 0 | 29999104 | -476315670107920613 |
 
+## Remove-With-Value Close Probe Result
+
+This run adds an internal queue primitive that removes a key and returns its
+ranked value in one trusted operation. Bucket close uses that primitive instead
+of `contains` + `get` + `remove`. A runtime regression test covers the
+already-popped-key case, where a bucket-owned key may no longer be present in
+the rank heap when the bucket closes.
+
+Configuration:
+
+- `CHECKED_SWR_EVENTS=100000`
+- `CHECKED_SWR_EVENTS_PER_BUCKET=25000`
+- `CHECKED_SWR_KEY_CAPACITY=65536`
+- `CHECKED_SWR_WINDOW_BUCKETS=8`
+- `CHECKED_SWR_BENCHMARK_RUNS=3`
+- `CHECKED_SWR_WARMUPS=1`
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 25.360 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 35225600 | -476315670107920613 |
+| rift-checked | 38.823 | 1.021 | 0.162 | 82545 | 5 | 5 | 0 | 30015488 | -476315670107920613 |
+
 ## Default Local Median
 
 Configuration:
@@ -187,8 +213,8 @@ Configuration:
 
 | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| heap | 200.304 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 145768448 | 6881312641757835670 |
-| rift-checked | 302.001 | 7.447 | 0.289 | 826643 | 41 | 41 | 0 | 87441408 | 6881312641757835670 |
+| heap | 258.839 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 145784832 | 6881312641757835670 |
+| rift-checked | 355.671 | 8.005 | 0.374 | 826643 | 41 | 41 | 0 | 87441408 | 6881312641757835670 |
 
 ## Interpretation
 
@@ -211,11 +237,14 @@ Configuration:
   path keeps the primitive owner tables and removes duplicate operator-side
   bucket nodes in checked mode.
 - The default local median is still not a speed win: checked Rift is slower
-  (`302.001 ms` vs heap `200.304 ms`) even though measured Rift runtime
-  operation cost is low (`0.289 ms`) and peak RSS is lower. The entry-cleanup
-  API improves the previous auto-cleanup default (`313.572 ms` checked) and RSS
-  (`94732288` bytes) by avoiding a second checked-side key list, but remains
-  slower than the previous manual-cleanup median (`254.050 ms` checked).
+  (`355.671 ms` vs heap `258.839 ms`) even though measured Rift runtime
+  operation cost is low (`0.374 ms`) and peak RSS is lower. The entry-cleanup
+  API improved the previous auto-cleanup default (`313.572 ms` checked) and RSS
+  (`94732288` bytes) by avoiding a second checked-side key list, but remained
+  slower than the previous manual-cleanup median (`254.050 ms` checked). The
+  remove-with-value primitive is a simpler close path and validates the
+  already-popped-key behavior, but it did not produce a measured speedup in the
+  current noisy local matrix.
 - The result is still useful because it validates the general pattern that
   bucket-lifetime records can be ordinary Scala objects, stored in checked
   region-backed ranking state, sampled during the stream, and automatically
