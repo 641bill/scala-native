@@ -26,6 +26,12 @@ object NexmarkRegionConfig {
   private def envNonNegativeInt(name: String, default: Int): Int =
     sys.env.get(name).flatMap(parseNonNegativeInt).getOrElse(default)
 
+  private def envFlag(name: String): Boolean =
+    sys.env.get(name).exists { value =>
+      value == "1" || value.equalsIgnoreCase("true") ||
+        value.equalsIgnoreCase("yes")
+    }
+
   val events: Int = envInt("NEXMARK_EVENTS", 1000000)
   val eventsPerBucket: Int = envInt("NEXMARK_EVENTS_PER_BUCKET", 25000)
   val windowBuckets: Int = envInt("NEXMARK_WINDOW_BUCKETS", 8)
@@ -36,6 +42,7 @@ object NexmarkRegionConfig {
   val sampleEvery: Int = envInt("NEXMARK_SAMPLE_EVERY", 8192)
   val warmupRuns: Int = envNonNegativeInt("NEXMARK_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("NEXMARK_BENCHMARK_RUNS", 3)
+  val q5Diagnostics: Boolean = envFlag("NEXMARK_Q5_DIAG")
 }
 
 object NexmarkRegionMatrixHelpers {
@@ -91,6 +98,57 @@ object NexmarkRegionMatrixHelpers {
       riftRegionOpNanos: Long,
       riftSlowAllocNanos: Long
   )
+
+  private final class Q5Diag(val enabled: Boolean, val mode: String) {
+    var windowAdds = 0L
+    var windowRemoves = 0L
+    var closedBuckets = 0L
+    var samples = 0L
+    var topScans = 0L
+    var topScanEntries = 0L
+    var topScanNanos = 0L
+
+    def recordAdd(): Unit =
+      if (enabled) windowAdds += 1L
+
+    def recordRemove(): Unit =
+      if (enabled) windowRemoves += 1L
+
+    def recordClosedBucket(): Unit =
+      if (enabled) closedBuckets += 1L
+
+    def recordSample(): Unit =
+      if (enabled) samples += 1L
+
+    def recordTopScan(entries: Int, nanos: Long): Unit =
+      if (enabled) {
+        topScans += 1L
+        topScanEntries += entries.toLong
+        topScanNanos += nanos
+      }
+
+    def print(query: String, events: Int): Unit =
+      if (enabled) {
+        val live = windowAdds - windowRemoves
+        val scansPerEvent =
+          if (events == 0) 0.0 else topScans.toDouble / events.toDouble
+        val scanEntriesPerEvent =
+          if (events == 0) 0.0 else topScanEntries.toDouble / events.toDouble
+        println(
+          f"NEXMARK_Q5_DIAG query=$query mode=$mode " +
+            f"window_adds=$windowAdds%d " +
+            f"window_removes=$windowRemoves%d " +
+            f"closed_buckets=$closedBuckets%d " +
+            f"samples=$samples%d " +
+            f"top_scans=$topScans%d " +
+            f"top_scan_entries=$topScanEntries%d " +
+            f"top_scan_ms=${topScanNanos / 1000000.0}%.3f " +
+            f"top_scans_per_event=$scansPerEvent%.6f " +
+            f"top_scan_entries_per_event=$scanEntriesPerEvent%.3f " +
+            f"final_live_records=$live%d"
+        )
+      }
+  }
 
   private object RuntimeSample {
     val zero: RuntimeSample =
@@ -246,6 +304,29 @@ object NexmarkRegionMatrixHelpers {
     best
   }
 
+  private def topAuctionProfiled(
+      counts: Array[Int],
+      sums: Array[Long],
+      diag: Q5Diag
+  ): Int =
+    if (!diag.enabled) topAuction(counts, sums)
+    else {
+      val start = System.nanoTime()
+      val result = topAuction(counts, sums)
+      diag.recordTopScan(counts.length, System.nanoTime() - start)
+      result
+    }
+
+  private def q5Diag(
+      query: String,
+      mode: String,
+      emitDiagnostics: Boolean
+  ): Q5Diag =
+    new Q5Diag(
+      query == "q5" && emitDiagnostics && NexmarkRegionConfig.q5Diagnostics,
+      mode
+    )
+
   private def appendRecord(bucket: HeapBucket, record: HeapRecord): Unit =
     if (bucket.head == null) {
       bucket.head = record
@@ -264,8 +345,9 @@ object NexmarkRegionMatrixHelpers {
       bucket.tail = record
     }
 
-  def runHeap(query: String): RunOutcome = {
+  def runHeap(query: String, emitDiagnostics: Boolean = true): RunOutcome = {
     val cfg = NexmarkRegionConfig
+    val diag = q5Diag(query, "heap", emitDiagnostics)
     val counts = if (query == "q5") new Array[Int](cfg.auctionSpace) else null
     val sums = if (query == "q5") new Array[Long](cfg.auctionSpace) else null
     val q8Persons =
@@ -280,6 +362,7 @@ object NexmarkRegionMatrixHelpers {
 
     def consumeRecord(bucket: HeapBucket, record: HeapRecord): Unit =
       if (query == "q5") {
+        diag.recordRemove()
         counts(record.key) -= 1
         sums(record.key) -= record.price
         checksum = fold(
@@ -343,6 +426,7 @@ object NexmarkRegionMatrixHelpers {
       ) {
         val bucket = first
         var record = bucket.head
+        if (query == "q5") diag.recordClosedBucket()
         while (record != null) {
           consumeRecord(bucket, record)
           record = record.next
@@ -410,9 +494,11 @@ object NexmarkRegionMatrixHelpers {
             new HeapRecord(15, i, auction, bidderId(i), bidPrice, i.toLong, null)
           counts(auction) += 1
           sums(auction) += bidPrice
+          diag.recordAdd()
           appendRecord(bucket, bid)
           if (i % cfg.sampleEvery == 0) {
-            val hot = topAuction(counts, sums)
+            diag.recordSample()
+            val hot = topAuctionProfiled(counts, sums, diag)
             checksum = fold(
               checksum,
               55,
@@ -473,13 +559,171 @@ object NexmarkRegionMatrixHelpers {
     }
 
     closeExpired(Long.MaxValue)
+    diag.print(query, cfg.events)
     checksumSink = checksum
     outputSink = outputCount
     RunOutcome(checksum, outputCount)
   }
 
-  def runRiftTrusted(query: String, kind: Int): RunOutcome = {
+  def runHeapJoinApi(query: String): RunOutcome = {
+    if (query != "q8")
+      throw new IllegalArgumentException(
+        "heap-join-api currently supports only NEXMark q8"
+      )
+
     val cfg = NexmarkRegionConfig
+    val leftCounts = new Array[Int](cfg.personSpace)
+    val rightCounts = new Array[Int](cfg.personSpace)
+    var first: HeapBucket = null
+    var last: HeapBucket = null
+    var current: HeapBucket = null
+    var checksum = 0L
+    var outputCount = 0L
+
+    def consumeRecord(bucket: HeapBucket, record: HeapRecord): Unit =
+      if (record.kind == 18) {
+        leftCounts(record.key) -= 1
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          leftCounts(record.key),
+          rightCounts(record.key).toLong,
+          bucket.startSeconds
+        )
+      } else if (record.kind == 19) {
+        rightCounts(record.key) -= 1
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          leftCounts(record.key),
+          rightCounts(record.key).toLong,
+          bucket.startSeconds
+        )
+      } else {
+        checksum = fold(
+          checksum,
+          record.kind,
+          record.id,
+          record.key,
+          record.value,
+          record.price,
+          record.timestamp
+        )
+        outputCount += 1L
+      }
+
+    def closeExpired(cutoffSeconds: Long): Unit =
+      while (
+        first != null &&
+        first.startSeconds + cfg.eventsPerBucket.toLong <= cutoffSeconds
+      ) {
+        val bucket = first
+        var record = bucket.head
+        while (record != null) {
+          consumeRecord(bucket, record)
+          record = record.next
+        }
+        first = bucket.next
+        if (first == null) last = null
+        if (current.eq(bucket)) current = null
+        bucket.head = null
+        bucket.tail = null
+        bucket.next = null
+      }
+
+    def bucketFor(startSeconds: Long): HeapBucket =
+      if (current != null && current.startSeconds == startSeconds) current
+      else {
+        closeExpired(closeCutoff(startSeconds))
+        val bucket = new HeapBucket(startSeconds, null)
+        if (first == null) {
+          first = bucket
+          last = bucket
+        } else {
+          last.next = bucket
+          last = bucket
+        }
+        current = bucket
+        bucket
+      }
+
+    var i = 0
+    while (i < cfg.events) {
+      val startSeconds = bucketStart(i)
+      val bucket = bucketFor(startSeconds)
+      eventKind(i) match {
+        case 0 =>
+          val id = personId(i)
+          val person =
+            new HeapRecord(18, i, id, category(i), price(i), i.toLong, null)
+          leftCounts(id) += 1
+          appendRecord(bucket, person)
+          val right = rightCounts(id)
+          if (right > 0) {
+            val out =
+              new HeapRecord(
+                28,
+                i,
+                id,
+                leftCounts(id),
+                right.toLong,
+                i.toLong,
+                null
+              )
+            appendRecord(bucket, out)
+          }
+        case 1 =>
+          val seller = auctionSeller(i)
+          val auction =
+            new HeapRecord(
+              19,
+              i,
+              seller,
+              auctionId(i),
+              price(i),
+              i.toLong,
+              null
+            )
+          rightCounts(seller) += 1
+          appendRecord(bucket, auction)
+          val left = leftCounts(seller)
+          if (left > 0) {
+            val out =
+              new HeapRecord(
+                28,
+                i,
+                seller,
+                left,
+                rightCounts(seller).toLong,
+                i.toLong,
+                null
+              )
+            appendRecord(bucket, out)
+          }
+        case _ =>
+          ()
+      }
+      i += 1
+    }
+
+    closeExpired(Long.MaxValue)
+    checksumSink = checksum
+    outputSink = outputCount
+    RunOutcome(checksum, outputCount)
+  }
+
+  def runRiftTrusted(
+      query: String,
+      kind: Int,
+      mode: String,
+      emitDiagnostics: Boolean = true
+  ): RunOutcome = {
+    val cfg = NexmarkRegionConfig
+    val diag = q5Diag(query, mode, emitDiagnostics)
     val counts = if (query == "q5") new Array[Int](cfg.auctionSpace) else null
     val sums = if (query == "q5") new Array[Long](cfg.auctionSpace) else null
     val q8Persons =
@@ -494,6 +738,7 @@ object NexmarkRegionMatrixHelpers {
 
     def consumeRecord(bucket: TrustedBucket, record: TrustedRecord): Unit =
       if (query == "q5") {
+        diag.recordRemove()
         counts(record.key) -= 1
         sums(record.key) -= record.price
         checksum = fold(
@@ -551,6 +796,7 @@ object NexmarkRegionMatrixHelpers {
       }
 
     def closeBucket(bucket: TrustedBucket): Unit = {
+      if (query == "q5") diag.recordClosedBucket()
       var record = bucket.head
       while (record != null) {
         consumeRecord(bucket, record)
@@ -651,9 +897,11 @@ object NexmarkRegionMatrixHelpers {
               )
             counts(auction) += 1
             sums(auction) += bidPrice
+            diag.recordAdd()
             appendRecord(bucket, bid)
             if (i % cfg.sampleEvery == 0) {
-              val hot = topAuction(counts, sums)
+              diag.recordSample()
+              val hot = topAuctionProfiled(counts, sums, diag)
               checksum = fold(
                 checksum,
                 55,
@@ -747,13 +995,18 @@ object NexmarkRegionMatrixHelpers {
       current = null
     }
 
+    diag.print(query, cfg.events)
     checksumSink = checksum
     outputSink = outputCount
     RunOutcome(checksum, outputCount)
   }
 
-  def runRiftChecked(query: String): RunOutcome = {
+  def runRiftChecked(
+      query: String,
+      emitDiagnostics: Boolean = true
+  ): RunOutcome = {
     val cfg = NexmarkRegionConfig
+    val diag = q5Diag(query, "rift-checked", emitDiagnostics)
     val counts = if (query == "q5") new Array[Int](cfg.auctionSpace) else null
     val sums = if (query == "q5") new Array[Long](cfg.auctionSpace) else null
     val q8Persons =
@@ -783,6 +1036,7 @@ object NexmarkRegionMatrixHelpers {
         while (cursor.hasNext) {
           val record: Record^{stream} = cursor.next()
           if (query == "q5") {
+            diag.recordRemove()
             counts(record.key) -= 1
             sums(record.key) -= record.price
             running = fold(
@@ -846,6 +1100,7 @@ object NexmarkRegionMatrixHelpers {
           window,
           cutoffSeconds
         ) { (bucket, cursor) =>
+          if (query == "q5") diag.recordClosedBucket()
           consume(bucket, cursor)
         }
 
@@ -920,9 +1175,11 @@ object NexmarkRegionMatrixHelpers {
               )(using bucketRegion)
             counts(auction) += 1
             sums(auction) += bidPrice
+            diag.recordAdd()
             RiftRegion.appendWindow(stream, window, bucket, bid)
             if (i % cfg.sampleEvery == 0) {
-              val hot = topAuction(counts, sums)
+              diag.recordSample()
+              val hot = topAuctionProfiled(counts, sums, diag)
               running = fold(
                 running,
                 55,
@@ -997,6 +1254,166 @@ object NexmarkRegionMatrixHelpers {
 
       RiftRegion.closeAllAppendWindowBucketsWithCursor(stream, window) {
         (bucket, cursor) =>
+          if (query == "q5") diag.recordClosedBucket()
+          consume(bucket, cursor)
+      }
+      outputCount = outputs
+      running
+    }
+    diag.print(query, cfg.events)
+    checksumSink = checksum
+    outputSink = outputCount
+    RunOutcome(checksum, outputCount)
+  }
+
+  def runRiftCheckedJoinApi(query: String): RunOutcome = {
+    if (query != "q8")
+      throw new IllegalArgumentException(
+        "rift-checked-join-api currently supports only NEXMark q8"
+      )
+
+    val cfg = NexmarkRegionConfig
+    var outputCount = 0L
+    val checksum = RiftRegion.streaming { stream ?=>
+      final class Record(
+          val kind: Int,
+          val id: Int,
+          val key: Int,
+          var value: Int,
+          var price: Long,
+          val timestamp: Long
+      ) extends RiftRegion.StreamAppendNode
+
+      val join =
+        RiftRegion.streamJoinWindow[Record](
+          cfg.eventsPerBucket.toLong,
+          cfg.personSpace
+        )
+      var running = 0L
+      var outputs = 0L
+
+      def consume(
+          bucket: RiftRegion.StreamBucket^{stream},
+          cursor: RiftRegion.StreamAppendCursor[Record]^{stream}
+      ): Unit =
+        while (cursor.hasNext) {
+          val record: Record^{stream} = cursor.next()
+          if (record.kind == 18) {
+            val left = RiftRegion.removeJoinLeft(stream, join, record.key)
+            running = fold(
+              running,
+              record.kind + 40,
+              record.id,
+              record.key,
+              left,
+              RiftRegion.rightJoinWindowCount(stream, join, record.key).toLong,
+              bucket.startSeconds
+            )
+          } else if (record.kind == 19) {
+            val right = RiftRegion.removeJoinRight(stream, join, record.key)
+            running = fold(
+              running,
+              record.kind + 40,
+              record.id,
+              record.key,
+              RiftRegion.leftJoinWindowCount(stream, join, record.key),
+              right.toLong,
+              bucket.startSeconds
+            )
+          } else {
+            running = fold(
+              running,
+              record.kind,
+              record.id,
+              record.key,
+              record.value,
+              record.price,
+              record.timestamp
+            )
+            outputs += 1L
+          }
+        }
+
+      def closeExpired(cutoffSeconds: Long): Unit =
+        RiftRegion.closeJoinWindowBucketsBeforeWithCursor(
+          stream,
+          join,
+          cutoffSeconds
+        ) { (bucket, cursor) =>
+          consume(bucket, cursor)
+        }
+
+      var currentStartSeconds = Long.MinValue
+      var currentBucket: RiftRegion.StreamBucket^{stream} = null
+      var currentBucketRegion: RiftRegion.StreamingRegion^{stream} = null
+      var i = 0
+      while (i < cfg.events) {
+        val startSeconds = bucketStart(i)
+        if (startSeconds != currentStartSeconds) {
+          closeExpired(closeCutoff(startSeconds))
+          currentStartSeconds = startSeconds
+          currentBucket =
+            RiftRegion.streamJoinWindowBucketFor(stream, join, startSeconds)
+          currentBucketRegion =
+            RiftRegion.streamBucketRegion(stream, currentBucket)
+        }
+        val bucket = currentBucket
+        val bucketRegion = currentBucketRegion
+
+        eventKind(i) match {
+          case 0 =>
+            val id = personId(i)
+            val person: Record^{stream} =
+              RiftRegion.alloc(
+                new Record(18, i, id, category(i), price(i), i.toLong)
+              )(using bucketRegion)
+            val left =
+              RiftRegion.putJoinLeftInBucket(stream, join, bucket, id, person)
+            val right = RiftRegion.rightJoinWindowCount(stream, join, id)
+            if (right > 0) {
+              val out: Record^{stream} =
+                RiftRegion.alloc(
+                  new Record(28, i, id, left, right.toLong, i.toLong)
+                )(using bucketRegion)
+              RiftRegion.putJoinOutputInBucket(stream, join, bucket, out)
+            }
+          case 1 =>
+            val seller = auctionSeller(i)
+            val auction: Record^{stream} =
+              RiftRegion.alloc(
+                new Record(
+                  19,
+                  i,
+                  seller,
+                  auctionId(i),
+                  price(i),
+                  i.toLong
+                )
+              )(using bucketRegion)
+            val right =
+              RiftRegion.putJoinRightInBucket(
+                stream,
+                join,
+                bucket,
+                seller,
+                auction
+              )
+            val left = RiftRegion.leftJoinWindowCount(stream, join, seller)
+            if (left > 0) {
+              val out: Record^{stream} =
+                RiftRegion.alloc(
+                  new Record(28, i, seller, left, right.toLong, i.toLong)
+                )(using bucketRegion)
+              RiftRegion.putJoinOutputInBucket(stream, join, bucket, out)
+            }
+          case _ =>
+            ()
+        }
+        i += 1
+      }
+
+      RiftRegion.closeAllJoinWindowBucketsWithCursor(stream, join) {
+        (bucket, cursor) =>
           consume(bucket, cursor)
       }
       outputCount = outputs
@@ -1007,19 +1424,32 @@ object NexmarkRegionMatrixHelpers {
     RunOutcome(checksum, outputCount)
   }
 
-  private def runMode(mode: String, query: String): RunOutcome =
+  private def runMode(
+      mode: String,
+      query: String,
+      emitDiagnostics: Boolean = true
+  ): RunOutcome =
     mode match {
-      case "heap"           => runHeap(query)
-      case "rift-checked"   => runRiftChecked(query)
-      case "rift-hp"        => runRiftTrusted(query, RiftRegion.HPZone)
-      case "rift-streaming" => runRiftTrusted(query, RiftRegion.Streaming)
+      case "heap" => runHeap(query, emitDiagnostics)
+      case "heap-join-api" =>
+        runHeapJoinApi(query)
+      case "rift-checked" =>
+        runRiftChecked(query, emitDiagnostics)
+      case "rift-checked-join-api" =>
+        runRiftCheckedJoinApi(query)
+      case "rift-hp" =>
+        runRiftTrusted(query, RiftRegion.HPZone, mode, emitDiagnostics)
+      case "rift-streaming" =>
+        runRiftTrusted(query, RiftRegion.Streaming, mode, emitDiagnostics)
       case other =>
         throw new IllegalArgumentException(s"unknown NEXMark mode '$other'")
     }
 
   def validateMode(mode: String): Unit =
     mode match {
-      case "heap" | "rift-checked" | "rift-hp" | "rift-streaming" => ()
+      case "heap" | "heap-join-api" | "rift-checked" |
+          "rift-checked-join-api" | "rift-hp" | "rift-streaming" =>
+        ()
       case other =>
         throw new IllegalArgumentException(s"unknown NEXMark mode '$other'")
     }
@@ -1033,12 +1463,12 @@ object NexmarkRegionMatrixHelpers {
 
   def runBenchmark(mode: String, query: String): Unit = {
     val cfg = NexmarkRegionConfig
-    val usesRift = mode != "heap"
-    val expected = runHeap(query)
+    val usesRift = mode != "heap" && mode != "heap-join-api"
+    val expected = runHeap(query, emitDiagnostics = false)
 
     var warmup = 0
     while (warmup < cfg.warmupRuns) {
-      val outcome = runMode(mode, query)
+      val outcome = runMode(mode, query, emitDiagnostics = false)
       if (outcome != expected)
         throw new IllegalStateException(
           s"warmup mismatch query=$query mode=$mode expected=$expected actual=$outcome"
@@ -1064,7 +1494,7 @@ object NexmarkRegionMatrixHelpers {
     while (run < cfg.benchmarkRuns) {
       val startRuntime = RuntimeSample.capture(usesRift)
       val start = System.nanoTime()
-      val outcome = runMode(mode, query)
+      val outcome = runMode(mode, query, emitDiagnostics = true)
       val end = System.nanoTime()
       val endRuntime = RuntimeSample.capture(usesRift)
       val runtime = RuntimeSample.since(startRuntime, endRuntime)
@@ -1123,7 +1553,7 @@ object NexmarkRegionMatrixHelpers {
   def printConfig(mode: String, query: String): Unit = {
     val cfg = NexmarkRegionConfig
     println(
-      s"CONFIG mode=$mode query=$query runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} window_buckets=${cfg.windowBuckets} auction_space=${cfg.auctionSpace} person_space=${cfg.personSpace} category_space=${cfg.categorySpace} q2_select_modulo=${cfg.q2SelectModulo} sample_every=${cfg.sampleEvery}"
+      s"CONFIG mode=$mode query=$query runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} window_buckets=${cfg.windowBuckets} auction_space=${cfg.auctionSpace} person_space=${cfg.personSpace} category_space=${cfg.categorySpace} q2_select_modulo=${cfg.q2SelectModulo} sample_every=${cfg.sampleEvery} q5_diag=${cfg.q5Diagnostics}"
     )
   }
 }
@@ -1136,7 +1566,7 @@ object NexmarkRegionMatrixHelpers {
   NexmarkRegionMatrixHelpers.validateQuery(query)
   NexmarkRegionMatrixHelpers.printConfig(mode, query)
 
-  val usesRift = mode != "heap"
+  val usesRift = mode != "heap" && mode != "heap-join-api"
   if (usesRift) RiftRegion.init(0)
   try {
     NexmarkRegionMatrixHelpers.runBenchmark(mode, query)

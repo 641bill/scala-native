@@ -32,8 +32,12 @@ Queries:
 Modes:
 
 - `heap`: ordinary Scala heap objects.
+- `heap-join-api`: Q8-only specialized heap join-window control. This exists
+  to keep the reusable join API comparison fair; it is not part of the generic
+  all-query matrix.
 - `rift-checked`: checked `RiftRegion.streaming` plus
   `StreamAppendWindow`/cursor bucket close.
+- `rift-checked-join-api`: Q8-only checked `StreamJoinWindow` API control.
 - `rift-hp`: trusted low-level HPZone bucket regions.
 - `rift-streaming`: trusted low-level Streaming bucket regions.
 
@@ -102,6 +106,8 @@ zsh sandbox/run_nexmark_region_matrix.sh
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile` passed.
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"` passed `91/91`.
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"` passed `36/36`.
+- After adding `StreamJoinWindow`, the targeted suites passed again:
+  compiler tests `93/93`, native checked runtime tests `37/37`.
 
 ## 100k Results
 
@@ -128,6 +134,28 @@ zsh sandbox/run_nexmark_region_matrix.sh
 | q8 | rift-hp | 30.860 | 0.954 | 0.010 | 30000 | 4 / 4 | 23085056 | 10000 |
 | q8 | rift-streaming | 30.790 | 0.923 | 0.019 | 30000 | 4 / 4 | 23150592 | 10000 |
 
+### Q8 Join API 100k Follow-Up
+
+Command:
+
+```bash
+NEXMARK_QUERIES=q8 \
+NEXMARK_MODES="heap heap-join-api rift-checked rift-checked-join-api" \
+NEXMARK_EVENTS=100000 \
+NEXMARK_BENCHMARK_RUNS=3 \
+NEXMARK_WARMUPS=1 \
+NEXMARK_BUILD=0 \
+NEXMARK_OUTPUT_DIR=/tmp/nexmark-q8-join-api-fair-100k \
+zsh sandbox/run_nexmark_region_matrix.sh
+```
+
+| Query | Mode | Median ms | GC ms | Rift op ms | Region objects | Opens/closes | RSS bytes | Outputs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| q8 | heap | 34.137 | 3.023 | 0.000 | 0 | 0 / 0 | 39223296 | 10000 |
+| q8 | heap-join-api | 1.732 | 0.000 | 0.000 | 0 | 0 / 0 | 21364736 | 10000 |
+| q8 | rift-checked | 31.397 | 0.953 | 0.014 | 30000 | 5 / 5 | 22921216 | 10000 |
+| q8 | rift-checked-join-api | 2.293 | 0.000 | 0.015 | 30002 | 5 / 5 | 20348928 | 10000 |
+
 ## 1M Results
 
 | Query | Mode | Median ms | GC ms | Rift op ms | Region objects | Opens/closes | RSS bytes | Outputs |
@@ -153,6 +181,101 @@ zsh sandbox/run_nexmark_region_matrix.sh
 | q8 | rift-hp | 305.338 | 7.388 | 0.069 | 300000 | 40 / 40 | 150077440 | 100000 |
 | q8 | rift-streaming | 305.410 | 7.379 | 0.074 | 300000 | 40 / 40 | 150241280 | 100000 |
 
+### Q8 Join API 1M Follow-Up
+
+Command:
+
+```bash
+NEXMARK_QUERIES=q8 \
+NEXMARK_MODES="heap heap-join-api rift-checked rift-checked-join-api" \
+NEXMARK_EVENTS=1000000 \
+NEXMARK_BENCHMARK_RUNS=3 \
+NEXMARK_WARMUPS=1 \
+NEXMARK_BUILD=0 \
+NEXMARK_OUTPUT_DIR=/tmp/nexmark-q8-join-api-fair-1m \
+zsh sandbox/run_nexmark_region_matrix.sh
+```
+
+| Query | Mode | Median ms | GC ms | Rift op ms | Region objects | Opens/closes | RSS bytes | Outputs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| q8 | heap | 327.102 | 27.578 | 0.000 | 0 | 0 / 0 | 146669568 | 100000 |
+| q8 | heap-join-api | 17.441 | 0.000 | 0.000 | 0 | 0 / 0 | 146407424 | 100000 |
+| q8 | rift-checked | 312.551 | 8.867 | 0.139 | 300000 | 41 / 41 | 149733376 | 100000 |
+| q8 | rift-checked-join-api | 23.021 | 0.000 | 0.065 | 300002 | 41 / 41 | 124174336 | 100000 |
+
+Interpretation:
+
+- The original generic Q8 row remains useful as a NEXMark-lite same-run result:
+  checked Rift beats the generic heap runner and cuts GC.
+- The reusable `StreamJoinWindow` API is a framework improvement because it
+  factors the Q8 two-sided count/window shape out of benchmark-local arrays
+  and appends. It also eliminates measured GC and lowers RSS versus the
+  specialized heap join control at 1M.
+- It is not a speed win against the fair specialized heap control:
+  `rift-checked-join-api` is `23.021 ms` versus `heap-join-api` at
+  `17.441 ms`. Therefore, Q8 join API should remain focused framework
+  evidence, not a headline application speed claim.
+
+## Q5 Diagnostic Follow-Up
+
+Diagnostics are enabled with `NEXMARK_Q5_DIAG=1`. These rows are not headline
+timing evidence because the diagnostic path times the top-auction scan.
+
+Commands:
+
+```bash
+NEXMARK_Q5_DIAG=1 \
+NEXMARK_QUERIES=q5 \
+NEXMARK_MODES="heap rift-checked rift-hp rift-streaming" \
+NEXMARK_EVENTS=100000 \
+NEXMARK_BENCHMARK_RUNS=1 \
+NEXMARK_WARMUPS=0 \
+NEXMARK_BUILD=0 \
+NEXMARK_OUTPUT_DIR=/tmp/nexmark-q5-diag-100k \
+zsh sandbox/run_nexmark_region_matrix.sh
+
+NEXMARK_Q5_DIAG=1 \
+NEXMARK_QUERIES=q5 \
+NEXMARK_MODES="heap rift-checked rift-hp rift-streaming" \
+NEXMARK_EVENTS=1000000 \
+NEXMARK_BENCHMARK_RUNS=1 \
+NEXMARK_WARMUPS=0 \
+NEXMARK_BUILD=0 \
+NEXMARK_OUTPUT_DIR=/tmp/nexmark-q5-diag-1m \
+zsh sandbox/run_nexmark_region_matrix.sh
+```
+
+Diagnostic counters:
+
+| Scale | Mode | Adds | Removes | Closed buckets | Samples | Top scans | Scan entries | Top scan ms | Final live |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100k | heap | 100000 | 100000 | 4 | 13 | 13 | 851968 | 4.791 | 0 |
+| 100k | rift-checked | 100000 | 100000 | 4 | 13 | 13 | 851968 | 4.803 | 0 |
+| 100k | rift-hp | 100000 | 100000 | 4 | 13 | 13 | 851968 | 4.743 | 0 |
+| 100k | rift-streaming | 100000 | 100000 | 4 | 13 | 13 | 851968 | 4.863 | 0 |
+| 1M | heap | 1000000 | 1000000 | 40 | 123 | 123 | 8060928 | 45.340 | 0 |
+| 1M | rift-checked | 1000000 | 1000000 | 40 | 123 | 123 | 8060928 | 46.823 | 0 |
+| 1M | rift-hp | 1000000 | 1000000 | 40 | 123 | 123 | 8060928 | 45.434 | 0 |
+| 1M | rift-streaming | 1000000 | 1000000 | 40 | 123 | 123 | 8060928 | 45.093 | 0 |
+
+Clean 1M control after adding diagnostics, with diagnostics off:
+
+| Query | Mode | Median ms | GC ms | Rift op ms | Region objects | Opens/closes | RSS bytes | Outputs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| q5 | heap | 361.882 | 19.496 | 0.000 | 0 | 0 / 0 | 205881344 | 123 |
+| q5 | rift-checked | 393.415 | 10.672 | 0.211 | 1000000 | 41 / 41 | 215793664 | 123 |
+| q5 | rift-hp | 364.071 | 10.490 | 0.216 | 1000000 | 40 / 40 | 217169920 | 123 |
+| q5 | rift-streaming | 369.280 | 10.192 | 0.213 | 1000000 | 40 / 40 | 217333760 | 123 |
+
+Interpretation:
+
+- Q5 is not blocked by region operation cost; Rift op time remains below
+  `1 ms` at 1M.
+- The aggregate scan cost is real but equal across modes: about `45 ms` for
+  `123` full scans of `65536` entries.
+- The remaining checked loss is mostly per-entry framework/container CPU plus
+  live-window footprint, not GC collection time or top-k scanning alone.
+
 ## Interpretation
 
 - This is the first non-DEBS application-style evidence added after the
@@ -167,13 +290,14 @@ zsh sandbox/run_nexmark_region_matrix.sh
 - `q0` is a near tie. Region placement reduces GC and RSS, but passthrough
   work alone does not create a large elapsed win.
 - `q5` is currently not a win at 1M. The region modes cut measured GC roughly
-  in half, but live window state and hot-auction scanning dominate; RSS is also
-  slightly higher. This should drive focused window-aggregate API work before
-  using Q5 as a positive claim.
-- `q8` is now the strongest NEXMark-lite checked result: checked Rift is
+  in half, but diagnostics show identical operation counts and about `45 ms`
+  of top-auction scans in every mode. The remaining loss is checked
+  framework/container CPU and live-window footprint.
+- Generic `q8` is the strongest NEXMark-lite checked result: checked Rift is
   `291.832 ms` versus heap `322.210 ms` at 1M, with GC time dropping from
-  `27.148 ms` to `7.413 ms`. RSS is slightly higher than heap, so this is an
-  elapsed/GC win rather than a memory win.
+  `27.148 ms` to `7.413 ms`. The new specialized `StreamJoinWindow` API is
+  much faster than the generic runner and lower-RSS than a specialized heap
+  join, but still slower than that fair specialized heap control.
 - Rift operation time stays below `0.4 ms` in all 1M rows. The remaining gaps
   are query/operator CPU and live-window footprint, not region open/close
   overhead.
@@ -181,10 +305,13 @@ zsh sandbox/run_nexmark_region_matrix.sh
 ## Next Steps
 
 - Keep `q1` and checked `q2` as NEXMark-lite positive candidates.
-- Keep `q8` as the first positive join-window candidate.
-- Profile or redesign `q5` before claiming window-aggregate wins.
-- Use Q8 to decide whether join-window state should remain a
-  `StreamAppendWindow` pattern or become a reusable checked join-buffer
-  primitive.
+- Keep generic `q8` as a positive checked NEXMark-lite row, but treat
+  `StreamJoinWindow` as framework evidence until it beats the specialized heap
+  join control.
+- Do not claim `q5` as a window-aggregate win. The next Q5 work should reduce
+  checked per-entry/window-container CPU or change the aggregate-maintenance
+  shape, with the heap version kept logically aligned.
+- Continue building reusable checked operators, but always add fair heap
+  operator controls when the API specializes the query loop.
 - Do not move back to DEBS ranking/TableRank from this result; TableRank
   remains gated out by its focused 1M profile.

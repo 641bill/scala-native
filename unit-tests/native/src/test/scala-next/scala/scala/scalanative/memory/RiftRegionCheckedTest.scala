@@ -1368,6 +1368,79 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def streamJoinWindowCountsAndClosesBuckets(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val side: Int, val key: Int, val value: Int)
+            extends RiftRegion.StreamAppendNode
+
+        val join = RiftRegion.streamJoinWindow[Event](10, 16)
+        val firstBucket =
+          RiftRegion.streamJoinWindowBucketFor(stream, join, 7L)
+        val firstRegion = RiftRegion.streamBucketRegion(stream, firstBucket)
+        val left: Event^{stream} =
+          RiftRegion.alloc(new Event(0, 3, 20))(using firstRegion)
+        val leftCount =
+          RiftRegion.putJoinLeftInBucket(stream, join, firstBucket, 3, left)
+
+        val secondBucket =
+          RiftRegion.streamJoinWindowBucketFor(stream, join, 17L)
+        val secondRegion = RiftRegion.streamBucketRegion(stream, secondBucket)
+        val right: Event^{stream} =
+          RiftRegion.alloc(new Event(1, 3, 21))(using secondRegion)
+        val rightCount =
+          RiftRegion.putJoinRightInBucket(stream, join, secondBucket, 3, right)
+
+        assertEquals(1, leftCount)
+        assertEquals(1, rightCount)
+        assertEquals(2, RiftRegion.joinWindowLength(stream, join))
+        assertEquals(1, RiftRegion.leftJoinWindowCount(stream, join, 3))
+        assertEquals(1, RiftRegion.rightJoinWindowCount(stream, join, 3))
+
+        var sum = 0
+        RiftRegion.closeJoinWindowBucketsBeforeWithCursor(stream, join, 10L) {
+          (_, cursor) =>
+            while (cursor.hasNext) {
+              val event = cursor.next()
+              if (event.side == 0)
+                RiftRegion.removeJoinLeft(stream, join, event.key)
+              else
+                RiftRegion.removeJoinRight(stream, join, event.key)
+              sum += event.value
+            }
+        }
+
+        assertTrue(firstBucket.isClosed)
+        assertFalse(secondBucket.isClosed)
+        assertEquals(1, RiftRegion.joinWindowLength(stream, join))
+        assertEquals(0, RiftRegion.leftJoinWindowCount(stream, join, 3))
+        assertEquals(1, RiftRegion.rightJoinWindowCount(stream, join, 3))
+
+        RiftRegion.closeAllJoinWindowBucketsWithCursor(stream, join) {
+          (_, cursor) =>
+            while (cursor.hasNext) {
+              val event = cursor.next()
+              if (event.side == 0)
+                RiftRegion.removeJoinLeft(stream, join, event.key)
+              else
+                RiftRegion.removeJoinRight(stream, join, event.key)
+              sum += event.value
+            }
+        }
+
+        assertTrue(secondBucket.isClosed)
+        assertEquals(0, RiftRegion.joinWindowLength(stream, join))
+        assertEquals(0, RiftRegion.rightJoinWindowCount(stream, join, 3))
+        sum + 1
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def scopedRegionAllowsMutableLinkedListBuilder(): Unit = {
     RiftRegion.init(1)
     try {

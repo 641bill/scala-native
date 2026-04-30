@@ -1738,6 +1738,51 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked object buffer cannot store an unrooted heap object"
     )
 
+  @Test def streamJoinWindowStoresChildBucketRecords(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    val join = RiftRegion.streamJoinWindow[Event](10, 16)
+      |    val bucket = RiftRegion.streamJoinWindowBucketFor(stream, join, 7L)
+      |    val region = RiftRegion.streamBucketRegion(stream, bucket)
+      |    val event: Event^{stream} =
+      |      RiftRegion.alloc(new Event(41))(using region)
+      |    val count = RiftRegion.putJoinLeftInBucket(stream, join, bucket, 3, event)
+      |    var total = 0
+      |    RiftRegion.closeAllJoinWindowBucketsWithCursor(stream, join) {
+      |      (_, cursor) =>
+      |        while cursor.hasNext do
+      |          val item = cursor.next()
+      |          total += item.value
+      |          RiftRegion.removeJoinLeft(stream, join, 3)
+      |    }
+      |    total + count + RiftRegion.joinWindowLength(stream, join)
+      |  }
+      |""".stripMargin)
+
+  @Test def streamJoinWindowRejectsDirectHeapRecord(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    val join = RiftRegion.streamJoinWindow[Event](10, 16)
+      |    val bucket = RiftRegion.streamJoinWindowBucketFor(stream, join, 7L)
+      |    val event: Event^{stream} = new Event(41)
+      |    RiftRegion.putJoinLeftInBucket(stream, join, bucket, 3, event)
+      |  }
+      |""".stripMargin,
+      "Rift checked object buffer cannot store an unrooted heap object"
+    )
+
   @Test def checkedMutableLinkedListBuilderCompiles(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking

@@ -205,6 +205,19 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       new StreamAppendCursor[T](null)
   }
 
+  /** Checked two-sided append/join stream-window primitive.
+   *
+   *  This factors the NEXMark Q8-shaped pattern out of benchmark code: records
+   *  still live in child bucket regions and are drained through the
+   *  append-window close cursor, while parent-owned primitive metadata tracks
+   *  how many left/right records are currently live per key.
+   */
+  final class StreamJoinWindow[T <: StreamAppendNode] private[memory] (
+      private[memory] val append: StreamAppendWindow[T],
+      private[memory] val leftCounts: Array[Int],
+      private[memory] val rightCounts: Array[Int]
+  )
+
   /** Close-time cursor over records linked in one append-window bucket.
    *
    *  Cursor close drains amortize close callback dispatch to once per bucket.
@@ -2711,6 +2724,24 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       streamBucketArena(bucketSeconds).asInstanceOf[StreamBucketArena]
     ).asInstanceOf[StreamAppendWindow[T]^{parent}]
 
+  /** Opens a parent-captured two-sided append/join window primitive. */
+  def streamJoinWindow[T <: StreamAppendNode](
+      bucketSeconds: Long,
+      keyCapacity: Int
+  )(using parent: StreamingRegion^): StreamJoinWindow[T]^{parent} = {
+    if (keyCapacity <= 0)
+      throw new IllegalArgumentException("keyCapacity must be positive")
+    val append =
+      streamAppendWindow[T](bucketSeconds).asInstanceOf[StreamAppendWindow[T]]
+    val leftCounts = alloc(new Array[Int](keyCapacity))
+    val rightCounts = alloc(new Array[Int](keyCapacity))
+    new StreamJoinWindow[T](
+      append,
+      leftCounts,
+      rightCounts
+    ).asInstanceOf[StreamJoinWindow[T]^{parent}]
+  }
+
   /** Tags a region for opt-in benchmark diagnostics.
    *
    *  This does not change allocation or safety behavior. It only lets runtime
@@ -2907,13 +2938,38 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       timestampSeconds
     )(onOpen)
 
-  /** Appends `value` to the linked list owned by `bucket`.
-   *
-   *  The value should be allocated in `bucket`'s child region and then widened
-   *  with the parent owner token. The compiler guard rejects direct heap values
-   *  passed here unless they are explicit `HeapRoot` handles.
-   */
-  def appendWindow[T <: StreamAppendNode](
+  /** Finds or opens the join-window bucket containing `timestampSeconds`. */
+  def streamJoinWindowBucketFor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      join: StreamJoinWindow[T]^{parent},
+      timestampSeconds: Long
+  ): StreamBucket^{parent} =
+    streamAppendWindowBucketFor(
+      parent,
+      join.append.asInstanceOf[StreamAppendWindow[T]^{parent}],
+      timestampSeconds
+    )
+
+  /** Finds or opens the join-window bucket containing `timestampSeconds`. */
+  def streamJoinWindowBucketFor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      join: StreamJoinWindow[T]^{parent},
+      timestampSeconds: Long
+  )(onOpen: StreamBucket^{parent} => Unit): StreamBucket^{parent} =
+    streamAppendWindowBucketFor(
+      parent,
+      join.append.asInstanceOf[StreamAppendWindow[T]^{parent}],
+      timestampSeconds
+    )(onOpen)
+
+  private def checkJoinWindowKey[T <: StreamAppendNode](
+      join: StreamJoinWindow[T],
+      key: Int
+  ): Unit =
+    if (key < 0 || key >= join.leftCounts.length)
+      throw new IndexOutOfBoundsException("Rift StreamJoinWindow key is absent")
+
+  private def appendWindowUnchecked[T <: StreamAppendNode](
       parent: StreamingRegion^,
       window: StreamAppendWindow[T]^{parent},
       bucket: StreamBucket^{parent},
@@ -2932,6 +2988,134 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
     bucket.appendLength += 1
     window.totalLength += 1
+  }
+
+  /** Appends `value` to the linked list owned by `bucket`.
+   *
+   *  The value should be allocated in `bucket`'s child region and then widened
+   *  with the parent owner token. The compiler guard rejects direct heap values
+   *  passed here unless they are explicit `HeapRoot` handles.
+   */
+  def appendWindow[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamAppendWindow[T]^{parent},
+      bucket: StreamBucket^{parent},
+      value: T^{parent}
+  ): Unit = {
+    appendWindowUnchecked(
+      parent,
+      window,
+      bucket,
+      value
+    )
+  }
+
+  /** Appends a left-side join record and returns the new live left count. */
+  def putJoinLeftInBucket[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      join: StreamJoinWindow[T]^{parent},
+      bucket: StreamBucket^{parent},
+      key: Int,
+      value: T^{parent}
+  ): Int = {
+    checkJoinWindowKey(join.asInstanceOf[StreamJoinWindow[T]], key)
+    val counts = join.leftCounts
+    val next = counts(key) + 1
+    counts(key) = next
+    appendWindowUnchecked(
+      parent,
+      join.append.asInstanceOf[StreamAppendWindow[T]^{parent}],
+      bucket,
+      value
+    )
+    next
+  }
+
+  /** Appends a right-side join record and returns the new live right count. */
+  def putJoinRightInBucket[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      join: StreamJoinWindow[T]^{parent},
+      bucket: StreamBucket^{parent},
+      key: Int,
+      value: T^{parent}
+  ): Int = {
+    checkJoinWindowKey(join.asInstanceOf[StreamJoinWindow[T]], key)
+    val counts = join.rightCounts
+    val next = counts(key) + 1
+    counts(key) = next
+    appendWindowUnchecked(
+      parent,
+      join.append.asInstanceOf[StreamAppendWindow[T]^{parent}],
+      bucket,
+      value
+    )
+    next
+  }
+
+  /** Appends a join output/scratch record without changing left/right counts. */
+  def putJoinOutputInBucket[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      join: StreamJoinWindow[T]^{parent},
+      bucket: StreamBucket^{parent},
+      value: T^{parent}
+  ): Unit =
+    appendWindowUnchecked(
+      parent,
+      join.append.asInstanceOf[StreamAppendWindow[T]^{parent}],
+      bucket,
+      value
+    )
+
+  /** Returns the live left-side count for `key`. */
+  def leftJoinWindowCount[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      join: StreamJoinWindow[T]^{parent},
+      key: Int
+  ): Int = {
+    checkJoinWindowKey(join.asInstanceOf[StreamJoinWindow[T]], key)
+    join.leftCounts(key)
+  }
+
+  /** Returns the live right-side count for `key`. */
+  def rightJoinWindowCount[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      join: StreamJoinWindow[T]^{parent},
+      key: Int
+  ): Int = {
+    checkJoinWindowKey(join.asInstanceOf[StreamJoinWindow[T]], key)
+    join.rightCounts(key)
+  }
+
+  /** Removes one left-side join record and returns the new live left count. */
+  def removeJoinLeft[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      join: StreamJoinWindow[T]^{parent},
+      key: Int
+  ): Int = {
+    checkJoinWindowKey(join.asInstanceOf[StreamJoinWindow[T]], key)
+    val counts = join.leftCounts
+    val current = counts(key)
+    if (current <= 0)
+      throw new IllegalStateException("Rift StreamJoinWindow left count underflow")
+    val next = current - 1
+    counts(key) = next
+    next
+  }
+
+  /** Removes one right-side join record and returns the new live right count. */
+  def removeJoinRight[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      join: StreamJoinWindow[T]^{parent},
+      key: Int
+  ): Int = {
+    checkJoinWindowKey(join.asInstanceOf[StreamJoinWindow[T]], key)
+    val counts = join.rightCounts
+    val current = counts(key)
+    if (current <= 0)
+      throw new IllegalStateException("Rift StreamJoinWindow right count underflow")
+    val next = current - 1
+    counts(key) = next
+    next
   }
 
   /** Prepends `value` to the linked list owned by `bucket`.
@@ -2962,6 +3146,16 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       window: StreamAppendWindow[T]^{parent}
   ): Int =
     window.totalLength
+
+  /** Returns the total number of live records in a join window. */
+  def joinWindowLength[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      join: StreamJoinWindow[T]^{parent}
+  ): Int =
+    appendWindowLength(
+      parent,
+      join.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
+    )
 
   /** Returns the number of records currently linked to `bucket`. */
   def appendWindowBucketLength[T <: StreamAppendNode](
@@ -3068,6 +3262,21 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       consumeAppendWindowBucketWithCursor(parent, window, bucket, onBucket)
     }
 
+  /** Closes join-window buckets fully before `cutoffSeconds`. */
+  def closeJoinWindowBucketsBeforeWithCursor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      join: StreamJoinWindow[T]^{parent},
+      cutoffSeconds: Long
+  )(onBucket: (
+      StreamBucket^{parent},
+      StreamAppendCursor[T]^{parent}
+  ) => Unit): Unit =
+    closeAppendWindowBucketsBeforeWithCursor(
+      parent,
+      join.append.asInstanceOf[StreamAppendWindow[T]^{parent}],
+      cutoffSeconds
+    )(onBucket)
+
   /** Closes every append-window bucket. */
   def closeAllAppendWindowBuckets[T <: StreamAppendNode](
       parent: StreamingRegion^,
@@ -3094,6 +3303,19 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     ) { bucket =>
       consumeAppendWindowBucketWithCursor(parent, window, bucket, onBucket)
     }
+
+  /** Closes every join-window bucket and drains each bucket through a cursor. */
+  def closeAllJoinWindowBucketsWithCursor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      join: StreamJoinWindow[T]^{parent}
+  )(onBucket: (
+      StreamBucket^{parent},
+      StreamAppendCursor[T]^{parent}
+  ) => Unit): Unit =
+    closeAllAppendWindowBucketsWithCursor(
+      parent,
+      join.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
+    )(onBucket)
 
   /** Closes a child window after caller-owned parent metadata is unlinked.
    *
