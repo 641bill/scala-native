@@ -67,6 +67,8 @@ live window payload still dominate.
 | NEXMark-lite Q8 window join | 1M events | checked `291.832 ms` | heap `322.210 ms` | Region-friendly checked join-window win | Local methodology benchmark, not exact Beam NEXMark |
 | NEXMark-lite Q8 `StreamJoinWindow` API | 1M events | packed checked join API `20.987 ms` | heap join API `17.393 ms` | Specialized checked join API is lower-GC/lower-RSS but slower than fair heap control | Focused framework evidence; not a speed claim |
 | NEXMark-lite Q5 diagnostic | 1M events | checked `393.415 ms` clean; top scan `46.823 ms` diagnostic | heap `361.882 ms` clean; top scan `45.340 ms` diagnostic | Window aggregate checked overhead | Diagnostic profile plus clean control |
+| Common Crawl WET-shaped tokenization | 100k pages / 13.7M records | HPZone `427.984 ms`, Streaming `428.040 ms` | heap `452.840 ms` | Object-heavy parser/token stream, modest trusted win | Generated input only; not a checked case-study win |
+| Common Crawl WET small-bucket control | 100k pages / 13.7M records | Streaming `423.951 ms` | heap `384.951 ms` | Heap recovers with tighter lifetimes | Generated input; argues against forcing this benchmark |
 | DEBS RunBoth checked, bounded 1M after Q1/Q2 append-window integration | 3-run median | checked `5349.444 ms` | heap `5219.189 ms` | API generalization, CPU-limited | Latest bounded control; not a speedup claim |
 | DEBS RunBoth checked, full month | 3-run median | checked `66.804 s` | heap `67.122 s` | Near-tie throughput, memory validation | Full-month evidence, not large speedup |
 
@@ -177,6 +179,9 @@ The strongest local categories are:
 - checked RegionBuffer and the manual checked AppendWindow child-bucket shape,
   which show the safe API direction can win on simple collection/operator
   shapes when abstraction overhead stays low.
+- generated Common Crawl WET tokenization with coarse page buckets, where
+  trusted Rift cuts GC/RSS and gives a modest elapsed win. This is not yet a
+  checked case study, and the small-bucket control makes the claim weaker.
 
 ## Where Immix Or SafeZone Remain Hard To Beat
 
@@ -213,6 +218,14 @@ The strongest local categories are:
   `103.244 ms`). Common Crawl WET and NEXMark Q5 fold-backed integration should
   stay blocked until the fold table/API overhead is reduced or a different
   object-heavy shape passes a focused gate.
+- The generated Common Crawl WET-shaped detector is mixed. Default token
+  buckets stress heap allocation (`160.268 ms` GC at 100k pages) and trusted
+  Rift improves elapsed by about `5.5%`, but smaller, more natural token
+  lifetimes make heap faster than Rift and collapse heap RSS. Treat Common
+  Crawl as a memory-pressure detector for now, not the next headline case
+  study. Move the next real-data search to Wikimedia-style pageview/clickstream
+  aggregation unless a real WET file plus checked page/token API changes the
+  result.
 - DEBS full-month is currently a near-tie in elapsed time with much better
   memory/lifetime evidence than earlier checkpoints, not a large application
   speedup.

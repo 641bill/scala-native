@@ -32,6 +32,8 @@ Queries:
 Modes:
 
 - `heap`: ordinary Scala heap objects.
+- `safezone`: closeable SafeZone bucket regions. This is a runtime control,
+  not a checked API mode.
 - `heap-join-api`: Q8-only specialized heap join-window control. This exists
   to keep the reusable join API comparison fair; it is not part of the generic
   all-query matrix.
@@ -103,6 +105,10 @@ zsh sandbox/run_nexmark_region_matrix.sh
 - 20k smoke matched checksum/output count across all modes and queries.
 - 100k and 1M medians matched checksum/output count across all modes and
   queries.
+- After adding SafeZone controls, a 20k smoke matched checksum/output count
+  across `heap`, `safezone`, `rift-hp`, and `rift-streaming` for Q1/Q5/Q8.
+- A 100k SafeZone follow-up matched checksum/output count across `heap`,
+  `safezone`, `rift-checked`, `rift-hp`, and `rift-streaming` for Q1/Q5/Q8.
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile` passed.
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"` passed `91/91`.
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"` passed `36/36`.
@@ -133,6 +139,49 @@ zsh sandbox/run_nexmark_region_matrix.sh
 | q8 | rift-checked | 31.441 | 0.928 | 0.012 | 30000 | 5 / 5 | 22921216 | 10000 |
 | q8 | rift-hp | 30.860 | 0.954 | 0.010 | 30000 | 4 / 4 | 23085056 | 10000 |
 | q8 | rift-streaming | 30.790 | 0.923 | 0.019 | 30000 | 4 / 4 | 23150592 | 10000 |
+
+### SafeZone 100k Follow-Up
+
+Command:
+
+```bash
+NEXMARK_BUILD=0 \
+NEXMARK_EVENTS=100000 \
+NEXMARK_BENCHMARK_RUNS=3 \
+NEXMARK_WARMUPS=1 \
+NEXMARK_QUERIES="q1 q5 q8" \
+NEXMARK_MODES="heap safezone rift-checked rift-hp rift-streaming" \
+NEXMARK_OUTPUT_DIR=/tmp/nexmark-safezone-100k \
+zsh sandbox/run_nexmark_region_matrix.sh
+```
+
+| Query | Mode | Median ms | GC ms | Rift op ms | Region objects | Opens/closes | RSS bytes | Outputs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| q1 | heap | 55.559 | 5.798 | 0.000 | 0 | 0 / 0 | 75137024 | 100000 |
+| q1 | safezone | 59.649 | 3.061 | 0.000 | 0 | 0 / 0 | 50741248 | 100000 |
+| q1 | rift-checked | 57.332 | 2.005 | 0.035 | 200000 | 5 / 5 | 49004544 | 100000 |
+| q1 | rift-hp | 55.319 | 1.959 | 0.042 | 200000 | 4 / 4 | 50610176 | 100000 |
+| q1 | rift-streaming | 55.964 | 2.074 | 0.041 | 200000 | 4 / 4 | 50675712 | 100000 |
+| q5 | heap | 35.520 | 0.000 | 0.000 | 0 | 0 / 0 | 74973184 | 13 |
+| q5 | safezone | 34.986 | 0.000 | 0.000 | 0 | 0 / 0 | 45088768 | 13 |
+| q5 | rift-checked | 35.629 | 0.000 | 0.020 | 100000 | 5 / 5 | 44269568 | 13 |
+| q5 | rift-hp | 35.346 | 0.000 | 0.023 | 100000 | 4 / 4 | 44957696 | 13 |
+| q5 | rift-streaming | 35.095 | 0.000 | 0.027 | 100000 | 4 / 4 | 45023232 | 13 |
+| q8 | heap | 31.893 | 2.153 | 0.000 | 0 | 0 / 0 | 39272448 | 10000 |
+| q8 | safezone | 31.138 | 1.542 | 0.000 | 0 | 0 / 0 | 23183360 | 10000 |
+| q8 | rift-checked | 30.577 | 0.911 | 0.016 | 30000 | 5 / 5 | 22970368 | 10000 |
+| q8 | rift-hp | 30.526 | 0.937 | 0.010 | 30000 | 4 / 4 | 23150592 | 10000 |
+| q8 | rift-streaming | 30.551 | 0.922 | 0.014 | 30000 | 4 / 4 | 23216128 | 10000 |
+
+Interpretation:
+
+- SafeZone is a useful RSS/GC control on these bucketed shapes, but it is not
+  consistently faster than heap or Rift.
+- Q1 at 100k shows SafeZone slower than heap despite lower RSS and GC.
+- Q5 is effectively a near-tie across all runtime modes because the top-scan
+  and aggregate maintenance dominate.
+- Q8 shows SafeZone competitive with heap and close to Rift, but checked/trusted
+  Rift are still slightly faster in this local 100k run.
 
 ### Q8 Join API 100k Follow-Up
 

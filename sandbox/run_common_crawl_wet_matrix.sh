@@ -4,12 +4,12 @@ set -euo pipefail
 
 script_dir=${0:A:h}
 repo_dir=${script_dir:h}
-output_dir=${NEXMARK_OUTPUT_DIR:-"/tmp/nexmark-region-matrix"}
-summary=${NEXMARK_SUMMARY:-"${output_dir}/summary.tsv"}
-build=${NEXMARK_BUILD:-1}
+output_dir=${COMMON_CRAWL_WET_OUTPUT_DIR:-"/tmp/common-crawl-wet-matrix"}
+summary=${COMMON_CRAWL_WET_SUMMARY:-"${output_dir}/summary.tsv"}
+build=${COMMON_CRAWL_WET_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${NEXMARK_MODES:-"heap safezone rift-checked rift-hp rift-streaming"}})
-queries=(${(z)${NEXMARK_QUERIES:-"q0 q1 q2 q5 q8"}})
+modes=(${(z)${COMMON_CRAWL_WET_MODES:-"heap safezone rift-hp rift-streaming"}})
+queries=(${(z)${COMMON_CRAWL_WET_QUERIES:-"q0-parse q1-tokenize"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"
@@ -21,17 +21,17 @@ cd "${repo_dir}"
 if [[ "${build}" != "0" ]]; then
   sbt \
     "project sandbox3_next" \
-    "set Compile / mainClass := Some(\"NexmarkRegionMatrix\")" \
+    "set Compile / mainClass := Some(\"CommonCrawlWetMatrix\")" \
     nativeLink
 fi
 
-binary=${NEXMARK_BINARY:-}
+binary=${COMMON_CRAWL_WET_BINARY:-}
 if [[ -z "${binary}" ]]; then
-  binary=$(find sandbox/.3-next/target -path "*/native/NexmarkRegionMatrix" -type f -perm -111 -print | sort | tail -n 1)
+  binary=$(find sandbox/.3-next/target -path "*/native/CommonCrawlWetMatrix" -type f -perm -111 -print | sort | tail -n 1)
 fi
 
 if [[ -z "${binary}" || ! -x "${binary}" ]]; then
-  echo "missing NexmarkRegionMatrix native binary; set NEXMARK_BINARY or enable NEXMARK_BUILD" >&2
+  echo "missing CommonCrawlWetMatrix native binary; set COMMON_CRAWL_WET_BINARY or enable COMMON_CRAWL_WET_BUILD" >&2
   exit 1
 fi
 
@@ -45,7 +45,7 @@ read_max_rss_bytes() {
 }
 
 write_summary_header() {
-  printf "query\tmode\tmedian_ms\tmedian_gc_ms\tmedian_rift_op_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\toutput_count\tmax_rss_bytes\n" > "${summary}"
+  printf "query\tmode\tinput\tmedian_ms\tmedian_gc_ms\tmedian_rift_op_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\toutput_count\tmax_rss_bytes\n" > "${summary}"
 }
 
 write_result_row() {
@@ -56,7 +56,7 @@ write_result_row() {
   local line token key value
   typeset -A fields
 
-  line=$(grep "^RESULT name=nexmark-${query}-${mode} " "${run_log}" | tail -n 1)
+  line=$(grep "^RESULT name=common-crawl-wet-${query}-${mode} " "${run_log}" | tail -n 1)
   fields=()
   for token in ${(z)line}; do
     if [[ "${token}" == *=* ]]; then
@@ -66,9 +66,10 @@ write_result_row() {
     fi
   done
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "${query}" \
     "${mode}" \
+    "${fields[input]-}" \
     "${fields[median_ms]-}" \
     "${fields[median_gc_ms]-}" \
     "${fields[median_rift_op_ms]-}" \
@@ -100,15 +101,15 @@ run_case() {
   command_status=$?
   set -e
 
-  if ! grep -q "^RESULT name=nexmark-${query}-${mode} " "${run_log}"; then
+  if ! grep -q "^RESULT name=common-crawl-wet-${query}-${mode} " "${run_log}"; then
     cat "${run_log}" >&2
     cat "${time_log}" >&2
     exit "${command_status}"
   fi
 
   max_rss_bytes=$(read_max_rss_bytes "${time_log}")
-  grep "^RESULT name=nexmark-${query}-${mode} " "${run_log}"
-  echo "NEXMARK_RSS_RESULT query=${query} mode=${mode} max_rss_bytes=${max_rss_bytes}"
+  grep "^RESULT name=common-crawl-wet-${query}-${mode} " "${run_log}"
+  echo "COMMON_CRAWL_WET_RSS_RESULT query=${query} mode=${mode} max_rss_bytes=${max_rss_bytes}"
   write_result_row "${query}" "${mode}" "${run_log}" "${max_rss_bytes}"
 }
 
@@ -120,5 +121,5 @@ for query in "${queries[@]}"; do
 done
 
 echo
-echo "NEXMark region matrix complete"
+echo "Common Crawl WET matrix complete"
 echo "Summary: ${summary}"

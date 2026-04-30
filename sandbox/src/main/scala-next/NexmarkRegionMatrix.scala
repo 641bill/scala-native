@@ -1,7 +1,13 @@
 import scala.language.experimental.captureChecking
 
-import scala.scalanative.memory.RiftRegion
-import scala.scalanative.runtime.{fromRawUSize, GC, RawSize, RiftAllocator}
+import scala.scalanative.memory.{RiftRegion, SafeZone}
+import scala.scalanative.runtime.{
+  fromRawUSize,
+  GC,
+  RawSize,
+  RiftAllocator,
+  SafeZoneAllocator
+}
 
 object NexmarkRegionConfig {
   private def parsePositiveInt(value: String): Option[Int] =
@@ -84,6 +90,25 @@ object NexmarkRegionMatrixHelpers {
   ) {
     var head: TrustedRecord = null
     var tail: TrustedRecord = null
+  }
+
+  private final class SafeZoneRecord(
+      val kind: Int,
+      val id: Int,
+      val key: Int,
+      var value: Int,
+      var price: Long,
+      val timestamp: Long,
+      var next: SafeZoneRecord
+  )
+
+  private final class SafeZoneBucket(
+      val zone: SafeZone,
+      val startSeconds: Long,
+      var next: SafeZoneBucket
+  ) {
+    var head: SafeZoneRecord = null
+    var tail: SafeZoneRecord = null
   }
 
   final case class RunOutcome(checksum: Long, outputCount: Long)
@@ -337,6 +362,18 @@ object NexmarkRegionMatrixHelpers {
     }
 
   private def appendRecord(bucket: TrustedBucket, record: TrustedRecord): Unit =
+    if (bucket.head == null) {
+      bucket.head = record
+      bucket.tail = record
+    } else {
+      bucket.tail.next = record
+      bucket.tail = record
+    }
+
+  private def appendRecord(
+      bucket: SafeZoneBucket,
+      record: SafeZoneRecord
+  ): Unit =
     if (bucket.head == null) {
       bucket.head = record
       bucket.tail = record
@@ -1001,6 +1038,362 @@ object NexmarkRegionMatrixHelpers {
     RunOutcome(checksum, outputCount)
   }
 
+  def runSafeZone(
+      query: String,
+      emitDiagnostics: Boolean = true
+  ): RunOutcome = {
+    val cfg = NexmarkRegionConfig
+    val diag = q5Diag(query, "safezone", emitDiagnostics)
+    val counts = if (query == "q5") new Array[Int](cfg.auctionSpace) else null
+    val sums = if (query == "q5") new Array[Long](cfg.auctionSpace) else null
+    val q8Persons =
+      if (query == "q8") new Array[Int](cfg.personSpace) else null
+    val q8Auctions =
+      if (query == "q8") new Array[Int](cfg.personSpace) else null
+    var first: SafeZoneBucket = null
+    var last: SafeZoneBucket = null
+    var current: SafeZoneBucket = null
+    var checksum = 0L
+    var outputCount = 0L
+
+    def consumeRecord(
+        bucket: SafeZoneBucket,
+        record: SafeZoneRecord
+    ): Unit =
+      if (query == "q5") {
+        diag.recordRemove()
+        counts(record.key) -= 1
+        sums(record.key) -= record.price
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          counts(record.key),
+          sums(record.key),
+          bucket.startSeconds
+        )
+      } else if (query == "q8" && record.kind == 18) {
+        q8Persons(record.key) -= 1
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          q8Persons(record.key),
+          q8Auctions(record.key).toLong,
+          bucket.startSeconds
+        )
+      } else if (query == "q8" && record.kind == 19) {
+        q8Auctions(record.key) -= 1
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          q8Persons(record.key),
+          q8Auctions(record.key).toLong,
+          bucket.startSeconds
+        )
+      } else if (query == "q0" || record.kind != 2) {
+        checksum = fold(
+          checksum,
+          record.kind,
+          record.id,
+          record.key,
+          record.value,
+          record.price,
+          record.timestamp
+        )
+        outputCount += 1L
+      } else {
+        checksum = fold(
+          checksum,
+          record.kind + 60,
+          record.id,
+          record.key,
+          record.value,
+          record.price,
+          record.timestamp
+        )
+      }
+
+    def closeBucket(bucket: SafeZoneBucket): Unit = {
+      if (query == "q5") diag.recordClosedBucket()
+      var record = bucket.head
+      while (record != null) {
+        consumeRecord(bucket, record)
+        record = record.next
+      }
+      bucket.head = null
+      bucket.tail = null
+      bucket.next = null
+      SafeZone.close(bucket.zone)
+    }
+
+    def closeExpired(cutoffSeconds: Long): Unit =
+      while (
+        first != null &&
+        first.startSeconds + cfg.eventsPerBucket.toLong <= cutoffSeconds
+      ) {
+        val bucket = first
+        first = bucket.next
+        if (first == null) last = null
+        if (current eq bucket) current = null
+        closeBucket(bucket)
+      }
+
+    def bucketFor(startSeconds: Long): SafeZoneBucket =
+      if (current != null && current.startSeconds == startSeconds) current
+      else {
+        closeExpired(closeCutoff(startSeconds))
+        val bucket = new SafeZoneBucket(SafeZone.open(), startSeconds, null)
+        if (first == null) {
+          first = bucket
+          last = bucket
+        } else {
+          last.next = bucket
+          last = bucket
+        }
+        current = bucket
+        bucket
+      }
+
+    var i = 0
+    try {
+      while (i < cfg.events) {
+        val startSeconds = bucketStart(i)
+        val bucket = bucketFor(startSeconds)
+        val zone = bucket.zone
+        query match {
+          case "q0" =>
+            val kind = eventKind(i)
+            val key = if (kind == 2) auctionId(i) else bidderId(i)
+            val record =
+              SafeZoneAllocator
+                .allocate(
+                zone,
+                new SafeZoneRecord(
+                  kind,
+                  i,
+                  key,
+                  category(i),
+                  price(i),
+                  i.toLong,
+                  null
+                )
+              )
+                .asInstanceOf[SafeZoneRecord]
+            appendRecord(bucket, record)
+
+          case "q1" =>
+            val bid =
+              SafeZoneAllocator
+                .allocate(
+                zone,
+                new SafeZoneRecord(
+                  2,
+                  i,
+                  auctionId(i),
+                  bidderId(i),
+                  price(i),
+                  i.toLong,
+                  null
+                )
+              )
+                .asInstanceOf[SafeZoneRecord]
+            appendRecord(bucket, bid)
+            val convertedPrice = (bid.price * 89L) / 100L
+            val out =
+              SafeZoneAllocator
+                .allocate(
+                zone,
+                new SafeZoneRecord(
+                  11,
+                  bid.id,
+                  bid.key,
+                  bid.value,
+                  convertedPrice,
+                  bid.timestamp,
+                  null
+                )
+              )
+                .asInstanceOf[SafeZoneRecord]
+            out.value += (convertedPrice & 7L).toInt
+            appendRecord(bucket, out)
+
+          case "q2" =>
+            val bid =
+              SafeZoneAllocator
+                .allocate(
+                zone,
+                new SafeZoneRecord(
+                  2,
+                  i,
+                  auctionId(i),
+                  bidderId(i),
+                  price(i),
+                  i.toLong,
+                  null
+                )
+              )
+                .asInstanceOf[SafeZoneRecord]
+            appendRecord(bucket, bid)
+            if ((bid.key % cfg.q2SelectModulo) == 0) {
+              val out =
+                SafeZoneAllocator
+                  .allocate(
+                  zone,
+                  new SafeZoneRecord(
+                    12,
+                    bid.id,
+                    bid.key,
+                    bid.value,
+                    bid.price,
+                    bid.timestamp,
+                    null
+                  )
+                )
+                  .asInstanceOf[SafeZoneRecord]
+              appendRecord(bucket, out)
+            }
+
+          case "q5" =>
+            val auction = auctionId(i)
+            val bidPrice = price(i)
+            val bid =
+              SafeZoneAllocator
+                .allocate(
+                zone,
+                new SafeZoneRecord(
+                  15,
+                  i,
+                  auction,
+                  bidderId(i),
+                  bidPrice,
+                  i.toLong,
+                  null
+                )
+              )
+                .asInstanceOf[SafeZoneRecord]
+            counts(auction) += 1
+            sums(auction) += bidPrice
+            diag.recordAdd()
+            appendRecord(bucket, bid)
+            if (i % cfg.sampleEvery == 0) {
+              diag.recordSample()
+              val hot = topAuctionProfiled(counts, sums, diag)
+              checksum = fold(
+                checksum,
+                55,
+                i,
+                hot,
+                counts(hot),
+                sums(hot),
+                startSeconds
+              )
+              outputCount += 1L
+            }
+
+          case "q8" =>
+            eventKind(i) match {
+              case 0 =>
+                val id = personId(i)
+                val person =
+                  SafeZoneAllocator
+                    .allocate(
+                    zone,
+                    new SafeZoneRecord(
+                      18,
+                      i,
+                      id,
+                      category(i),
+                      price(i),
+                      i.toLong,
+                      null
+                    )
+                  )
+                    .asInstanceOf[SafeZoneRecord]
+                q8Persons(id) += 1
+                appendRecord(bucket, person)
+                if (q8Auctions(id) > 0) {
+                  val out =
+                    SafeZoneAllocator
+                      .allocate(
+                      zone,
+                      new SafeZoneRecord(
+                        28,
+                        i,
+                        id,
+                        q8Persons(id),
+                        q8Auctions(id).toLong,
+                        i.toLong,
+                        null
+                      )
+                    )
+                      .asInstanceOf[SafeZoneRecord]
+                  appendRecord(bucket, out)
+                }
+              case 1 =>
+                val seller = auctionSeller(i)
+                val auction =
+                  SafeZoneAllocator
+                    .allocate(
+                    zone,
+                    new SafeZoneRecord(
+                      19,
+                      i,
+                      seller,
+                      auctionId(i),
+                      price(i),
+                      i.toLong,
+                      null
+                    )
+                  )
+                    .asInstanceOf[SafeZoneRecord]
+                q8Auctions(seller) += 1
+                appendRecord(bucket, auction)
+                if (q8Persons(seller) > 0) {
+                  val out =
+                    SafeZoneAllocator
+                      .allocate(
+                      zone,
+                      new SafeZoneRecord(
+                        28,
+                        i,
+                        seller,
+                        q8Persons(seller),
+                        q8Auctions(seller).toLong,
+                        i.toLong,
+                        null
+                      )
+                    )
+                      .asInstanceOf[SafeZoneRecord]
+                  appendRecord(bucket, out)
+                }
+              case _ =>
+                ()
+            }
+        }
+        i += 1
+      }
+      closeExpired(Long.MaxValue)
+    } finally {
+      while (first != null) {
+        val bucket = first
+        first = bucket.next
+        closeBucket(bucket)
+      }
+      last = null
+      current = null
+    }
+
+    diag.print(query, cfg.events)
+    checksumSink = checksum
+    outputSink = outputCount
+    RunOutcome(checksum, outputCount)
+  }
+
   def runRiftChecked(
       query: String,
       emitDiagnostics: Boolean = true
@@ -1445,6 +1838,8 @@ object NexmarkRegionMatrixHelpers {
   ): RunOutcome =
     mode match {
       case "heap" => runHeap(query, emitDiagnostics)
+      case "safezone" =>
+        runSafeZone(query, emitDiagnostics)
       case "heap-join-api" =>
         runHeapJoinApi(query)
       case "rift-checked" =>
@@ -1461,7 +1856,7 @@ object NexmarkRegionMatrixHelpers {
 
   def validateMode(mode: String): Unit =
     mode match {
-      case "heap" | "heap-join-api" | "rift-checked" |
+      case "heap" | "safezone" | "heap-join-api" | "rift-checked" |
           "rift-checked-join-api" | "rift-hp" | "rift-streaming" =>
         ()
       case other =>
@@ -1477,7 +1872,8 @@ object NexmarkRegionMatrixHelpers {
 
   def runBenchmark(mode: String, query: String): Unit = {
     val cfg = NexmarkRegionConfig
-    val usesRift = mode != "heap" && mode != "heap-join-api"
+    val usesRift =
+      mode != "heap" && mode != "safezone" && mode != "heap-join-api"
     val expected = runHeap(query, emitDiagnostics = false)
 
     var warmup = 0
@@ -1580,7 +1976,8 @@ object NexmarkRegionMatrixHelpers {
   NexmarkRegionMatrixHelpers.validateQuery(query)
   NexmarkRegionMatrixHelpers.printConfig(mode, query)
 
-  val usesRift = mode != "heap" && mode != "heap-join-api"
+  val usesRift =
+    mode != "heap" && mode != "safezone" && mode != "heap-join-api"
   if (usesRift) RiftRegion.init(0)
   try {
     NexmarkRegionMatrixHelpers.runBenchmark(mode, query)
