@@ -8,7 +8,7 @@ output_dir=${NEXMARK_OUTPUT_DIR:-"/tmp/nexmark-region-matrix"}
 summary=${NEXMARK_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${NEXMARK_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${NEXMARK_MODES:-"heap safezone rift-checked rift-hp rift-streaming"}})
+modes=(${(z)${NEXMARK_MODES:-"heap safezone-current safezone-improved rift-checked rift-hp rift-streaming"}})
 queries=(${(z)${NEXMARK_QUERIES:-"q0 q1 q2 q5 q8"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
@@ -51,12 +51,13 @@ write_summary_header() {
 write_result_row() {
   local query="$1"
   local mode="$2"
-  local run_log="$3"
-  local max_rss_bytes="$4"
+  local binary_mode="$3"
+  local run_log="$4"
+  local max_rss_bytes="$5"
   local line token key value
   typeset -A fields
 
-  line=$(grep "^RESULT name=nexmark-${query}-${mode} " "${run_log}" | tail -n 1)
+  line=$(grep "^RESULT name=nexmark-${query}-${binary_mode} " "${run_log}" | tail -n 1)
   fields=()
   for token in ${(z)line}; do
     if [[ "${token}" == *=* ]]; then
@@ -84,32 +85,53 @@ write_result_row() {
 run_case() {
   local query="$1"
   local mode="$2"
+  local binary_mode="${mode}"
+  local roots_mode=""
   local run_log="${output_dir}/run-${query}-${mode}.log"
   local time_log="${output_dir}/time-${query}-${mode}.log"
   local max_rss_bytes
   local command_status
 
+  case "${mode}" in
+    safezone-current)
+      binary_mode="safezone"
+      roots_mode="0"
+      ;;
+    safezone-improved)
+      binary_mode="safezone"
+      roots_mode="1"
+      ;;
+  esac
+
   echo
   echo "== ${query} / ${mode} =="
   set +e
   if [[ "${platform}" == "Darwin" ]]; then
-    /usr/bin/time -l "${binary}" "${mode}" "${query}" > "${run_log}" 2> "${time_log}"
+    if [[ -n "${roots_mode}" ]]; then
+      SAFEZONE_ROOTS_MODE="${roots_mode}" /usr/bin/time -l "${binary}" "${binary_mode}" "${query}" > "${run_log}" 2> "${time_log}"
+    else
+      /usr/bin/time -l "${binary}" "${binary_mode}" "${query}" > "${run_log}" 2> "${time_log}"
+    fi
   else
-    /usr/bin/time -v "${binary}" "${mode}" "${query}" > "${run_log}" 2> "${time_log}"
+    if [[ -n "${roots_mode}" ]]; then
+      SAFEZONE_ROOTS_MODE="${roots_mode}" /usr/bin/time -v "${binary}" "${binary_mode}" "${query}" > "${run_log}" 2> "${time_log}"
+    else
+      /usr/bin/time -v "${binary}" "${binary_mode}" "${query}" > "${run_log}" 2> "${time_log}"
+    fi
   fi
   command_status=$?
   set -e
 
-  if ! grep -q "^RESULT name=nexmark-${query}-${mode} " "${run_log}"; then
+  if ! grep -q "^RESULT name=nexmark-${query}-${binary_mode} " "${run_log}"; then
     cat "${run_log}" >&2
     cat "${time_log}" >&2
     exit "${command_status}"
   fi
 
   max_rss_bytes=$(read_max_rss_bytes "${time_log}")
-  grep "^RESULT name=nexmark-${query}-${mode} " "${run_log}"
+  grep "^RESULT name=nexmark-${query}-${binary_mode} " "${run_log}"
   echo "NEXMARK_RSS_RESULT query=${query} mode=${mode} max_rss_bytes=${max_rss_bytes}"
-  write_result_row "${query}" "${mode}" "${run_log}" "${max_rss_bytes}"
+  write_result_row "${query}" "${mode}" "${binary_mode}" "${run_log}" "${max_rss_bytes}"
 }
 
 write_summary_header

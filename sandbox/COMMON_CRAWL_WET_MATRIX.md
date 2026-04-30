@@ -30,7 +30,10 @@ Queries:
 Modes:
 
 - `heap`: ordinary Scala heap objects.
-- `safezone`: closeable SafeZone per page bucket.
+- `safezone-current`: closeable SafeZone per page bucket with
+  `SAFEZONE_ROOTS_MODE=0`.
+- `safezone-improved`: closeable SafeZone per page bucket with
+  `SAFEZONE_ROOTS_MODE=1`.
 - `rift-hp`: trusted HPZone per page bucket.
 - `rift-streaming`: trusted Streaming zone per page bucket.
 
@@ -57,7 +60,7 @@ COMMON_CRAWL_WET_OUTPUT_DIR=/tmp/common-crawl-wet-smoke \
 zsh sandbox/run_common_crawl_wet_matrix.sh
 ```
 
-100k default bucket medians:
+100k default bucket medians with current/improved SafeZone:
 
 ```bash
 COMMON_CRAWL_WET_BUILD=0 \
@@ -65,11 +68,12 @@ COMMON_CRAWL_WET_PAGES=100000 \
 COMMON_CRAWL_WET_BENCHMARK_RUNS=3 \
 COMMON_CRAWL_WET_WARMUPS=1 \
 COMMON_CRAWL_WET_QUERIES="q1-tokenize" \
-COMMON_CRAWL_WET_OUTPUT_DIR=/tmp/common-crawl-wet-q1-100k \
+COMMON_CRAWL_WET_MODES="heap safezone-current safezone-improved rift-hp rift-streaming" \
+COMMON_CRAWL_WET_OUTPUT_DIR=/tmp/common-crawl-wet-q1-100k-roots \
 zsh sandbox/run_common_crawl_wet_matrix.sh
 ```
 
-100k small-bucket control:
+100k small-bucket control with current/improved SafeZone:
 
 ```bash
 COMMON_CRAWL_WET_BUILD=0 \
@@ -79,7 +83,8 @@ COMMON_CRAWL_WET_LIVE_BUCKETS=1 \
 COMMON_CRAWL_WET_BENCHMARK_RUNS=3 \
 COMMON_CRAWL_WET_WARMUPS=1 \
 COMMON_CRAWL_WET_QUERIES="q1-tokenize" \
-COMMON_CRAWL_WET_OUTPUT_DIR=/tmp/common-crawl-wet-q1-100k-small-buckets \
+COMMON_CRAWL_WET_MODES="heap safezone-current safezone-improved rift-hp rift-streaming" \
+COMMON_CRAWL_WET_OUTPUT_DIR=/tmp/common-crawl-wet-q1-100k-small-buckets-roots \
 zsh sandbox/run_common_crawl_wet_matrix.sh
 ```
 
@@ -90,11 +95,11 @@ zsh sandbox/run_common_crawl_wet_matrix.sh
 | Query | Mode | Median ms | GC ms | Rift op ms | Region objects | Opens/closes | RSS bytes | Outputs |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
 | q0-parse | heap | 3.092 | 1.694 | 0.000 | 0 | 0 / 0 | 7929856 | 45000 |
-| q0-parse | safezone | 1.669 | 0.000 | 0.000 | 0 | 0 / 0 | 7995392 | 45000 |
+| q0-parse | safezone-current | 1.669 | 0.000 | 0.000 | 0 | 0 / 0 | 7995392 | 45000 |
 | q0-parse | rift-hp | 1.530 | 0.000 | 0.068 | 45000 | 2 / 2 | 7979008 | 45000 |
 | q0-parse | rift-streaming | 1.681 | 0.000 | 0.083 | 45000 | 2 / 2 | 7979008 | 45000 |
 | q1-tokenize | heap | 46.212 | 29.122 | 0.000 | 0 | 0 / 0 | 75022336 | 685000 |
-| q1-tokenize | safezone | 39.876 | 0.000 | 0.000 | 0 | 0 / 0 | 69222400 | 685000 |
+| q1-tokenize | safezone-current | 39.876 | 0.000 | 0.000 | 0 | 0 / 0 | 69222400 | 685000 |
 | q1-tokenize | rift-hp | 23.652 | 0.000 | 1.090 | 685000 | 2 / 2 | 68878336 | 685000 |
 | q1-tokenize | rift-streaming | 23.656 | 0.000 | 1.077 | 685000 | 2 / 2 | 68878336 | 685000 |
 
@@ -112,20 +117,21 @@ Default bucket settings:
 
 | Query | Mode | Median ms | GC ms | Rift op ms | Region objects | Opens/closes | RSS bytes | Outputs |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| q1-tokenize | heap | 452.840 | 160.268 | 0.000 | 0 | 0 / 0 | 408010752 | 13700000 |
-| q1-tokenize | safezone | 1706.540 | 0.000 | 0.000 | 0 | 0 / 0 | 345309184 | 13700000 |
-| q1-tokenize | rift-hp | 427.984 | 0.000 | 1.145 | 13700000 | 40 / 40 | 344670208 | 13700000 |
-| q1-tokenize | rift-streaming | 428.040 | 0.000 | 1.125 | 13700000 | 40 / 40 | 344752128 | 13700000 |
+| q1-tokenize | heap | 427.942 | 149.149 | 0.000 | 0 | 0 / 0 | 408305664 | 13700000 |
+| q1-tokenize | safezone-current | 1675.962 | 0.000 | 0.000 | 0 | 0 / 0 | 345276416 | 13700000 |
+| q1-tokenize | safezone-improved | 381.006 | 0.000 | 0.000 | 0 | 0 / 0 | 345292800 | 13700000 |
+| q1-tokenize | rift-hp | 404.123 | 0.000 | 0.949 | 13700000 | 40 / 40 | 344670208 | 13700000 |
+| q1-tokenize | rift-streaming | 403.935 | 0.000 | 0.926 | 13700000 | 40 / 40 | 344735744 | 13700000 |
 
 Interpretation:
 
 - This generated WET-shaped tokenization workload does stress heap allocation:
-  heap reports `160.268 ms` of GC and much higher RSS than Rift.
-- Trusted Rift removes measured GC and cuts RSS, but elapsed improves only
-  about `5.5%` at this scale.
-- SafeZone is not competitive here despite removing measured GC.
-- This is useful evidence that parser/token streams can expose heap pressure,
-  but it is not yet a strong case-study result.
+  heap reports `149.149 ms` of GC and much higher RSS than the region modes.
+- Current SafeZone is pathological at this scale, but improved SafeZone is the
+  fastest row.
+- Trusted Rift removes measured GC and cuts RSS, but it does not beat improved
+  SafeZone.
+- This is useful as a memory-pressure detector, not a Rift case-study win.
 
 ### 100k Small-Bucket Control
 
@@ -136,28 +142,33 @@ Small-bucket settings:
 
 | Query | Mode | Median ms | GC ms | Rift op ms | Region objects | Opens/closes | RSS bytes | Outputs |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| q1-tokenize | heap | 384.951 | 94.533 | 0.000 | 0 | 0 / 0 | 21364736 | 13700000 |
-| q1-tokenize | safezone | 411.583 | 1.771 | 0.000 | 0 | 0 / 0 | 22806528 | 13700000 |
-| q1-tokenize | rift-hp | 425.050 | 2.346 | 0.969 | 13700000 | 400 / 400 | 22740992 | 13700000 |
-| q1-tokenize | rift-streaming | 423.951 | 2.307 | 1.003 | 13700000 | 400 / 400 | 22740992 | 13700000 |
+| q1-tokenize | heap | 386.807 | 106.615 | 0.000 | 0 | 0 / 0 | 21348352 | 13700000 |
+| q1-tokenize | safezone-current | 400.242 | 2.527 | 0.000 | 0 | 0 / 0 | 22790144 | 13700000 |
+| q1-tokenize | safezone-improved | 381.109 | 2.606 | 0.000 | 0 | 0 / 0 | 22790144 | 13700000 |
+| q1-tokenize | rift-hp | 406.536 | 2.219 | 0.835 | 13700000 | 400 / 400 | 22724608 | 13700000 |
+| q1-tokenize | rift-streaming | 419.779 | 2.240 | 0.916 | 13700000 | 400 / 400 | 22724608 | 13700000 |
 
 Interpretation:
 
 - Making the structured lifetime more precise helps heap substantially too,
   because objects become unreachable sooner and RSS collapses.
-- Rift no longer wins elapsed time under this bucket policy.
+- Improved SafeZone is fastest by a small margin; Rift loses elapsed time under
+  this bucket policy.
 - This is an important guardrail: Common Crawl tokenization should not become a
   benchmark-specific story where Rift wins only because heap is forced to hold
   data for too long.
 
 ## Current Conclusion
 
-Common Crawl WET remains promising as a *memory-pressure detector*, but the
-generated workload does not yet give a strong checked-Rift case study:
+Common Crawl WET remains useful as a *memory-pressure detector*, but the
+generated workload does not give a strong Rift case study:
 
-- default buckets show lower GC/RSS and a modest trusted Rift elapsed win;
-- smaller, more natural token lifetimes make heap competitive or faster;
-- SafeZone is poor on the large default-bucket tokenization case;
+- default buckets show lower GC/RSS for region modes, but improved SafeZone is
+  faster than trusted Rift;
+- smaller, more natural token lifetimes make heap and improved SafeZone
+  competitive or faster;
+- current SafeZone is poor on the large default-bucket tokenization case, but
+  improved SafeZone is not;
 - no checked Common Crawl mode should be added until a cheap checked page/token
   append operator can match the trusted shape.
 

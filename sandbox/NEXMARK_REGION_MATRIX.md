@@ -32,8 +32,10 @@ Queries:
 Modes:
 
 - `heap`: ordinary Scala heap objects.
-- `safezone`: closeable SafeZone bucket regions. This is a runtime control,
-  not a checked API mode.
+- `safezone-current`: closeable SafeZone bucket regions with
+  `SAFEZONE_ROOTS_MODE=0`. This is a runtime control, not a checked API mode.
+- `safezone-improved`: closeable SafeZone bucket regions with
+  `SAFEZONE_ROOTS_MODE=1`.
 - `heap-join-api`: Q8-only specialized heap join-window control. This exists
   to keep the reusable join API comparison fair; it is not part of the generic
   all-query matrix.
@@ -105,10 +107,12 @@ zsh sandbox/run_nexmark_region_matrix.sh
 - 20k smoke matched checksum/output count across all modes and queries.
 - 100k and 1M medians matched checksum/output count across all modes and
   queries.
-- After adding SafeZone controls, a 20k smoke matched checksum/output count
-  across `heap`, `safezone`, `rift-hp`, and `rift-streaming` for Q1/Q5/Q8.
-- A 100k SafeZone follow-up matched checksum/output count across `heap`,
-  `safezone`, `rift-checked`, `rift-hp`, and `rift-streaming` for Q1/Q5/Q8.
+- After adding SafeZone controls, a 20k current-SafeZone smoke matched
+  checksum/output count across `heap`, `safezone-current`, `rift-hp`, and
+  `rift-streaming` for Q1/Q5/Q8.
+- A corrected 100k SafeZone roots-mode follow-up matched checksum/output count
+  across `heap`, `safezone-current`, `safezone-improved`, `rift-checked`,
+  `rift-hp`, and `rift-streaming` for Q1/Q5/Q8.
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile` passed.
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"` passed `91/91`.
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"` passed `36/36`.
@@ -140,7 +144,7 @@ zsh sandbox/run_nexmark_region_matrix.sh
 | q8 | rift-hp | 30.860 | 0.954 | 0.010 | 30000 | 4 / 4 | 23085056 | 10000 |
 | q8 | rift-streaming | 30.790 | 0.923 | 0.019 | 30000 | 4 / 4 | 23150592 | 10000 |
 
-### SafeZone 100k Follow-Up
+### SafeZone Roots-Mode 100k Follow-Up
 
 Command:
 
@@ -150,38 +154,45 @@ NEXMARK_EVENTS=100000 \
 NEXMARK_BENCHMARK_RUNS=3 \
 NEXMARK_WARMUPS=1 \
 NEXMARK_QUERIES="q1 q5 q8" \
-NEXMARK_MODES="heap safezone rift-checked rift-hp rift-streaming" \
-NEXMARK_OUTPUT_DIR=/tmp/nexmark-safezone-100k \
+NEXMARK_MODES="heap safezone-current safezone-improved rift-checked rift-hp rift-streaming" \
+NEXMARK_OUTPUT_DIR=/tmp/nexmark-safezone-roots-100k \
 zsh sandbox/run_nexmark_region_matrix.sh
 ```
 
+`safezone-current` runs the binary `safezone` mode with
+`SAFEZONE_ROOTS_MODE=0`. `safezone-improved` runs the same binary mode with
+`SAFEZONE_ROOTS_MODE=1`.
+
 | Query | Mode | Median ms | GC ms | Rift op ms | Region objects | Opens/closes | RSS bytes | Outputs |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| q1 | heap | 55.559 | 5.798 | 0.000 | 0 | 0 / 0 | 75137024 | 100000 |
-| q1 | safezone | 59.649 | 3.061 | 0.000 | 0 | 0 / 0 | 50741248 | 100000 |
-| q1 | rift-checked | 57.332 | 2.005 | 0.035 | 200000 | 5 / 5 | 49004544 | 100000 |
-| q1 | rift-hp | 55.319 | 1.959 | 0.042 | 200000 | 4 / 4 | 50610176 | 100000 |
-| q1 | rift-streaming | 55.964 | 2.074 | 0.041 | 200000 | 4 / 4 | 50675712 | 100000 |
-| q5 | heap | 35.520 | 0.000 | 0.000 | 0 | 0 / 0 | 74973184 | 13 |
-| q5 | safezone | 34.986 | 0.000 | 0.000 | 0 | 0 / 0 | 45088768 | 13 |
-| q5 | rift-checked | 35.629 | 0.000 | 0.020 | 100000 | 5 / 5 | 44269568 | 13 |
-| q5 | rift-hp | 35.346 | 0.000 | 0.023 | 100000 | 4 / 4 | 44957696 | 13 |
-| q5 | rift-streaming | 35.095 | 0.000 | 0.027 | 100000 | 4 / 4 | 45023232 | 13 |
-| q8 | heap | 31.893 | 2.153 | 0.000 | 0 | 0 / 0 | 39272448 | 10000 |
-| q8 | safezone | 31.138 | 1.542 | 0.000 | 0 | 0 / 0 | 23183360 | 10000 |
-| q8 | rift-checked | 30.577 | 0.911 | 0.016 | 30000 | 5 / 5 | 22970368 | 10000 |
-| q8 | rift-hp | 30.526 | 0.937 | 0.010 | 30000 | 4 / 4 | 23150592 | 10000 |
-| q8 | rift-streaming | 30.551 | 0.922 | 0.014 | 30000 | 4 / 4 | 23216128 | 10000 |
+| q1 | heap | 54.378 | 5.593 | 0.000 | 0 | 0 / 0 | 75137024 | 100000 |
+| q1 | safezone-current | 57.561 | 2.958 | 0.000 | 0 | 0 / 0 | 50741248 | 100000 |
+| q1 | safezone-improved | 54.777 | 2.964 | 0.000 | 0 | 0 / 0 | 50708480 | 100000 |
+| q1 | rift-checked | 55.661 | 1.852 | 0.021 | 200000 | 5 / 5 | 49004544 | 100000 |
+| q1 | rift-hp | 53.008 | 1.833 | 0.024 | 200000 | 4 / 4 | 50610176 | 100000 |
+| q1 | rift-streaming | 54.026 | 1.849 | 0.024 | 200000 | 4 / 4 | 50675712 | 100000 |
+| q5 | heap | 33.043 | 0.000 | 0.000 | 0 | 0 / 0 | 74973184 | 13 |
+| q5 | safezone-current | 33.505 | 0.000 | 0.000 | 0 | 0 / 0 | 45088768 | 13 |
+| q5 | safezone-improved | 32.435 | 0.000 | 0.000 | 0 | 0 / 0 | 45056000 | 13 |
+| q5 | rift-checked | 34.993 | 0.000 | 0.011 | 100000 | 5 / 5 | 44269568 | 13 |
+| q5 | rift-hp | 32.865 | 0.000 | 0.011 | 100000 | 4 / 4 | 44957696 | 13 |
+| q5 | rift-streaming | 32.899 | 0.000 | 0.011 | 100000 | 4 / 4 | 45023232 | 13 |
+| q8 | heap | 29.598 | 1.960 | 0.000 | 0 | 0 / 0 | 39272448 | 10000 |
+| q8 | safezone-current | 29.297 | 1.076 | 0.000 | 0 | 0 / 0 | 23216128 | 10000 |
+| q8 | safezone-improved | 29.919 | 1.130 | 0.000 | 0 | 0 / 0 | 23216128 | 10000 |
+| q8 | rift-checked | 29.146 | 0.878 | 0.004 | 30000 | 5 / 5 | 22986752 | 10000 |
+| q8 | rift-hp | 29.911 | 0.874 | 0.004 | 30000 | 4 / 4 | 23134208 | 10000 |
+| q8 | rift-streaming | 28.766 | 0.885 | 0.004 | 30000 | 4 / 4 | 23199744 | 10000 |
 
 Interpretation:
 
-- SafeZone is a useful RSS/GC control on these bucketed shapes, but it is not
-  consistently faster than heap or Rift.
-- Q1 at 100k shows SafeZone slower than heap despite lower RSS and GC.
-- Q5 is effectively a near-tie across all runtime modes because the top-scan
-  and aggregate maintenance dominate.
-- Q8 shows SafeZone competitive with heap and close to Rift, but checked/trusted
-  Rift are still slightly faster in this local 100k run.
+- Improved SafeZone is the relevant SafeZone baseline. It closes most of the
+  current SafeZone Q1 gap and is the fastest Q5 row in this 100k run.
+- Q1 remains a modest trusted Rift row: HPZone is faster than heap and improved
+  SafeZone, while checked Rift is slightly slower than both.
+- Q5 remains mostly an aggregate/top-scan shape, not a Rift checked win.
+- Q8 is a near-tie among heap, SafeZone, and Rift, with Streaming fastest in
+  this local 100k run.
 
 ### Q8 Join API 100k Follow-Up
 
