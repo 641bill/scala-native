@@ -201,6 +201,8 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       private[memory] val buckets: StreamBucketArena
   ) {
     private[memory] var totalLength: Int = 0
+    private[memory] val cursor: StreamAppendCursor[T] =
+      new StreamAppendCursor[T](null)
   }
 
   /** Close-time cursor over records linked in one append-window bucket.
@@ -2985,10 +2987,11 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     bucket.appendLength = 0
     window.totalLength -= removed
 
-    val cursor =
-      new StreamAppendCursor[T](head).asInstanceOf[StreamAppendCursor[T]^{parent}]
+    val cursor = window.cursor.asInstanceOf[StreamAppendCursor[T]^{parent}]
+    cursor.current = head
     onBucket(bucket, cursor)
     while (cursor.hasNext) cursor.next()
+    cursor.current = null
   }
 
   /** Returns true if closing before `cutoffSeconds` would close a bucket. */

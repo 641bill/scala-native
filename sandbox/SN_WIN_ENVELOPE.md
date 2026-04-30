@@ -19,10 +19,12 @@ DEBS faster?" It is:
 
 This document summarizes existing evidence and the new
 `CheckedAppendWindowMatrix` result. It keeps TableRank boxed off from DEBS Q1:
-TableRank is framework progress, but its 1M focused gate still fails. It also
-keeps `StreamAppendWindow` out of DEBS for this checkpoint: the cursor-close
-API now clears the focused 1M gate, but application integration should happen
-as a separate, controlled step.
+TableRank is framework progress, but its 1M focused gate still fails.
+`StreamAppendWindow` cursor close now clears the focused append-window gate and
+has been integrated into checked DEBS Q1/Q2 window entries. That integration is
+framework generalization evidence, not a large DEBS speedup claim; the latest
+bounded controls are near-ties or checked-slower because Q1/Q2 process CPU and
+live window payload still dominate.
 
 ## Evidence Labels
 
@@ -56,8 +58,8 @@ as a separate, controlled step.
 | StreamWindowTableRank profile | 1M events | table-long `568.572 ms` | heap-long `437.702 ms` | Checked-container overhead | Profiled; gated out of DEBS |
 | Checked AppendWindow manual child-bucket | 1M events | checked `32.261 ms` | heap `35.513 ms` | Cheap checked operator win | New focused matrix |
 | Reusable `StreamAppendWindow` per-entry API | 1M events | cached checked-api `39.372 ms` | same-run heap `38.559 ms` | Near miss / per-entry callback overhead | Focused matrix; keep as control |
-| Reusable `StreamAppendWindow` cursor API | 1M events | cursor `34.708 ms` | same-run heap `35.705 ms` | Cheap checked operator win | Focused gate passed; not yet DEBS evidence |
-| DEBS RunBoth checked, bounded 1M | 3-run median | checked `5043.240 ms` | heap `5363.257 ms` | Application partial win, CPU-limited | Bounded real-data evidence |
+| Reusable `StreamAppendWindow` cursor API | 1M events | cursor `34.708 ms`; cursor-reuse confirmation `35.527 ms` | same-run heap `35.705 ms`; confirmation heap `37.494 ms` | Cheap checked operator win | Focused gate passed; cursor-object reuse is neutral/noisy |
+| DEBS RunBoth checked, bounded 1M after Q1/Q2 append-window integration | 3-run median | checked `5349.444 ms` | heap `5219.189 ms` | API generalization, CPU-limited | Latest bounded control; not a speedup claim |
 | DEBS RunBoth checked, full month | 3-run median | checked `66.804 s` | heap `67.122 s` | Near-tie throughput, memory validation | Full-month evidence, not large speedup |
 
 ## What The New Append Window Matrix Adds
@@ -122,6 +124,13 @@ extending `RiftRegion.StreamAppendNode`, but closes buckets through
 than same-run heap, within 1.15x of same-run manual checked, keeps RSS low, and
 keeps Rift op time under `1 ms`. The older per-entry close API remains as a
 control and should not be the DEBS integration target.
+
+A follow-up changed `StreamAppendWindow` to reuse one cursor object instead of
+allocating a fresh cursor per closed bucket. The 1M focused confirmation subset
+still clears the cursor API gate (`35.527 ms` versus same-run heap
+`37.494 ms`), but the all-mode rerun had a noisy/non-winning cursor row and RSS
+did not change. Treat cursor-object reuse as a small cleanup, not as a new
+performance result.
 
 The trusted modes losing here is also useful. It means the current win is not a
 generic "HPZone always beats heap" statement. It is a checked operator-shape

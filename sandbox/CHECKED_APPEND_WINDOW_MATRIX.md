@@ -338,6 +338,78 @@ Interpretation:
   but DEBS should still wait for a deliberate integration step. The passing
   shape is cursor close, not the older per-entry close callback.
 
+## Cursor-Reuse Follow-Up, 2026-04-30
+
+Implementation change:
+
+- `StreamAppendWindow` now owns one reusable `StreamAppendCursor` object.
+- `closeAppendWindowBucketsBeforeWithCursor` and
+  `closeAllAppendWindowBucketsWithCursor` reset that cursor for each closed
+  bucket instead of allocating a fresh cursor object per bucket.
+- Public API signatures did not change.
+
+Validation:
+
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile`
+  passed.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"`
+  passed `89/89`.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"`
+  passed `35/35`.
+- 20k, 100k, and 1M focused matrix runs matched checksums across modes.
+
+20k smoke:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 0.563 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 6209536 | 2522262741738122908 |
+| rift-checked | 0.788 | 0.000 | 0.038 | 20000 | 5 | 5 | 0 | 6078464 | 2522262741738122908 |
+| rift-checked-api | 1.091 | 0.000 | 0.038 | 20000 | 5 | 5 | 0 | 6078464 | 2522262741738122908 |
+| rift-checked-api-cursor | 1.011 | 0.000 | 0.034 | 20000 | 5 | 5 | 0 | 6078464 | 2522262741738122908 |
+| rift-trusted-hp | 1.202 | 0.000 | 0.062 | 20000 | 4 | 4 | 0 | 6045696 | 2522262741738122908 |
+| rift-trusted-streaming | 1.007 | 0.000 | 0.046 | 20000 | 4 | 4 | 0 | 6045696 | 2522262741738122908 |
+
+100k 3-run median:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 3.327 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 21315584 | 4594055666086494054 |
+| rift-checked | 3.420 | 0.000 | 0.011 | 100000 | 5 | 5 | 0 | 15777792 | 4594055666086494054 |
+| rift-checked-api | 4.070 | 0.000 | 0.009 | 100000 | 5 | 5 | 0 | 15777792 | 4594055666086494054 |
+| rift-checked-api-cursor | 3.627 | 0.000 | 0.008 | 100000 | 5 | 5 | 0 | 15777792 | 4594055666086494054 |
+| rift-trusted-hp | 4.341 | 0.000 | 0.007 | 100000 | 4 | 4 | 0 | 15679488 | 4594055666086494054 |
+| rift-trusted-streaming | 4.264 | 0.000 | 0.009 | 100000 | 4 | 4 | 0 | 15745024 | 4594055666086494054 |
+
+1M all-mode 3-run median:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 38.670 | 11.893 | 0.000 | 0 | 0 | 0 | 0 | 75022336 | -2507118467295660905 |
+| rift-checked | 34.605 | 0.000 | 0.086 | 1000000 | 41 | 41 | 0 | 47529984 | -2507118467295660905 |
+| rift-checked-api | 42.432 | 0.000 | 0.088 | 1000000 | 41 | 41 | 0 | 47546368 | -2507118467295660905 |
+| rift-checked-api-cursor | 44.344 | 0.000 | 0.107 | 1000000 | 41 | 41 | 0 | 47546368 | -2507118467295660905 |
+| rift-trusted-hp | 43.577 | 0.000 | 0.097 | 1000000 | 40 | 40 | 0 | 47366144 | -2507118467295660905 |
+| rift-trusted-streaming | 43.546 | 0.000 | 0.089 | 1000000 | 40 | 40 | 0 | 47513600 | -2507118467295660905 |
+
+1M confirmation subset:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 37.494 | 11.576 | 0.000 | 0 | 0 | 0 | 0 | 75022336 | -2507118467295660905 |
+| rift-checked | 33.286 | 0.000 | 0.087 | 1000000 | 41 | 41 | 0 | 47529984 | -2507118467295660905 |
+| rift-checked-api-cursor | 35.527 | 0.000 | 0.093 | 1000000 | 41 | 41 | 0 | 47546368 | -2507118467295660905 |
+
+Interpretation:
+
+- Reusing the cursor object is a small framework cleanup, not a headline
+  performance result.
+- The focused confirmation subset still clears the cursor API gate, but the
+  all-mode 1M run had a noisy/non-winning cursor row. Use the earlier
+  cached-bucket plus cursor result and this confirmation as correctness and
+  gate evidence, not as evidence that cursor-object reuse itself is faster.
+- RSS is effectively unchanged. Cursor object allocation was not the memory
+  driver in the focused append-window matrix.
+
 ## Opt-In API Diagnostics
 
 Command shape:

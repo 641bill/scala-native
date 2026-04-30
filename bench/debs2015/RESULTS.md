@@ -4660,3 +4660,73 @@ Interpretation:
 - RSS remains below heap in this run but is much higher than the preceding
   Q1-only append-window checkpoint. Treat this as a useful API unification, not
   as a new stronger DEBS performance result.
+
+## StreamAppendWindow Cursor-Reuse Control, 2026-04-30
+
+This checkpoint changes only the reusable append-window primitive:
+`StreamAppendWindow` now owns one reusable `StreamAppendCursor` and resets it
+for each closed bucket, instead of allocating a fresh cursor object per closed
+bucket. Public APIs and DEBS Q1/Q2 logic are unchanged.
+
+Validation:
+
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile`
+  passed.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"`
+  passed `89/89`.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"`
+  passed `35/35`.
+- Focused `CheckedAppendWindowMatrix` smoke/100k/1M runs matched checksums.
+- RunBoth 100k and 1M heap/checked controls matched Q1/Q2 outputs after
+  stripping only latency columns.
+
+100k single-run RunBoth control:
+
+```sh
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-cursor-reuse-100k \
+DEBS2015_BOTH_SUMMARY=/tmp/debs2015-runboth-cursor-reuse-100k/summary.tsv \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+```
+
+| Mode | Elapsed ms | GC ms | RSS MiB | Rift op ms | Q1 process ms | Q2 process ms |
+|---|---:|---:|---:|---:|---:|---:|
+| heap | 533.744 | 8.547 | 53.0 | 0.000 | 156.371 | 143.764 |
+| rift-checked | 531.347 | 2.047 | 42.0 | 1.706 | 172.735 | 141.402 |
+
+1M 3-run RunBoth control:
+
+Each run used `DEBS2015_BOTH_MODES="heap rift-checked"` and
+`DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv`.
+
+```sh
+for run in 1 2 3; do
+  out="/tmp/debs2015-runboth-cursor-reuse-1m-run${run}"
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_MODES="heap rift-checked" \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR="$out" \
+  DEBS2015_BOTH_SUMMARY="$out/summary.tsv" \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+```
+
+Median rows:
+
+| Mode | Elapsed ms | Throughput eps | GC ms | RSS MiB | Rift op ms | Q1 process ms | Q2 process ms | Q1 window raw MiB | Q2 profit raw MiB | Q2 empty raw MiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 5219.189 | 191600.637 | 21.819 | 153.8 | 0.000 | 1606.540 | 1472.710 | 0.0 | 0.0 | 0.0 |
+| rift-checked | 5349.444 | 186935.328 | 21.593 | 142.4 | 9.747 | 1760.174 | 1528.867 | 99.9 | 37.5 | 29.9 |
+
+Interpretation:
+
+- Cursor-object reuse is correctness-valid but neutral/negative on this DEBS
+  bounded control. It should be treated as a small framework cleanup, not as a
+  new application performance claim.
+- The checked RSS median is essentially unchanged from the Q2 append-window
+  checkpoint (`142.4 MiB`), so per-bucket cursor object allocation is not the
+  source of the checked RSS increase after Q2 moved to `StreamAppendWindow`.
+- The application limit remains checked Q1/Q2 process CPU and live
+  append-window payload/metadata, not cursor allocation. The next useful work
+  is append-window footprint analysis or checked Q1 process overhead reduction.
