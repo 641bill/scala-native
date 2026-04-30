@@ -60,6 +60,9 @@ live window payload still dominate.
 | Reusable `StreamAppendWindow` per-entry API | 1M events | cached checked-api `39.372 ms` | same-run heap `38.559 ms` | Near miss / per-entry callback overhead | Focused matrix; keep as control |
 | Reusable `StreamAppendWindow` cursor API | 1M events | cursor `34.708 ms`; cursor-reuse confirmation `35.527 ms` | same-run heap `35.705 ms`; confirmation heap `37.494 ms` | Cheap checked operator win | Focused gate passed; cursor-object reuse is neutral/noisy |
 | Reusable `StreamAppendWindow` prepend cursor API | 1M events | prepend cursor `34.662 ms` | same-run heap-prepend `36.836 ms` | Cheap checked operator win, not better than append cursor | Focused control; do not move to DEBS yet |
+| NEXMark-lite Q1 conversion | 1M events | checked `374.767 ms`; Streaming `371.404 ms` | heap `384.595 ms` | Region-friendly stream map win | Local methodology benchmark, not exact Beam NEXMark |
+| NEXMark-lite Q2 selection | 1M events | checked `287.808 ms` | heap `297.053 ms` | Low-output input-region win | Local methodology benchmark; checked RSS higher than heap |
+| NEXMark-lite Q5 hot items | 1M events | checked `355.100 ms` | heap `350.941 ms` | Window aggregate not yet a win | Local methodology benchmark; needs operator/footprint work |
 | DEBS RunBoth checked, bounded 1M after Q1/Q2 append-window integration | 3-run median | checked `5349.444 ms` | heap `5219.189 ms` | API generalization, CPU-limited | Latest bounded control; not a speedup claim |
 | DEBS RunBoth checked, full month | 3-run median | checked `66.804 s` | heap `67.122 s` | Near-tie throughput, memory validation | Full-month evidence, not large speedup |
 
@@ -164,6 +167,8 @@ The strongest local categories are:
   heap GC and latency misses;
 - Yak top-word/filter and GraphChi-style subintervals where high-volume data
   objects are epoch/subinterval-local;
+- NEXMark-lite Q1 conversion and checked Q2 selection, where ordinary stream
+  input/output objects are bucket-owned and measured GC time drops materially;
 - checked RegionBuffer and the manual checked AppendWindow child-bucket shape,
   which show the safe API direction can win on simple collection/operator
   shapes when abstraction overhead stays low.
@@ -179,6 +184,8 @@ The strongest local categories are:
 - Checked ranking/indexing containers are still too expensive at 1M:
   `StreamWindowRank`, `StreamWindowLongIndexedRank`, and `StreamWindowTableRank`
   are functionally important, but not ready as throughput evidence.
+- The first NEXMark-lite Q5 hot-items row is not a win: region modes reduce GC
+  but live-window arrays and top scanning dominate elapsed time and RSS.
 - The first reusable `StreamAppendWindow` per-entry close API was too
   expensive at 1M despite matching the winning child-bucket lifetime shape.
   Cached bucket/region use almost closed the gap; cursor close is the first
