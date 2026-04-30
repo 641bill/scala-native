@@ -89,9 +89,8 @@ object Debs2015Q2CheckedProcessingRunner {
 
     final class ProfitEntry(
         val cellKey: Int,
-        val profit: Double,
-        var bucketNext: ProfitEntry^{stream}
-    ) {
+        val profit: Double
+    ) extends RiftRegion.StreamAppendNode {
       var medianHeap: Int = NoMedianHeap
       var medianIndex: Int = -1
     }
@@ -99,23 +98,8 @@ object Debs2015Q2CheckedProcessingRunner {
     final class EmptyEntry(
         val seq: Long,
         val taxiKey: Int,
-        val cellKey: Int,
-        var next: EmptyEntry^{stream}
-    )
-
-    final class ProfitBucket(
-        val child: RiftRegion.ChildBucket^{stream},
-        val startSeconds: Long,
-        var head: ProfitEntry^{stream},
-        var next: ProfitBucket^{stream}
-    )
-
-    final class EmptyBucket(
-        val child: RiftRegion.ChildBucket^{stream},
-        val startSeconds: Long,
-        var head: EmptyEntry^{stream},
-        var next: EmptyBucket^{stream}
-    )
+        val cellKey: Int
+    ) extends RiftRegion.StreamAppendNode
 
     final class TaxiIdEntry(
         val hash: Int,
@@ -443,12 +427,16 @@ object Debs2015Q2CheckedProcessingRunner {
       private var latestEmptyByTaxi =
         allocateEmptyEntryArray(InitialTaxiTableCapacity)
       private val result = allocateAreaArray(10)
-      private var firstProfitBucket: ProfitBucket^{stream} = null
-      private var lastProfitBucket: ProfitBucket^{stream} = null
-      private var currentProfitBucket: ProfitBucket^{stream} = null
-      private var firstEmptyBucket: EmptyBucket^{stream} = null
-      private var lastEmptyBucket: EmptyBucket^{stream} = null
-      private var currentEmptyBucket: EmptyBucket^{stream} = null
+      private val profitWindow: RiftRegion.StreamAppendWindow[ProfitEntry]^{stream} =
+        RiftRegion.streamAppendWindow[ProfitEntry](1L)
+      private val emptyWindow: RiftRegion.StreamAppendWindow[EmptyEntry]^{stream} =
+        RiftRegion.streamAppendWindow[EmptyEntry](1L)
+      private var currentProfitStartSeconds = Long.MinValue
+      private var currentProfitBucket: RiftRegion.StreamBucket^{stream} = null
+      private var currentProfitRegion: RiftRegion.StreamingRegion^{stream} = null
+      private var currentEmptyStartSeconds = Long.MinValue
+      private var currentEmptyBucket: RiftRegion.StreamBucket^{stream} = null
+      private var currentEmptyRegion: RiftRegion.StreamingRegion^{stream} = null
       private var nextSeq = 0L
       private var heapSize = 0
       private var resultSize = 0
@@ -496,9 +484,13 @@ object Debs2015Q2CheckedProcessingRunner {
           if (pickupKey != 0) {
             val profit = trip.profit
             val bucket = profitBucketFor(trip.dropoffSeconds)
-            val entry = allocateProfitEntry(bucket, pickupKey, profit)
-            entry.bucketNext = bucket.head
-            bucket.head = entry
+            val bucketRegion = currentProfitRegion
+            val entry: ProfitEntry^{stream} =
+              RiftRegion.alloc(new ProfitEntry(pickupKey, profit))(using
+                bucketRegion
+              )
+            Debs2015ProcessDiagnostics.recordQ2ProfitEntry()
+            RiftRegion.appendWindow(stream, profitWindow, bucket, entry)
             profitStatsOrCreate(pickupKey).add(entry)
             updateLatest(pickupKey, seq)
             if (q2CpuDiagnostics)
@@ -523,9 +515,13 @@ object Debs2015Q2CheckedProcessingRunner {
           Grid.Q2.cellKeyOrZero(trip.dropoffLongitude, trip.dropoffLatitude)
         if (dropoffKey != 0) {
           val bucket = emptyBucketFor(trip.dropoffSeconds)
-          val entry = allocateEmptyEntry(bucket, seq, taxiKey, dropoffKey)
-          entry.next = bucket.head
-          bucket.head = entry
+          val bucketRegion = currentEmptyRegion
+          val entry: EmptyEntry^{stream} =
+            RiftRegion.alloc(new EmptyEntry(seq, taxiKey, dropoffKey))(using
+              bucketRegion
+            )
+          Debs2015ProcessDiagnostics.recordQ2EmptyEntry()
+          RiftRegion.appendWindow(stream, emptyWindow, bucket, entry)
           updateLatestEmpty(taxiKey, entry)
           incrementEmpty(dropoffKey)
           updateLatest(dropoffKey, seq)
@@ -565,147 +561,140 @@ object Debs2015Q2CheckedProcessingRunner {
         clearLatestEmpty()
         clearRankIndex()
         clearCellTables()
-
-        while (firstProfitBucket != null) {
-          val bucket = firstProfitBucket
-          firstProfitBucket = bucket.next
-          closeProfitBucket(bucket)
+        RiftRegion.closeAllAppendWindowBucketsWithCursor(
+          stream,
+          profitWindow
+        ) { (_, cursor) =>
+          Debs2015ProcessDiagnostics.recordQ2ProfitBucketClose()
+          while (cursor.hasNext) cursor.next()
         }
-        while (firstEmptyBucket != null) {
-          val bucket = firstEmptyBucket
-          firstEmptyBucket = bucket.next
-          closeEmptyBucket(bucket)
+        RiftRegion.closeAllAppendWindowBucketsWithCursor(
+          stream,
+          emptyWindow
+        ) { (_, cursor) =>
+          Debs2015ProcessDiagnostics.recordQ2EmptyBucketClose()
+          while (cursor.hasNext) cursor.next()
         }
-        lastProfitBucket = null
+        currentProfitStartSeconds = Long.MinValue
         currentProfitBucket = null
-        lastEmptyBucket = null
+        currentProfitRegion = null
+        currentEmptyStartSeconds = Long.MinValue
         currentEmptyBucket = null
+        currentEmptyRegion = null
       }
 
-      private def evictProfitBefore(cutoffSeconds: Long): Unit =
-        while (
-          firstProfitBucket != null &&
-          firstProfitBucket.startSeconds < cutoffSeconds
-        ) {
-          val bucket = firstProfitBucket
+      private def evictProfitBefore(cutoffSeconds: Long): Unit = {
+        RiftRegion.closeAppendWindowBucketsBeforeWithCursor(
+          stream,
+          profitWindow,
+          cutoffSeconds
+        ) { (_, cursor) =>
           Debs2015ProcessDiagnostics.recordQ2ProfitBucketClose()
-          RiftRegion.closeChildBucket(stream, bucket.child) {
-            var expired = bucket.head
-            while (expired != null) {
-              val next = expired.bucketNext
-              val stats = profitStats(expired.cellKey)
-              if (stats != null) {
-                stats.remove(expired)
-                updateRank(expired.cellKey)
-              }
-              expired = next
+          while (cursor.hasNext) {
+            val expired = cursor.next()
+            val stats = profitStats(expired.cellKey)
+            if (stats != null) {
+              stats.remove(expired)
+              updateRank(expired.cellKey)
             }
-            firstProfitBucket = bucket.next
-            if (firstProfitBucket == null) lastProfitBucket = null
-            if (currentProfitBucket eq bucket) currentProfitBucket = null
-            bucket.head = null
-            bucket.next = null
           }
         }
-
-      private def evictEmptyBefore(cutoffSeconds: Long): Unit =
-        while (
-          firstEmptyBucket != null &&
-          firstEmptyBucket.startSeconds < cutoffSeconds
+        if (
+          currentProfitBucket != null &&
+          currentProfitStartSeconds < cutoffSeconds
         ) {
-          val bucket = firstEmptyBucket
+          currentProfitStartSeconds = Long.MinValue
+          currentProfitBucket = null
+          currentProfitRegion = null
+        }
+      }
+
+      private def evictEmptyBefore(cutoffSeconds: Long): Unit = {
+        RiftRegion.closeAppendWindowBucketsBeforeWithCursor(
+          stream,
+          emptyWindow,
+          cutoffSeconds
+        ) { (_, cursor) =>
           Debs2015ProcessDiagnostics.recordQ2EmptyBucketClose()
-          RiftRegion.closeChildBucket(stream, bucket.child) {
-            var expired = bucket.head
-            while (expired != null) {
-              val latest = latestEmpty(expired.taxiKey)
-              if (latest != null && latest.seq == expired.seq) {
-                clearLatestEmpty(expired.taxiKey)
-                removeEmpty(expired)
-              }
-              expired = expired.next
+          while (cursor.hasNext) {
+            val expired = cursor.next()
+            val latest = latestEmpty(expired.taxiKey)
+            if (latest != null && latest.seq == expired.seq) {
+              clearLatestEmpty(expired.taxiKey)
+              removeEmpty(expired)
             }
-            firstEmptyBucket = bucket.next
-            if (firstEmptyBucket == null) lastEmptyBucket = null
-            if (currentEmptyBucket eq bucket) currentEmptyBucket = null
-            bucket.head = null
-            bucket.next = null
           }
         }
+        if (
+          currentEmptyBucket != null &&
+          currentEmptyStartSeconds < cutoffSeconds
+        ) {
+          currentEmptyStartSeconds = Long.MinValue
+          currentEmptyBucket = null
+          currentEmptyRegion = null
+        }
+      }
 
       private def profitBucketFor(
           dropoffSeconds: Long
-      ): ProfitBucket^{stream} =
+      ): RiftRegion.StreamBucket^{stream} = {
+        val startSeconds = dropoffSeconds
         if (
           currentProfitBucket != null &&
-          currentProfitBucket.startSeconds == dropoffSeconds
-        ) currentProfitBucket
+          currentProfitStartSeconds == startSeconds &&
+          currentProfitBucket.isOpen
+        )
+          currentProfitBucket
         else {
-          val child = RiftRegion.childBucket
-          Debs2015ProcessDiagnostics.recordQ2ProfitBucketOpen()
-          DebsRegionFamilies.setChildBucket(
-            stream,
-            child,
-            DebsRegionFamilies.Q2ProfitWindow
-          )
-          val bucket: ProfitBucket^{stream} =
-            new ProfitBucket(child, dropoffSeconds, null, null)
-          if (firstProfitBucket == null) {
-            firstProfitBucket = bucket
-            lastProfitBucket = bucket
-          } else {
-            lastProfitBucket.next = bucket
-            lastProfitBucket = bucket
-          }
-          currentProfitBucket = bucket
-          bucket
+          currentProfitStartSeconds = startSeconds
+          currentProfitBucket =
+            RiftRegion.streamAppendWindowBucketFor(
+              stream,
+              profitWindow,
+              dropoffSeconds
+            ) { bucket =>
+              Debs2015ProcessDiagnostics.recordQ2ProfitBucketOpen()
+              RiftRegion.setDiagnosticFamily(
+                stream,
+                bucket,
+                DebsRegionFamilies.Q2ProfitWindow
+              )
+            }
+          currentProfitRegion =
+            RiftRegion.streamBucketRegion(stream, currentProfitBucket)
+          currentProfitBucket
         }
-
-      private def emptyBucketFor(dropoffSeconds: Long): EmptyBucket^{stream} =
-        if (
-          currentEmptyBucket != null &&
-          currentEmptyBucket.startSeconds == dropoffSeconds
-        ) currentEmptyBucket
-        else {
-          val child = RiftRegion.childBucket
-          Debs2015ProcessDiagnostics.recordQ2EmptyBucketOpen()
-          DebsRegionFamilies.setChildBucket(
-            stream,
-            child,
-            DebsRegionFamilies.Q2EmptyWindow
-          )
-          val bucket: EmptyBucket^{stream} =
-            new EmptyBucket(child, dropoffSeconds, null, null)
-          if (firstEmptyBucket == null) {
-            firstEmptyBucket = bucket
-            lastEmptyBucket = bucket
-          } else {
-            lastEmptyBucket.next = bucket
-            lastEmptyBucket = bucket
-          }
-          currentEmptyBucket = bucket
-          bucket
-        }
-
-      private def allocateProfitEntry(
-          bucket: ProfitBucket^{stream},
-          cellKey: Int,
-          profit: Double
-      ): ProfitEntry^{stream} = {
-        Debs2015ProcessDiagnostics.recordQ2ProfitEntry()
-        val region = RiftRegion.childBucketRegion(stream, bucket.child)
-        RiftRegion.alloc(new ProfitEntry(cellKey, profit, null))(using region)
       }
 
-      private def allocateEmptyEntry(
-          bucket: EmptyBucket^{stream},
-          seq: Long,
-          taxiKey: Int,
-          cellKey: Int
-      ): EmptyEntry^{stream} = {
-        Debs2015ProcessDiagnostics.recordQ2EmptyEntry()
-        val region = RiftRegion.childBucketRegion(stream, bucket.child)
-        RiftRegion.alloc(new EmptyEntry(seq, taxiKey, cellKey, null))(using region)
+      private def emptyBucketFor(
+          dropoffSeconds: Long
+      ): RiftRegion.StreamBucket^{stream} = {
+        val startSeconds = dropoffSeconds
+        if (
+          currentEmptyBucket != null &&
+          currentEmptyStartSeconds == startSeconds &&
+          currentEmptyBucket.isOpen
+        )
+          currentEmptyBucket
+        else {
+          currentEmptyStartSeconds = startSeconds
+          currentEmptyBucket =
+            RiftRegion.streamAppendWindowBucketFor(
+              stream,
+              emptyWindow,
+              dropoffSeconds
+            ) { bucket =>
+              Debs2015ProcessDiagnostics.recordQ2EmptyBucketOpen()
+              RiftRegion.setDiagnosticFamily(
+                stream,
+                bucket,
+                DebsRegionFamilies.Q2EmptyWindow
+              )
+            }
+          currentEmptyRegion =
+            RiftRegion.streamBucketRegion(stream, currentEmptyBucket)
+          currentEmptyBucket
+        }
       }
 
       private def allocateProfitableArea(
@@ -1090,22 +1079,6 @@ object Debs2015Q2CheckedProcessingRunner {
           if (area != null)
             topIndexByCell(area.cellKey) = 0
           i += 1
-        }
-      }
-
-      private def closeProfitBucket(bucket: ProfitBucket^{stream}): Unit = {
-        Debs2015ProcessDiagnostics.recordQ2ProfitBucketClose()
-        RiftRegion.closeChildBucket(stream, bucket.child) {
-          bucket.head = null
-          bucket.next = null
-        }
-      }
-
-      private def closeEmptyBucket(bucket: EmptyBucket^{stream}): Unit = {
-        Debs2015ProcessDiagnostics.recordQ2EmptyBucketClose()
-        RiftRegion.closeChildBucket(stream, bucket.child) {
-          bucket.head = null
-          bucket.next = null
         }
       }
     }

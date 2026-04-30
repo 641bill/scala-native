@@ -4552,3 +4552,111 @@ Interpretation:
   process time is still higher than heap. The next integration should target
   another append/fold/window subpath or reduce checked Q1 process overhead
   without touching Q1 TableRank/ranking, which remains gated out.
+
+## Q2 StreamAppendWindow Cursor Profit/Empty Buckets, 2026-04-30
+
+This checkpoint applies the same reusable append/window cursor-close primitive
+to checked Q2's profit and empty-taxi window entries. It does not change Q2's
+median heaps, taxi-id table, ranking heap, top-10 cache, or output semantics.
+
+What changed:
+
+- `ProfitEntry` and `EmptyEntry` now extend `RiftRegion.StreamAppendNode`.
+- Checked Q2 no longer has local `ProfitBucket`/`EmptyBucket` classes and
+  path-dependent `bucketNext`/`next` links.
+- Profit and empty entries are allocated in the current `StreamBucket` child
+  region, appended through `RiftRegion.appendWindow`, and consumed on eviction
+  through `closeAppendWindowBucketsBeforeWithCursor`.
+- End-of-run cleanup uses `closeAllAppendWindowBucketsWithCursor`.
+- Q2 median/rank parent metadata still retains live child entries until their
+  bucket closes; eviction removes those references before the child region is
+  closed.
+
+Validation:
+
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile`
+  passed.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest" "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"`
+  passed `89/89` compiler probes and `35/35` runtime tests.
+- Q2 checked-processing sample output matched heap:
+
+```sh
+zsh bench/debs2015/run_q2_checked_processing_matrix.sh
+```
+
+- Q2 checked-processing 100k output matched heap:
+
+```sh
+DEBS2015_Q2_CHECKED_PROCESSING_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_Q2_CHECKED_PROCESSING_DIR=/tmp/debs2015-q2-checked-processing-appendwindow-100k \
+  zsh bench/debs2015/run_q2_checked_processing_matrix.sh
+```
+
+- RunBoth sample output matched for `heap`, `rift-hp`, `rift-streaming`, and
+  `rift-checked`:
+
+```sh
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-appendwindow-sample \
+DEBS2015_BOTH_MODES="heap rift-hp rift-streaming rift-checked" \
+  zsh bench/debs2015/run_both_sample_matrix.sh
+```
+
+- RunBoth 100k output matched for `heap` and `rift-checked`:
+
+```sh
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-100000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-appendwindow-100k \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+  zsh bench/debs2015/run_both_sample_matrix.sh
+```
+
+100k single-run RunBoth control rows:
+
+| Mode | Elapsed ms | GC ms | Rift op ms | Q1 process ms | Q2 process ms | Q1 outputs | Q2 outputs |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| heap | 487.948 | 9.023 | 0.000 | 142.167 | 116.391 | 5942 | 3246 |
+| rift-checked | 494.789 | 2.241 | 1.713 | 158.695 | 124.979 | 5942 | 3246 |
+
+1M 3-run RunBoth control:
+
+Each run used `DEBS2015_BOTH_MODES="heap rift-checked"` and
+`DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv`; each run diffed Q1 and
+Q2 outputs against heap after stripping only the latency column.
+
+```sh
+DEBS2015_BOTH_BUILD=0 \
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q2-appendwindow-1m-single \
+DEBS2015_BOTH_SUMMARY=/tmp/debs2015-runboth-q2-appendwindow-1m-single/summary.tsv \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+for run in 2 3; do
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_MODES="heap rift-checked" \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR="/tmp/debs2015-runboth-q2-appendwindow-1m-run${run}" \
+  DEBS2015_BOTH_SUMMARY="/tmp/debs2015-runboth-q2-appendwindow-1m-run${run}/summary.tsv" \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+```
+
+Median rows:
+
+| Mode | Elapsed ms | Throughput eps | GC ms | RSS MiB | Rift op ms | Q1 process ms | Q2 process ms | Q1 window raw MiB | Q2 profit raw MiB | Q2 empty raw MiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 4993.892 | 200244.609 | 21.009 | 153.8 | 0.000 | 1518.053 | 1343.606 | 0.0 | 0.0 | 0.0 |
+| rift-checked | 4995.946 | 200162.297 | 20.637 | 142.4 | 8.072 | 1631.084 | 1330.543 | 99.9 | 37.5 | 29.9 |
+
+Interpretation:
+
+- This is framework-generalization evidence: Q2's window entries now use the
+  same reusable `StreamAppendWindow` cursor-close shape as Q1.
+- The heap/Rift logical program remains aligned; only the checked Q2
+  window-entry storage and close traversal changed.
+- The 1M median is a near tie on elapsed time, with checked Q2 process
+  slightly lower than heap but checked Q1 process still higher. This does not
+  justify returning to Q1 ranking/TableRank.
+- RSS remains below heap in this run but is much higher than the preceding
+  Q1-only append-window checkpoint. Treat this as a useful API unification, not
+  as a new stronger DEBS performance result.
