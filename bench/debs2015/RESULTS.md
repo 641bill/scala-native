@@ -4503,10 +4503,41 @@ DEBS2015_BOTH_MODES="heap rift-checked" \
 | RunBoth | heap | 979.461 | 15.857 | 0.000 | 291.974 | 249.467 | 5942 | 3246 |
 | RunBoth | rift-checked | 872.828 | 3.350 | 2.606 | 288.270 | 196.571 | 5942 | 3246 |
 
+1M 3-run RunBoth control:
+
+Each run used `DEBS2015_BOTH_MODES="heap rift-checked"` and
+`DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv`; each run diffed Q1 and
+Q2 outputs against heap after stripping only the latency column.
+
+```sh
+DEBS2015_BOTH_MODES="heap rift-checked" \
+DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+DEBS2015_BOTH_OUTPUT_DIR=/tmp/debs2015-runboth-q1-appendcursor-1m-run1 \
+DEBS2015_BOTH_SUMMARY=/tmp/debs2015-runboth-q1-appendcursor-1m-run1/summary.tsv \
+  zsh bench/debs2015/run_both_instrumented_matrix.sh
+
+for run in 2 3; do
+  DEBS2015_BOTH_BUILD=0 \
+  DEBS2015_BOTH_MODES="heap rift-checked" \
+  DEBS2015_BOTH_INPUT=/tmp/debs2015-month1-1000000.csv \
+  DEBS2015_BOTH_OUTPUT_DIR="/tmp/debs2015-runboth-q1-appendcursor-1m-run${run}" \
+  DEBS2015_BOTH_SUMMARY="/tmp/debs2015-runboth-q1-appendcursor-1m-run${run}/summary.tsv" \
+    zsh bench/debs2015/run_both_instrumented_matrix.sh
+done
+```
+
+Median rows:
+
+| Mode | Elapsed ms | Throughput eps | GC ms | RSS MiB | Rift op ms | Q1 process ms | Q1 change ms | Q2 process ms | Region objects | Q1 window raw MiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 4559.928 | 219301.708 | 19.893 | 153.8 | 0.000 | 1389.540 | 109.034 | 1192.661 | 0 | 0.0 |
+| rift-checked | 4514.165 | 221524.921 | 10.297 | 91.7 | 6.888 | 1507.776 | 81.145 | 1113.035 | 5940011 | 99.9 |
+
 Interpretation:
 
 - This is a controlled DEBS integration of the passing append/window cursor
-  shape, not a new DEBS median.
+  shape. The 1M control is now median-backed, but it is still a bounded
+  application-path result rather than final full-DEBS evidence.
 - The heap and checked logical program remain aligned: both keep Q1 route
   counts/ranking semantics, and only the checked event-window storage moves to
   the reusable region-backed append/window primitive.
@@ -4515,6 +4546,9 @@ Interpretation:
 - The 100k RunBoth row is a single-run correctness/control result. It is
   directionally favorable for checked Rift in this run, but should not replace
   the existing 3-run bounded medians.
-- Next useful DEBS work is either a 1M median rerun for this Q1 event-window
-  integration or a similar controlled migration of another append/fold/window
-  subpath. Q1 TableRank/ranking remains gated out.
+- The 1M median shows the useful shape and the remaining limit at the same
+  time: checked Rift moves `5.94M` Q1 event-window Scala objects through
+  regions with `6.888 ms` median Rift op time and much lower RSS, but Q1
+  process time is still higher than heap. The next integration should target
+  another append/fold/window subpath or reduce checked Q1 process overhead
+  without touching Q1 TableRank/ranking, which remains gated out.
