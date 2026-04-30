@@ -188,7 +188,7 @@ object CheckedAppendWindowMatrixHelpers {
       (cfg.windowBuckets.toLong - 1L) * cfg.eventsPerBucket.toLong
   }
 
-  def runHeap(): Long = {
+  def runHeap(prepend: Boolean = false): Long = {
     val cfg = CheckedAppendWindowConfig
     val totals = new Array[Long](cfg.keySpace)
     var first: HeapBucket = null
@@ -245,7 +245,12 @@ object CheckedAppendWindowMatrixHelpers {
       val record = new HeapRecord(key, value, value.toLong, null)
       record.value += seed & 3
       record.total += record.value.toLong
-      if (bucket.head == null) {
+      if (prepend) {
+        record.next = bucket.head
+        bucket.head = record
+        if (bucket.tail == null)
+          bucket.tail = record
+      } else if (bucket.head == null) {
         bucket.head = record
         bucket.tail = record
       } else {
@@ -585,7 +590,7 @@ object CheckedAppendWindowMatrixHelpers {
       runRiftCheckedApiDiagnostic()
     else runRiftCheckedApiFast()
 
-  private def runRiftCheckedApiCursor(): Long = {
+  private def runRiftCheckedApiCursor(prepend: Boolean = false): Long = {
     val cfg = CheckedAppendWindowConfig
     val totals = new Array[Long](cfg.keySpace)
     val checksum = RiftRegion.streaming { stream ?=>
@@ -650,7 +655,8 @@ object CheckedAppendWindowMatrixHelpers {
           )
         record.value += seed & 3
         record.total += record.value.toLong
-        RiftRegion.appendWindow(stream, window, bucket, record)
+        if (prepend) RiftRegion.prependWindow(stream, window, bucket, record)
+        else RiftRegion.appendWindow(stream, window, bucket, record)
         if (i % cfg.sampleEvery == 0)
           running = fold(
             running,
@@ -772,9 +778,12 @@ object CheckedAppendWindowMatrixHelpers {
   private def runMode(mode: String): Long =
     mode match {
       case "heap"                   => runHeap()
+      case "heap-prepend"           => runHeap(prepend = true)
       case "rift-checked"           => runRiftChecked()
       case "rift-checked-api"       => runRiftCheckedApi()
       case "rift-checked-api-cursor" => runRiftCheckedApiCursor()
+      case "rift-checked-api-prepend-cursor" =>
+        runRiftCheckedApiCursor(prepend = true)
       case "rift-trusted-hp"        => runRiftTrusted(RiftRegion.HPZone)
       case "rift-trusted-streaming" => runRiftTrusted(RiftRegion.Streaming)
       case other =>
@@ -788,9 +797,9 @@ object CheckedAppendWindowMatrixHelpers {
 
   private def runModeName(mode: String): String =
     mode match {
-      case "heap" | "rift-checked" | "rift-trusted-hp" |
+      case "heap" | "heap-prepend" | "rift-checked" | "rift-trusted-hp" |
           "rift-trusted-streaming" | "rift-checked-api" |
-          "rift-checked-api-cursor" =>
+          "rift-checked-api-cursor" | "rift-checked-api-prepend-cursor" =>
         mode
       case other =>
         throw new IllegalArgumentException(
@@ -800,8 +809,10 @@ object CheckedAppendWindowMatrixHelpers {
 
   def runBenchmark(mode: String): Unit = {
     val cfg = CheckedAppendWindowConfig
-    val usesRift = mode != "heap"
-    val expectedChecksum = runHeap()
+    val usesRift = mode != "heap" && mode != "heap-prepend"
+    val prependMode =
+      mode == "heap-prepend" || mode == "rift-checked-api-prepend-cursor"
+    val expectedChecksum = runHeap(prepend = prependMode)
 
     var warmup = 0
     while (warmup < cfg.warmupRuns) {
@@ -896,7 +907,7 @@ object CheckedAppendWindowMatrixHelpers {
   CheckedAppendWindowMatrixHelpers.validateMode(mode)
   CheckedAppendWindowMatrixHelpers.printConfig(mode)
 
-  val usesRift = mode != "heap"
+  val usesRift = mode != "heap" && mode != "heap-prepend"
   if (usesRift) RiftRegion.init(0)
   try {
     CheckedAppendWindowMatrixHelpers.runBenchmark(mode)

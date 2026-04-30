@@ -201,7 +201,8 @@ trait NirGenExpr(using Context) {
 
     private def isRiftStreamAppendWindowAppend(tree: Tree): Boolean = {
       val sym = calledSymbol(tree)
-      sym.name.toString == "appendWindow" &&
+      val name = sym.name.toString
+      (name == "appendWindow" || name == "prependWindow") &&
         isRiftRegionCompanionOwner(sym)
     }
 

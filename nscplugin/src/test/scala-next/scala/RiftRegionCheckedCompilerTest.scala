@@ -1677,6 +1677,31 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def streamAppendWindowPrependsChildBucketRecords(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    val window = RiftRegion.streamAppendWindow[Event](10)
+      |    val bucket = RiftRegion.streamAppendWindowBucketFor(stream, window, 7L)
+      |    val region = RiftRegion.streamBucketRegion(stream, bucket)
+      |    val event: Event^{stream} =
+      |      RiftRegion.alloc(new Event(41))(using region)
+      |    RiftRegion.prependWindow(stream, window, bucket, event)
+      |    var total = 0
+      |    RiftRegion.closeAllAppendWindowBucketsWithCursor(stream, window) {
+      |      (_, cursor) =>
+      |        while cursor.hasNext do
+      |          total += cursor.next().value
+      |    }
+      |    total + RiftRegion.appendWindowLength(stream, window) + 1
+      |  }
+      |""".stripMargin)
+
   @Test def streamAppendWindowRejectsDirectHeapRecord(): Unit =
     assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
@@ -1690,6 +1715,24 @@ class RiftRegionCheckedCompilerTest {
       |    val bucket = RiftRegion.streamAppendWindowBucketFor(stream, window, 7L)
       |    val event: Event^{stream} = new Event(41)
       |    RiftRegion.appendWindow(stream, window, bucket, event)
+      |  }
+      |""".stripMargin,
+      "Rift checked object buffer cannot store an unrooted heap object"
+    )
+
+  @Test def streamAppendWindowPrependRejectsDirectHeapRecord(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    val window = RiftRegion.streamAppendWindow[Event](10)
+      |    val bucket = RiftRegion.streamAppendWindowBucketFor(stream, window, 7L)
+      |    val event: Event^{stream} = new Event(41)
+      |    RiftRegion.prependWindow(stream, window, bucket, event)
       |  }
       |""".stripMargin,
       "Rift checked object buffer cannot store an unrooted heap object"

@@ -33,6 +33,9 @@ The difference is allocation placement:
 - `rift-checked-api-cursor`: the same reusable API, but expired buckets are
   drained through a close-time cursor so close callback dispatch is once per
   bucket rather than once per entry;
+- `heap-prepend`: heap baseline for order-insensitive/head-insert buckets;
+- `rift-checked-api-prepend-cursor`: checked `StreamAppendWindow` with
+  head-insert `prependWindow` and cursor close;
 - `rift-trusted-hp`: trusted `RiftRegion.open(HPZone)` once per bucket;
 - `rift-trusted-streaming`: trusted `RiftRegion.open(Streaming)` once per
   bucket.
@@ -57,9 +60,11 @@ Defaults:
 Modes:
 
 - `heap`
+- `heap-prepend`
 - `rift-checked`
 - `rift-checked-api`
 - `rift-checked-api-cursor`
+- `rift-checked-api-prepend-cursor`
 - `rift-trusted-hp`
 - `rift-trusted-streaming`
 
@@ -409,6 +414,59 @@ Interpretation:
   gate evidence, not as evidence that cursor-object reuse itself is faster.
 - RSS is effectively unchanged. Cursor object allocation was not the memory
   driver in the focused append-window matrix.
+
+## Prepend-Cursor Follow-Up, 2026-04-30
+
+Implementation change:
+
+- Added experimental `RiftRegion.prependWindow`.
+- The compiler guard treats `prependWindow` like `appendWindow`: direct
+  unrooted heap values are rejected.
+- Added `heap-prepend` and `rift-checked-api-prepend-cursor` focused modes so
+  the comparison uses the same head-insert logical order on both sides.
+- DEBS was not changed.
+
+Validation:
+
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile`
+  passed.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"`
+  passed `91/91`.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"`
+  passed `36/36`.
+- 20k, 100k, and 1M focused prepend runs matched checksums.
+
+Prepend-only focused rows:
+
+| Input | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 20k | heap-prepend | 1.428 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 6209536 | 3441449352371702976 |
+| 20k | rift-checked-api-prepend-cursor | 1.541 | 0.000 | 0.050 | 20000 | 5 | 5 | 0 | 6078464 | 3441449352371702976 |
+| 100k | heap-prepend | 2.870 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 21315584 | 5398035291417411760 |
+| 100k | rift-checked-api-prepend-cursor | 3.610 | 0.000 | 0.008 | 100000 | 5 | 5 | 0 | 15777792 | 5398035291417411760 |
+| 1M | heap-prepend | 36.700 | 11.147 | 0.000 | 0 | 0 | 0 | 0 | 75022336 | 7790559636484650435 |
+| 1M | rift-checked-api-prepend-cursor | 34.943 | 0.000 | 0.076 | 1000000 | 41 | 41 | 0 | 47529984 | 7790559636484650435 |
+
+Same-binary append-vs-prepend 1M comparison:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 36.746 | 11.394 | 0.000 | 0 | 0 | 0 | 0 | 75022336 | -2507118467295660905 |
+| rift-checked-api-cursor | 34.597 | 0.000 | 0.075 | 1000000 | 41 | 41 | 0 | 47529984 | -2507118467295660905 |
+| heap-prepend | 36.836 | 11.367 | 0.000 | 0 | 0 | 0 | 0 | 75022336 | 7790559636484650435 |
+| rift-checked-api-prepend-cursor | 34.662 | 0.000 | 0.076 | 1000000 | 41 | 41 | 0 | 47529984 | 7790559636484650435 |
+
+Interpretation:
+
+- `prependWindow` is a valid order-insensitive checked append-window operation
+  and clears the same 1M threshold as cursor close: lower elapsed than the
+  matching heap-prepend baseline, no measured GC, and lower RSS.
+- It does not improve on the existing append-cursor shape in the focused
+  matrix. The same-binary 1M rows are effectively tied.
+- Therefore this is framework/control evidence only. Do not integrate
+  `prependWindow` into DEBS unless a DEBS path specifically needs
+  order-insensitive head insertion for code clarity or a new focused result
+  shows a real advantage.
 
 ## Opt-In API Diagnostics
 

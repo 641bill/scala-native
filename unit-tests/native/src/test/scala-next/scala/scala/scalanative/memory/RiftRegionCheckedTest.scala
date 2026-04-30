@@ -1327,6 +1327,47 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def streamAppendWindowPrependConsumesAndClosesBuckets(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val window = RiftRegion.streamAppendWindow[Event](10)
+        val bucket =
+          RiftRegion.streamAppendWindowBucketFor(stream, window, 7L)
+        val region = RiftRegion.streamBucketRegion(stream, bucket)
+        val first: Event^{stream} =
+          RiftRegion.alloc(new Event(20))(using region)
+        val second: Event^{stream} =
+          RiftRegion.alloc(new Event(21))(using region)
+        RiftRegion.prependWindow(stream, window, bucket, first)
+        RiftRegion.prependWindow(stream, window, bucket, second)
+
+        assertEquals(2, RiftRegion.appendWindowLength(stream, window))
+        assertEquals(2, RiftRegion.appendWindowBucketLength(stream, window, bucket))
+
+        var sum = 0
+        var order = 0
+        RiftRegion.closeAllAppendWindowBucketsWithCursor(stream, window) {
+          (_, cursor) =>
+            val firstSeen = cursor.next()
+            val secondSeen = cursor.next()
+            order = firstSeen.value * 100 + secondSeen.value
+            sum = firstSeen.value + secondSeen.value
+        }
+
+        assertTrue(bucket.isClosed)
+        assertEquals(0, RiftRegion.appendWindowLength(stream, window))
+        sum + order
+      }
+
+      assertEquals(2161, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def scopedRegionAllowsMutableLinkedListBuilder(): Unit = {
     RiftRegion.init(1)
     try {

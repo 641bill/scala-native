@@ -2934,6 +2934,28 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     window.totalLength += 1
   }
 
+  /** Prepends `value` to the linked list owned by `bucket`.
+   *
+   *  This is the unordered/head-insert sibling of `appendWindow`. It is useful
+   *  for stream windows whose close-time fold does not depend on insertion
+   *  order, and avoids the per-entry tail update on the hot path.
+   */
+  def prependWindow[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamAppendWindow[T]^{parent},
+      bucket: StreamBucket^{parent},
+      value: T^{parent}
+  ): Unit = {
+    bucket.child.checkOpen()
+    val head = bucket.appendHead
+    value.appendNext = head.asInstanceOf[StreamAppendNode]
+    bucket.appendHead = value.asInstanceOf[Object]
+    if (head == null)
+      bucket.appendTail = value.asInstanceOf[Object]
+    bucket.appendLength += 1
+    window.totalLength += 1
+  }
+
   /** Returns the total number of live append-window records. */
   def appendWindowLength[T <: StreamAppendNode](
       parent: StreamingRegion^,

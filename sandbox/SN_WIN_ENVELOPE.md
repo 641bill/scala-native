@@ -59,6 +59,7 @@ live window payload still dominate.
 | Checked AppendWindow manual child-bucket | 1M events | checked `32.261 ms` | heap `35.513 ms` | Cheap checked operator win | New focused matrix |
 | Reusable `StreamAppendWindow` per-entry API | 1M events | cached checked-api `39.372 ms` | same-run heap `38.559 ms` | Near miss / per-entry callback overhead | Focused matrix; keep as control |
 | Reusable `StreamAppendWindow` cursor API | 1M events | cursor `34.708 ms`; cursor-reuse confirmation `35.527 ms` | same-run heap `35.705 ms`; confirmation heap `37.494 ms` | Cheap checked operator win | Focused gate passed; cursor-object reuse is neutral/noisy |
+| Reusable `StreamAppendWindow` prepend cursor API | 1M events | prepend cursor `34.662 ms` | same-run heap-prepend `36.836 ms` | Cheap checked operator win, not better than append cursor | Focused control; do not move to DEBS yet |
 | DEBS RunBoth checked, bounded 1M after Q1/Q2 append-window integration | 3-run median | checked `5349.444 ms` | heap `5219.189 ms` | API generalization, CPU-limited | Latest bounded control; not a speedup claim |
 | DEBS RunBoth checked, full month | 3-run median | checked `66.804 s` | heap `67.122 s` | Near-tie throughput, memory validation | Full-month evidence, not large speedup |
 
@@ -131,6 +132,13 @@ still clears the cursor API gate (`35.527 ms` versus same-run heap
 `37.494 ms`), but the all-mode rerun had a noisy/non-winning cursor row and RSS
 did not change. Treat cursor-object reuse as a small cleanup, not as a new
 performance result.
+
+The order-insensitive/head-insert sibling, `prependWindow`, also clears its
+matching focused gate: at 1M, `rift-checked-api-prepend-cursor` is `34.662 ms`
+versus same-run `heap-prepend` at `36.836 ms`, with the same low RSS as append
+cursor. It is not faster than append cursor (`34.597 ms` in the same run), so
+it should remain framework/control evidence unless a later operator specifically
+needs head insertion.
 
 The trusted modes losing here is also useful. It means the current win is not a
 generic "HPZone always beats heap" statement. It is a checked operator-shape
