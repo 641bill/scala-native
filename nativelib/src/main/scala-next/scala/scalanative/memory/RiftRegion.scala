@@ -2969,6 +2969,9 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     if (key < 0 || key >= join.leftCounts.length)
       throw new IndexOutOfBoundsException("Rift StreamJoinWindow key is absent")
 
+  private def packJoinCounts(left: Int, right: Int): Long =
+    (left.toLong << 32) | (right.toLong & 0xffffffffL)
+
   private def appendWindowUnchecked[T <: StreamAppendNode](
       parent: StreamingRegion^,
       window: StreamAppendWindow[T]^{parent},
@@ -3031,6 +3034,31 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     next
   }
 
+  /** Appends a left-side join record and returns packed live counts.
+   *
+   *  The high 32 bits contain the new left count and the low 32 bits contain
+   *  the current right count. This avoids a second checked count lookup in
+   *  high-volume stream joins.
+   */
+  def putJoinLeftInBucketAndCounts[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      join: StreamJoinWindow[T]^{parent},
+      bucket: StreamBucket^{parent},
+      key: Int,
+      value: T^{parent}
+  ): Long = {
+    val leftCounts = join.leftCounts
+    val left = leftCounts(key) + 1
+    leftCounts(key) = left
+    appendWindowUnchecked(
+      parent,
+      join.append.asInstanceOf[StreamAppendWindow[T]^{parent}],
+      bucket,
+      value
+    )
+    packJoinCounts(left, join.rightCounts(key))
+  }
+
   /** Appends a right-side join record and returns the new live right count. */
   def putJoinRightInBucket[T <: StreamAppendNode](
       parent: StreamingRegion^,
@@ -3050,6 +3078,30 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       value
     )
     next
+  }
+
+  /** Appends a right-side join record and returns packed live counts.
+   *
+   *  The high 32 bits contain the current left count and the low 32 bits
+   *  contain the new right count.
+   */
+  def putJoinRightInBucketAndCounts[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      join: StreamJoinWindow[T]^{parent},
+      bucket: StreamBucket^{parent},
+      key: Int,
+      value: T^{parent}
+  ): Long = {
+    val rightCounts = join.rightCounts
+    val right = rightCounts(key) + 1
+    rightCounts(key) = right
+    appendWindowUnchecked(
+      parent,
+      join.append.asInstanceOf[StreamAppendWindow[T]^{parent}],
+      bucket,
+      value
+    )
+    packJoinCounts(join.leftCounts(key), right)
   }
 
   /** Appends a join output/scratch record without changing left/right counts. */
@@ -3102,6 +3154,21 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     next
   }
 
+  /** Removes one left-side join record and returns packed live counts. */
+  def removeJoinLeftAndCounts[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      join: StreamJoinWindow[T]^{parent},
+      key: Int
+  ): Long = {
+    val leftCounts = join.leftCounts
+    val current = leftCounts(key)
+    if (current <= 0)
+      throw new IllegalStateException("Rift StreamJoinWindow left count underflow")
+    val left = current - 1
+    leftCounts(key) = left
+    packJoinCounts(left, join.rightCounts(key))
+  }
+
   /** Removes one right-side join record and returns the new live right count. */
   def removeJoinRight[T <: StreamAppendNode](
       parent: StreamingRegion^,
@@ -3116,6 +3183,21 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     val next = current - 1
     counts(key) = next
     next
+  }
+
+  /** Removes one right-side join record and returns packed live counts. */
+  def removeJoinRightAndCounts[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      join: StreamJoinWindow[T]^{parent},
+      key: Int
+  ): Long = {
+    val rightCounts = join.rightCounts
+    val current = rightCounts(key)
+    if (current <= 0)
+      throw new IllegalStateException("Rift StreamJoinWindow right count underflow")
+    val right = current - 1
+    rightCounts(key) = right
+    packJoinCounts(join.leftCounts(key), right)
   }
 
   /** Prepends `value` to the linked list owned by `bucket`.

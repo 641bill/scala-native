@@ -64,7 +64,7 @@ live window payload still dominate.
 | NEXMark-lite Q2 selection | 1M events | checked `287.808 ms` | heap `297.053 ms` | Low-output input-region win | Local methodology benchmark; checked RSS higher than heap |
 | NEXMark-lite Q5 hot items | 1M events | checked `355.100 ms` | heap `350.941 ms` | Window aggregate not yet a win | Local methodology benchmark; needs operator/footprint work |
 | NEXMark-lite Q8 window join | 1M events | checked `291.832 ms` | heap `322.210 ms` | Region-friendly checked join-window win | Local methodology benchmark, not exact Beam NEXMark |
-| NEXMark-lite Q8 `StreamJoinWindow` API | 1M events | checked join API `23.021 ms` | heap join API `17.441 ms` | Specialized checked join API is lower-GC/lower-RSS but slower than fair heap control | Focused framework evidence; not a speed claim |
+| NEXMark-lite Q8 `StreamJoinWindow` API | 1M events | packed checked join API `20.987 ms` | heap join API `17.393 ms` | Specialized checked join API is lower-GC/lower-RSS but slower than fair heap control | Focused framework evidence; not a speed claim |
 | NEXMark-lite Q5 diagnostic | 1M events | checked `393.415 ms` clean; top scan `46.823 ms` diagnostic | heap `361.882 ms` clean; top scan `45.340 ms` diagnostic | Window aggregate checked overhead | Diagnostic profile plus clean control |
 | DEBS RunBoth checked, bounded 1M after Q1/Q2 append-window integration | 3-run median | checked `5349.444 ms` | heap `5219.189 ms` | API generalization, CPU-limited | Latest bounded control; not a speedup claim |
 | DEBS RunBoth checked, full month | 3-run median | checked `66.804 s` | heap `67.122 s` | Near-tie throughput, memory validation | Full-month evidence, not large speedup |
@@ -194,10 +194,12 @@ The strongest local categories are:
   in every mode (`123` scans over `65536` entries), while checked Rift is still
   slower in the clean control. That makes Q5 a checked per-entry/window
   container overhead problem, not a region open/close problem.
-- The new `StreamJoinWindow` API is a useful Q8-shaped framework primitive,
-  but its first fair speed gate fails: `23.021 ms` checked versus
-  `17.441 ms` for the equally specialized heap join API at 1M. It still cuts
-  measured GC to zero and lowers RSS, so keep it as framework/memory evidence.
+- The new `StreamJoinWindow` API is a useful Q8-shaped framework primitive.
+  The packed-count fast path removes redundant hot-path count lookups and
+  narrows the 1M checked API row from `23.021 ms` to `20.987 ms`, but the fair
+  speed gate still fails against the equally specialized heap join API
+  (`17.393 ms`). It still cuts measured GC to zero and lowers RSS, so keep it
+  as framework/memory evidence.
 - The first reusable `StreamAppendWindow` per-entry close API was too
   expensive at 1M despite matching the winning child-bucket lifetime shape.
   Cached bucket/region use almost closed the gap; cursor close is the first

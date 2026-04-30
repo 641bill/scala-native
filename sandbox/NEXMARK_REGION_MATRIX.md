@@ -216,6 +216,64 @@ Interpretation:
   `17.441 ms`. Therefore, Q8 join API should remain focused framework
   evidence, not a headline application speed claim.
 
+### Q8 Join API Packed-Count Follow-Up
+
+`StreamJoinWindow` now has packed-count put/remove fast paths:
+`putJoinLeftInBucketAndCounts`, `putJoinRightInBucketAndCounts`,
+`removeJoinLeftAndCounts`, and `removeJoinRightAndCounts`. These return the
+left/right counts as one packed `Long`, removing the separate count lookups in
+the Q8 hot path. The final version also avoids a duplicate explicit key check
+inside the packed methods while keeping the underlying array bounds checks and
+the compiler's checked-region store guard.
+
+Commands:
+
+```bash
+NEXMARK_QUERIES=q8 \
+NEXMARK_MODES="heap-join-api rift-checked-join-api" \
+NEXMARK_EVENTS=100000 \
+NEXMARK_BENCHMARK_RUNS=3 \
+NEXMARK_WARMUPS=1 \
+NEXMARK_BUILD=0 \
+NEXMARK_OUTPUT_DIR=/tmp/nexmark-q8-join-nocheck-100k \
+zsh sandbox/run_nexmark_region_matrix.sh
+
+NEXMARK_QUERIES=q8 \
+NEXMARK_MODES="heap-join-api rift-checked-join-api" \
+NEXMARK_EVENTS=1000000 \
+NEXMARK_BENCHMARK_RUNS=3 \
+NEXMARK_WARMUPS=1 \
+NEXMARK_BUILD=0 \
+NEXMARK_OUTPUT_DIR=/tmp/nexmark-q8-join-nocheck-1m \
+zsh sandbox/run_nexmark_region_matrix.sh
+```
+
+| Events | Mode | Median ms | GC ms | Rift op ms | Region objects | Opens/closes | RSS bytes | Outputs |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 100k | heap-join-api | 2.576 | 0.000 | 0.000 | 0 | 0 / 0 | 21331968 | 10000 |
+| 100k | rift-checked-join-api | 2.531 | 0.000 | 0.016 | 30002 | 5 / 5 | 20332544 | 10000 |
+| 1M | heap-join-api | 17.393 | 0.000 | 0.000 | 0 | 0 / 0 | 146391040 | 100000 |
+| 1M | rift-checked-join-api | 20.987 | 0.000 | 0.062 | 300002 | 41 / 41 | 124157952 | 100000 |
+
+Validation after the packed-count API:
+
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile`
+  passed.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"`
+  passed `94/94`.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"`
+  passed `37/37`.
+
+Interpretation:
+
+- The packed-count path improves the 1M checked join API from `23.021 ms` to
+  `20.987 ms`, while preserving zero measured GC and lower RSS than the
+  specialized heap control.
+- The 100k row is a near tie and slightly favors checked Rift in this run.
+- The 1M speed gate still fails: `20.987 ms` checked versus `17.393 ms` heap.
+  Keep `StreamJoinWindow` as framework/RSS evidence until the remaining API
+  overhead is understood.
+
 ## Q5 Diagnostic Follow-Up
 
 Diagnostics are enabled with `NEXMARK_Q5_DIAG=1`. These rows are not headline
@@ -295,9 +353,9 @@ Interpretation:
   framework/container CPU and live-window footprint.
 - Generic `q8` is the strongest NEXMark-lite checked result: checked Rift is
   `291.832 ms` versus heap `322.210 ms` at 1M, with GC time dropping from
-  `27.148 ms` to `7.413 ms`. The new specialized `StreamJoinWindow` API is
-  much faster than the generic runner and lower-RSS than a specialized heap
-  join, but still slower than that fair specialized heap control.
+  `27.148 ms` to `7.413 ms`. The packed-count `StreamJoinWindow` API is much
+  faster than the generic runner and lower-RSS than a specialized heap join,
+  but still slower than that fair specialized heap control at 1M.
 - Rift operation time stays below `0.4 ms` in all 1M rows. The remaining gaps
   are query/operator CPU and live-window footprint, not region open/close
   overhead.
@@ -307,7 +365,8 @@ Interpretation:
 - Keep `q1` and checked `q2` as NEXMark-lite positive candidates.
 - Keep generic `q8` as a positive checked NEXMark-lite row, but treat
   `StreamJoinWindow` as framework evidence until it beats the specialized heap
-  join control.
+  join control. The packed-count path narrowed the 1M checked API gap from
+  `23.021 ms` to `20.987 ms`, but did not clear the gate.
 - Do not claim `q5` as a window-aggregate win. The next Q5 work should reduce
   checked per-entry/window-container CPU or change the aggregate-maintenance
   shape, with the heap version kept logically aligned.

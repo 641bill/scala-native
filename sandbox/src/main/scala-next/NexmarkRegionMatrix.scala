@@ -1299,24 +1299,30 @@ object NexmarkRegionMatrixHelpers {
         while (cursor.hasNext) {
           val record: Record^{stream} = cursor.next()
           if (record.kind == 18) {
-            val left = RiftRegion.removeJoinLeft(stream, join, record.key)
+            val counts =
+              RiftRegion.removeJoinLeftAndCounts(stream, join, record.key)
+            val left = (counts >>> 32).toInt
+            val right = counts.toInt
             running = fold(
               running,
               record.kind + 40,
               record.id,
               record.key,
               left,
-              RiftRegion.rightJoinWindowCount(stream, join, record.key).toLong,
+              right.toLong,
               bucket.startSeconds
             )
           } else if (record.kind == 19) {
-            val right = RiftRegion.removeJoinRight(stream, join, record.key)
+            val counts =
+              RiftRegion.removeJoinRightAndCounts(stream, join, record.key)
+            val left = (counts >>> 32).toInt
+            val right = counts.toInt
             running = fold(
               running,
               record.kind + 40,
               record.id,
               record.key,
-              RiftRegion.leftJoinWindowCount(stream, join, record.key),
+              left,
               right.toLong,
               bucket.startSeconds
             )
@@ -1367,9 +1373,16 @@ object NexmarkRegionMatrixHelpers {
               RiftRegion.alloc(
                 new Record(18, i, id, category(i), price(i), i.toLong)
               )(using bucketRegion)
-            val left =
-              RiftRegion.putJoinLeftInBucket(stream, join, bucket, id, person)
-            val right = RiftRegion.rightJoinWindowCount(stream, join, id)
+            val counts =
+              RiftRegion.putJoinLeftInBucketAndCounts(
+                stream,
+                join,
+                bucket,
+                id,
+                person
+              )
+            val left = (counts >>> 32).toInt
+            val right = counts.toInt
             if (right > 0) {
               val out: Record^{stream} =
                 RiftRegion.alloc(
@@ -1390,15 +1403,16 @@ object NexmarkRegionMatrixHelpers {
                   i.toLong
                 )
               )(using bucketRegion)
-            val right =
-              RiftRegion.putJoinRightInBucket(
+            val counts =
+              RiftRegion.putJoinRightInBucketAndCounts(
                 stream,
                 join,
                 bucket,
                 seller,
                 auction
               )
-            val left = RiftRegion.leftJoinWindowCount(stream, join, seller)
+            val left = (counts >>> 32).toInt
+            val right = counts.toInt
             if (left > 0) {
               val out: Record^{stream} =
                 RiftRegion.alloc(

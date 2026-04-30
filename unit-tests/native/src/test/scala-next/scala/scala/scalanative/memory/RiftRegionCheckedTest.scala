@@ -1381,16 +1381,30 @@ class RiftRegionCheckedTest {
         val firstRegion = RiftRegion.streamBucketRegion(stream, firstBucket)
         val left: Event^{stream} =
           RiftRegion.alloc(new Event(0, 3, 20))(using firstRegion)
-        val leftCount =
-          RiftRegion.putJoinLeftInBucket(stream, join, firstBucket, 3, left)
+        val leftCounts =
+          RiftRegion.putJoinLeftInBucketAndCounts(
+            stream,
+            join,
+            firstBucket,
+            3,
+            left
+          )
+        val leftCount = (leftCounts >>> 32).toInt
 
         val secondBucket =
           RiftRegion.streamJoinWindowBucketFor(stream, join, 17L)
         val secondRegion = RiftRegion.streamBucketRegion(stream, secondBucket)
         val right: Event^{stream} =
           RiftRegion.alloc(new Event(1, 3, 21))(using secondRegion)
-        val rightCount =
-          RiftRegion.putJoinRightInBucket(stream, join, secondBucket, 3, right)
+        val rightCounts =
+          RiftRegion.putJoinRightInBucketAndCounts(
+            stream,
+            join,
+            secondBucket,
+            3,
+            right
+          )
+        val rightCount = rightCounts.toInt
 
         assertEquals(1, leftCount)
         assertEquals(1, rightCount)
@@ -1404,9 +1418,9 @@ class RiftRegionCheckedTest {
             while (cursor.hasNext) {
               val event = cursor.next()
               if (event.side == 0)
-                RiftRegion.removeJoinLeft(stream, join, event.key)
+                RiftRegion.removeJoinLeftAndCounts(stream, join, event.key)
               else
-                RiftRegion.removeJoinRight(stream, join, event.key)
+                RiftRegion.removeJoinRightAndCounts(stream, join, event.key)
               sum += event.value
             }
         }
@@ -1422,9 +1436,9 @@ class RiftRegionCheckedTest {
             while (cursor.hasNext) {
               val event = cursor.next()
               if (event.side == 0)
-                RiftRegion.removeJoinLeft(stream, join, event.key)
+                RiftRegion.removeJoinLeftAndCounts(stream, join, event.key)
               else
-                RiftRegion.removeJoinRight(stream, join, event.key)
+                RiftRegion.removeJoinRightAndCounts(stream, join, event.key)
               sum += event.value
             }
         }

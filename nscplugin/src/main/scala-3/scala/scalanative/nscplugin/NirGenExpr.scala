@@ -207,6 +207,8 @@ trait NirGenExpr(using Context) {
           name == "prependWindow" ||
           name == "putJoinLeftInBucket" ||
           name == "putJoinRightInBucket" ||
+          name == "putJoinLeftInBucketAndCounts" ||
+          name == "putJoinRightInBucketAndCounts" ||
           name == "putJoinOutputInBucket"
       ) &&
         isRiftRegionCompanionOwner(sym)

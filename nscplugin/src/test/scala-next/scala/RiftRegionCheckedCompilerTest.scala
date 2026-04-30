@@ -1752,14 +1752,15 @@ class RiftRegionCheckedCompilerTest {
       |    val region = RiftRegion.streamBucketRegion(stream, bucket)
       |    val event: Event^{stream} =
       |      RiftRegion.alloc(new Event(41))(using region)
-      |    val count = RiftRegion.putJoinLeftInBucket(stream, join, bucket, 3, event)
+      |    val counts = RiftRegion.putJoinLeftInBucketAndCounts(stream, join, bucket, 3, event)
+      |    val count = (counts >>> 32).toInt
       |    var total = 0
       |    RiftRegion.closeAllJoinWindowBucketsWithCursor(stream, join) {
       |      (_, cursor) =>
       |        while cursor.hasNext do
       |          val item = cursor.next()
       |          total += item.value
-      |          RiftRegion.removeJoinLeft(stream, join, 3)
+      |          RiftRegion.removeJoinLeftAndCounts(stream, join, 3)
       |    }
       |    total + count + RiftRegion.joinWindowLength(stream, join)
       |  }
@@ -1778,6 +1779,24 @@ class RiftRegionCheckedCompilerTest {
       |    val bucket = RiftRegion.streamJoinWindowBucketFor(stream, join, 7L)
       |    val event: Event^{stream} = new Event(41)
       |    RiftRegion.putJoinLeftInBucket(stream, join, bucket, 3, event)
+      |  }
+      |""".stripMargin,
+      "Rift checked object buffer cannot store an unrooted heap object"
+    )
+
+  @Test def streamJoinWindowPackedPutRejectsDirectHeapRecord(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    val join = RiftRegion.streamJoinWindow[Event](10, 16)
+      |    val bucket = RiftRegion.streamJoinWindowBucketFor(stream, join, 7L)
+      |    val event: Event^{stream} = new Event(41)
+      |    RiftRegion.putJoinLeftInBucketAndCounts(stream, join, bucket, 3, event)
       |  }
       |""".stripMargin,
       "Rift checked object buffer cannot store an unrooted heap object"
