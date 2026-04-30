@@ -209,6 +209,7 @@ trait NirGenExpr(using Context) {
           name == "putJoinRightInBucket" ||
           name == "putJoinLeftInBucketAndCounts" ||
           name == "putJoinRightInBucketAndCounts" ||
+          name == "putFoldInBucket" ||
           name == "putJoinOutputInBucket"
       ) &&
         isRiftRegionCompanionOwner(sym)

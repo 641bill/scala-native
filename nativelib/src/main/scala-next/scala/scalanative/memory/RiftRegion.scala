@@ -218,6 +218,23 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       private[memory] val rightCounts: Array[Int]
   )
 
+  /** Checked additive fold stream-window primitive.
+   *
+   *  Records live in child bucket regions through the underlying
+   *  `StreamAppendWindow`. Parent-owned primitive arrays keep aggregate
+   *  metadata so simple count/sum windows do not need a heap map or ranking
+   *  container on the hot path.
+   */
+  final class StreamWindowFold[T <: StreamAppendNode] private[memory] (
+      private[memory] val append: StreamAppendWindow[T],
+      private[memory] var keys: Array[Int],
+      private[memory] var sums: Array[Long],
+      private[memory] var counts: Array[Int],
+      private[memory] var states: Array[Byte],
+      private[memory] var size: Int,
+      private[memory] var deleted: Int
+  )
+
   /** Close-time cursor over records linked in one append-window bucket.
    *
    *  Cursor close drains amortize close callback dispatch to once per bucket.
@@ -2742,6 +2759,38 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     ).asInstanceOf[StreamJoinWindow[T]^{parent}]
   }
 
+  private def nextPowerOfTwo(value: Int): Int = {
+    var n = 1
+    val target = if (value <= 1) 1 else value
+    while (n > 0 && n < target) n <<= 1
+    if (n > 0) n else 1 << 30
+  }
+
+  /** Opens a parent-captured additive fold window primitive. */
+  def streamWindowFold[T <: StreamAppendNode](
+      bucketSeconds: Long,
+      initialKeyCapacity: Int
+  )(using parent: StreamingRegion^): StreamWindowFold[T]^{parent} = {
+    if (initialKeyCapacity <= 0)
+      throw new IllegalArgumentException("initialKeyCapacity must be positive")
+    val capacity = nextPowerOfTwo(initialKeyCapacity * 2)
+    val append =
+      streamAppendWindow[T](bucketSeconds).asInstanceOf[StreamAppendWindow[T]]
+    val keys = alloc(new Array[Int](capacity))
+    val sums = alloc(new Array[Long](capacity))
+    val counts = alloc(new Array[Int](capacity))
+    val states = alloc(new Array[Byte](capacity))
+    new StreamWindowFold[T](
+      append,
+      keys,
+      sums,
+      counts,
+      states,
+      0,
+      0
+    ).asInstanceOf[StreamWindowFold[T]^{parent}]
+  }
+
   /** Tags a region for opt-in benchmark diagnostics.
    *
    *  This does not change allocation or safety behavior. It only lets runtime
@@ -2962,6 +3011,30 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       timestampSeconds
     )(onOpen)
 
+  /** Finds or opens the fold-window bucket containing `timestampSeconds`. */
+  def streamWindowFoldBucketFor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: StreamWindowFold[T]^{parent},
+      timestampSeconds: Long
+  ): StreamBucket^{parent} =
+    streamAppendWindowBucketFor(
+      parent,
+      fold.append.asInstanceOf[StreamAppendWindow[T]^{parent}],
+      timestampSeconds
+    )
+
+  /** Finds or opens the fold-window bucket containing `timestampSeconds`. */
+  def streamWindowFoldBucketFor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: StreamWindowFold[T]^{parent},
+      timestampSeconds: Long
+  )(onOpen: StreamBucket^{parent} => Unit): StreamBucket^{parent} =
+    streamAppendWindowBucketFor(
+      parent,
+      fold.append.asInstanceOf[StreamAppendWindow[T]^{parent}],
+      timestampSeconds
+    )(onOpen)
+
   private def checkJoinWindowKey[T <: StreamAppendNode](
       join: StreamJoinWindow[T],
       key: Int
@@ -2971,6 +3044,118 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
 
   private def packJoinCounts(left: Int, right: Int): Long =
     (left.toLong << 32) | (right.toLong & 0xffffffffL)
+
+  private final val FoldEmpty: Byte = 0
+  private final val FoldUsed: Byte = 1
+  private final val FoldDeleted: Byte = 2
+
+  private def foldHash(key: Int): Int = {
+    var x = key
+    x ^= x >>> 16
+    x *= 0x7feb352d
+    x ^= x >>> 15
+    x *= 0x846ca68b
+    x ^ (x >>> 16)
+  }
+
+  private def findFoldSlot[T <: StreamAppendNode](
+      fold: StreamWindowFold[T],
+      key: Int
+  ): Int = {
+    val states = fold.states
+    val keys = fold.keys
+    val mask = states.length - 1
+    var slot = foldHash(key) & mask
+    while (states(slot) != FoldEmpty) {
+      if (states(slot) == FoldUsed && keys(slot) == key) return slot
+      slot = (slot + 1) & mask
+    }
+    -1
+  }
+
+  private def findFoldInsertSlot[T <: StreamAppendNode](
+      fold: StreamWindowFold[T],
+      key: Int
+  ): Int = {
+    val states = fold.states
+    val keys = fold.keys
+    val mask = states.length - 1
+    var slot = foldHash(key) & mask
+    var firstDeleted = -1
+    while (states(slot) != FoldEmpty) {
+      val state = states(slot)
+      if (state == FoldUsed && keys(slot) == key) return slot
+      if (state == FoldDeleted && firstDeleted < 0) firstDeleted = slot
+      slot = (slot + 1) & mask
+    }
+    if (firstDeleted >= 0) firstDeleted else slot
+  }
+
+  private def rehashFoldTable[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: StreamWindowFold[T],
+      nextCapacity: Int
+  ): Unit = {
+    val oldKeys = fold.keys
+    val oldSums = fold.sums
+    val oldCounts = fold.counts
+    val oldStates = fold.states
+    fold.keys = parent.alloc(new Array[Int](nextCapacity))
+    fold.sums = parent.alloc(new Array[Long](nextCapacity))
+    fold.counts = parent.alloc(new Array[Int](nextCapacity))
+    fold.states = parent.alloc(new Array[Byte](nextCapacity))
+    fold.size = 0
+    fold.deleted = 0
+
+    var index = 0
+    while (index < oldStates.length) {
+      if (oldStates(index) == FoldUsed) {
+        val key = oldKeys(index)
+        val slot = findFoldInsertSlot(fold, key)
+        fold.keys(slot) = key
+        fold.sums(slot) = oldSums(index)
+        fold.counts(slot) = oldCounts(index)
+        fold.states(slot) = FoldUsed
+        fold.size += 1
+      }
+      index += 1
+    }
+  }
+
+  private def ensureFoldCapacity[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: StreamWindowFold[T]
+  ): Unit =
+    if ((fold.size + fold.deleted + 1) * 4 >= fold.states.length * 3) {
+      val nextCapacity =
+        if (fold.deleted > fold.size / 2) fold.states.length
+        else fold.states.length << 1
+      rehashFoldTable(parent, fold, nextCapacity)
+    }
+
+  private def addFoldContribution[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: StreamWindowFold[T],
+      key: Int,
+      delta: Long
+  ): Long = {
+    ensureFoldCapacity(parent, fold)
+    val slot = findFoldInsertSlot(fold, key)
+    if (fold.states(slot) == FoldUsed) {
+      val next = fold.sums(slot) + delta
+      fold.sums(slot) = next
+      fold.counts(slot) += 1
+      next
+    } else {
+      if (fold.states(slot) == FoldDeleted) fold.deleted -= 1
+      fold.keys(slot) = key
+      fold.sums(slot) = delta
+      fold.counts(slot) = 1
+      fold.states(slot) = FoldUsed
+      fold.size += 1
+      delta
+    }
+  }
 
   private def appendWindowUnchecked[T <: StreamAppendNode](
       parent: StreamingRegion^,
@@ -3012,6 +3197,95 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       value
     )
   }
+
+  /** Appends a fold record and adds `delta` to the live aggregate for `key`. */
+  def putFoldInBucket[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: StreamWindowFold[T]^{parent},
+      bucket: StreamBucket^{parent},
+      key: Int,
+      delta: Long,
+      value: T^{parent}
+  ): Long = {
+    bucket.child.checkOpen()
+    val next = addFoldContribution(
+      parent,
+      fold.asInstanceOf[StreamWindowFold[T]],
+      key,
+      delta
+    )
+    appendWindowUnchecked(
+      parent,
+      fold.append.asInstanceOf[StreamAppendWindow[T]^{parent}],
+      bucket,
+      value
+    )
+    next
+  }
+
+  /** Removes one fold contribution for `key` and returns the new aggregate. */
+  def removeFoldContribution[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: StreamWindowFold[T]^{parent},
+      key: Int,
+      delta: Long
+  ): Long = {
+    val rawFold = fold.asInstanceOf[StreamWindowFold[T]]
+    val slot = findFoldSlot(rawFold, key)
+    if (slot < 0 || rawFold.counts(slot) <= 0)
+      throw new IllegalStateException("Rift StreamWindowFold count underflow")
+    val nextCount = rawFold.counts(slot) - 1
+    val nextSum = rawFold.sums(slot) - delta
+    if (nextCount == 0) {
+      rawFold.states(slot) = FoldDeleted
+      rawFold.sums(slot) = 0L
+      rawFold.counts(slot) = 0
+      rawFold.size -= 1
+      rawFold.deleted += 1
+      0L
+    } else {
+      rawFold.sums(slot) = nextSum
+      rawFold.counts(slot) = nextCount
+      nextSum
+    }
+  }
+
+  /** Returns true if the fold currently has a live aggregate for `key`. */
+  def containsFoldKey[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: StreamWindowFold[T]^{parent},
+      key: Int
+  ): Boolean =
+    findFoldSlot(fold.asInstanceOf[StreamWindowFold[T]], key) >= 0
+
+  /** Returns the live aggregate sum for `key`, or zero if absent. */
+  def foldValue[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: StreamWindowFold[T]^{parent},
+      key: Int
+  ): Long = {
+    val rawFold = fold.asInstanceOf[StreamWindowFold[T]]
+    val slot = findFoldSlot(rawFold, key)
+    if (slot >= 0) rawFold.sums(slot) else 0L
+  }
+
+  /** Returns the live contribution count for `key`, or zero if absent. */
+  def foldCount[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: StreamWindowFold[T]^{parent},
+      key: Int
+  ): Int = {
+    val rawFold = fold.asInstanceOf[StreamWindowFold[T]]
+    val slot = findFoldSlot(rawFold, key)
+    if (slot >= 0) rawFold.counts(slot) else 0
+  }
+
+  /** Returns the number of keys with at least one live contribution. */
+  def foldKeyCount[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: StreamWindowFold[T]^{parent}
+  ): Int =
+    fold.size
 
   /** Appends a left-side join record and returns the new live left count. */
   def putJoinLeftInBucket[T <: StreamAppendNode](
@@ -3239,6 +3513,16 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       join.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
     )
 
+  /** Returns the total number of live records in a fold window. */
+  def foldWindowLength[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: StreamWindowFold[T]^{parent}
+  ): Int =
+    appendWindowLength(
+      parent,
+      fold.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
+    )
+
   /** Returns the number of records currently linked to `bucket`. */
   def appendWindowBucketLength[T <: StreamAppendNode](
       parent: StreamingRegion^,
@@ -3359,6 +3643,21 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       cutoffSeconds
     )(onBucket)
 
+  /** Closes fold-window buckets fully before `cutoffSeconds`. */
+  def closeFoldBucketsBeforeWithCursor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: StreamWindowFold[T]^{parent},
+      cutoffSeconds: Long
+  )(onBucket: (
+      StreamBucket^{parent},
+      StreamAppendCursor[T]^{parent}
+  ) => Unit): Unit =
+    closeAppendWindowBucketsBeforeWithCursor(
+      parent,
+      fold.append.asInstanceOf[StreamAppendWindow[T]^{parent}],
+      cutoffSeconds
+    )(onBucket)
+
   /** Closes every append-window bucket. */
   def closeAllAppendWindowBuckets[T <: StreamAppendNode](
       parent: StreamingRegion^,
@@ -3397,6 +3696,19 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     closeAllAppendWindowBucketsWithCursor(
       parent,
       join.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
+    )(onBucket)
+
+  /** Closes every fold-window bucket and drains each bucket through a cursor. */
+  def closeAllFoldBucketsWithCursor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: StreamWindowFold[T]^{parent}
+  )(onBucket: (
+      StreamBucket^{parent},
+      StreamAppendCursor[T]^{parent}
+  ) => Unit): Unit =
+    closeAllAppendWindowBucketsWithCursor(
+      parent,
+      fold.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
     )(onBucket)
 
   /** Closes a child window after caller-owned parent metadata is unlinked.

@@ -1802,6 +1802,53 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked object buffer cannot store an unrooted heap object"
     )
 
+  @Test def streamWindowFoldStoresChildBucketRecords(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val key: Int, val delta: Long, val value: Int)
+      |    extends RiftRegion.StreamAppendNode
+      |
+      |def ok(): Long =
+      |  RiftRegion.streaming { stream ?=>
+      |    val fold = RiftRegion.streamWindowFold[Event](10, 16)
+      |    val bucket = RiftRegion.streamWindowFoldBucketFor(stream, fold, 7L)
+      |    val region = RiftRegion.streamBucketRegion(stream, bucket)
+      |    val event: Event^{stream} =
+      |      RiftRegion.alloc(new Event(3, 41L, 5))(using region)
+      |    val total = RiftRegion.putFoldInBucket(stream, fold, bucket, 3, event.delta, event)
+      |    var closed = 0L
+      |    RiftRegion.closeAllFoldBucketsWithCursor(stream, fold) {
+      |      (_, cursor) =>
+      |        while cursor.hasNext do
+      |          val item = cursor.next()
+      |          closed += item.value
+      |          RiftRegion.removeFoldContribution(stream, fold, item.key, item.delta)
+      |    }
+      |    total + closed + RiftRegion.foldWindowLength(stream, fold)
+      |  }
+      |""".stripMargin)
+
+  @Test def streamWindowFoldRejectsDirectHeapRecord(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val key: Int, val delta: Long)
+      |    extends RiftRegion.StreamAppendNode
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    val fold = RiftRegion.streamWindowFold[Event](10, 16)
+      |    val bucket = RiftRegion.streamWindowFoldBucketFor(stream, fold, 7L)
+      |    val event: Event^{stream} = new Event(3, 41L)
+      |    RiftRegion.putFoldInBucket(stream, fold, bucket, event.key, event.delta, event)
+      |  }
+      |""".stripMargin,
+      "Rift checked object buffer cannot store an unrooted heap object"
+    )
+
   @Test def checkedMutableLinkedListBuilderCompiles(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking

@@ -60,6 +60,7 @@ live window payload still dominate.
 | Reusable `StreamAppendWindow` per-entry API | 1M events | cached checked-api `39.372 ms` | same-run heap `38.559 ms` | Near miss / per-entry callback overhead | Focused matrix; keep as control |
 | Reusable `StreamAppendWindow` cursor API | 1M events | cursor `34.708 ms`; cursor-reuse confirmation `35.527 ms` | same-run heap `35.705 ms`; confirmation heap `37.494 ms` | Cheap checked operator win | Focused gate passed; cursor-object reuse is neutral/noisy |
 | Reusable `StreamAppendWindow` prepend cursor API | 1M events | prepend cursor `34.662 ms` | same-run heap-prepend `36.836 ms` | Cheap checked operator win, not better than append cursor | Focused control; do not move to DEBS yet |
+| Reusable `StreamWindowFold` additive API | 1M events | checked `118.726 ms` | heap `103.244 ms` | Checked aggregate-table overhead | Focused gate failed; lower RSS and zero measured GC, but block application integration |
 | NEXMark-lite Q1 conversion | 1M events | checked `374.767 ms`; Streaming `371.404 ms` | heap `384.595 ms` | Region-friendly stream map win | Local methodology benchmark, not exact Beam NEXMark |
 | NEXMark-lite Q2 selection | 1M events | checked `287.808 ms` | heap `297.053 ms` | Low-output input-region win | Local methodology benchmark; checked RSS higher than heap |
 | NEXMark-lite Q5 hot items | 1M events | checked `355.100 ms` | heap `350.941 ms` | Window aggregate not yet a win | Local methodology benchmark; needs operator/footprint work |
@@ -206,6 +207,12 @@ The strongest local categories are:
   reusable API form to pass the focused gate. This is a warning that framework
   APIs must be benchmarked separately from handwritten benchmark logic before
   application integration.
+- `StreamWindowFold` confirms that warning for aggregate tables. Its 1M
+  checked row removes measured GC and cuts RSS (`40402944` bytes versus heap
+  `75022336` bytes), but loses elapsed time (`118.726 ms` versus
+  `103.244 ms`). Common Crawl WET and NEXMark Q5 fold-backed integration should
+  stay blocked until the fold table/API overhead is reduced or a different
+  object-heavy shape passes a focused gate.
 - DEBS full-month is currently a near-tie in elapsed time with much better
   memory/lifetime evidence than earlier checkpoints, not a large application
   speedup.

@@ -1555,4 +1555,97 @@ class RiftRegionCheckedTest {
       RiftRegion.shutdown()
     }
   }
+
+  @Test def streamWindowFoldAggregatesAndClosesBuckets(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val key: Int, val delta: Long, val value: Int)
+            extends RiftRegion.StreamAppendNode
+
+        val fold = RiftRegion.streamWindowFold[Event](10, 16)
+        val firstBucket =
+          RiftRegion.streamWindowFoldBucketFor(stream, fold, 7L)
+        val firstRegion = RiftRegion.streamBucketRegion(stream, firstBucket)
+        val first: Event^{stream} =
+          RiftRegion.alloc(new Event(3, 20L, 20))(using firstRegion)
+        val firstSum =
+          RiftRegion.putFoldInBucket(
+            stream,
+            fold,
+            firstBucket,
+            first.key,
+            first.delta,
+            first
+          )
+
+        val secondBucket =
+          RiftRegion.streamWindowFoldBucketFor(stream, fold, 17L)
+        val secondRegion = RiftRegion.streamBucketRegion(stream, secondBucket)
+        val second: Event^{stream} =
+          RiftRegion.alloc(new Event(3, 21L, 21))(using secondRegion)
+        val secondSum =
+          RiftRegion.putFoldInBucket(
+            stream,
+            fold,
+            secondBucket,
+            second.key,
+            second.delta,
+            second
+          )
+
+        assertEquals(20L, firstSum)
+        assertEquals(41L, secondSum)
+        assertTrue(RiftRegion.containsFoldKey(stream, fold, 3))
+        assertEquals(41L, RiftRegion.foldValue(stream, fold, 3))
+        assertEquals(2, RiftRegion.foldCount(stream, fold, 3))
+        assertEquals(2, RiftRegion.foldWindowLength(stream, fold))
+
+        var sum = 0
+        RiftRegion.closeFoldBucketsBeforeWithCursor(stream, fold, 10L) {
+          (_, cursor) =>
+            while (cursor.hasNext) {
+              val event = cursor.next()
+              RiftRegion.removeFoldContribution(
+                stream,
+                fold,
+                event.key,
+                event.delta
+              )
+              sum += event.value
+            }
+        }
+
+        assertTrue(firstBucket.isClosed)
+        assertFalse(secondBucket.isClosed)
+        assertEquals(1, RiftRegion.foldWindowLength(stream, fold))
+        assertEquals(21L, RiftRegion.foldValue(stream, fold, 3))
+        assertEquals(1, RiftRegion.foldCount(stream, fold, 3))
+
+        RiftRegion.closeAllFoldBucketsWithCursor(stream, fold) {
+          (_, cursor) =>
+            while (cursor.hasNext) {
+              val event = cursor.next()
+              RiftRegion.removeFoldContribution(
+                stream,
+                fold,
+                event.key,
+                event.delta
+              )
+              sum += event.value
+            }
+        }
+
+        assertTrue(secondBucket.isClosed)
+        assertEquals(0, RiftRegion.foldWindowLength(stream, fold))
+        assertFalse(RiftRegion.containsFoldKey(stream, fold, 3))
+        assertEquals(0L, RiftRegion.foldValue(stream, fold, 3))
+        sum + 1
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
 }
