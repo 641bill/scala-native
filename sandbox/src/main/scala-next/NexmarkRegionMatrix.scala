@@ -193,6 +193,12 @@ object NexmarkRegionMatrixHelpers {
   private def auctionId(index: Int): Int =
     mix(index * 1103515245 + 12345) % NexmarkRegionConfig.auctionSpace
 
+  private def personId(index: Int): Int =
+    (index / 10) % NexmarkRegionConfig.personSpace
+
+  private def auctionSeller(index: Int): Int =
+    ((index - 1) / 10) % NexmarkRegionConfig.personSpace
+
   private def bidderId(index: Int): Int =
     mix(index * 1664525 + 1013904223) % NexmarkRegionConfig.personSpace
 
@@ -262,6 +268,10 @@ object NexmarkRegionMatrixHelpers {
     val cfg = NexmarkRegionConfig
     val counts = if (query == "q5") new Array[Int](cfg.auctionSpace) else null
     val sums = if (query == "q5") new Array[Long](cfg.auctionSpace) else null
+    val q8Persons =
+      if (query == "q8") new Array[Int](cfg.personSpace) else null
+    val q8Auctions =
+      if (query == "q8") new Array[Int](cfg.personSpace) else null
     var first: HeapBucket = null
     var last: HeapBucket = null
     var current: HeapBucket = null
@@ -279,6 +289,28 @@ object NexmarkRegionMatrixHelpers {
           record.key,
           counts(record.key),
           sums(record.key),
+          bucket.startSeconds
+        )
+      } else if (query == "q8" && record.kind == 18) {
+        q8Persons(record.key) -= 1
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          q8Persons(record.key),
+          q8Auctions(record.key).toLong,
+          bucket.startSeconds
+        )
+      } else if (query == "q8" && record.kind == 19) {
+        q8Auctions(record.key) -= 1
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          q8Persons(record.key),
+          q8Auctions(record.key).toLong,
           bucket.startSeconds
         )
       } else if (query == "q0" || record.kind != 2) {
@@ -392,6 +424,50 @@ object NexmarkRegionMatrixHelpers {
             )
             outputCount += 1L
           }
+
+        case "q8" =>
+          eventKind(i) match {
+            case 0 =>
+              val id = personId(i)
+              val person =
+                new HeapRecord(18, i, id, category(i), price(i), i.toLong, null)
+              q8Persons(id) += 1
+              appendRecord(bucket, person)
+              if (q8Auctions(id) > 0) {
+                val out =
+                  new HeapRecord(
+                    28,
+                    i,
+                    id,
+                    q8Persons(id),
+                    q8Auctions(id).toLong,
+                    i.toLong,
+                    null
+                  )
+                appendRecord(bucket, out)
+              }
+            case 1 =>
+              val seller = auctionSeller(i)
+              val auction =
+                new HeapRecord(19, i, seller, auctionId(i), price(i), i.toLong, null)
+              q8Auctions(seller) += 1
+              appendRecord(bucket, auction)
+              if (q8Persons(seller) > 0) {
+                val out =
+                  new HeapRecord(
+                    28,
+                    i,
+                    seller,
+                    q8Persons(seller),
+                    q8Auctions(seller).toLong,
+                    i.toLong,
+                    null
+                  )
+                appendRecord(bucket, out)
+              }
+            case _ =>
+              ()
+          }
       }
       i += 1
     }
@@ -406,6 +482,10 @@ object NexmarkRegionMatrixHelpers {
     val cfg = NexmarkRegionConfig
     val counts = if (query == "q5") new Array[Int](cfg.auctionSpace) else null
     val sums = if (query == "q5") new Array[Long](cfg.auctionSpace) else null
+    val q8Persons =
+      if (query == "q8") new Array[Int](cfg.personSpace) else null
+    val q8Auctions =
+      if (query == "q8") new Array[Int](cfg.personSpace) else null
     var first: TrustedBucket = null
     var last: TrustedBucket = null
     var current: TrustedBucket = null
@@ -423,6 +503,28 @@ object NexmarkRegionMatrixHelpers {
           record.key,
           counts(record.key),
           sums(record.key),
+          bucket.startSeconds
+        )
+      } else if (query == "q8" && record.kind == 18) {
+        q8Persons(record.key) -= 1
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          q8Persons(record.key),
+          q8Auctions(record.key).toLong,
+          bucket.startSeconds
+        )
+      } else if (query == "q8" && record.kind == 19) {
+        q8Auctions(record.key) -= 1
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          q8Persons(record.key),
+          q8Auctions(record.key).toLong,
           bucket.startSeconds
         )
       } else if (query == "q0" || record.kind != 2) {
@@ -563,6 +665,74 @@ object NexmarkRegionMatrixHelpers {
               )
               outputCount += 1L
             }
+
+          case "q8" =>
+            eventKind(i) match {
+              case 0 =>
+                val id = personId(i)
+                val person =
+                  region.alloc(
+                    new TrustedRecord(
+                      18,
+                      i,
+                      id,
+                      category(i),
+                      price(i),
+                      i.toLong,
+                      null
+                    )
+                  )
+                q8Persons(id) += 1
+                appendRecord(bucket, person)
+                if (q8Auctions(id) > 0) {
+                  val out =
+                    region.alloc(
+                      new TrustedRecord(
+                        28,
+                        i,
+                        id,
+                        q8Persons(id),
+                        q8Auctions(id).toLong,
+                        i.toLong,
+                        null
+                      )
+                    )
+                  appendRecord(bucket, out)
+                }
+              case 1 =>
+                val seller = auctionSeller(i)
+                val auction =
+                  region.alloc(
+                    new TrustedRecord(
+                      19,
+                      i,
+                      seller,
+                      auctionId(i),
+                      price(i),
+                      i.toLong,
+                      null
+                    )
+                  )
+                q8Auctions(seller) += 1
+                appendRecord(bucket, auction)
+                if (q8Persons(seller) > 0) {
+                  val out =
+                    region.alloc(
+                      new TrustedRecord(
+                        28,
+                        i,
+                        seller,
+                        q8Persons(seller),
+                        q8Auctions(seller).toLong,
+                        i.toLong,
+                        null
+                      )
+                    )
+                  appendRecord(bucket, out)
+                }
+              case _ =>
+                ()
+            }
         }
         i += 1
       }
@@ -586,6 +756,10 @@ object NexmarkRegionMatrixHelpers {
     val cfg = NexmarkRegionConfig
     val counts = if (query == "q5") new Array[Int](cfg.auctionSpace) else null
     val sums = if (query == "q5") new Array[Long](cfg.auctionSpace) else null
+    val q8Persons =
+      if (query == "q8") new Array[Int](cfg.personSpace) else null
+    val q8Auctions =
+      if (query == "q8") new Array[Int](cfg.personSpace) else null
     var outputCount = 0L
     val checksum = RiftRegion.streaming { stream ?=>
       final class Record(
@@ -618,6 +792,28 @@ object NexmarkRegionMatrixHelpers {
               record.key,
               counts(record.key),
               sums(record.key),
+              bucket.startSeconds
+            )
+          } else if (query == "q8" && record.kind == 18) {
+            q8Persons(record.key) -= 1
+            running = fold(
+              running,
+              record.kind + 40,
+              record.id,
+              record.key,
+              q8Persons(record.key),
+              q8Auctions(record.key).toLong,
+              bucket.startSeconds
+            )
+          } else if (query == "q8" && record.kind == 19) {
+            q8Auctions(record.key) -= 1
+            running = fold(
+              running,
+              record.kind + 40,
+              record.id,
+              record.key,
+              q8Persons(record.key),
+              q8Auctions(record.key).toLong,
               bucket.startSeconds
             )
           } else if (query == "q0" || record.kind != 2) {
@@ -738,6 +934,63 @@ object NexmarkRegionMatrixHelpers {
               )
               outputs += 1L
             }
+
+          case "q8" =>
+            eventKind(i) match {
+              case 0 =>
+                val id = personId(i)
+                val person: Record^{stream} =
+                  RiftRegion.alloc(
+                    new Record(18, i, id, category(i), price(i), i.toLong)
+                  )(using bucketRegion)
+                q8Persons(id) += 1
+                RiftRegion.appendWindow(stream, window, bucket, person)
+                if (q8Auctions(id) > 0) {
+                  val out: Record^{stream} =
+                    RiftRegion.alloc(
+                      new Record(
+                        28,
+                        i,
+                        id,
+                        q8Persons(id),
+                        q8Auctions(id).toLong,
+                        i.toLong
+                      )
+                    )(using bucketRegion)
+                  RiftRegion.appendWindow(stream, window, bucket, out)
+                }
+              case 1 =>
+                val seller = auctionSeller(i)
+                val auction: Record^{stream} =
+                  RiftRegion.alloc(
+                    new Record(
+                      19,
+                      i,
+                      seller,
+                      auctionId(i),
+                      price(i),
+                      i.toLong
+                    )
+                  )(using bucketRegion)
+                q8Auctions(seller) += 1
+                RiftRegion.appendWindow(stream, window, bucket, auction)
+                if (q8Persons(seller) > 0) {
+                  val out: Record^{stream} =
+                    RiftRegion.alloc(
+                      new Record(
+                        28,
+                        i,
+                        seller,
+                        q8Persons(seller),
+                        q8Auctions(seller).toLong,
+                        i.toLong
+                      )
+                    )(using bucketRegion)
+                  RiftRegion.appendWindow(stream, window, bucket, out)
+                }
+              case _ =>
+                ()
+            }
         }
         i += 1
       }
@@ -773,7 +1026,7 @@ object NexmarkRegionMatrixHelpers {
 
   def validateQuery(query: String): Unit =
     query match {
-      case "q0" | "q1" | "q2" | "q5" => ()
+      case "q0" | "q1" | "q2" | "q5" | "q8" => ()
       case other =>
         throw new IllegalArgumentException(s"unknown NEXMark query '$other'")
     }

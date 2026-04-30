@@ -63,6 +63,7 @@ live window payload still dominate.
 | NEXMark-lite Q1 conversion | 1M events | checked `374.767 ms`; Streaming `371.404 ms` | heap `384.595 ms` | Region-friendly stream map win | Local methodology benchmark, not exact Beam NEXMark |
 | NEXMark-lite Q2 selection | 1M events | checked `287.808 ms` | heap `297.053 ms` | Low-output input-region win | Local methodology benchmark; checked RSS higher than heap |
 | NEXMark-lite Q5 hot items | 1M events | checked `355.100 ms` | heap `350.941 ms` | Window aggregate not yet a win | Local methodology benchmark; needs operator/footprint work |
+| NEXMark-lite Q8 window join | 1M events | checked `291.832 ms` | heap `322.210 ms` | Region-friendly checked join-window win | Local methodology benchmark, not exact Beam NEXMark |
 | DEBS RunBoth checked, bounded 1M after Q1/Q2 append-window integration | 3-run median | checked `5349.444 ms` | heap `5219.189 ms` | API generalization, CPU-limited | Latest bounded control; not a speedup claim |
 | DEBS RunBoth checked, full month | 3-run median | checked `66.804 s` | heap `67.122 s` | Near-tie throughput, memory validation | Full-month evidence, not large speedup |
 
@@ -167,8 +168,9 @@ The strongest local categories are:
   heap GC and latency misses;
 - Yak top-word/filter and GraphChi-style subintervals where high-volume data
   objects are epoch/subinterval-local;
-- NEXMark-lite Q1 conversion and checked Q2 selection, where ordinary stream
-  input/output objects are bucket-owned and measured GC time drops materially;
+- NEXMark-lite Q1 conversion, checked Q2 selection, and checked Q8 window
+  joins, where ordinary stream input/output objects are bucket-owned and
+  measured GC time drops materially;
 - checked RegionBuffer and the manual checked AppendWindow child-bucket shape,
   which show the safe API direction can win on simple collection/operator
   shapes when abstraction overhead stays low.

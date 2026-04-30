@@ -9,7 +9,7 @@ summary=${NEXMARK_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${NEXMARK_BUILD:-1}
 platform=$(uname -s)
 modes=(${(z)${NEXMARK_MODES:-"heap rift-checked rift-hp rift-streaming"}})
-queries=(${(z)${NEXMARK_QUERIES:-"q0 q1 q2 q5"}})
+queries=(${(z)${NEXMARK_QUERIES:-"q0 q1 q2 q5 q8"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"

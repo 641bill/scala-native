@@ -25,6 +25,9 @@ Queries:
   selected bids produce output.
 - `q5`: hot-auction sliding-window shape; bid objects are bucket-owned while
   durable window counts/sums stay in primitive heap arrays.
+- `q8`: new-user/new-auction window join; person, auction, and join-output
+  objects are bucket-owned while durable join counts stay in primitive heap
+  arrays.
 
 Modes:
 
@@ -120,6 +123,10 @@ zsh sandbox/run_nexmark_region_matrix.sh
 | q5 | rift-checked | 34.521 | 0.000 | 0.018 | 100000 | 5 / 5 | 44171264 | 13 |
 | q5 | rift-hp | 35.223 | 0.000 | 0.022 | 100000 | 4 / 4 | 44875776 | 13 |
 | q5 | rift-streaming | 34.725 | 0.000 | 0.029 | 100000 | 4 / 4 | 44941312 | 13 |
+| q8 | heap | 31.382 | 2.186 | 0.000 | 0 | 0 / 0 | 39223296 | 10000 |
+| q8 | rift-checked | 31.441 | 0.928 | 0.012 | 30000 | 5 / 5 | 22921216 | 10000 |
+| q8 | rift-hp | 30.860 | 0.954 | 0.010 | 30000 | 4 / 4 | 23085056 | 10000 |
+| q8 | rift-streaming | 30.790 | 0.923 | 0.019 | 30000 | 4 / 4 | 23150592 | 10000 |
 
 ## 1M Results
 
@@ -141,6 +148,10 @@ zsh sandbox/run_nexmark_region_matrix.sh
 | q5 | rift-checked | 355.100 | 10.231 | 0.189 | 1000000 | 41 / 41 | 215728128 | 123 |
 | q5 | rift-hp | 356.015 | 10.359 | 0.220 | 1000000 | 40 / 40 | 217169920 | 123 |
 | q5 | rift-streaming | 356.588 | 10.281 | 0.206 | 1000000 | 40 / 40 | 217300992 | 123 |
+| q8 | heap | 322.210 | 27.148 | 0.000 | 0 | 0 / 0 | 146669568 | 100000 |
+| q8 | rift-checked | 291.832 | 7.413 | 0.054 | 300000 | 41 / 41 | 149684224 | 100000 |
+| q8 | rift-hp | 305.338 | 7.388 | 0.069 | 300000 | 40 / 40 | 150077440 | 100000 |
+| q8 | rift-streaming | 305.410 | 7.379 | 0.074 | 300000 | 40 / 40 | 150241280 | 100000 |
 
 ## Interpretation
 
@@ -159,6 +170,10 @@ zsh sandbox/run_nexmark_region_matrix.sh
   in half, but live window state and hot-auction scanning dominate; RSS is also
   slightly higher. This should drive focused window-aggregate API work before
   using Q5 as a positive claim.
+- `q8` is now the strongest NEXMark-lite checked result: checked Rift is
+  `291.832 ms` versus heap `322.210 ms` at 1M, with GC time dropping from
+  `27.148 ms` to `7.413 ms`. RSS is slightly higher than heap, so this is an
+  elapsed/GC win rather than a memory win.
 - Rift operation time stays below `0.4 ms` in all 1M rows. The remaining gaps
   are query/operator CPU and live-window footprint, not region open/close
   overhead.
@@ -166,8 +181,10 @@ zsh sandbox/run_nexmark_region_matrix.sh
 ## Next Steps
 
 - Keep `q1` and checked `q2` as NEXMark-lite positive candidates.
+- Keep `q8` as the first positive join-window candidate.
 - Profile or redesign `q5` before claiming window-aggregate wins.
-- Add a Q8-style join only after deciding whether join-window state should use
-  `RegionBuffer`, `StreamAppendWindow`, or a new checked join-buffer primitive.
+- Use Q8 to decide whether join-window state should remain a
+  `StreamAppendWindow` pattern or become a reusable checked join-buffer
+  primitive.
 - Do not move back to DEBS ranking/TableRank from this result; TableRank
   remains gated out by its focused 1M profile.
