@@ -7,16 +7,18 @@ wins against Scala Native Immix, where it only reduces memory pressure, and
 where checked container overhead still dominates.
 
 Latest clean-sweep update: `evidence/HEADLINE_STREAMS_2026_05_01.md`,
-`evidence/HEADLINE_DEBS_1M_2026_05_01.md`, and
-`evidence/HEADLINE_UNSAFEZONE_CORE_PRIOR_2026_05_01.md` supersede older
-generated stream, DEBS, core-runtime, and prior-work rows where they overlap.
+`evidence/HEADLINE_DEBS_1M_2026_05_01.md`,
+`evidence/HEADLINE_UNSAFEZONE_CORE_PRIOR_2026_05_01.md`, and
+`evidence/HEADLINE_UNSAFEZONE_STREAMS_2026_05_01.md` supersede older generated
+stream, DEBS, core-runtime, and prior-work rows where they overlap.
 
 UnsafeZone-HP checkpoint: `evidence/UNSAFEZONE_HP_BASELINE_MATRIX.md` adds a
 benchmark-only SafeZone no-root control (`SAFEZONE_ROOTS_MODE=3`,
 `SAFEZONE_PAGE_SIZE=32768`). The first clean core/prior headline medians are
-now in `evidence/HEADLINE_UNSAFEZONE_CORE_PRIOR_2026_05_01.md`. Use it to
-decide whether SafeZone internals are a better runtime substrate after root
-bookkeeping is removed; do not treat it as a safe user-facing mode.
+now in `evidence/HEADLINE_UNSAFEZONE_CORE_PRIOR_2026_05_01.md`; the first
+stream medians are in `evidence/HEADLINE_UNSAFEZONE_STREAMS_2026_05_01.md`.
+Use it to decide whether SafeZone internals are a better runtime substrate
+after root bookkeeping is removed; do not treat it as a safe user-facing mode.
 
 ## Purpose
 
@@ -86,6 +88,7 @@ live window payload still dominate.
 | NEXMark Beam-default Q4/Q9 | 1M generated-profile events | Q4 HPZone `576.367 ms`; Q9 Streaming `751.602 ms` | Q4 heap `579.239 ms`; Q9 improved SafeZone `756.972 ms` | Near-tie or improved-SafeZone-adjacent controls | Clean generated Beam-default profile |
 | NEXMark Beam-default Q8 | 1M generated-profile events | checked `457.518 ms` | heap `470.798 ms`; improved SafeZone `457.725 ms` | Checked near-tie with improved SafeZone | Clean generated Beam-default profile |
 | NEXMark Beam-default Q11 | 1M generated-profile events | HPZone `228.741 ms`, checked `234.401 ms` | heap `218.774 ms`; improved SafeZone `229.557 ms` | Heap wins elapsed; region rows lower GC only | Clean generated Beam-default profile |
+| UnsafeZone-HP stream follow-up | 1M generated/profile stream rows | NEXMark q3 checked `292.371 ms`, q8 checked `450.904 ms`; Common Crawl q1 HPZone `4322.349 ms` | unsafezone-hp q0/q1/q4/q5/q8/q11 often near-best; heap Common Crawl q1 `4743.205 ms`; improved SafeZone Common Crawl q1 `4028.067 ms` | UnsafeZone-HP is often best SafeZone-family stream row, but current Rift still rarely beats improved SafeZone by a case-study margin | Clean UnsafeZone stream sweep |
 | Common Crawl WET-shaped tokenization | 1M generated pages / 137M token records | HPZone `4301.536 ms`, Streaming `4327.405 ms` | heap `4770.503 ms`; improved SafeZone `4066.435 ms` | GC-heavy detector; Rift beats heap but improved SafeZone wins | Clean generated input only; not a Rift case-study win |
 | Common Crawl WET small-bucket control | 100k pages / 13.7M records | Streaming `419.779 ms` | heap `386.807 ms`; improved SafeZone `381.109 ms` | Heap/SafeZone recover with tighter lifetimes | Generated input; not a case-study row |
 | Common Crawl real WET tokenization | 10k requested pages / 349709 token records | Streaming `15.651 ms` | heap `12.079 ms`; improved SafeZone `16.093 ms` | Real preloaded WET is CPU/live-input-bound, not GC-bound | Real preloaded input; no parser/decompression timing |
