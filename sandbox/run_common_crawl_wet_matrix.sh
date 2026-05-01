@@ -9,7 +9,7 @@ summary=${COMMON_CRAWL_WET_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${COMMON_CRAWL_WET_BUILD:-1}
 platform=$(uname -s)
 modes=(${(z)${COMMON_CRAWL_WET_MODES:-"heap safezone-current safezone-improved unsafezone-hp rift-hp rift-streaming"}})
-queries=(${(z)${COMMON_CRAWL_WET_QUERIES:-"q0-parse q1-tokenize"}})
+queries=(${(z)${COMMON_CRAWL_WET_QUERIES:-"q0-parse q1-tokenize q2-domain-window q3-parser-scratch"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"

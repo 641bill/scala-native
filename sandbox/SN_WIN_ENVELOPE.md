@@ -21,6 +21,14 @@ stream medians are in `evidence/HEADLINE_UNSAFEZONE_STREAMS_2026_05_01.md`.
 Use it to decide whether SafeZone internals are a better runtime substrate
 after root bookkeeping is removed; do not treat it as a safe user-facing mode.
 
+Post-UnsafeZone scaffold: `evidence/SAFEZONE_COST_MATRIX.md` now defines the
+cost-decomposition run that should precede backend changes. It records
+SafeZone pool trace counters for root modes and page sizes, so future
+optimizations can target measured root, reclaim, page-size, or allocation
+costs. `evidence/SAFEZONE_HP_BACKEND_PROTOTYPE.md` captures the intended
+`rift-checked-safezone-hp` direction, but no checked SafeZone-HP backend code
+exists yet.
+
 ## Purpose
 
 The next useful Scala Native question is not "can one more TableRank patch make
@@ -91,6 +99,7 @@ live window payload still dominate.
 | NEXMark Beam-default Q11 | 1M generated-profile events | HPZone `228.741 ms`, checked `234.401 ms` | heap `218.774 ms`; improved SafeZone `229.557 ms` | Heap wins elapsed; region rows lower GC only | Clean generated Beam-default profile |
 | UnsafeZone-HP stream follow-up | 1M generated/profile stream rows | NEXMark q3 checked `292.371 ms`, q8 checked `450.904 ms`; Common Crawl q1 HPZone `4322.349 ms` | unsafezone-hp q0/q1/q4/q5/q8/q11 often near-best; heap Common Crawl q1 `4743.205 ms`; improved SafeZone Common Crawl q1 `4028.067 ms` | UnsafeZone-HP is often best SafeZone-family stream row, but current Rift still rarely beats improved SafeZone by a case-study margin | Clean UnsafeZone stream sweep |
 | Common Crawl WET-shaped tokenization | 1M generated pages / 137M token records | HPZone `4301.536 ms`, Streaming `4327.405 ms` | heap `4770.503 ms`; improved SafeZone `4066.435 ms` | GC-heavy detector; Rift beats heap but improved SafeZone wins | Clean generated input only; not a Rift case-study win |
+| Common Crawl WET-shaped q2/q3 expansion | smoke only | q2/q3 checksums match across heap, SafeZone-family, and Rift HPZone | headline rows pending | New object-heavy probes for domain-window aggregation and parser scratch | Implemented scaffold; not evidence yet |
 | Common Crawl WET small-bucket control | 100k pages / 13.7M records | Streaming `419.779 ms` | heap `386.807 ms`; improved SafeZone `381.109 ms` | Heap/SafeZone recover with tighter lifetimes | Generated input; not a case-study row |
 | Common Crawl real WET tokenization | 10k requested pages / 349709 token records | Streaming `15.651 ms` | heap `12.079 ms`; improved SafeZone `16.093 ms` | Real preloaded WET is CPU/live-input-bound, not GC-bound | Real preloaded input; no parser/decompression timing |
 | Common Crawl real WET tokenization larger shard row | 50k requested, 21425 actual pages / 752797 token records | HPZone `32.809 ms`, Streaming `33.103 ms` | heap `26.452 ms`; improved SafeZone `30.730 ms` | Heap wins; median timed GC zero | Real preloaded input; actual page count below request |

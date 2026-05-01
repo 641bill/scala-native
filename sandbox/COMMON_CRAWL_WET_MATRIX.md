@@ -4,7 +4,9 @@ Date: 2026-05-01
 
 Status: generated WET-shaped detector plus first real Common Crawl WET input
 wiring. Real WET input is currently preloaded before timing so parser and
-decompression cost do not hide memory-management behavior.
+decompression cost do not hide memory-management behavior. The latest code
+adds two follow-up WET-shaped queries for domain-window aggregation and parser
+scratch allocation; those rows are not headline evidence until rerun.
 
 ## Workload
 
@@ -28,6 +30,11 @@ Queries:
   bucket close.
 - `q1-tokenize`: allocate page/header, body-line, and token records, then
   consume them at bucket close.
+- `q2-domain-window`: allocate page/header, body-line, and token records, then
+  aggregate per-domain bucket summaries at close.
+- `q3-parser-scratch`: allocate page/header, body-line, and token scratch
+  records and consume them immediately; bucket regions still provide the bulk
+  lifetime boundary.
 
 Modes:
 
@@ -36,6 +43,8 @@ Modes:
   `SAFEZONE_ROOTS_MODE=0`.
 - `safezone-improved`: closeable SafeZone per page bucket with
   `SAFEZONE_ROOTS_MODE=1`.
+- `unsafezone-hp`: benchmark-only rootless SafeZone with
+  `SAFEZONE_ROOTS_MODE=3` and `SAFEZONE_PAGE_SIZE=32768`.
 - `rift-hp`: trusted HPZone per page bucket.
 - `rift-streaming`: trusted Streaming zone per page bucket.
 

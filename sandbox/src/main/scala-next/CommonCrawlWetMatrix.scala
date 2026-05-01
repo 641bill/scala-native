@@ -414,12 +414,21 @@ object CommonCrawlWetMatrixHelpers {
 
   def validateQuery(query: String): Unit =
     query match {
-      case "q0-parse" | "q1-tokenize" => ()
+      case "q0-parse" | "q1-tokenize" | "q2-domain-window" |
+          "q3-parser-scratch" =>
+        ()
       case other =>
         throw new IllegalArgumentException(
           s"unknown Common Crawl WET query '$other'"
         )
     }
+
+  private def tokenQuery(query: String): Boolean =
+    query == "q1-tokenize" || query == "q2-domain-window" ||
+      query == "q3-parser-scratch"
+
+  private def scratchQuery(query: String): Boolean =
+    query == "q3-parser-scratch"
 
   def runHeap(query: String): RunOutcome = {
     val cfg = CommonCrawlWetConfig
@@ -443,17 +452,57 @@ object CommonCrawlWetMatrixHelpers {
       outputCount += 1L
     }
 
+    def consumeDomainSummary(
+        bucket: HeapBucket,
+        domain: Int,
+        count: Int
+    ): Unit = {
+      checksum = fold(
+        checksum,
+        4,
+        bucket.startPage.toInt,
+        domain,
+        count,
+        (domain.toLong << 32) ^ count.toLong,
+        bucket.startPage
+      )
+      outputCount += 1L
+    }
+
+    def closeRecords(bucket: HeapBucket): Unit =
+      if (query == "q2-domain-window") {
+        val counts = new Array[Int](cfg.domainSpace)
+        var record = bucket.head
+        while (record != null) {
+          counts(record.domain) += 1
+          record = record.next
+        }
+        var domain = 0
+        while (domain < counts.length) {
+          val count = counts(domain)
+          if (count != 0)
+            consumeDomainSummary(bucket, domain, count)
+          domain += 1
+        }
+      } else {
+        var record = bucket.head
+        while (record != null) {
+          consume(bucket, record)
+          record = record.next
+        }
+      }
+
+    def emit(bucket: HeapBucket, record: HeapRecord): Unit =
+      if (scratchQuery(query)) consume(bucket, record)
+      else appendRecord(bucket, record)
+
     def closeExpired(cutoffPage: Long): Unit =
       while (
         first != null &&
         first.startPage + cfg.pagesPerBucket.toLong <= cutoffPage
       ) {
         val bucket = first
-        var record = bucket.head
-        while (record != null) {
-          consume(bucket, record)
-          record = record.next
-        }
+        closeRecords(bucket)
         first = bucket.next
         if (first == null) last = null
         if (current eq bucket) current = null
@@ -482,17 +531,17 @@ object CommonCrawlWetMatrixHelpers {
     while (page < input.pages) {
       val domain = input.domainAt(page)
       val bucket = bucketFor(bucketStart(page))
-      appendRecord(bucket, new HeapRecord(1, page, domain, 0, input.lineHashAt(page, 0), null))
+      emit(bucket, new HeapRecord(1, page, domain, 0, input.lineHashAt(page, 0), null))
       var line = 0
       val lines = input.lineCountAt(page)
       while (line < lines) {
         val lh = input.lineHashAt(page, line)
-        appendRecord(bucket, new HeapRecord(2, page, domain, line, lh, null))
-        if (query == "q1-tokenize") {
+        emit(bucket, new HeapRecord(2, page, domain, line, lh, null))
+        if (tokenQuery(query)) {
           var token = 0
           val tokens = input.tokenCountAt(page, line)
           while (token < tokens) {
-            appendRecord(
+            emit(
               bucket,
               new HeapRecord(
                 3,
@@ -541,12 +590,52 @@ object CommonCrawlWetMatrixHelpers {
       outputCount += 1L
     }
 
-    def closeBucket(bucket: SafeBucket): Unit = {
-      var record = bucket.head
-      while (record != null) {
-        consume(bucket, record)
-        record = record.next
+    def consumeDomainSummary(
+        bucket: SafeBucket,
+        domain: Int,
+        count: Int
+    ): Unit = {
+      checksum = fold(
+        checksum,
+        4,
+        bucket.startPage.toInt,
+        domain,
+        count,
+        (domain.toLong << 32) ^ count.toLong,
+        bucket.startPage
+      )
+      outputCount += 1L
+    }
+
+    def closeRecords(bucket: SafeBucket): Unit =
+      if (query == "q2-domain-window") {
+        val counts = new Array[Int](cfg.domainSpace)
+        var record = bucket.head
+        while (record != null) {
+          counts(record.domain) += 1
+          record = record.next
+        }
+        var domain = 0
+        while (domain < counts.length) {
+          val count = counts(domain)
+          if (count != 0)
+            consumeDomainSummary(bucket, domain, count)
+          domain += 1
+        }
+      } else {
+        var record = bucket.head
+        while (record != null) {
+          consume(bucket, record)
+          record = record.next
+        }
       }
+
+    def emit(bucket: SafeBucket, record: SafeRecord): Unit =
+      if (scratchQuery(query)) consume(bucket, record)
+      else appendRecord(bucket, record)
+
+    def closeBucket(bucket: SafeBucket): Unit = {
+      closeRecords(bucket)
       bucket.head = null
       bucket.tail = null
       bucket.next = null
@@ -587,7 +676,7 @@ object CommonCrawlWetMatrixHelpers {
         val domain = input.domainAt(page)
         val bucket = bucketFor(bucketStart(page))
         val zone = bucket.zone
-        appendRecord(
+        emit(
           bucket,
           SafeZoneAllocator
             .allocate(zone, new SafeRecord(1, page, domain, 0, input.lineHashAt(page, 0), null))
@@ -597,17 +686,17 @@ object CommonCrawlWetMatrixHelpers {
         val lines = input.lineCountAt(page)
         while (line < lines) {
           val lh = input.lineHashAt(page, line)
-          appendRecord(
+          emit(
             bucket,
             SafeZoneAllocator
               .allocate(zone, new SafeRecord(2, page, domain, line, lh, null))
               .asInstanceOf[SafeRecord]
           )
-          if (query == "q1-tokenize") {
+          if (tokenQuery(query)) {
             var token = 0
             val tokens = input.tokenCountAt(page, line)
             while (token < tokens) {
-              appendRecord(
+              emit(
                 bucket,
                 SafeZoneAllocator
                   .allocate(
@@ -668,12 +757,52 @@ object CommonCrawlWetMatrixHelpers {
       outputCount += 1L
     }
 
-    def closeBucket(bucket: TrustedBucket): Unit = {
-      var record = bucket.head
-      while (record != null) {
-        consume(bucket, record)
-        record = record.next
+    def consumeDomainSummary(
+        bucket: TrustedBucket,
+        domain: Int,
+        count: Int
+    ): Unit = {
+      checksum = fold(
+        checksum,
+        4,
+        bucket.startPage.toInt,
+        domain,
+        count,
+        (domain.toLong << 32) ^ count.toLong,
+        bucket.startPage
+      )
+      outputCount += 1L
+    }
+
+    def closeRecords(bucket: TrustedBucket): Unit =
+      if (query == "q2-domain-window") {
+        val counts = new Array[Int](cfg.domainSpace)
+        var record = bucket.head
+        while (record != null) {
+          counts(record.domain) += 1
+          record = record.next
+        }
+        var domain = 0
+        while (domain < counts.length) {
+          val count = counts(domain)
+          if (count != 0)
+            consumeDomainSummary(bucket, domain, count)
+          domain += 1
+        }
+      } else {
+        var record = bucket.head
+        while (record != null) {
+          consume(bucket, record)
+          record = record.next
+        }
       }
+
+    def emit(bucket: TrustedBucket, record: TrustedRecord): Unit =
+      if (scratchQuery(query)) consume(bucket, record)
+      else appendRecord(bucket, record)
+
+    def closeBucket(bucket: TrustedBucket): Unit = {
+      closeRecords(bucket)
       bucket.head = null
       bucket.tail = null
       bucket.next = null
@@ -714,7 +843,7 @@ object CommonCrawlWetMatrixHelpers {
         val domain = input.domainAt(page)
         val bucket = bucketFor(bucketStart(page))
         val region = bucket.region
-        appendRecord(
+        emit(
           bucket,
           region.alloc(new TrustedRecord(1, page, domain, 0, input.lineHashAt(page, 0), null))
         )
@@ -722,15 +851,15 @@ object CommonCrawlWetMatrixHelpers {
         val lines = input.lineCountAt(page)
         while (line < lines) {
           val lh = input.lineHashAt(page, line)
-          appendRecord(
+          emit(
             bucket,
             region.alloc(new TrustedRecord(2, page, domain, line, lh, null))
           )
-          if (query == "q1-tokenize") {
+          if (tokenQuery(query)) {
             var token = 0
             val tokens = input.tokenCountAt(page, line)
             while (token < tokens) {
-              appendRecord(
+              emit(
                 bucket,
                 region.alloc(
                   new TrustedRecord(
