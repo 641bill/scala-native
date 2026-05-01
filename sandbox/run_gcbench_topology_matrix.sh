@@ -16,11 +16,14 @@ batch_size=${SAFEZONE_BATCH_SIZE:-1}
 run_mode() {
   local label="$1"
   local mode="$2"
+  local roots_mode="${3:-${SAFEZONE_ROOTS_MODE:-}}"
+  local mode_page_size="${4:-${page_size}}"
 
   echo
   echo "== ${label} =="
   GCBENCH_BENCHMARK_RUNS="${runs}" \
-  SAFEZONE_PAGE_SIZE="${page_size}" \
+  SAFEZONE_ROOTS_MODE="${roots_mode}" \
+  SAFEZONE_PAGE_SIZE="${mode_page_size}" \
   SAFEZONE_BATCH_SIZE="${batch_size}" \
     sbt \
       "project sandbox3_next" \
@@ -31,7 +34,9 @@ run_mode() {
 cd "${repo_dir}"
 
 run_mode "Immix heap baseline" "heap"
-SAFEZONE_ROOTS_MODE=0 run_mode "Current SafeZone topology A" "topology-a"
-SAFEZONE_ROOTS_MODE=0 run_mode "Current SafeZone topology B" "topology-b"
-SAFEZONE_ROOTS_MODE=1 run_mode "Improved SafeZone topology A" "topology-a"
-SAFEZONE_ROOTS_MODE=1 run_mode "Improved SafeZone topology B" "topology-b"
+run_mode "Current SafeZone topology A" "topology-a" "0"
+run_mode "Current SafeZone topology B" "topology-b" "0"
+run_mode "Improved SafeZone topology A" "topology-a" "1"
+run_mode "Improved SafeZone topology B" "topology-b" "1"
+run_mode "UnsafeZone-HP topology A" "topology-a" "3" "32768"
+run_mode "UnsafeZone-HP topology B" "topology-b" "3" "32768"

@@ -94,6 +94,7 @@ run_mode() {
   local mode="$2"
   local roots_mode="$3"
   local mode_workload="${4:-${workload}}"
+  local page_size="${5:-${SAFEZONE_PAGE_SIZE:-}}"
   local run_log="${output_dir}/run-${label}.log"
   local time_log="${output_dir}/time-${label}.log"
   local max_rss_bytes
@@ -101,9 +102,9 @@ run_mode() {
   echo
   echo "== ${label} =="
   if [[ "${platform}" == "Darwin" ]]; then
-    SAFEZONE_ROOTS_MODE="${roots_mode}" /usr/bin/time -l "${binary}" "${mode}" "${mode_workload}" > "${run_log}" 2> "${time_log}"
+    SAFEZONE_ROOTS_MODE="${roots_mode}" SAFEZONE_PAGE_SIZE="${page_size}" /usr/bin/time -l "${binary}" "${mode}" "${mode_workload}" > "${run_log}" 2> "${time_log}"
   else
-    SAFEZONE_ROOTS_MODE="${roots_mode}" /usr/bin/time -v "${binary}" "${mode}" "${mode_workload}" > "${run_log}" 2> "${time_log}"
+    SAFEZONE_ROOTS_MODE="${roots_mode}" SAFEZONE_PAGE_SIZE="${page_size}" /usr/bin/time -v "${binary}" "${mode}" "${mode_workload}" > "${run_log}" 2> "${time_log}"
   fi
 
   max_rss_bytes=$(read_max_rss_bytes "${time_log}")
@@ -118,6 +119,7 @@ if [[ "${workload}" != "promotion" ]]; then
   run_mode "heap" "heap" "0"
   run_mode "current-safezone" "safezone" "0"
   run_mode "improved-safezone" "safezone" "1"
+  run_mode "unsafezone-hp" "safezone" "3" "${workload}" "32768"
   run_mode "rift-hp" "rift-hp" "0"
   run_mode "rift-streaming" "rift-streaming" "0"
   run_mode "yak-runtime" "yak-runtime" "0"

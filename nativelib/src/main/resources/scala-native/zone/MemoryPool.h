@@ -22,6 +22,11 @@ typedef struct _MemoryPool {
 #define MEMORYPOOL_MIN_CHUNK_COUNT 4
 #define MEMORYPOOL_MAX_CHUNK_COUNT 512
 
+#define MEMORYPOOL_ROOTS_CURRENT 0
+#define MEMORYPOOL_ROOTS_IMPROVED 1
+#define MEMORYPOOL_ROOTS_CHUNK 2
+#define MEMORYPOOL_ROOTS_UNSAFE_NO_ROOTS 3
+
 /**
  * @brief Open an empry memory pool. A memory pool consists of a linked list
  * of chunks. Each chunk is divided into fixed-size pages.
@@ -33,7 +38,12 @@ MemoryPool *MemoryPool_open();
 /** Returns the configured memory-pool page size. */
 size_t MemoryPool_page_size();
 
-/** Returns configured roots bookkeeping mode (SAFEZONE_ROOTS_MODE). */
+/** Returns configured roots bookkeeping mode (SAFEZONE_ROOTS_MODE).
+ *
+ * Modes:
+ * 0 = current per-page roots, 1 = improved/coalesced root removal,
+ * 2 = chunk roots, 3 = unsafe no roots for benchmark-only UnsafeZone-HP.
+ */
 int MemoryPool_roots_mode();
 
 /** Borrow a single unused page, to be reclaimed later.

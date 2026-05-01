@@ -158,7 +158,8 @@ static bool MemoryPool_parse_roots_mode(const char *value, int *parsed) {
     char *end = NULL;
     errno = 0;
     long raw = strtol(value, &end, 10);
-    if (errno != 0 || end == value || *end != '\0' || raw < 0L || raw > 2L) {
+    if (errno != 0 || end == value || *end != '\0' || raw < 0L ||
+        raw > MEMORYPOOL_ROOTS_UNSAFE_NO_ROOTS) {
         return false;
     }
     *parsed = (int)raw;
@@ -223,7 +224,7 @@ void MemoryPool_alloc_chunk(MemoryPool *pool) {
     chunk->size = pool->chunkPageCount * pageSize;
     chunk->offset = 0;
     chunk->start = memoryMapOrExitOnError(chunk->size);
-    if (rootsMode == 2) {
+    if (rootsMode == MEMORYPOOL_ROOTS_CHUNK) {
         const unsigned long long rootStartNs =
             trace ? MemoryPool_now_ns() : 0ULL;
         scalanative_GC_add_roots(chunk->start, chunk->start + chunk->size);
@@ -275,7 +276,8 @@ MemoryPage *MemoryPool_claim(MemoryPool *pool) {
     pool->page = result->next;
     result->next = NULL;
     result->offset = 0;
-    if (rootsMode != 2) {
+    if (rootsMode != MEMORYPOOL_ROOTS_CHUNK &&
+        rootsMode != MEMORYPOOL_ROOTS_UNSAFE_NO_ROOTS) {
         const unsigned long long rootStartNs =
             trace ? MemoryPool_now_ns() : 0ULL;
         scalanative_GC_add_roots(result->start, result->start + result->size);
@@ -298,7 +300,7 @@ void MemoryPool_reclaim(MemoryPool *pool, MemoryPage *head) {
     const int rootsMode = MemoryPool_roots_mode();
     MemoryPage *reclaimHead = head;
     MemoryPage *page = reclaimHead, *tail = NULL;
-    if (rootsMode == 1) {
+    if (rootsMode == MEMORYPOOL_ROOTS_IMPROVED) {
         if (reclaimHead != NULL && reclaimHead->next != NULL) {
             const unsigned long long sortStartNs =
                 trace ? MemoryPool_now_ns() : 0ULL;
@@ -320,7 +322,7 @@ void MemoryPool_reclaim(MemoryPool *pool, MemoryPage *head) {
         char *rangeEnd = rangeStart + page->size;
         unsigned long long pagesInRun = 1;
 
-        if (rootsMode == 1) {
+        if (rootsMode == MEMORYPOOL_ROOTS_IMPROVED) {
             while (runTail->next != NULL &&
                    rangeEnd == (char *)runTail->next->start) {
                 runTail = runTail->next;
@@ -330,7 +332,8 @@ void MemoryPool_reclaim(MemoryPool *pool, MemoryPage *head) {
         }
 
         unsigned long long rootDurationNs = 0ULL;
-        if (rootsMode != 2) {
+        if (rootsMode != MEMORYPOOL_ROOTS_CHUNK &&
+            rootsMode != MEMORYPOOL_ROOTS_UNSAFE_NO_ROOTS) {
             const unsigned long long rootStartNs =
                 trace ? MemoryPool_now_ns() : 0ULL;
             scalanative_GC_remove_roots(rangeStart, rangeEnd);
@@ -344,7 +347,7 @@ void MemoryPool_reclaim(MemoryPool *pool, MemoryPage *head) {
         if (trace) {
             memoryPoolTraceReclaimRuns += 1;
             memoryPoolTraceReclaimedPages += pagesInRun;
-            if (rootsMode == 1 && pagesInRun > 1) {
+            if (rootsMode == MEMORYPOOL_ROOTS_IMPROVED && pagesInRun > 1) {
                 memoryPoolTraceRootRemoveCoalescedPages += pagesInRun - 1;
             }
             const unsigned long long opDurationNs =
@@ -375,7 +378,7 @@ void MemoryPool_close(MemoryPool *pool) {
     while (chunk != NULL) {
         preChunk = chunk;
         chunk = chunk->next;
-        if (rootsMode == 2) {
+        if (rootsMode == MEMORYPOOL_ROOTS_CHUNK) {
             scalanative_GC_remove_roots(preChunk->start,
                                         preChunk->start + preChunk->size);
         }

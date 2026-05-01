@@ -17,9 +17,13 @@ workers=${PIPELINE_WORKERS:-4}
 run_mode() {
   local label="$1"
   local mode="$2"
+  local roots_mode="${3:-${SAFEZONE_ROOTS_MODE:-}}"
+  local page_size="${4:-${SAFEZONE_PAGE_SIZE:-}}"
 
   echo
   echo "== ${label} =="
+  SAFEZONE_ROOTS_MODE="${roots_mode}" \
+  SAFEZONE_PAGE_SIZE="${page_size}" \
   PIPELINE_BENCHMARK_RUNS="${runs}" \
   PIPELINE_WARMUPS="${warmups}" \
   PIPELINE_SIZE="${size}" \
@@ -33,7 +37,8 @@ run_mode() {
 cd "${repo_dir}"
 
 run_mode "Immix heap baseline" "heap"
-SAFEZONE_ROOTS_MODE=0 run_mode "Current SafeZone pipeline" "safezone"
-SAFEZONE_ROOTS_MODE=1 run_mode "Improved SafeZone pipeline" "safezone"
+run_mode "Current SafeZone pipeline" "safezone" "0"
+run_mode "Improved SafeZone pipeline" "safezone" "1"
+run_mode "UnsafeZone-HP pipeline" "safezone" "3" "32768"
 run_mode "Rift HPZone pipeline" "rift-hp"
 run_mode "Rift Streaming pipeline" "rift-streaming"

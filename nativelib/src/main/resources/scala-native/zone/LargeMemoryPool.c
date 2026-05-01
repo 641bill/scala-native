@@ -56,7 +56,7 @@ void LargeMemoryPool_alloc_page(LargeMemoryPool *largePool, size_t size) {
     page->start = memoryMapOrExitOnError(size);
     page->offset = 0;
     page->size = size;
-    if (rootsMode == 2) {
+    if (rootsMode == MEMORYPOOL_ROOTS_CHUNK) {
         scalanative_GC_add_roots(page->start, page->start + page->size);
     }
     page->next = largePool->page;
@@ -91,7 +91,9 @@ MemoryPage *LargeMemoryPool_claim(LargeMemoryPool *largePool, size_t size) {
     largePool->page = result->next;
     result->next = NULL;
     result->offset = 0;
-    if (MemoryPool_roots_mode() != 2) {
+    const int rootsMode = MemoryPool_roots_mode();
+    if (rootsMode != MEMORYPOOL_ROOTS_CHUNK &&
+        rootsMode != MEMORYPOOL_ROOTS_UNSAFE_NO_ROOTS) {
         scalanative_GC_add_roots(result->start, result->start + result->size);
     }
     return result;
@@ -101,7 +103,7 @@ void LargeMemoryPool_reclaim(LargeMemoryPool *largePool, MemoryPage *head) {
     const int rootsMode = MemoryPool_roots_mode();
     MemoryPage *reclaimHead = head;
     MemoryPage *page = reclaimHead, *tail = NULL;
-    if (rootsMode == 1) {
+    if (rootsMode == MEMORYPOOL_ROOTS_IMPROVED) {
         reclaimHead = LargeMemoryPool_sort_pages_by_start(reclaimHead);
         page = reclaimHead;
         while (page != NULL) {
@@ -117,7 +119,7 @@ void LargeMemoryPool_reclaim(LargeMemoryPool *largePool, MemoryPage *head) {
             tail = runTail;
             page = runTail->next;
         }
-    } else if (rootsMode == 0) {
+    } else if (rootsMode == MEMORYPOOL_ROOTS_CURRENT) {
         while (page != NULL) {
             scalanative_GC_remove_roots(page->start, page->start + page->size);
             tail = page;
@@ -141,7 +143,7 @@ void LargeMemoryPool_close(LargeMemoryPool *largePool) {
     while (page != NULL) {
         prePage = page;
         page = page->next;
-        if (rootsMode == 2) {
+        if (rootsMode == MEMORYPOOL_ROOTS_CHUNK) {
             scalanative_GC_remove_roots(prePage->start,
                                         prePage->start + prePage->size);
         }

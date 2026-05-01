@@ -8,7 +8,7 @@ input=${DEBS2015_BOTH_INPUT:-"${script_dir}/sample_both.csv"}
 output_dir=${DEBS2015_BOTH_OUTPUT_DIR:-"/tmp/debs2015-runboth-instrumented"}
 summary=${DEBS2015_BOTH_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${DEBS2015_BOTH_BUILD:-1}
-modes_text=${DEBS2015_BOTH_MODES:-"heap rift-hp rift-streaming"}
+modes_text=${DEBS2015_BOTH_MODES:-"heap safezone-current safezone-improved unsafezone-hp rift-hp rift-streaming"}
 modes=(${=modes_text})
 platform=$(uname -s)
 
@@ -306,6 +306,8 @@ write_summary_row() {
 
 run_mode() {
   local mode="$1"
+  local roots_mode=""
+  local page_size="${SAFEZONE_PAGE_SIZE:-}"
   local q1_output="${output_dir}/q1-${mode}.out"
   local q2_output="${output_dir}/q2-${mode}.out"
   local run_log="${output_dir}/run-${mode}.log"
@@ -316,12 +318,25 @@ run_mode() {
   local time_user_s
   local time_sys_s
 
+  case "${mode}" in
+    safezone-current)
+      roots_mode="0"
+      ;;
+    safezone-improved)
+      roots_mode="1"
+      ;;
+    unsafezone-hp)
+      roots_mode="3"
+      page_size="32768"
+      ;;
+  esac
+
   echo
   echo "== Instrumented RunBoth Q1 ${mode} =="
   if [[ "${platform}" == "Darwin" ]]; then
-    /usr/bin/time -l "${binary}" "${input}" "${q1_output}" "${q2_output}" "${mode}" > "${run_log}" 2> "${time_log}"
+    SAFEZONE_ROOTS_MODE="${roots_mode}" SAFEZONE_PAGE_SIZE="${page_size}" /usr/bin/time -l "${binary}" "${input}" "${q1_output}" "${q2_output}" "${mode}" > "${run_log}" 2> "${time_log}"
   else
-    /usr/bin/time -v "${binary}" "${input}" "${q1_output}" "${q2_output}" "${mode}" > "${run_log}" 2> "${time_log}"
+    SAFEZONE_ROOTS_MODE="${roots_mode}" SAFEZONE_PAGE_SIZE="${page_size}" /usr/bin/time -v "${binary}" "${input}" "${q1_output}" "${q2_output}" "${mode}" > "${run_log}" 2> "${time_log}"
   fi
 
   metric=$(grep "DEBS2015_RUNBOTH_RESULT" "${run_log}" | tail -n 1)

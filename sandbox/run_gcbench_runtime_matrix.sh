@@ -12,10 +12,22 @@ run_case() {
   local label="$1"
   local mode="$2"
   local roots_mode="${3:-}"
+  local page_size="${4:-}"
 
   echo
   echo "== $label =="
-  if [[ -n "$roots_mode" ]]; then
+  if [[ -n "$roots_mode" && -n "$page_size" ]]; then
+    SAFEZONE_ROOTS_MODE="$roots_mode" \
+    SAFEZONE_PAGE_SIZE="$page_size" \
+    ENABLE_EXPERIMENTAL_COMPILER=1 \
+    JAVA_HOME="$JAVA_HOME" \
+    PATH="$PATH" \
+    GCBENCH_BENCHMARK_RUNS="$RUNS" \
+    sbt \
+      "project sandbox3_next" \
+      "set Compile / mainClass := Some(\"GCBenchRuntimeMatrix\")" \
+      "run $mode"
+  elif [[ -n "$roots_mode" ]]; then
     SAFEZONE_ROOTS_MODE="$roots_mode" \
     ENABLE_EXPERIMENTAL_COMPILER=1 \
     JAVA_HOME="$JAVA_HOME" \
@@ -45,4 +57,5 @@ echo "SAFEZONE_BATCH_SIZE=${SAFEZONE_BATCH_SIZE:-default}"
 run_case "Immix heap baseline" "heap"
 run_case "Current SafeZone baseline" "safezone" "0"
 run_case "Improved SafeZone baseline" "safezone" "1"
+run_case "UnsafeZone-HP baseline" "safezone" "3" "32768"
 run_case "Rift HPZone" "rift-hp"

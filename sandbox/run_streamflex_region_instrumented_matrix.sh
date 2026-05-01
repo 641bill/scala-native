@@ -90,6 +90,7 @@ run_mode() {
   local label="$1"
   local mode="$2"
   local roots_mode="$3"
+  local page_size="${4:-${SAFEZONE_PAGE_SIZE:-}}"
   local run_log="${output_dir}/run-${label}.log"
   local time_log="${output_dir}/time-${label}.log"
   local max_rss_bytes
@@ -97,9 +98,9 @@ run_mode() {
   echo
   echo "== ${label} =="
   if [[ "${platform}" == "Darwin" ]]; then
-    SAFEZONE_ROOTS_MODE="${roots_mode}" /usr/bin/time -l "${binary}" "${mode}" "${workload}" > "${run_log}" 2> "${time_log}"
+    SAFEZONE_ROOTS_MODE="${roots_mode}" SAFEZONE_PAGE_SIZE="${page_size}" /usr/bin/time -l "${binary}" "${mode}" "${workload}" > "${run_log}" 2> "${time_log}"
   else
-    SAFEZONE_ROOTS_MODE="${roots_mode}" /usr/bin/time -v "${binary}" "${mode}" "${workload}" > "${run_log}" 2> "${time_log}"
+    SAFEZONE_ROOTS_MODE="${roots_mode}" SAFEZONE_PAGE_SIZE="${page_size}" /usr/bin/time -v "${binary}" "${mode}" "${workload}" > "${run_log}" 2> "${time_log}"
   fi
 
   max_rss_bytes=$(read_max_rss_bytes "${time_log}")
@@ -113,6 +114,7 @@ write_summary_header
 run_mode "heap" "heap" "0"
 run_mode "current-safezone" "safezone" "0"
 run_mode "improved-safezone" "safezone" "1"
+run_mode "unsafezone-hp" "safezone" "3" "32768"
 run_mode "rift-hp" "rift-hp" "0"
 run_mode "rift-streaming" "rift-streaming" "0"
 

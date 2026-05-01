@@ -14,9 +14,13 @@ runs=${LISTBENCH_BENCHMARK_RUNS:-5}
 run_mode() {
   local label="$1"
   local mode="$2"
+  local roots_mode="${3:-${SAFEZONE_ROOTS_MODE:-}}"
+  local page_size="${4:-${SAFEZONE_PAGE_SIZE:-}}"
 
   echo
   echo "== ${label} =="
+  SAFEZONE_ROOTS_MODE="${roots_mode}" \
+  SAFEZONE_PAGE_SIZE="${page_size}" \
   LISTBENCH_BENCHMARK_RUNS="${runs}" \
     sbt \
       "project sandbox3_next" \
@@ -27,6 +31,7 @@ run_mode() {
 cd "${repo_dir}"
 
 run_mode "Immix" "heap"
-SAFEZONE_ROOTS_MODE=0 run_mode "Current SafeZone" "safezone"
-SAFEZONE_ROOTS_MODE=1 run_mode "Improved SafeZone" "safezone"
+run_mode "Current SafeZone" "safezone" "0"
+run_mode "Improved SafeZone" "safezone" "1"
+run_mode "UnsafeZone-HP" "safezone" "3" "32768"
 run_mode "Rift HPZone" "rift-hp"

@@ -8,7 +8,7 @@ output_dir=${COMMON_CRAWL_WET_OUTPUT_DIR:-"/tmp/common-crawl-wet-matrix"}
 summary=${COMMON_CRAWL_WET_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${COMMON_CRAWL_WET_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${COMMON_CRAWL_WET_MODES:-"heap safezone-current safezone-improved rift-hp rift-streaming"}})
+modes=(${(z)${COMMON_CRAWL_WET_MODES:-"heap safezone-current safezone-improved unsafezone-hp rift-hp rift-streaming"}})
 queries=(${(z)${COMMON_CRAWL_WET_QUERIES:-"q0-parse q1-tokenize"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
@@ -91,6 +91,7 @@ run_case() {
   local mode="$2"
   local binary_mode="${mode}"
   local roots_mode=""
+  local page_size="${SAFEZONE_PAGE_SIZE:-}"
   local run_log="${output_dir}/run-${query}-${mode}.log"
   local time_log="${output_dir}/time-${query}-${mode}.log"
   local max_rss_bytes
@@ -105,6 +106,11 @@ run_case() {
       binary_mode="safezone"
       roots_mode="1"
       ;;
+    unsafezone-hp)
+      binary_mode="safezone"
+      roots_mode="3"
+      page_size="32768"
+      ;;
   esac
 
   echo
@@ -112,13 +118,13 @@ run_case() {
   set +e
   if [[ "${platform}" == "Darwin" ]]; then
     if [[ -n "${roots_mode}" ]]; then
-      SAFEZONE_ROOTS_MODE="${roots_mode}" /usr/bin/time -l "${binary}" "${binary_mode}" "${query}" > "${run_log}" 2> "${time_log}"
+      SAFEZONE_ROOTS_MODE="${roots_mode}" SAFEZONE_PAGE_SIZE="${page_size}" /usr/bin/time -l "${binary}" "${binary_mode}" "${query}" > "${run_log}" 2> "${time_log}"
     else
       /usr/bin/time -l "${binary}" "${binary_mode}" "${query}" > "${run_log}" 2> "${time_log}"
     fi
   else
     if [[ -n "${roots_mode}" ]]; then
-      SAFEZONE_ROOTS_MODE="${roots_mode}" /usr/bin/time -v "${binary}" "${binary_mode}" "${query}" > "${run_log}" 2> "${time_log}"
+      SAFEZONE_ROOTS_MODE="${roots_mode}" SAFEZONE_PAGE_SIZE="${page_size}" /usr/bin/time -v "${binary}" "${binary_mode}" "${query}" > "${run_log}" 2> "${time_log}"
     else
       /usr/bin/time -v "${binary}" "${binary_mode}" "${query}" > "${run_log}" 2> "${time_log}"
     fi

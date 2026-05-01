@@ -87,10 +87,12 @@ object Debs2015Q2Runner {
       case "heap"           => new Q2Heap
       case "rift-hp"        => new Q2RiftWindows(RiftRegion.HPZone)
       case "rift-streaming" => new Q2RiftWindows(RiftRegion.Streaming)
-      case "safezone"       => new Q2SafeZone
+      case "safezone" | "safezone-current" | "safezone-improved" |
+          "unsafezone-hp" =>
+        new Q2SafeZone
       case other =>
         throw new IllegalArgumentException(
-          s"unknown Q2 mode '$other'; expected heap, rift-hp, rift-streaming, or safezone"
+          s"unknown Q2 mode '$other'; expected heap, rift-hp, rift-streaming, safezone, safezone-current, safezone-improved, or unsafezone-hp"
         )
     }
 

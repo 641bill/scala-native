@@ -6,6 +6,16 @@ Status: Phase 6/7 evidence synthesis. This note classifies where Rift currently
 wins against Scala Native Immix, where it only reduces memory pressure, and
 where checked container overhead still dominates.
 
+Latest clean-sweep update: `evidence/HEADLINE_STREAMS_2026_05_01.md` and
+`evidence/HEADLINE_DEBS_1M_2026_05_01.md` supersede older generated stream
+profile rows where they overlap.
+
+UnsafeZone-HP checkpoint: `evidence/UNSAFEZONE_HP_BASELINE_MATRIX.md` adds a
+benchmark-only SafeZone no-root control (`SAFEZONE_ROOTS_MODE=3`,
+`SAFEZONE_PAGE_SIZE=32768`). Current evidence is smoke-only. Use it to decide
+whether SafeZone internals are a better runtime substrate after root
+bookkeeping is removed; do not treat it as a safe user-facing mode.
+
 ## Purpose
 
 The next useful Scala Native question is not "can one more TableRank patch make
@@ -41,6 +51,7 @@ live window payload still dominate.
 | Benchmark / result pack | Main scale | Best current Rift row | Heap / Immix row | Classification | Evidence status |
 |---|---:|---:|---:|---|---|
 | GCBench | 5-run median | HPZone `161.641 ms` | heap `203.514 ms` | Runtime allocator win | Validated local baseline |
+| UnsafeZone-HP GCBench smoke | 1-run smoke | unsafezone-hp `250.579 ms` | heap `267.363 ms`; improved SafeZone `263.200 ms`; Rift HPZone `291.065 ms` | Unsafe substrate control | Provisional smoke only |
 | ListOfLists linked | 5-run median | HPZone `6951.331 ms` | heap `15085.511 ms` | Runtime + topology win | Validated local baseline |
 | ListOfLists flat | 3-run layout median | HPZone `1515.091 ms` | heap `1766.295 ms` | Layout/topology win | Validated enough for Phase 4 |
 | Pipeline surrogate | 5-run median | HPZone `5.089 ms` | heap `4.924 ms` | CPU-bound/no GC ceiling | Surrogate, not tracked-source evidence |
@@ -67,14 +78,14 @@ live window payload still dominate.
 | NEXMark-lite Q8 window join | 1M events | checked `291.832 ms` | heap `322.210 ms` | Region-friendly checked join-window win | Local methodology benchmark, not exact Beam NEXMark |
 | NEXMark-lite Q8 `StreamJoinWindow` API | 1M events | packed checked join API `20.987 ms` | heap join API `17.393 ms` | Specialized checked join API is lower-GC/lower-RSS but slower than fair heap control | Focused framework evidence; not a speed claim |
 | NEXMark-lite Q5 diagnostic | 1M events | checked `393.415 ms` clean; top scan `46.823 ms` diagnostic | heap `361.882 ms` clean; top scan `45.340 ms` diagnostic | Window aggregate checked overhead | Diagnostic profile plus clean control |
-| NEXMark Beam-default profile Q1 | 1M events | HPZone `538.451 ms`; checked `557.251 ms` | heap `579.038 ms`; improved SafeZone `561.787 ms` | Promising stream-map profile row | Generated Beam-default profile, not Beam runner evidence |
-| NEXMark Beam-default profile Q8 | 1M events | checked `315.545 ms` | heap `331.599 ms`; improved SafeZone `326.569 ms` | Modest checked join/window win | Generated Beam-default profile, not Beam runner evidence |
-| NEXMark Beam-default profile Q2 | 1M events | Streaming `377.816 ms` | heap `375.514 ms`; improved SafeZone `382.855 ms` | Lower GC but elapsed near-tie | Generated Beam-default profile |
-| NEXMark Beam-default Q0 | 1M generated-profile events | HPZone `467.895 ms`, Streaming `470.501 ms`, checked `497.319 ms` | heap `548.184 ms`; improved SafeZone `482.774 ms` | Trusted runtime stream-object win; checked beats heap but not improved SafeZone | Generated Beam-default profile, not Beam runner evidence |
-| NEXMark Beam-default Q3 | 1M generated-profile events | checked `287.169 ms`, Streaming `290.374 ms` | heap `304.190 ms`; improved SafeZone `293.586 ms` | Best new checked stream-GC row | Generated Beam-default profile, not Beam runner evidence |
-| NEXMark Beam-default Q4/Q9 | 1M generated-profile events | Q4 Streaming `579.229 ms`; Q9 HPZone `739.200 ms` | Q4 heap `567.739 ms`; Q9 improved SafeZone `733.171 ms` | CPU/aggregate or improved-SafeZone-favored controls | Generated Beam-default profile |
-| NEXMark Beam-default Q11 | 1M generated-profile events | HPZone `226.862 ms`, checked `240.065 ms` | heap `255.418 ms`; improved SafeZone `237.400 ms` | Trusted session-window win; checked not better than improved SafeZone | Generated Beam-default profile |
-| Common Crawl WET-shaped tokenization | 100k pages / 13.7M records | HPZone `404.123 ms`, Streaming `403.935 ms` | heap `427.942 ms`; improved SafeZone `381.006 ms` | Object-heavy parser/token stream, but improved SafeZone wins | Generated input only; not a Rift case-study win |
+| NEXMark Beam-default Q0 | 1M generated-profile events | Streaming `475.161 ms`, checked `481.436 ms` | heap `521.508 ms`; improved SafeZone `478.500 ms` | Trusted runtime stream-object win; checked beats heap but not improved SafeZone | Clean generated Beam-default profile, not Beam runner evidence |
+| NEXMark Beam-default Q1 | 1M generated-profile events | Streaming `919.670 ms`; checked `945.372 ms` | heap `950.341 ms`; improved SafeZone `929.887 ms` | Trusted modest stream-map win; checked does not win | Clean generated Beam-default profile |
+| NEXMark Beam-default Q2 | 1M generated-profile events | Streaming `563.282 ms`; checked `572.005 ms` | heap `586.607 ms`; improved SafeZone `576.228 ms` | Modest region-friendly selection row | Clean generated Beam-default profile |
+| NEXMark Beam-default Q3 | 1M generated-profile events | checked `295.166 ms`, Streaming `301.975 ms` | heap `315.715 ms`; improved SafeZone `302.668 ms` | Best checked stream row, but below 10% case-study gate | Clean generated Beam-default profile |
+| NEXMark Beam-default Q4/Q9 | 1M generated-profile events | Q4 HPZone `576.367 ms`; Q9 Streaming `751.602 ms` | Q4 heap `579.239 ms`; Q9 improved SafeZone `756.972 ms` | Near-tie or improved-SafeZone-adjacent controls | Clean generated Beam-default profile |
+| NEXMark Beam-default Q8 | 1M generated-profile events | checked `457.518 ms` | heap `470.798 ms`; improved SafeZone `457.725 ms` | Checked near-tie with improved SafeZone | Clean generated Beam-default profile |
+| NEXMark Beam-default Q11 | 1M generated-profile events | HPZone `228.741 ms`, checked `234.401 ms` | heap `218.774 ms`; improved SafeZone `229.557 ms` | Heap wins elapsed; region rows lower GC only | Clean generated Beam-default profile |
+| Common Crawl WET-shaped tokenization | 1M generated pages / 137M token records | HPZone `4301.536 ms`, Streaming `4327.405 ms` | heap `4770.503 ms`; improved SafeZone `4066.435 ms` | GC-heavy detector; Rift beats heap but improved SafeZone wins | Clean generated input only; not a Rift case-study win |
 | Common Crawl WET small-bucket control | 100k pages / 13.7M records | Streaming `419.779 ms` | heap `386.807 ms`; improved SafeZone `381.109 ms` | Heap/SafeZone recover with tighter lifetimes | Generated input; not a case-study row |
 | Common Crawl real WET tokenization | 10k requested pages / 349709 token records | Streaming `15.651 ms` | heap `12.079 ms`; improved SafeZone `16.093 ms` | Real preloaded WET is CPU/live-input-bound, not GC-bound | Real preloaded input; no parser/decompression timing |
 | Common Crawl real WET tokenization larger shard row | 50k requested, 21425 actual pages / 752797 token records | HPZone `32.809 ms`, Streaming `33.103 ms` | heap `26.452 ms`; improved SafeZone `30.730 ms` | Heap wins; median timed GC zero | Real preloaded input; actual page count below request |
@@ -85,10 +96,11 @@ live window payload still dominate.
 | Linear Road generated accidents | 1M events / 2M records | HPZone `203.793 ms`, Streaming `217.685 ms` | heap `194.520 ms`; improved SafeZone `215.808 ms` | HPZone beats improved SafeZone but not heap | Generated methodology only |
 | Linear Road official input reports | 1M events | Streaming `99.769 ms` | heap `88.750 ms`; improved SafeZone `103.086 ms` | Heap wins; region modes lower RSS | Real preloaded official input, not full validator |
 | Linear Road official input tolls/accidents | 1M events / 2M outputs | best region `180.277 ms` q1, `198.863 ms` q2 | heap `162.668 ms` q1, `167.811 ms` q2 | Heap wins; median timed GC zero, with one heap collection outlier per 1M query | Real preloaded official input, not full validator |
-| Yahoo-style ad stream Q0/Q1 | 100k generated/preloaded events | region modes lower RSS/max-GC | heap Q0 `10.101 ms`, Q1 `10.867 ms` | Heap-fast parse/filter controls | Local Yahoo-style memory probe |
-| Yahoo-style ad stream Q2 campaign window | 1M generated/preloaded events | HPZone `105.216 ms`, Streaming `105.961 ms` | heap `104.512 ms`; improved SafeZone `108.173 ms` | Cuts GC but does not beat heap elapsed | Local Yahoo-style memory probe; not a case-study win |
-| RIoTBench-style q1 clean/annotate | 100k generated sensor events | HPZone `14.516 ms`, Streaming `14.445 ms` | heap `16.643 ms`; improved SafeZone `13.980 ms` | Heap-GC pressure, improved SafeZone still stronger | Local methodology probe; no checked mode yet |
-| RIoTBench-style q2 window stats | 100k generated sensor events | HPZone `17.164 ms`, Streaming `17.367 ms` | heap `16.621 ms`; improved SafeZone `16.702 ms` | Lower RSS/max-GC, no elapsed win | Local methodology probe |
+| Yahoo-style ad stream Q0/Q1 | 1M generated/preloaded events | region modes lower median/max GC | heap Q0 `109.512 ms`, Q1 `121.799 ms` | Heap/improved-SafeZone parse/filter controls | Clean local Yahoo-style memory probe |
+| Yahoo-style ad stream Q2 campaign window | 1M generated/preloaded events | Streaming `106.415 ms`, HPZone `109.297 ms` | heap `105.802 ms`; improved SafeZone `106.425 ms` | Near-tie; cuts GC but heap elapsed wins | Clean local Yahoo-style memory probe; not a case-study win |
+| RIoTBench-style q1 clean/annotate | 1M generated sensor events | Streaming `148.019 ms`, HPZone `150.369 ms` | heap `135.750 ms`; improved SafeZone `147.638 ms` | Heap wins in clean 1M row; earlier 100k positive weakened | Clean local methodology probe |
+| RIoTBench-style q2 window stats | 1M generated sensor events | Streaming `172.802 ms`, HPZone `172.847 ms` | heap `173.334 ms`; improved SafeZone `174.824 ms` | Near-tie; lower GC, tiny elapsed edge | Clean local methodology probe |
+| DEBS RunBoth bounded 1M | single run | Streaming `4681.292 ms`; checked `4882.562 ms` | heap `4987.579 ms` | Trusted wins, checked modestly beats heap, bounded correctness/control row | Clean bounded single-run |
 | DEBS RunBoth checked, bounded 1M after Q1/Q2 append-window integration | 3-run median | checked `5349.444 ms` | heap `5219.189 ms` | API generalization, CPU-limited | Latest bounded control; not a speedup claim |
 | DEBS RunBoth checked, full month | 3-run median | checked `66.804 s` | heap `67.122 s` | Near-tie throughput, memory validation | Full-month evidence, not large speedup |
 
@@ -187,28 +199,29 @@ Rift has reliable wins when all of these hold:
 
 The strongest local categories are:
 
-- linked allocation-heavy runtime baselines: GCBench and ListOfLists;
-- Broom-style dataflow operators where documents and outputs are epoch-local;
-- StreamFlex-style throughput/latency pressure where per-event objects cause
-  heap GC and latency misses;
+- flat ListOfLists and some older linked allocation-heavy baselines; the clean
+  2026-05-01 rerun weakens the GCBench/linked-ListOfLists runtime claim
+  against improved SafeZone;
+- Broom-style dataflow operators where documents and outputs are epoch-local,
+  with the caveat that the clean rerun beats heap but not improved SafeZone on
+  SELECT/AGGREGATE and loses JOIN to heap;
+- StreamFlex-style latency pressure where region modes remove deadline misses,
+  but the clean rerun does not give a throughput win;
 - Yak top-word/filter and GraphChi-style subintervals where high-volume data
   objects are epoch/subinterval-local;
 - NEXMark-lite Q1 conversion, checked Q2 selection, and checked Q8 window
   joins, where ordinary stream input/output objects are bucket-owned and
   measured GC time drops materially;
-- NEXMark Beam-default profile Q1 and Q8, which preserve the same local logical
-  program under Beam-default generator settings and show modest trusted/checked
-  wins while cutting measured GC;
-- NEXMark Beam-default Q3, which is the best new checked stream-GC row after
-  the benchmark refocus;
-- Yahoo-style ad stream Q2 at 100k, which was promising enough to scale but
-  did not hold up as a 1M case-study win;
+- NEXMark Beam-default Q0/Q1/Q2/Q3/Q5/Q8/Q9, which preserve the same local
+  logical program under Beam-default generator settings and cut measured GC;
+  Q3 is the best checked row, while Q0/Q1/Q2/Q5/Q9 are trusted or near-tie
+  rows rather than checked case-study wins;
 - checked RegionBuffer and the manual checked AppendWindow child-bucket shape,
   which show the safe API direction can win on simple collection/operator
   shapes when abstraction overhead stays low.
-- generated Common Crawl WET tokenization with coarse page buckets, where
-  trusted Rift cuts GC/RSS and gives a modest elapsed win. This is not yet a
-  checked case study, and the small-bucket control makes the claim weaker.
+- generated Common Crawl WET-shaped tokenization, where trusted Rift cuts heap
+  GC from `1559.601 ms` to about `20.5 ms` and beats heap elapsed. This is not
+  a Rift case-study win yet because improved SafeZone is still faster.
 
 ## Where Immix Or SafeZone Remain Hard To Beat
 
@@ -269,18 +282,18 @@ The strongest local categories are:
   outlier, but collection was not frequent enough to affect the median. These
   rows are useful ceiling results: preloading real input can make RSS large
   while leaving little median collection-time headroom for regions to recover.
-- NEXMark Beam-default Q0/Q1/Q3/Q8/Q11 are the useful new profile rows:
-  Q0/Q11 are trusted-runtime wins, Q1 is a trusted win with a near-competitive
-  checked row, Q3 is the best checked expanded-query row, and Q8 is a modest
-  checked win. These are generated-profile rows, not exact Beam runner
-  evidence.
+- NEXMark Beam-default Q0/Q1/Q2/Q3/Q5/Q8/Q9 are useful profile rows. Q3 is the
+  best checked row (`295.166 ms` versus heap `315.715 ms` and improved
+  SafeZone `302.668 ms`); Q8 is a checked near-tie with improved SafeZone; Q11
+  is heap-fastest in the clean sweep. These are generated-profile rows, not
+  exact Beam runner evidence.
 - Yahoo-style ad stream Q2 is not a case-study win at 1M. It cuts heap median
-  GC from `6.253 ms` to `2.1-2.4 ms`, but heap elapsed remains slightly
-  faster (`104.512 ms` versus HPZone `105.216 ms` and Streaming `105.961 ms`).
-- The first RIoTBench-style 100k rows are useful controls, not wins. Q1
-  clean/annotate shows heap collection pressure and Rift beats heap elapsed,
-  but improved SafeZone is still faster (`13.980 ms` versus Streaming
-  `14.445 ms`). Q2 lowers RSS/max-GC but does not beat heap.
+  GC from `6.575 ms` to `1.932 ms` in Streaming, but heap elapsed remains
+  slightly faster (`105.802 ms` versus Streaming `106.415 ms`).
+- RIoTBench-style rows are useful controls, not wins in the clean 1M sweep. Q1
+  clean/annotate now has heap fastest (`135.750 ms`), weakening the earlier
+  100k positive row; Q2 is a near-tie where Streaming is only `0.532 ms`
+  faster than heap.
 - DEBS full-month is currently a near-tie in elapsed time with much better
   memory/lifetime evidence than earlier checkpoints, not a large application
   speedup.
