@@ -2,8 +2,9 @@
 
 Date: 2026-05-01
 
-Status: first generated TSV-shaped Wikimedia pageview/clickstream probe.
-This is a local methodology benchmark, not a run over official Wikimedia dumps.
+Status: generated TSV-shaped Wikimedia pageview/clickstream probe plus first
+real Wikimedia dump input wiring. The real-input path is currently preloaded
+before timing to separate gzip/TSV parsing from memory-management behavior.
 
 ## Purpose
 
@@ -13,7 +14,8 @@ Crawl tokenization.
 
 The logical program is the same across heap, SafeZone, and Rift modes:
 
-- generate deterministic TSV-shaped pageview/clickstream fields;
+- generate deterministic TSV-shaped pageview/clickstream fields, or preload
+  real Wikimedia pageviews/clickstream TSV rows from `WIKIMEDIA_INPUT`;
 - allocate ordinary Scala event objects into event buckets;
 - retain only a small bucket list as control metadata;
 - bulk-consume and close buckets when the window expires;
@@ -58,6 +60,23 @@ WIKIMEDIA_OUTPUT_DIR=/tmp/wikimedia-region-smoke \
 zsh sandbox/run_wikimedia_region_matrix.sh
 ```
 
+Real clickstream smoke:
+
+```bash
+WIKIMEDIA_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/wikimedia/clickstream-svwiki-2026-03.tsv.gz \
+WIKIMEDIA_INPUT_KIND=clickstream \
+WIKIMEDIA_EVENTS=20000 \
+WIKIMEDIA_BENCHMARK_RUNS=1 \
+WIKIMEDIA_WARMUPS=0 \
+WIKIMEDIA_MODES="heap rift-hp" \
+WIKIMEDIA_QUERIES="q2-clickstream" \
+WIKIMEDIA_OUTPUT_DIR=/tmp/wikimedia-real-smoke \
+zsh sandbox/run_wikimedia_region_matrix.sh
+```
+
+Real pageviews input uses the same path with
+`WIKIMEDIA_INPUT_KIND=pageviews`.
+
 100k 3-run medians:
 
 ```bash
@@ -100,6 +119,9 @@ zsh sandbox/run_wikimedia_region_matrix.sh
 - 100k and 1M 3-run medians matched checksum/output count across all queries
   and modes.
 - 10M Q2 single-run scale check matched checksum/output count across all modes.
+- Real `svwiki` clickstream smoke matched checksum/output count for heap and
+  HPZone with `input=real-clickstream-preloaded`. This validates input wiring
+  only; it is not median performance evidence.
 
 ## 100k Results
 

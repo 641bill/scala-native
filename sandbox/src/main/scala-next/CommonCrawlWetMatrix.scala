@@ -41,6 +41,8 @@ object CommonCrawlWetConfig {
   val sampleEvery: Int = envInt("COMMON_CRAWL_WET_SAMPLE_EVERY", 4096)
   val warmupRuns: Int = envNonNegativeInt("COMMON_CRAWL_WET_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("COMMON_CRAWL_WET_BENCHMARK_RUNS", 3)
+  val inputPath: String =
+    BenchmarkInputSupport.envString("COMMON_CRAWL_WET_INPUT")
 }
 
 object CommonCrawlWetMatrixHelpers {
@@ -112,6 +114,38 @@ object CommonCrawlWetMatrixHelpers {
       riftRegionOpNanos: Long,
       riftSlowAllocNanos: Long
   )
+
+  private final class InputData(
+      val label: String,
+      val pages: Int,
+      val domains: Array[Int],
+      val lineOffsets: Array[Int],
+      val lineHashes: Array[Long],
+      val tokenCounts: Array[Int],
+      val tokenHashSeeds: Array[Long]
+  ) {
+    def domainAt(page: Int): Int =
+      if (domains == null) domainFor(page) else domains(page)
+
+    def lineCountAt(page: Int): Int =
+      if (lineOffsets == null) CommonCrawlWetConfig.linesPerPage
+      else lineOffsets(page + 1) - lineOffsets(page)
+
+    def lineHashAt(page: Int, line: Int): Long =
+      if (lineHashes == null) lineHash(page, line)
+      else lineHashes(lineOffsets(page) + line)
+
+    def tokenCountAt(page: Int, line: Int): Int =
+      if (tokenCounts == null) CommonCrawlWetConfig.tokensPerLine
+      else tokenCounts(lineOffsets(page) + line)
+
+    def tokenHashAt(page: Int, line: Int, token: Int): Long =
+      if (tokenHashSeeds == null) tokenHash(page, line, token)
+      else tokenHashSeeds(lineOffsets(page) + line) ^
+        (token.toLong * 1099511628211L)
+  }
+
+  private lazy val inputData: InputData = loadInput()
 
   private object RuntimeSample {
     val zero: RuntimeSample =
@@ -213,6 +247,96 @@ object CommonCrawlWetMatrixHelpers {
   private def tokenHash(page: Int, line: Int, token: Int): Long =
     mix(page * 1000003 + line * 8191 + token * 131 + 53).toLong
 
+  private def loadInput(): InputData = {
+    val cfg = CommonCrawlWetConfig
+    if (cfg.inputPath.isEmpty)
+      return new InputData(
+        "generated-wet-shaped",
+        cfg.pages,
+        null,
+        null,
+        null,
+        null,
+        null
+      )
+
+    val domains = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val lineOffsets = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val lineHashes = scala.collection.mutable.ArrayBuffer.empty[Long]
+    val tokenCounts = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val tokenHashSeeds = scala.collection.mutable.ArrayBuffer.empty[Long]
+    lineOffsets += 0
+
+    var currentDomain = 0
+    var sawTarget = false
+    var inContent = false
+    var currentLines = 0
+
+    def flushPage(): Unit =
+      if (sawTarget && currentLines > 0 && domains.length < cfg.pages) {
+        domains += currentDomain
+        lineOffsets += lineHashes.length
+      }
+
+    def resetRecord(): Unit = {
+      sawTarget = false
+      inContent = false
+      currentLines = 0
+    }
+
+    val reader = BenchmarkInputSupport.openText(cfg.inputPath)
+    try {
+      var line = reader.readLine()
+      while (line != null && domains.length < cfg.pages) {
+        if (line == "WARC/1.0") {
+          flushPage()
+          resetRecord()
+        } else if (!inContent) {
+          if (line.startsWith("WARC-Target-URI:")) {
+            val uri = line.substring("WARC-Target-URI:".length).trim
+            currentDomain =
+              BenchmarkInputSupport.positiveModulo(
+                BenchmarkInputSupport.stableHash(uri),
+                cfg.domainSpace
+              )
+            sawTarget = true
+          } else if (line.isEmpty && sawTarget) {
+            inContent = true
+          }
+        } else if (currentLines < cfg.linesPerPage && line.nonEmpty) {
+          lineHashes += BenchmarkInputSupport.stableHash(line).toLong
+          tokenCounts += BenchmarkInputSupport.tokenCount(
+            line,
+            cfg.tokensPerLine
+          )
+          tokenHashSeeds +=
+            (BenchmarkInputSupport.stableHash(line.reverse).toLong ^
+              currentLines.toLong)
+          currentLines += 1
+        }
+        line = reader.readLine()
+      }
+      flushPage()
+    } finally {
+      reader.close()
+    }
+
+    if (domains.isEmpty)
+      throw new IllegalArgumentException(
+        s"Common Crawl WET input '${cfg.inputPath}' did not contain any usable conversion records"
+      )
+
+    new InputData(
+      "real-wet-preloaded",
+      domains.length,
+      domains.toArray,
+      lineOffsets.toArray,
+      lineHashes.toArray,
+      tokenCounts.toArray,
+      tokenHashSeeds.toArray
+    )
+  }
+
   private def fold(
       checksum: Long,
       kind: Int,
@@ -279,6 +403,7 @@ object CommonCrawlWetMatrixHelpers {
 
   def runHeap(query: String): RunOutcome = {
     val cfg = CommonCrawlWetConfig
+    val input = inputData
     var first: HeapBucket = null
     var last: HeapBucket = null
     var current: HeapBucket = null
@@ -334,17 +459,19 @@ object CommonCrawlWetMatrixHelpers {
       }
 
     var page = 0
-    while (page < cfg.pages) {
-      val domain = domainFor(page)
+    while (page < input.pages) {
+      val domain = input.domainAt(page)
       val bucket = bucketFor(bucketStart(page))
-      appendRecord(bucket, new HeapRecord(1, page, domain, 0, lineHash(page, 0), null))
+      appendRecord(bucket, new HeapRecord(1, page, domain, 0, input.lineHashAt(page, 0), null))
       var line = 0
-      while (line < cfg.linesPerPage) {
-        val lh = lineHash(page, line)
+      val lines = input.lineCountAt(page)
+      while (line < lines) {
+        val lh = input.lineHashAt(page, line)
         appendRecord(bucket, new HeapRecord(2, page, domain, line, lh, null))
         if (query == "q1-tokenize") {
           var token = 0
-          while (token < cfg.tokensPerLine) {
+          val tokens = input.tokenCountAt(page, line)
+          while (token < tokens) {
             appendRecord(
               bucket,
               new HeapRecord(
@@ -352,7 +479,7 @@ object CommonCrawlWetMatrixHelpers {
                 page,
                 domain,
                 token,
-                tokenHash(page, line, token),
+                input.tokenHashAt(page, line, token),
                 null
               )
             )
@@ -362,7 +489,7 @@ object CommonCrawlWetMatrixHelpers {
         line += 1
       }
       if (page % cfg.sampleEvery == 0)
-        checksum = fold(checksum, 9, page, domain, line, lineHash(page, 7), bucket.startPage)
+        checksum = fold(checksum, 9, page, domain, line, input.lineHashAt(page, if (line == 0) 0 else line - 1), bucket.startPage)
       page += 1
     }
 
@@ -374,6 +501,7 @@ object CommonCrawlWetMatrixHelpers {
 
   def runSafeZone(query: String): RunOutcome = {
     val cfg = CommonCrawlWetConfig
+    val input = inputData
     var first: SafeBucket = null
     var last: SafeBucket = null
     var current: SafeBucket = null
@@ -435,19 +563,20 @@ object CommonCrawlWetMatrixHelpers {
 
     var page = 0
     try {
-      while (page < cfg.pages) {
-        val domain = domainFor(page)
+      while (page < input.pages) {
+        val domain = input.domainAt(page)
         val bucket = bucketFor(bucketStart(page))
         val zone = bucket.zone
         appendRecord(
           bucket,
           SafeZoneAllocator
-            .allocate(zone, new SafeRecord(1, page, domain, 0, lineHash(page, 0), null))
+            .allocate(zone, new SafeRecord(1, page, domain, 0, input.lineHashAt(page, 0), null))
             .asInstanceOf[SafeRecord]
         )
         var line = 0
-        while (line < cfg.linesPerPage) {
-          val lh = lineHash(page, line)
+        val lines = input.lineCountAt(page)
+        while (line < lines) {
+          val lh = input.lineHashAt(page, line)
           appendRecord(
             bucket,
             SafeZoneAllocator
@@ -456,7 +585,8 @@ object CommonCrawlWetMatrixHelpers {
           )
           if (query == "q1-tokenize") {
             var token = 0
-            while (token < cfg.tokensPerLine) {
+            val tokens = input.tokenCountAt(page, line)
+            while (token < tokens) {
               appendRecord(
                 bucket,
                 SafeZoneAllocator
@@ -467,7 +597,7 @@ object CommonCrawlWetMatrixHelpers {
                       page,
                       domain,
                       token,
-                      tokenHash(page, line, token),
+                      input.tokenHashAt(page, line, token),
                       null
                     )
                   )
@@ -479,7 +609,7 @@ object CommonCrawlWetMatrixHelpers {
           line += 1
         }
         if (page % cfg.sampleEvery == 0)
-          checksum = fold(checksum, 9, page, domain, line, lineHash(page, 7), bucket.startPage)
+          checksum = fold(checksum, 9, page, domain, line, input.lineHashAt(page, if (line == 0) 0 else line - 1), bucket.startPage)
         page += 1
       }
       closeExpired(Long.MaxValue)
@@ -498,6 +628,7 @@ object CommonCrawlWetMatrixHelpers {
 
   def runRiftTrusted(query: String, kind: Int): RunOutcome = {
     val cfg = CommonCrawlWetConfig
+    val input = inputData
     var first: TrustedBucket = null
     var last: TrustedBucket = null
     var current: TrustedBucket = null
@@ -559,24 +690,26 @@ object CommonCrawlWetMatrixHelpers {
 
     var page = 0
     try {
-      while (page < cfg.pages) {
-        val domain = domainFor(page)
+      while (page < input.pages) {
+        val domain = input.domainAt(page)
         val bucket = bucketFor(bucketStart(page))
         val region = bucket.region
         appendRecord(
           bucket,
-          region.alloc(new TrustedRecord(1, page, domain, 0, lineHash(page, 0), null))
+          region.alloc(new TrustedRecord(1, page, domain, 0, input.lineHashAt(page, 0), null))
         )
         var line = 0
-        while (line < cfg.linesPerPage) {
-          val lh = lineHash(page, line)
+        val lines = input.lineCountAt(page)
+        while (line < lines) {
+          val lh = input.lineHashAt(page, line)
           appendRecord(
             bucket,
             region.alloc(new TrustedRecord(2, page, domain, line, lh, null))
           )
           if (query == "q1-tokenize") {
             var token = 0
-            while (token < cfg.tokensPerLine) {
+            val tokens = input.tokenCountAt(page, line)
+            while (token < tokens) {
               appendRecord(
                 bucket,
                 region.alloc(
@@ -585,7 +718,7 @@ object CommonCrawlWetMatrixHelpers {
                     page,
                     domain,
                     token,
-                    tokenHash(page, line, token),
+                    input.tokenHashAt(page, line, token),
                     null
                   )
                 )
@@ -596,7 +729,7 @@ object CommonCrawlWetMatrixHelpers {
           line += 1
         }
         if (page % cfg.sampleEvery == 0)
-          checksum = fold(checksum, 9, page, domain, line, lineHash(page, 7), bucket.startPage)
+          checksum = fold(checksum, 9, page, domain, line, input.lineHashAt(page, if (line == 0) 0 else line - 1), bucket.startPage)
         page += 1
       }
       closeExpired(Long.MaxValue)
@@ -627,6 +760,7 @@ object CommonCrawlWetMatrixHelpers {
 
   def runBenchmark(mode: String, query: String): Unit = {
     val cfg = CommonCrawlWetConfig
+    val input = inputData
     val usesRift = mode == "rift-hp" || mode == "rift-streaming"
     val expected = runHeap(query)
 
@@ -701,7 +835,7 @@ object CommonCrawlWetMatrixHelpers {
 
     println(
       f"RESULT name=common-crawl-wet-$query-$mode " +
-        f"query=$query mode=$mode input=generated-wet-shaped " +
+        f"query=$query mode=$mode input=${input.label} " +
         f"median_ms=$medianElapsed%.3f " +
         f"median_gc_ms=${medianGc / 1000000.0}%.3f " +
         f"median_rift_op_ms=${medianRiftOp / 1000000.0}%.3f " +
@@ -716,8 +850,9 @@ object CommonCrawlWetMatrixHelpers {
 
   def printConfig(mode: String, query: String): Unit = {
     val cfg = CommonCrawlWetConfig
+    val input = inputData
     println(
-      s"CONFIG mode=$mode query=$query pages=${cfg.pages} pages_per_bucket=${cfg.pagesPerBucket} live_buckets=${cfg.liveBuckets} domain_space=${cfg.domainSpace} lines_per_page=${cfg.linesPerPage} tokens_per_line=${cfg.tokensPerLine} sample_every=${cfg.sampleEvery} warmups=${cfg.warmupRuns} runs=${cfg.benchmarkRuns} input=generated-wet-shaped"
+      s"CONFIG mode=$mode query=$query pages=${input.pages} configured_pages=${cfg.pages} pages_per_bucket=${cfg.pagesPerBucket} live_buckets=${cfg.liveBuckets} domain_space=${cfg.domainSpace} lines_per_page=${cfg.linesPerPage} tokens_per_line=${cfg.tokensPerLine} sample_every=${cfg.sampleEvery} warmups=${cfg.warmupRuns} runs=${cfg.benchmarkRuns} input=${input.label} input_path=${cfg.inputPath}"
     )
   }
 }

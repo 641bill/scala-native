@@ -2,10 +2,9 @@
 
 Date: 2026-04-30
 
-Status: first generated WET-shaped detector. This is not a real Common Crawl
-artifact run yet. It exists to answer whether an object-heavy page/token stream
-creates enough Scala Native Immix pressure to justify moving on to a real WET
-file.
+Status: generated WET-shaped detector plus first real Common Crawl WET input
+wiring. Real WET input is currently preloaded before timing so parser and
+decompression cost do not hide memory-management behavior.
 
 ## Workload
 
@@ -18,7 +17,10 @@ Input:
 
 - `input=generated-wet-shaped`
 - deterministic pages, domains, lines, and token hashes
-- no decompression or file I/O
+- or `COMMON_CRAWL_WET_INPUT=/path/to/file.warc.wet` for real WET records
+- Common Crawl WET shards are concatenated gzip streams; use the decompressed
+  `.warc.wet` sample prepared by `scripts/fetch-benchmark-data.sh` for Scala
+  Native runs.
 
 Queries:
 
@@ -60,6 +62,19 @@ COMMON_CRAWL_WET_OUTPUT_DIR=/tmp/common-crawl-wet-smoke \
 zsh sandbox/run_common_crawl_wet_matrix.sh
 ```
 
+Real WET smoke:
+
+```bash
+COMMON_CRAWL_WET_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/common-crawl/CC-MAIN-2026-17/CC-MAIN-20260410081153-20260410111153-00000.warc.wet \
+COMMON_CRAWL_WET_PAGES=100 \
+COMMON_CRAWL_WET_BENCHMARK_RUNS=1 \
+COMMON_CRAWL_WET_WARMUPS=0 \
+COMMON_CRAWL_WET_MODES="heap rift-hp" \
+COMMON_CRAWL_WET_QUERIES="q1-tokenize" \
+COMMON_CRAWL_WET_OUTPUT_DIR=/tmp/common-crawl-real-smoke \
+zsh sandbox/run_common_crawl_wet_matrix.sh
+```
+
 100k default bucket medians with current/improved SafeZone:
 
 ```bash
@@ -89,6 +104,19 @@ zsh sandbox/run_common_crawl_wet_matrix.sh
 ```
 
 ## Results
+
+### Real WET Smoke
+
+Input:
+`/Users/siyaoliu/rift/cache/benchmark-data/common-crawl/CC-MAIN-2026-17/CC-MAIN-20260410081153-20260410111153-00000.warc.wet`
+
+| Query | Mode | Median ms | GC ms | Rift op ms | Region objects | Opens/closes | RSS bytes | Outputs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| q1-tokenize | heap | 0.121 | 0.000 | 0.000 | 0 | 0 / 0 | 12648448 | 3402 |
+| q1-tokenize | rift-hp | 0.172 | 0.000 | 0.011 | 3402 | 1 / 1 | 12746752 | 3402 |
+
+This is a plumbing smoke only. The row count is too small for performance
+claims.
 
 ### 5k Smoke
 

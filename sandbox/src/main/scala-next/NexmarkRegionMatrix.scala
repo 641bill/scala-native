@@ -38,17 +38,26 @@ object NexmarkRegionConfig {
         value.equalsIgnoreCase("yes")
     }
 
-  val events: Int = envInt("NEXMARK_EVENTS", 1000000)
-  val eventsPerBucket: Int = envInt("NEXMARK_EVENTS_PER_BUCKET", 25000)
-  val windowBuckets: Int = envInt("NEXMARK_WINDOW_BUCKETS", 8)
-  val auctionSpace: Int = envInt("NEXMARK_AUCTION_SPACE", 65536)
-  val personSpace: Int = envInt("NEXMARK_PERSON_SPACE", 65536)
-  val categorySpace: Int = envInt("NEXMARK_CATEGORY_SPACE", 64)
+  val beamDefaults: Boolean = envFlag("NEXMARK_BEAM_DEFAULTS")
+  private def defaultInt(local: Int, beam: Int): Int =
+    if (beamDefaults) beam else local
+
+  val events: Int = envInt("NEXMARK_EVENTS", defaultInt(1000000, 100000))
+  val eventsPerBucket: Int =
+    envInt("NEXMARK_EVENTS_PER_BUCKET", defaultInt(25000, 10000))
+  val windowBuckets: Int = envInt("NEXMARK_WINDOW_BUCKETS", defaultInt(8, 10))
+  val auctionSpace: Int = envInt("NEXMARK_AUCTION_SPACE", defaultInt(65536, 100))
+  val personSpace: Int = envInt("NEXMARK_PERSON_SPACE", defaultInt(65536, 1000))
+  val categorySpace: Int = envInt("NEXMARK_CATEGORY_SPACE", defaultInt(64, 5))
   val q2SelectModulo: Int = envInt("NEXMARK_Q2_SELECT_MODULO", 128)
   val sampleEvery: Int = envInt("NEXMARK_SAMPLE_EVERY", 8192)
   val warmupRuns: Int = envNonNegativeInt("NEXMARK_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("NEXMARK_BENCHMARK_RUNS", 3)
   val q5Diagnostics: Boolean = envFlag("NEXMARK_Q5_DIAG")
+  val beamSourcePath: String =
+    BenchmarkInputSupport.envString("NEXMARK_BEAM_SOURCE")
+  val inputLabel: String =
+    if (beamDefaults) "beam-defaults-generated" else "generated-local"
 }
 
 object NexmarkRegionMatrixHelpers {
@@ -1947,7 +1956,7 @@ object NexmarkRegionMatrixHelpers {
 
     println(
       f"RESULT name=nexmark-$query-$mode " +
-        f"query=$query mode=$mode " +
+        f"query=$query mode=$mode input=${cfg.inputLabel} " +
         f"median_ms=$medianElapsed%.3f " +
         f"median_gc_ms=${medianGc / 1000000.0}%.3f " +
         f"median_rift_op_ms=${medianRiftOp / 1000000.0}%.3f " +
@@ -1963,7 +1972,7 @@ object NexmarkRegionMatrixHelpers {
   def printConfig(mode: String, query: String): Unit = {
     val cfg = NexmarkRegionConfig
     println(
-      s"CONFIG mode=$mode query=$query runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} window_buckets=${cfg.windowBuckets} auction_space=${cfg.auctionSpace} person_space=${cfg.personSpace} category_space=${cfg.categorySpace} q2_select_modulo=${cfg.q2SelectModulo} sample_every=${cfg.sampleEvery} q5_diag=${cfg.q5Diagnostics}"
+      s"CONFIG mode=$mode query=$query runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} window_buckets=${cfg.windowBuckets} auction_space=${cfg.auctionSpace} person_space=${cfg.personSpace} category_space=${cfg.categorySpace} q2_select_modulo=${cfg.q2SelectModulo} sample_every=${cfg.sampleEvery} q5_diag=${cfg.q5Diagnostics} input=${cfg.inputLabel} beam_defaults=${cfg.beamDefaults} beam_source=${cfg.beamSourcePath}"
     )
   }
 }

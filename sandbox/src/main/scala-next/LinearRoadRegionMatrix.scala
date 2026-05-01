@@ -43,6 +43,8 @@ object LinearRoadRegionConfig {
   val sampleEvery: Int = envInt("LINEAR_ROAD_SAMPLE_EVERY", 4096)
   val warmupRuns: Int = envNonNegativeInt("LINEAR_ROAD_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("LINEAR_ROAD_BENCHMARK_RUNS", 3)
+  val inputPath: String =
+    BenchmarkInputSupport.envString("LINEAR_ROAD_INPUT")
 }
 
 object LinearRoadRegionMatrixHelpers {
@@ -136,6 +138,46 @@ object LinearRoadRegionMatrixHelpers {
       eventMaxNanos: Long,
       bucketCloseMaxNanos: Long
   )
+
+  private final class InputData(
+      val label: String,
+      val events: Int,
+      val timestamps: Array[Long],
+      val vehicles: Array[Int],
+      val expressways: Array[Int],
+      val segments: Array[Int],
+      val lanes: Array[Int],
+      val directions: Array[Int],
+      val positions: Array[Int],
+      val speeds: Array[Int]
+  ) {
+    def timestampAt(index: Int): Long =
+      if (timestamps == null) index.toLong else timestamps(index)
+
+    def vehicleAt(index: Int): Int =
+      if (vehicles == null) vehicleFor(index) else vehicles(index)
+
+    def expresswayAt(index: Int, vehicle: Int): Int =
+      if (expressways == null) expresswayFor(index, vehicle)
+      else expressways(index)
+
+    def segmentAt(index: Int, vehicle: Int): Int =
+      if (segments == null) segmentFor(index, vehicle) else segments(index)
+
+    def laneAt(index: Int, vehicle: Int): Int =
+      if (lanes == null) laneFor(index, vehicle) else lanes(index)
+
+    def directionAt(index: Int, vehicle: Int): Int =
+      if (directions == null) directionFor(index, vehicle) else directions(index)
+
+    def positionAt(index: Int, segment: Int): Int =
+      if (positions == null) positionFor(segment, index) else positions(index)
+
+    def speedAt(index: Int): Int =
+      if (speeds == null) speedFor(index) else speeds(index)
+  }
+
+  private lazy val inputData: InputData = loadInput()
 
   private final class LatencyRecorder(cfg: LinearRoadRegionConfig.type) {
     private val eventNanos =
@@ -317,6 +359,90 @@ object LinearRoadRegionMatrixHelpers {
     ((expressway * 2 + direction) * LinearRoadRegionConfig.segmentSpace) +
       segment
 
+  private def loadInput(): InputData = {
+    val cfg = LinearRoadRegionConfig
+    if (cfg.inputPath.isEmpty)
+      return new InputData(
+        "generated-linear-road-shaped",
+        cfg.events,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      )
+
+    val timestamps = scala.collection.mutable.ArrayBuffer.empty[Long]
+    val vehicles = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val expressways = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val segments = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val lanes = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val directions = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val positions = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val speeds = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val reader = BenchmarkInputSupport.openText(cfg.inputPath)
+    try {
+      var line = reader.readLine()
+      while (line != null && timestamps.length < cfg.events) {
+        if (line.nonEmpty) {
+          val parts = line.split(",", -1)
+          if (parts.length >= 9) {
+            val recordType = BenchmarkInputSupport.parseInt(parts(0), -1)
+            if (recordType == 0) {
+              timestamps += BenchmarkInputSupport.parseLong(
+                parts(1),
+                timestamps.length.toLong
+              )
+              vehicles += BenchmarkInputSupport.positiveModulo(
+                BenchmarkInputSupport.parseInt(parts(2), 0),
+                cfg.vehicleSpace
+              )
+              speeds += BenchmarkInputSupport.parseInt(parts(3), 0)
+              expressways += BenchmarkInputSupport.positiveModulo(
+                BenchmarkInputSupport.parseInt(parts(4), 0),
+                cfg.expresswaySpace
+              )
+              lanes += BenchmarkInputSupport.positiveModulo(
+                BenchmarkInputSupport.parseInt(parts(5), 0),
+                cfg.laneSpace
+              )
+              directions += (BenchmarkInputSupport.parseInt(parts(6), 0) & 1)
+              segments += BenchmarkInputSupport.positiveModulo(
+                BenchmarkInputSupport.parseInt(parts(7), 0),
+                cfg.segmentSpace
+              )
+              positions += BenchmarkInputSupport.parseInt(parts(8), 0)
+            }
+          }
+        }
+        line = reader.readLine()
+      }
+    } finally {
+      reader.close()
+    }
+
+    if (timestamps.isEmpty)
+      throw new IllegalArgumentException(
+        s"Linear Road input '${cfg.inputPath}' did not contain any usable position reports"
+      )
+
+    new InputData(
+      "real-linear-road-preloaded",
+      timestamps.length,
+      timestamps.toArray,
+      vehicles.toArray,
+      expressways.toArray,
+      segments.toArray,
+      lanes.toArray,
+      directions.toArray,
+      positions.toArray,
+      speeds.toArray
+    )
+  }
+
   private def eventHash(
       kind: Int,
       eventIndex: Int,
@@ -492,6 +618,7 @@ object LinearRoadRegionMatrixHelpers {
       latency: LatencyRecorder | Null
   ): RunOutcome = {
     val cfg = LinearRoadRegionConfig
+    val input = inputData
     val lastSegmentByVehicle = Array.fill(cfg.vehicleSpace)(-1)
     val lastPositionByVehicle = Array.fill(cfg.vehicleSpace)(-1)
     val stoppedCountByVehicle = new Array[Int](cfg.vehicleSpace)
@@ -547,22 +674,22 @@ object LinearRoadRegionMatrixHelpers {
       }
 
     var eventIndex = 0
-    while (eventIndex < cfg.events) {
+    while (eventIndex < input.events) {
       val sample =
         latency != null && eventIndex % cfg.sampleEvery == 0
       val sampleStart = if (sample) System.nanoTime() else 0L
-      val vehicle = vehicleFor(eventIndex)
-      val expressway = expresswayFor(eventIndex, vehicle)
-      val segment = segmentFor(eventIndex, vehicle)
-      val lane = laneFor(eventIndex, vehicle)
-      val direction = directionFor(eventIndex, vehicle)
-      val position = positionFor(segment, eventIndex)
-      val speed = speedFor(eventIndex)
+      val vehicle = input.vehicleAt(eventIndex)
+      val expressway = input.expresswayAt(eventIndex, vehicle)
+      val segment = input.segmentAt(eventIndex, vehicle)
+      val lane = input.laneAt(eventIndex, vehicle)
+      val direction = input.directionAt(eventIndex, vehicle)
+      val position = input.positionAt(eventIndex, segment)
+      val speed = input.speedAt(eventIndex)
       val slot = segmentSlot(expressway, direction, segment)
       val count =
         updateSegmentCount(vehicle, slot, lastSegmentByVehicle, segmentCounts)
       val bucket = bucketFor(bucketStart(eventIndex))
-      val timestamp = eventIndex.toLong
+      val timestamp = input.timestampAt(eventIndex)
 
       appendEvent(
         bucket,
@@ -649,6 +776,7 @@ object LinearRoadRegionMatrixHelpers {
       latency: LatencyRecorder | Null
   ): RunOutcome = {
     val cfg = LinearRoadRegionConfig
+    val input = inputData
     val lastSegmentByVehicle = Array.fill(cfg.vehicleSpace)(-1)
     val lastPositionByVehicle = Array.fill(cfg.vehicleSpace)(-1)
     val stoppedCountByVehicle = new Array[Int](cfg.vehicleSpace)
@@ -706,23 +834,23 @@ object LinearRoadRegionMatrixHelpers {
 
     var eventIndex = 0
     try {
-      while (eventIndex < cfg.events) {
+      while (eventIndex < input.events) {
         val sample =
           latency != null && eventIndex % cfg.sampleEvery == 0
         val sampleStart = if (sample) System.nanoTime() else 0L
-        val vehicle = vehicleFor(eventIndex)
-        val expressway = expresswayFor(eventIndex, vehicle)
-        val segment = segmentFor(eventIndex, vehicle)
-        val lane = laneFor(eventIndex, vehicle)
-        val direction = directionFor(eventIndex, vehicle)
-        val position = positionFor(segment, eventIndex)
-        val speed = speedFor(eventIndex)
+        val vehicle = input.vehicleAt(eventIndex)
+        val expressway = input.expresswayAt(eventIndex, vehicle)
+        val segment = input.segmentAt(eventIndex, vehicle)
+        val lane = input.laneAt(eventIndex, vehicle)
+        val direction = input.directionAt(eventIndex, vehicle)
+        val position = input.positionAt(eventIndex, segment)
+        val speed = input.speedAt(eventIndex)
         val slot = segmentSlot(expressway, direction, segment)
         val count =
           updateSegmentCount(vehicle, slot, lastSegmentByVehicle, segmentCounts)
         val bucket = bucketFor(bucketStart(eventIndex))
         val zone = bucket.zone
-        val timestamp = eventIndex.toLong
+        val timestamp = input.timestampAt(eventIndex)
 
         appendEvent(
           bucket,
@@ -832,6 +960,7 @@ object LinearRoadRegionMatrixHelpers {
       latency: LatencyRecorder | Null
   ): RunOutcome = {
     val cfg = LinearRoadRegionConfig
+    val input = inputData
     val lastSegmentByVehicle = Array.fill(cfg.vehicleSpace)(-1)
     val lastPositionByVehicle = Array.fill(cfg.vehicleSpace)(-1)
     val stoppedCountByVehicle = new Array[Int](cfg.vehicleSpace)
@@ -889,23 +1018,23 @@ object LinearRoadRegionMatrixHelpers {
 
     var eventIndex = 0
     try {
-      while (eventIndex < cfg.events) {
+      while (eventIndex < input.events) {
         val sample =
           latency != null && eventIndex % cfg.sampleEvery == 0
         val sampleStart = if (sample) System.nanoTime() else 0L
-        val vehicle = vehicleFor(eventIndex)
-        val expressway = expresswayFor(eventIndex, vehicle)
-        val segment = segmentFor(eventIndex, vehicle)
-        val lane = laneFor(eventIndex, vehicle)
-        val direction = directionFor(eventIndex, vehicle)
-        val position = positionFor(segment, eventIndex)
-        val speed = speedFor(eventIndex)
+        val vehicle = input.vehicleAt(eventIndex)
+        val expressway = input.expresswayAt(eventIndex, vehicle)
+        val segment = input.segmentAt(eventIndex, vehicle)
+        val lane = input.laneAt(eventIndex, vehicle)
+        val direction = input.directionAt(eventIndex, vehicle)
+        val position = input.positionAt(eventIndex, segment)
+        val speed = input.speedAt(eventIndex)
         val slot = segmentSlot(expressway, direction, segment)
         val count =
           updateSegmentCount(vehicle, slot, lastSegmentByVehicle, segmentCounts)
         val bucket = bucketFor(bucketStart(eventIndex))
         val region = bucket.region
-        val timestamp = eventIndex.toLong
+        val timestamp = input.timestampAt(eventIndex)
 
         appendEvent(
           bucket,
@@ -1022,6 +1151,7 @@ object LinearRoadRegionMatrixHelpers {
 
   def runBenchmark(mode: String, query: String): Unit = {
     val cfg = LinearRoadRegionConfig
+    val input = inputData
     val usesRift = mode == "rift-hp" || mode == "rift-streaming"
     val expected = runHeap(query, null)
 
@@ -1114,7 +1244,7 @@ object LinearRoadRegionMatrixHelpers {
 
     println(
       f"RESULT name=linear-road-$query-$mode " +
-        f"query=$query mode=$mode input=generated-linear-road-shaped " +
+        f"query=$query mode=$mode input=${input.label} " +
         f"median_ms=$medianElapsed%.3f " +
         f"median_gc_ms=${medianGc / 1000000.0}%.3f " +
         f"median_rift_op_ms=${medianRiftOp / 1000000.0}%.3f " +
@@ -1133,8 +1263,9 @@ object LinearRoadRegionMatrixHelpers {
 
   def printConfig(mode: String, query: String): Unit = {
     val cfg = LinearRoadRegionConfig
+    val input = inputData
     println(
-      s"CONFIG mode=$mode query=$query events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} live_buckets=${cfg.liveBuckets} vehicle_space=${cfg.vehicleSpace} expressway_space=${cfg.expresswaySpace} segment_space=${cfg.segmentSpace} lane_space=${cfg.laneSpace} position_range=${cfg.positionRange} sample_every=${cfg.sampleEvery} warmups=${cfg.warmupRuns} runs=${cfg.benchmarkRuns} input=generated-linear-road-shaped"
+      s"CONFIG mode=$mode query=$query events=${input.events} configured_events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} live_buckets=${cfg.liveBuckets} vehicle_space=${cfg.vehicleSpace} expressway_space=${cfg.expresswaySpace} segment_space=${cfg.segmentSpace} lane_space=${cfg.laneSpace} position_range=${cfg.positionRange} sample_every=${cfg.sampleEvery} warmups=${cfg.warmupRuns} runs=${cfg.benchmarkRuns} input=${input.label} input_path=${cfg.inputPath}"
     )
   }
 }

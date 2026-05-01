@@ -2,16 +2,17 @@
 
 Date: 2026-05-01
 
-Status: first generated Linear Road-shaped methodology probe. This is not an
-exact Linear Road benchmark reproduction because it does not use the original
-generator or full query set.
+Status: generated Linear Road-shaped methodology probe plus first official
+Linear Road test-data input wiring. This is still not an exact Linear Road
+benchmark reproduction because it does not run the full query set or validator.
 
 ## Purpose
 
 This matrix tests a stream shape that differs from DEBS, NEXMark-lite, Common
 Crawl, and Wikimedia:
 
-- generated position reports;
+- generated position reports, or preloaded official Data Driver `.dat` rows
+  from `LINEAR_ROAD_INPUT`;
 - durable vehicle/segment state in heap primitive arrays;
 - short-lived position report, toll output, and accident/congestion candidate
   objects in bucket lifetimes;
@@ -59,6 +60,19 @@ LINEAR_ROAD_OUTPUT_DIR=/tmp/linear-road-region-smoke \
 zsh sandbox/run_linear_road_region_matrix.sh
 ```
 
+Official test-data smoke:
+
+```bash
+LINEAR_ROAD_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/linear-road/test-data/datafile20seconds.dat \
+LINEAR_ROAD_EVENTS=20000 \
+LINEAR_ROAD_BENCHMARK_RUNS=1 \
+LINEAR_ROAD_WARMUPS=0 \
+LINEAR_ROAD_MODES="heap rift-hp" \
+LINEAR_ROAD_QUERIES="q1-tolls" \
+LINEAR_ROAD_OUTPUT_DIR=/tmp/linear-road-real-smoke \
+zsh sandbox/run_linear_road_region_matrix.sh
+```
+
 100k 3-run medians:
 
 ```bash
@@ -89,6 +103,19 @@ zsh sandbox/run_linear_road_region_matrix.sh
 - 100k and 1M 3-run medians matched checksum/output count across all queries
   and modes.
 - No 10M scale check was run because no 1M row cleared the continuation gate.
+- Official 20-second Data Driver input smoke matched checksum/output count for
+  heap and HPZone with `input=real-linear-road-preloaded`. This validates
+  input wiring only, not full Linear Road semantics.
+
+## Real Test-Data Smoke
+
+Input:
+`/Users/siyaoliu/rift/cache/benchmark-data/linear-road/test-data/datafile20seconds.dat`
+
+| Query | Mode | Median ms | GC ms | Rift op ms | Objects | Opens/closes | RSS bytes | Event p95 us | Bucket close max us | Outputs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| q1-tolls | heap | 2.781 | 0.000 | 0.000 | 0 | 0 / 0 | 8044544 | 0.833 | 11.083 | 558 |
+| q1-tolls | rift-hp | 2.303 | 0.000 | 0.008 | 558 | 1 / 1 | 8093696 | 21.791 | 8.333 | 558 |
 
 ## 100k Results
 

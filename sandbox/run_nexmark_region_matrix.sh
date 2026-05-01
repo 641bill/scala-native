@@ -45,7 +45,7 @@ read_max_rss_bytes() {
 }
 
 write_summary_header() {
-  printf "query\tmode\tmedian_ms\tmedian_gc_ms\tmedian_rift_op_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\toutput_count\tmax_rss_bytes\n" > "${summary}"
+  printf "query\tmode\tinput\tmedian_ms\tmedian_gc_ms\tmedian_rift_op_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\toutput_count\tmax_rss_bytes\n" > "${summary}"
 }
 
 write_result_row() {
@@ -67,9 +67,10 @@ write_result_row() {
     fi
   done
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "${query}" \
     "${mode}" \
+    "${fields[input]-}" \
     "${fields[median_ms]-}" \
     "${fields[median_gc_ms]-}" \
     "${fields[median_rift_op_ms]-}" \

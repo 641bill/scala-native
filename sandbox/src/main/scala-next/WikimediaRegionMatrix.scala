@@ -40,6 +40,15 @@ object WikimediaRegionConfig {
   val sampleEvery: Int = envInt("WIKIMEDIA_SAMPLE_EVERY", 4096)
   val warmupRuns: Int = envNonNegativeInt("WIKIMEDIA_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("WIKIMEDIA_BENCHMARK_RUNS", 3)
+  val inputPath: String = BenchmarkInputSupport.envString("WIKIMEDIA_INPUT")
+  val inputKind: String =
+    sys.env.get("WIKIMEDIA_INPUT_KIND").map(_.trim).filter(_.nonEmpty) match {
+      case Some(value) => value
+      case None =>
+        if (inputPath.contains("clickstream")) "clickstream"
+        else if (inputPath.nonEmpty) "pageviews"
+        else "generated"
+    }
 }
 
 object WikimediaRegionMatrixHelpers {
@@ -120,6 +129,44 @@ object WikimediaRegionMatrixHelpers {
       riftRegionOpNanos: Long,
       riftSlowAllocNanos: Long
   )
+
+  private final class InputData(
+      val label: String,
+      val events: Int,
+      val projects: Array[Int],
+      val articles: Array[Int],
+      val peers: Array[Int],
+      val values: Array[Int],
+      val bytes: Array[Long],
+      val hashes: Array[Long]
+  ) {
+    def projectAt(index: Int): Int =
+      if (projects == null) projectFor(index) else projects(index)
+
+    def articleAt(index: Int): Int =
+      if (articles == null) articleFor(index) else articles(index)
+
+    def peerAt(index: Int): Int =
+      if (peers == null) peerFor(index) else peers(index)
+
+    def valueAt(index: Int): Int =
+      if (values == null) viewsFor(index) else values(index)
+
+    def bytesAt(index: Int): Long =
+      if (bytes == null) bytesFor(index) else bytes(index)
+
+    def hashAt(
+        kind: Int,
+        index: Int,
+        project: Int,
+        article: Int,
+        peer: Int
+    ): Long =
+      if (hashes == null) eventHash(kind, index, project, article, peer)
+      else hashes(index) ^ (kind.toLong * 1099511628211L)
+  }
+
+  private lazy val inputData: InputData = loadInput()
 
   private object RuntimeSample {
     val zero: RuntimeSample =
@@ -237,6 +284,103 @@ object WikimediaRegionMatrixHelpers {
     mix(eventIndex * 1000003 + kind * 8191 + project * 131 + article + peer)
       .toLong
 
+  private def loadInput(): InputData = {
+    val cfg = WikimediaRegionConfig
+    if (cfg.inputPath.isEmpty)
+      return new InputData(
+        "generated-tsv-shaped",
+        cfg.events,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      )
+
+    val projects = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val articles = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val peers = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val values = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val bytes = scala.collection.mutable.ArrayBuffer.empty[Long]
+    val hashes = scala.collection.mutable.ArrayBuffer.empty[Long]
+    val reader = BenchmarkInputSupport.openText(cfg.inputPath)
+
+    def append(
+        projectText: String,
+        articleText: String,
+        peerText: String,
+        valueText: String,
+        bytesText: String,
+        rowHashText: String
+    ): Unit = {
+      val project =
+        BenchmarkInputSupport.positiveModulo(
+          BenchmarkInputSupport.stableHash(projectText),
+          cfg.projectSpace
+        )
+      val article =
+        BenchmarkInputSupport.positiveModulo(
+          BenchmarkInputSupport.stableHash(articleText),
+          cfg.articleSpace
+        )
+      val peer =
+        BenchmarkInputSupport.positiveModulo(
+          BenchmarkInputSupport.stableHash(peerText),
+          cfg.articleSpace
+        )
+      val value = BenchmarkInputSupport.parseInt(valueText, 1)
+      val rowBytes =
+        BenchmarkInputSupport.parseLong(
+          bytesText,
+          projectText.length.toLong + articleText.length.toLong +
+            peerText.length.toLong
+        )
+      projects += project
+      articles += article
+      peers += peer
+      values += (if (value > 0) value else 1)
+      bytes += (if (rowBytes >= 0L) rowBytes else 0L)
+      hashes += BenchmarkInputSupport.stableHash(rowHashText).toLong
+    }
+
+    try {
+      var line = reader.readLine()
+      while (line != null && projects.length < cfg.events) {
+        if (line.nonEmpty) {
+          if (cfg.inputKind == "clickstream") {
+            val parts = line.split("\t", -1)
+            if (parts.length >= 4)
+              append(parts(2), parts(1), parts(0), parts(3), "", line)
+          } else {
+            val parts = line.split(" ", -1)
+            if (parts.length >= 4)
+              append(parts(0), parts(1), "", parts(2), parts(3), line)
+          }
+        }
+        line = reader.readLine()
+      }
+    } finally {
+      reader.close()
+    }
+
+    if (projects.isEmpty)
+      throw new IllegalArgumentException(
+        s"Wikimedia input '${cfg.inputPath}' did not contain any usable ${cfg.inputKind} rows"
+      )
+
+    new InputData(
+      s"real-${cfg.inputKind}-preloaded",
+      projects.length,
+      projects.toArray,
+      articles.toArray,
+      peers.toArray,
+      values.toArray,
+      bytes.toArray,
+      hashes.toArray
+    )
+  }
+
   private def fold(
       checksum: Long,
       kind: Int,
@@ -313,6 +457,7 @@ object WikimediaRegionMatrixHelpers {
 
   private def runHeap(query: String): RunOutcome = {
     val cfg = WikimediaRegionConfig
+    val input = inputData
     var first: HeapBucket = null
     var last: HeapBucket = null
     var current: HeapBucket = null
@@ -371,12 +516,12 @@ object WikimediaRegionMatrixHelpers {
       }
 
     var eventIndex = 0
-    while (eventIndex < cfg.events) {
-      val project = projectFor(eventIndex)
-      val article = articleFor(eventIndex)
-      val peer = peerFor(eventIndex)
-      val views = viewsFor(eventIndex)
-      val bytes = bytesFor(eventIndex)
+    while (eventIndex < input.events) {
+      val project = input.projectAt(eventIndex)
+      val article = input.articleAt(eventIndex)
+      val peer = input.peerAt(eventIndex)
+      val views = input.valueAt(eventIndex)
+      val bytes = input.bytesAt(eventIndex)
       val start = bucketStart(eventIndex)
       val bucket = bucketFor(start)
       val timestamp = eventIndex.toLong
@@ -391,7 +536,7 @@ object WikimediaRegionMatrixHelpers {
           0,
           views,
           bytes,
-          eventHash(1, eventIndex, project, article, 0),
+          input.hashAt(1, eventIndex, project, article, 0),
           null
         )
       )
@@ -407,7 +552,7 @@ object WikimediaRegionMatrixHelpers {
             0,
             views,
             bytes,
-            eventHash(2, eventIndex, project, article, 0),
+            input.hashAt(2, eventIndex, project, article, 0),
             null
           )
         )
@@ -422,7 +567,7 @@ object WikimediaRegionMatrixHelpers {
             peer,
             1,
             bytes,
-            eventHash(3, eventIndex, project, article, peer),
+            input.hashAt(3, eventIndex, project, article, peer),
             null
           )
         )
@@ -438,7 +583,7 @@ object WikimediaRegionMatrixHelpers {
           peer,
           extraRecords(query),
           bytes,
-          eventHash(9, eventIndex, project, article, peer),
+          input.hashAt(9, eventIndex, project, article, peer),
           bucket.startEvent
         )
 
@@ -453,6 +598,7 @@ object WikimediaRegionMatrixHelpers {
 
   private def runSafeZone(query: String): RunOutcome = {
     val cfg = WikimediaRegionConfig
+    val input = inputData
     var first: SafeBucket = null
     var last: SafeBucket = null
     var current: SafeBucket = null
@@ -517,12 +663,12 @@ object WikimediaRegionMatrixHelpers {
 
     var eventIndex = 0
     try {
-      while (eventIndex < cfg.events) {
-        val project = projectFor(eventIndex)
-        val article = articleFor(eventIndex)
-        val peer = peerFor(eventIndex)
-        val views = viewsFor(eventIndex)
-        val bytes = bytesFor(eventIndex)
+      while (eventIndex < input.events) {
+        val project = input.projectAt(eventIndex)
+        val article = input.articleAt(eventIndex)
+        val peer = input.peerAt(eventIndex)
+        val views = input.valueAt(eventIndex)
+        val bytes = input.bytesAt(eventIndex)
         val start = bucketStart(eventIndex)
         val bucket = bucketFor(start)
         val zone = bucket.zone
@@ -541,7 +687,7 @@ object WikimediaRegionMatrixHelpers {
                 0,
                 views,
                 bytes,
-                eventHash(1, eventIndex, project, article, 0),
+                  input.hashAt(1, eventIndex, project, article, 0),
                 null
               )
             )
@@ -562,7 +708,7 @@ object WikimediaRegionMatrixHelpers {
                   0,
                   views,
                   bytes,
-                  eventHash(2, eventIndex, project, article, 0),
+                  input.hashAt(2, eventIndex, project, article, 0),
                   null
                 )
               )
@@ -582,7 +728,7 @@ object WikimediaRegionMatrixHelpers {
                   peer,
                   1,
                   bytes,
-                  eventHash(3, eventIndex, project, article, peer),
+                  input.hashAt(3, eventIndex, project, article, peer),
                   null
                 )
               )
@@ -600,7 +746,7 @@ object WikimediaRegionMatrixHelpers {
             peer,
             extraRecords(query),
             bytes,
-            eventHash(9, eventIndex, project, article, peer),
+            input.hashAt(9, eventIndex, project, article, peer),
             bucket.startEvent
           )
 
@@ -622,6 +768,7 @@ object WikimediaRegionMatrixHelpers {
 
   private def runRiftTrusted(query: String, kind: Int): RunOutcome = {
     val cfg = WikimediaRegionConfig
+    val input = inputData
     var first: TrustedBucket = null
     var last: TrustedBucket = null
     var current: TrustedBucket = null
@@ -686,12 +833,12 @@ object WikimediaRegionMatrixHelpers {
 
     var eventIndex = 0
     try {
-      while (eventIndex < cfg.events) {
-        val project = projectFor(eventIndex)
-        val article = articleFor(eventIndex)
-        val peer = peerFor(eventIndex)
-        val views = viewsFor(eventIndex)
-        val bytes = bytesFor(eventIndex)
+      while (eventIndex < input.events) {
+        val project = input.projectAt(eventIndex)
+        val article = input.articleAt(eventIndex)
+        val peer = input.peerAt(eventIndex)
+        val views = input.valueAt(eventIndex)
+        val bytes = input.bytesAt(eventIndex)
         val start = bucketStart(eventIndex)
         val bucket = bucketFor(start)
         val region = bucket.region
@@ -708,7 +855,7 @@ object WikimediaRegionMatrixHelpers {
               0,
               views,
               bytes,
-              eventHash(1, eventIndex, project, article, 0),
+              input.hashAt(1, eventIndex, project, article, 0),
               null
             )
           )
@@ -726,7 +873,7 @@ object WikimediaRegionMatrixHelpers {
                 0,
                 views,
                 bytes,
-                eventHash(2, eventIndex, project, article, 0),
+                input.hashAt(2, eventIndex, project, article, 0),
                 null
               )
             )
@@ -743,7 +890,7 @@ object WikimediaRegionMatrixHelpers {
                 peer,
                 1,
                 bytes,
-                eventHash(3, eventIndex, project, article, peer),
+                input.hashAt(3, eventIndex, project, article, peer),
                 null
               )
             )
@@ -760,7 +907,7 @@ object WikimediaRegionMatrixHelpers {
             peer,
             extraRecords(query),
             bytes,
-            eventHash(9, eventIndex, project, article, peer),
+            input.hashAt(9, eventIndex, project, article, peer),
             bucket.startEvent
           )
 
@@ -794,6 +941,7 @@ object WikimediaRegionMatrixHelpers {
 
   def runBenchmark(mode: String, query: String): Unit = {
     val cfg = WikimediaRegionConfig
+    val input = inputData
     val usesRift = mode == "rift-hp" || mode == "rift-streaming"
     val expected = runHeap(query)
 
@@ -868,7 +1016,7 @@ object WikimediaRegionMatrixHelpers {
 
     println(
       f"RESULT name=wikimedia-$query-$mode " +
-        f"query=$query mode=$mode input=generated-tsv-shaped " +
+        f"query=$query mode=$mode input=${input.label} " +
         f"median_ms=$medianElapsed%.3f " +
         f"median_gc_ms=${medianGc / 1000000.0}%.3f " +
         f"median_rift_op_ms=${medianRiftOp / 1000000.0}%.3f " +
@@ -883,8 +1031,9 @@ object WikimediaRegionMatrixHelpers {
 
   def printConfig(mode: String, query: String): Unit = {
     val cfg = WikimediaRegionConfig
+    val input = inputData
     println(
-      s"CONFIG mode=$mode query=$query events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} live_buckets=${cfg.liveBuckets} project_space=${cfg.projectSpace} article_space=${cfg.articleSpace} sample_every=${cfg.sampleEvery} warmups=${cfg.warmupRuns} runs=${cfg.benchmarkRuns} input=generated-tsv-shaped"
+      s"CONFIG mode=$mode query=$query events=${input.events} configured_events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} live_buckets=${cfg.liveBuckets} project_space=${cfg.projectSpace} article_space=${cfg.articleSpace} sample_every=${cfg.sampleEvery} warmups=${cfg.warmupRuns} runs=${cfg.benchmarkRuns} input=${input.label} input_path=${cfg.inputPath} input_kind=${cfg.inputKind}"
     )
   }
 }

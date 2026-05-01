@@ -58,6 +58,17 @@ Default settings:
 - `NEXMARK_WARMUPS=1`
 - `NEXMARK_BENCHMARK_RUNS=3`
 
+Apache Beam compatibility source:
+
+- Beam NEXMark is generated, not file-backed. Use
+  `NEXMARK_BEAM_DEFAULTS=1` to switch this local generator to the Beam-default
+  profile recorded in `../evidence/BENCHMARK_DATA_SOURCES.md`: 100000 events,
+  100 concurrent auctions, 1000 concurrent persons, 10 event-rate buckets per
+  active window, and 5 categories.
+- `NEXMARK_BEAM_SOURCE=/Users/siyaoliu/rift/cache/benchmark-data/apache-beam/apache-beam-2.73.0-source-release.zip`
+  can be set to record which Beam source archive/configuration is being used
+  as the comparison contract. The benchmark does not read that zip at runtime.
+
 ## Commands
 
 Compile/link:
@@ -77,6 +88,20 @@ NEXMARK_BENCHMARK_RUNS=1 \
 NEXMARK_WARMUPS=0 \
 NEXMARK_OUTPUT_DIR=/tmp/nexmark-smoke \
 NEXMARK_BUILD=0 \
+zsh sandbox/run_nexmark_region_matrix.sh
+```
+
+Beam-default smoke:
+
+```bash
+NEXMARK_BEAM_DEFAULTS=1 \
+NEXMARK_BEAM_SOURCE=/Users/siyaoliu/rift/cache/benchmark-data/apache-beam/apache-beam-2.73.0-source-release.zip \
+NEXMARK_EVENTS=20000 \
+NEXMARK_BENCHMARK_RUNS=1 \
+NEXMARK_WARMUPS=0 \
+NEXMARK_MODES="heap rift-hp" \
+NEXMARK_QUERIES="q1" \
+NEXMARK_OUTPUT_DIR=/tmp/nexmark-beam-smoke \
 zsh sandbox/run_nexmark_region_matrix.sh
 ```
 
@@ -114,6 +139,9 @@ zsh sandbox/run_nexmark_region_matrix.sh
   across `heap`, `safezone-current`, `safezone-improved`, `rift-checked`,
   `rift-hp`, and `rift-streaming` for Q1/Q5/Q8.
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile` passed.
+- Beam-default generated smoke passed for Q1 heap/HPZone with matching
+  checksum/output count. This is input/config wiring only, not exact Beam
+  runner evidence.
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"` passed `91/91`.
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"` passed `36/36`.
 - After adding `StreamJoinWindow`, the targeted suites passed again:
