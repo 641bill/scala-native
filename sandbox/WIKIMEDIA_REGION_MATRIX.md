@@ -226,8 +226,12 @@ Interpretation:
 
 - Real enwiki clickstream Q2 does not reproduce the generated Q2 elapsed win.
   Heap is fastest at both 100k and 1M.
-- Measured timed GC is zero in the timed section for every mode. The large RSS
-  mostly reflects the preloaded real input, not query-local retained objects.
+- Median measured GC is zero, but that does not mean no collection happened:
+  the 1M heap row had one timed run with one collection and `67.236 ms` GC,
+  while the other two timed runs had none. The reported median is therefore
+  `0.000 ms`.
+- The large RSS mostly reflects the preloaded real input, not query-local
+  retained objects.
 - Regions reduce 1M RSS versus heap, but by less than the elapsed slowdown
   would justify as a case-study claim.
 
@@ -241,6 +245,7 @@ Interpretation:
 - The 10M single-run Q2 check weakens the story: HPZone remains much lower-GC,
   but elapsed is effectively a near-tie with heap and improved SafeZone.
 - The real enwiki clickstream row weakens it further: with preloaded real TSV
-  rows, heap is fastest and timed GC is zero.
+  rows, heap is fastest and median timed GC is zero, although one heap 1M run
+  did collect.
 - This generated TSV-shaped matrix should stay as stream-benchmark ladder
   evidence, not a headline case study.

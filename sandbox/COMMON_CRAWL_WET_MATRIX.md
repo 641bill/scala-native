@@ -169,8 +169,8 @@ Interpretation:
 
 - Real WET tokenization does not reproduce the generated WET allocation win.
   Heap is fastest at both requested scales.
-- Measured timed GC is zero in the timed section. The dominant cost here is not
-  collection time after preloading; it is token/hash loop CPU plus the live
+- Median measured GC is zero in the timed section. The dominant cost here is
+  not collection time after preloading; it is token/hash loop CPU plus the live
   preloaded input footprint.
 - Current/improved SafeZone and Rift all add region object/linking overhead in
   this real shard. Do not continue tuning Common Crawl from this row without a

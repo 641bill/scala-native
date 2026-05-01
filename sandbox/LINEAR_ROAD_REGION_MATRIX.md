@@ -186,7 +186,11 @@ Checksums and output counts matched across all modes.
 Interpretation:
 
 - Official-input rows are more negative than the generated Linear Road rows:
-  measured timed GC is zero in all 100k and 1M timed sections.
+  median measured GC is zero in the reported 100k and 1M rows.
+- Median-zero GC does not mean no collection happened. In the 1M heap logs,
+  q0 had one timed run with `52.436 ms` GC, q1 had one with `45.194 ms`, and
+  q2 had one with `59.832 ms`; the other two timed runs in each row had no
+  collection, so the median GC column is `0.000 ms`.
 - Heap is fastest for all three 1M queries. Region modes lower RSS only for
   q0 reports; they do not improve RSS on q1/q2 toll/accident outputs.
 - Current SafeZone remains much slower than improved SafeZone, but improved

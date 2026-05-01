@@ -21,9 +21,9 @@ benchmarks should test the same design question:
 |---|---|---|
 | NEXMark-lite Q1/Q2/Q8 | Modest checked/trusted wins or near-ties, with lower GC/RSS. Beam-default Q1/Q8 remain promising; Q2 is near-tie. | Keep as methodology evidence and focused operator regression coverage, not exact Beam runner evidence. |
 | NEXMark-lite Q5 / fold | Checked fold lowers RSS/GC but loses elapsed time. | Do not build Q5 claims until fold/table overhead improves. |
-| Common Crawl WET-shaped tokenization | Generated rows stress heap GC, but improved SafeZone beats trusted Rift; real preloaded WET rows are heap-fastest with zero timed GC. | Keep as memory-pressure detector; do not make it the next case study without a new shard or cheaper checked page/token API. |
-| Wikimedia pageview/clickstream | Generated Q2 is promising at 1M, but the 10M generated scale check is a near-tie and real enwiki clickstream is heap-fastest. | Keep as ladder evidence; do not make it a headline case study from current real TSV rows. |
-| Linear Road position/toll stream | Generated q1/q2 remove measured GC in Rift, but heap is fastest; official preloaded input has zero timed GC and heap wins all 1M rows. | Record as a ceiling result; do not tune it into a benchmark-specific claim. |
+| Common Crawl WET-shaped tokenization | Generated rows stress heap GC, but improved SafeZone beats trusted Rift; real preloaded WET rows are heap-fastest with median-zero timed GC. | Keep as memory-pressure detector; do not make it the next case study without a new shard or cheaper checked page/token API. |
+| Wikimedia pageview/clickstream | Generated Q2 is promising at 1M, but the 10M generated scale check is a near-tie and real enwiki clickstream is heap-fastest. Median GC is zero on real input, with one heap 1M collection outlier. | Keep as ladder evidence; do not make it a headline case study from current real TSV rows. |
+| Linear Road position/toll stream | Generated q1/q2 remove measured GC in Rift, but heap is fastest; official preloaded input has median-zero GC and heap wins all 1M rows, with one heap collection outlier per 1M query. | Record as a ceiling result; do not tune it into a benchmark-specific claim. |
 | DEBS | Real data and correctness-heavy, but current wins are modest/near-ties. | Keep as downstream validation, not the next search space. |
 
 ## Candidate Ranking
@@ -51,7 +51,9 @@ Every ladder benchmark must record:
 
 The real-input ladder is now wired and measured. Real enwiki clickstream,
 Common Crawl WET, and official Linear Road preloaded rows do not clear the
-case-study gate; heap is fastest and timed GC is zero in the measured section.
+case-study gate; heap is fastest and median timed GC is zero in the reported
+rows. This is not the same as "no GC ever": Wikimedia and Linear Road heap 1M
+logs include sporadic collection outliers.
 NEXMark Beam-default Q1/Q8 remain useful positive profile rows, but not exact
 Beam runner evidence. The next implementation target should be focused
 checked-operator overhead reduction, with NEXMark Beam-default Q1/Q8 kept as
