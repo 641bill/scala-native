@@ -9,7 +9,8 @@ where checked container overhead still dominates.
 Latest clean-sweep update: `evidence/HEADLINE_STREAMS_2026_05_01.md`,
 `evidence/HEADLINE_DEBS_1M_2026_05_01.md`,
 `evidence/HEADLINE_UNSAFEZONE_CORE_PRIOR_2026_05_01.md`, and
-`evidence/HEADLINE_UNSAFEZONE_STREAMS_2026_05_01.md` supersede older generated
+`evidence/HEADLINE_UNSAFEZONE_STREAMS_2026_05_01.md`, and
+`evidence/HEADLINE_UNSAFEZONE_DEBS_1M_2026_05_01.md` supersede older generated
 stream, DEBS, core-runtime, and prior-work rows where they overlap.
 
 UnsafeZone-HP checkpoint: `evidence/UNSAFEZONE_HP_BASELINE_MATRIX.md` adds a
@@ -105,6 +106,7 @@ live window payload still dominate.
 | RIoTBench-style q1 clean/annotate | 1M generated sensor events | Streaming `148.019 ms`, HPZone `150.369 ms` | heap `135.750 ms`; improved SafeZone `147.638 ms` | Heap wins in clean 1M row; earlier 100k positive weakened | Clean local methodology probe |
 | RIoTBench-style q2 window stats | 1M generated sensor events | Streaming `172.802 ms`, HPZone `172.847 ms` | heap `173.334 ms`; improved SafeZone `174.824 ms` | Near-tie; lower GC, tiny elapsed edge | Clean local methodology probe |
 | DEBS RunBoth bounded 1M | single run | Streaming `4681.292 ms`; checked `4882.562 ms` | heap `4987.579 ms` | Trusted wins, checked modestly beats heap, bounded correctness/control row | Clean bounded single-run |
+| DEBS RunBoth bounded 1M with UnsafeZone-HP | single run | unsafezone-hp `4639.791 ms`; Streaming `4663.529 ms`; checked `4844.738 ms` | heap `4861.406 ms`; improved SafeZone `5341.010 ms` | Unsafe substrate/control win, trusted Streaming close, checked heap-adjacent | Clean bounded single-run |
 | DEBS RunBoth checked, bounded 1M after Q1/Q2 append-window integration | 3-run median | checked `5349.444 ms` | heap `5219.189 ms` | API generalization, CPU-limited | Latest bounded control; not a speedup claim |
 | DEBS RunBoth checked, full month | 3-run median | checked `66.804 s` | heap `67.122 s` | Near-tie throughput, memory validation | Full-month evidence, not large speedup |
 
