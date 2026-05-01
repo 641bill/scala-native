@@ -68,9 +68,11 @@ live window payload still dominate.
 | NEXMark-lite Q8 `StreamJoinWindow` API | 1M events | packed checked join API `20.987 ms` | heap join API `17.393 ms` | Specialized checked join API is lower-GC/lower-RSS but slower than fair heap control | Focused framework evidence; not a speed claim |
 | NEXMark-lite Q5 diagnostic | 1M events | checked `393.415 ms` clean; top scan `46.823 ms` diagnostic | heap `361.882 ms` clean; top scan `45.340 ms` diagnostic | Window aggregate checked overhead | Diagnostic profile plus clean control |
 | Common Crawl WET-shaped tokenization | 100k pages / 13.7M records | HPZone `404.123 ms`, Streaming `403.935 ms` | heap `427.942 ms`; improved SafeZone `381.006 ms` | Object-heavy parser/token stream, but improved SafeZone wins | Generated input only; not a Rift case-study win |
-| Common Crawl WET small-bucket control | 100k pages / 13.7M records | Streaming `419.779 ms` | heap `386.807 ms`; improved SafeZone `381.109 ms` | Heap/SafeZone recover with tighter lifetimes | Generated input; move next search to Wikimedia |
+| Common Crawl WET small-bucket control | 100k pages / 13.7M records | Streaming `419.779 ms` | heap `386.807 ms`; improved SafeZone `381.109 ms` | Heap/SafeZone recover with tighter lifetimes | Generated input; not a case-study row |
 | Wikimedia generated clickstream | 1M events / 2M records | HPZone `147.163 ms`, Streaming `148.364 ms` | heap `159.746 ms`; improved SafeZone `147.936 ms` | Promising Q2 row but not a 10% win over improved SafeZone | Generated TSV-shaped input only |
 | Wikimedia generated clickstream scale check | 10M events / 20M records | HPZone `1462.015 ms`, Streaming `1464.663 ms` | heap `1459.438 ms`; improved SafeZone `1473.088 ms` | Lower GC but elapsed near-tie | Single run only |
+| Linear Road generated tolls | 1M events / 2M records | HPZone `191.896 ms`, Streaming `228.226 ms` | heap `170.464 ms`; improved SafeZone `196.138 ms` | Removes GC but heap wins elapsed | Generated methodology only |
+| Linear Road generated accidents | 1M events / 2M records | HPZone `203.793 ms`, Streaming `217.685 ms` | heap `194.520 ms`; improved SafeZone `215.808 ms` | HPZone beats improved SafeZone but not heap | Generated methodology only |
 | DEBS RunBoth checked, bounded 1M after Q1/Q2 append-window integration | 3-run median | checked `5349.444 ms` | heap `5219.189 ms` | API generalization, CPU-limited | Latest bounded control; not a speedup claim |
 | DEBS RunBoth checked, full month | 3-run median | checked `66.804 s` | heap `67.122 s` | Near-tie throughput, memory validation | Full-month evidence, not large speedup |
 
@@ -225,14 +227,18 @@ The strongest local categories are:
   (`149.149 ms` GC at 100k pages), but improved SafeZone is faster than trusted
   Rift (`381.006 ms` vs Streaming `403.935 ms`). Smaller, more natural token
   lifetimes keep improved SafeZone fastest and make heap competitive. Treat
-  Common Crawl as a memory-pressure detector, not the next case study. Move the
-  next real-data search to Wikimedia-style pageview/clickstream aggregation
-  unless a real WET file plus checked page/token API changes the result.
+  Common Crawl as a memory-pressure detector, not the next case study. Revisit
+  only if a real WET file plus checked page/token API changes the result.
 - The generated Wikimedia detector is also mixed. Q2 clickstream is promising
   at 1M (`147.163 ms` HPZone vs `159.746 ms` heap and `147.936 ms` improved
   SafeZone), but the 10M single-run scale check collapses to a near-tie with
   heap. Keep it as ladder evidence; do not make a generated-Wikimedia case
   study without real TSV input or a stronger checked operator.
+- The generated Linear Road detector is negative as a case-study candidate.
+  HPZone removes measured GC and beats improved SafeZone on q1/q2, but heap is
+  still fastest at 1M (`170.464 ms` q1 and `194.520 ms` q2). RSS also does not
+  improve for q1/q2 at the default bucket size because the bucket-retained
+  event/output objects dominate the live set.
 - DEBS full-month is currently a near-tie in elapsed time with much better
   memory/lifetime evidence than earlier checkpoints, not a large application
   speedup.
