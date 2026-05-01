@@ -23,11 +23,19 @@ Queries:
   bucket-owned.
 - `q2`: low-output bid selection; every input bid is bucket-owned, but only
   selected bids produce output.
+- `q3`: incremental join/filter shape; person and auction records are
+  bucket-owned while primitive arrays track active seller eligibility.
+- `q4`: category-average shape; bid records are bucket-owned while category
+  count/sum state stays in primitive arrays.
 - `q5`: hot-auction sliding-window shape; bid objects are bucket-owned while
   durable window counts/sums stay in primitive heap arrays.
 - `q8`: new-user/new-auction window join; person, auction, and join-output
   objects are bucket-owned while durable join counts stay in primitive heap
   arrays.
+- `q9`: winning-bid core shape; bid and winning-output records are
+  bucket-owned while current max metadata stays in primitive arrays.
+- `q11`: session-window shape; bidder session records are bucket-owned while
+  active session counts stay in primitive arrays.
 
 Modes:
 
@@ -58,6 +66,10 @@ Default settings:
 - `NEXMARK_WARMUPS=1`
 - `NEXMARK_BENCHMARK_RUNS=3`
 
+The default runner query set is now
+`q0 q1 q2 q3 q4 q5 q8 q9 q11`. Historical tables below cover only
+`q0/q1/q2/q5/q8` unless explicitly stated otherwise.
+
 Apache Beam compatibility source:
 
 - Beam NEXMark is generated, not file-backed. Use
@@ -87,6 +99,36 @@ NEXMARK_EVENTS=20000 \
 NEXMARK_BENCHMARK_RUNS=1 \
 NEXMARK_WARMUPS=0 \
 NEXMARK_OUTPUT_DIR=/tmp/nexmark-smoke \
+NEXMARK_BUILD=0 \
+zsh sandbox/run_nexmark_region_matrix.sh
+
+NEXMARK_BEAM_DEFAULTS=1 \
+NEXMARK_BEAM_SOURCE=/Users/siyaoliu/rift/cache/benchmark-data/apache-beam/apache-beam-2.73.0-source-release.zip \
+NEXMARK_EVENTS=1000000 \
+NEXMARK_BENCHMARK_RUNS=3 \
+NEXMARK_WARMUPS=1 \
+NEXMARK_QUERIES="q0 q5" \
+NEXMARK_OUTPUT_DIR=/tmp/nexmark-beam-1m-q0-q5 \
+NEXMARK_BUILD=0 \
+zsh sandbox/run_nexmark_region_matrix.sh
+
+NEXMARK_BEAM_DEFAULTS=1 \
+NEXMARK_BEAM_SOURCE=/Users/siyaoliu/rift/cache/benchmark-data/apache-beam/apache-beam-2.73.0-source-release.zip \
+NEXMARK_EVENTS=1000000 \
+NEXMARK_BENCHMARK_RUNS=3 \
+NEXMARK_WARMUPS=1 \
+NEXMARK_QUERIES="q3 q9" \
+NEXMARK_OUTPUT_DIR=/tmp/nexmark-beam-1m-q3-q9 \
+NEXMARK_BUILD=0 \
+zsh sandbox/run_nexmark_region_matrix.sh
+
+NEXMARK_BEAM_DEFAULTS=1 \
+NEXMARK_BEAM_SOURCE=/Users/siyaoliu/rift/cache/benchmark-data/apache-beam/apache-beam-2.73.0-source-release.zip \
+NEXMARK_EVENTS=1000000 \
+NEXMARK_BENCHMARK_RUNS=3 \
+NEXMARK_WARMUPS=1 \
+NEXMARK_QUERIES="q4 q11" \
+NEXMARK_OUTPUT_DIR=/tmp/nexmark-beam-1m-q4-q11 \
 NEXMARK_BUILD=0 \
 zsh sandbox/run_nexmark_region_matrix.sh
 ```
@@ -142,6 +184,9 @@ zsh sandbox/run_nexmark_region_matrix.sh
 - Beam-default generated smoke passed for Q1 heap/HPZone with matching
   checksum/output count. This is input/config wiring only, not exact Beam
   runner evidence.
+- Q3/Q4/Q9/Q11 are implemented and were measured in the Beam-default 1M
+  follow-up below. Q3 is the only expanded query that currently gives a
+  checked Rift win over both heap and improved SafeZone.
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"` passed `91/91`.
 - `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"` passed `36/36`.
 - After adding `StreamJoinWindow`, the targeted suites passed again:
@@ -295,15 +340,58 @@ output counts matched across all modes.
 | q8 | rift-hp | 321.910 | 11.274 | 0.111 | 399000 | 100 / 100 | 77479936 | 199000 |
 | q8 | rift-streaming | 321.610 | 11.208 | 0.092 | 399000 | 100 / 100 | 77627392 | 199000 |
 
+Additional 1M Beam-default rows after the stream-GC refocus:
+
+| Query | Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | Rift op ms | Region objects | RSS bytes | Outputs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| q0 | heap | 548.184 | 81.336 | 86.004 | 3 | 0.000 | 0 | 39387136 | 1000000 |
+| q0 | safezone-improved | 482.774 | 27.524 | 28.171 | 3 | 0.000 | 0 | 45187072 | 1000000 |
+| q0 | rift-checked | 497.319 | 17.443 | 17.493 | 3 | 0.220 | 1000000 | 44531712 | 1000000 |
+| q0 | rift-hp | 467.895 | 17.524 | 17.977 | 3 | 0.124 | 1000000 | 45318144 | 1000000 |
+| q0 | rift-streaming | 470.501 | 17.008 | 17.852 | 3 | 0.132 | 1000000 | 45137920 | 1000000 |
+| q3 | heap | 304.190 | 27.529 | 28.281 | 3 | 0.000 | 0 | 39403520 | 98266 |
+| q3 | safezone-improved | 293.586 | 14.376 | 14.906 | 3 | 0.000 | 0 | 41172992 | 98266 |
+| q3 | rift-checked | 287.169 | 11.394 | 11.753 | 3 | 0.059 | 298266 | 40910848 | 98266 |
+| q3 | rift-hp | 297.678 | 11.791 | 11.796 | 3 | 0.055 | 298266 | 41385984 | 98266 |
+| q3 | rift-streaming | 290.374 | 11.602 | 12.717 | 3 | 0.054 | 298266 | 41205760 | 98266 |
+| q4 | heap | 567.739 | 38.535 | 50.975 | 3 | 0.000 | 0 | 146784256 | 123 |
+| q4 | safezone-improved | 581.302 | 27.187 | 28.684 | 3 | 0.000 | 0 | 152567808 | 123 |
+| q4 | rift-streaming | 579.229 | 22.167 | 33.763 | 3 | 0.180 | 1000000 | 152535040 | 123 |
+| q5 | heap | 393.184 | 29.424 | 43.397 | 3 | 0.000 | 0 | 146784256 | 123 |
+| q5 | safezone-improved | 391.742 | 17.183 | 18.004 | 3 | 0.000 | 0 | 152535040 | 123 |
+| q5 | rift-checked | 395.000 | 14.444 | 14.666 | 3 | 0.132 | 1000000 | 151863296 | 123 |
+| q5 | rift-hp | 389.188 | 14.723 | 16.256 | 3 | 0.126 | 1000000 | 152649728 | 123 |
+| q5 | rift-streaming | 386.869 | 14.516 | 14.661 | 3 | 0.129 | 1000000 | 152485888 | 123 |
+| q9 | heap | 778.606 | 83.179 | 84.030 | 3 | 0.000 | 0 | 146784256 | 922 |
+| q9 | safezone-improved | 733.171 | 33.577 | 34.497 | 3 | 0.000 | 0 | 152567808 | 922 |
+| q9 | rift-checked | 764.372 | 29.483 | 29.704 | 3 | 0.198 | 1000922 | 151879680 | 922 |
+| q9 | rift-hp | 739.200 | 29.443 | 29.575 | 3 | 0.138 | 1000922 | 152698880 | 922 |
+| q9 | rift-streaming | 752.774 | 29.380 | 30.185 | 3 | 0.165 | 1000922 | 152567808 | 922 |
+| q11 | heap | 255.418 | 19.927 | 37.120 | 3 | 0.000 | 0 | 75202560 | 250197 |
+| q11 | safezone-improved | 237.400 | 5.772 | 9.753 | 3 | 0.000 | 0 | 82411520 | 250197 |
+| q11 | rift-checked | 240.065 | 3.885 | 10.958 | 3 | 0.210 | 1250197 | 81313792 | 250197 |
+| q11 | rift-hp | 226.862 | 3.879 | 7.545 | 3 | 0.142 | 1250197 | 82444288 | 250197 |
+| q11 | rift-streaming | 233.387 | 3.916 | 7.411 | 3 | 0.136 | 1250197 | 82264064 | 250197 |
+
 Interpretation:
 
+- Beam-default Q0 is now a strong trusted-runtime stream-object row: HPZone is
+  `467.895 ms` versus heap `548.184 ms`, and median GC drops from
+  `81.336 ms` to about `17 ms`. Checked Rift also beats heap, but not improved
+  SafeZone.
 - Beam-default Q1 is now the most promising NEXMark-profile row: HPZone is
   faster than heap and improved SafeZone, and checked Rift is slightly faster
   than improved SafeZone while cutting measured GC sharply.
+- Beam-default Q3 is the new best checked expanded-query row: checked Rift is
+  faster than heap and improved SafeZone, with low Rift op time. This should be
+  the next NEXMark operator-profile candidate.
 - Beam-default Q8 is a smaller checked win: checked Rift is faster than heap
   and improved SafeZone, but the margin is below the case-study threshold.
 - Beam-default Q2 is a ceiling result. Rift lowers GC, but elapsed time remains
   near heap/improved SafeZone or slower.
+- Beam-default Q4/Q9/Q11 are mixed controls. Q11 gives a trusted HPZone win
+  but improved SafeZone beats checked; Q9 is improved-SafeZone-favored; Q4
+  stays CPU/aggregate dominated.
 - These rows are useful win-envelope evidence, not exact Beam NEXMark
   evidence.
 

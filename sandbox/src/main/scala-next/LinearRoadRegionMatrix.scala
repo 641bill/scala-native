@@ -314,6 +314,26 @@ object LinearRoadRegionMatrixHelpers {
     else (sorted(sorted.length / 2 - 1) + sorted(sorted.length / 2)) / 2L
   }
 
+  private def maxLong(values: Array[Long]): Long = {
+    var max = 0L
+    var i = 0
+    while (i < values.length) {
+      if (values(i) > max) max = values(i)
+      i += 1
+    }
+    max
+  }
+
+  private def countPositive(values: Array[Long]): Long = {
+    var count = 0L
+    var i = 0
+    while (i < values.length) {
+      if (values(i) > 0L) count += 1L
+      i += 1
+    }
+    count
+  }
+
   private def bucketStart(eventIndex: Int): Long = {
     val cfg = LinearRoadRegionConfig
     (eventIndex / cfg.eventsPerBucket).toLong * cfg.eventsPerBucket.toLong
@@ -1169,6 +1189,7 @@ object LinearRoadRegionMatrixHelpers {
 
     val elapsedMs = new Array[Double](cfg.benchmarkRuns)
     val gcNanos = new Array[Long](cfg.benchmarkRuns)
+    val gcCollections = new Array[Long](cfg.benchmarkRuns)
     val riftOpNanos = new Array[Long](cfg.benchmarkRuns)
     val riftObjects = new Array[Long](cfg.benchmarkRuns)
     val riftOpens = new Array[Long](cfg.benchmarkRuns)
@@ -1201,6 +1222,7 @@ object LinearRoadRegionMatrixHelpers {
 
       elapsedMs(run) = (end - start) / 1000000.0
       gcNanos(run) = runtime.gcNanos
+      gcCollections(run) = runtime.gcCollections
       riftOpNanos(run) = runtime.riftRegionOpNanos
       riftObjects(run) = runtime.riftAllocObjectTotal
       riftOpens(run) = runtime.riftRegionOpenTotal
@@ -1232,6 +1254,9 @@ object LinearRoadRegionMatrixHelpers {
 
     val medianElapsed = medianDouble(elapsedMs)
     val medianGc = medianLong(gcNanos)
+    val maxGc = maxLong(gcNanos)
+    val runsWithGc = countPositive(gcCollections)
+    val maxGcCollections = maxLong(gcCollections)
     val medianRiftOp = medianLong(riftOpNanos)
     val medianObjects = medianLong(riftObjects)
     val medianOpens = medianLong(riftOpens)
@@ -1247,6 +1272,9 @@ object LinearRoadRegionMatrixHelpers {
         f"query=$query mode=$mode input=${input.label} " +
         f"median_ms=$medianElapsed%.3f " +
         f"median_gc_ms=${medianGc / 1000000.0}%.3f " +
+        f"max_gc_ms=${maxGc / 1000000.0}%.3f " +
+        f"runs_with_gc=$runsWithGc%d " +
+        f"max_gc_collections=$maxGcCollections%d " +
         f"median_rift_op_ms=${medianRiftOp / 1000000.0}%.3f " +
         f"median_rift_alloc_object_total=$medianObjects%d " +
         f"median_rift_open_total=$medianOpens%d " +

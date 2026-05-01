@@ -264,6 +264,26 @@ object NexmarkRegionMatrixHelpers {
     else (sorted(sorted.length / 2 - 1) + sorted(sorted.length / 2)) / 2L
   }
 
+  private def maxLong(values: Array[Long]): Long = {
+    var max = 0L
+    var i = 0
+    while (i < values.length) {
+      if (values(i) > max) max = values(i)
+      i += 1
+    }
+    max
+  }
+
+  private def countPositive(values: Array[Long]): Long = {
+    var count = 0L
+    var i = 0
+    while (i < values.length) {
+      if (values(i) > 0L) count += 1L
+      i += 1
+    }
+    count
+  }
+
   private def bucketStart(eventIndex: Int): Long = {
     val cfg = NexmarkRegionConfig
     (eventIndex / cfg.eventsPerBucket).toLong * cfg.eventsPerBucket.toLong
@@ -299,6 +319,9 @@ object NexmarkRegionMatrixHelpers {
 
   private def category(index: Int): Int =
     mix(index * 131 + 53) % NexmarkRegionConfig.categorySpace
+
+  private def allowedSeller(person: Int, category: Int): Int =
+    if ((person % 5) == 0 || category == 0 || category == 2) 1 else 0
 
   private def fold(
       checksum: Long,
@@ -400,6 +423,18 @@ object NexmarkRegionMatrixHelpers {
       if (query == "q8") new Array[Int](cfg.personSpace) else null
     val q8Auctions =
       if (query == "q8") new Array[Int](cfg.personSpace) else null
+    val q3Allowed =
+      if (query == "q3") new Array[Int](cfg.personSpace) else null
+    val q3Auctions =
+      if (query == "q3") new Array[Int](cfg.personSpace) else null
+    val q4Counts =
+      if (query == "q4") new Array[Int](cfg.categorySpace) else null
+    val q4Sums =
+      if (query == "q4") new Array[Long](cfg.categorySpace) else null
+    val q9Max =
+      if (query == "q9") new Array[Long](cfg.auctionSpace) else null
+    val q11Counts =
+      if (query == "q11") new Array[Int](cfg.personSpace) else null
     var first: HeapBucket = null
     var last: HeapBucket = null
     var current: HeapBucket = null
@@ -440,6 +475,61 @@ object NexmarkRegionMatrixHelpers {
           record.key,
           q8Persons(record.key),
           q8Auctions(record.key).toLong,
+          bucket.startSeconds
+        )
+      } else if (query == "q3" && record.kind == 13) {
+        q3Allowed(record.key) -= record.value
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          q3Allowed(record.key),
+          record.price,
+          bucket.startSeconds
+        )
+      } else if (query == "q3" && record.kind == 14) {
+        q3Auctions(record.key) -= 1
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          q3Auctions(record.key),
+          record.price,
+          bucket.startSeconds
+        )
+      } else if (query == "q4" && record.kind == 24) {
+        q4Counts(record.key) -= 1
+        q4Sums(record.key) -= record.price
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          q4Counts(record.key),
+          q4Sums(record.key),
+          bucket.startSeconds
+        )
+      } else if (query == "q9" && record.kind == 39) {
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          record.value,
+          q9Max(record.key),
+          bucket.startSeconds
+        )
+      } else if (query == "q11" && record.kind == 31) {
+        q11Counts(record.key) -= 1
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          q11Counts(record.key),
+          record.price,
           bucket.startSeconds
         )
       } else if (query == "q0" || record.kind != 2) {
@@ -533,6 +623,54 @@ object NexmarkRegionMatrixHelpers {
             appendRecord(bucket, out)
           }
 
+        case "q3" =>
+          eventKind(i) match {
+            case 0 =>
+              val id = personId(i)
+              val allowed = allowedSeller(id, category(i))
+              q3Allowed(id) += allowed
+              appendRecord(
+                bucket,
+                new HeapRecord(13, i, id, allowed, price(i), i.toLong, null)
+              )
+            case 1 =>
+              val seller = auctionSeller(i)
+              q3Auctions(seller) += 1
+              appendRecord(
+                bucket,
+                new HeapRecord(14, i, seller, auctionId(i), price(i), i.toLong, null)
+              )
+              if (q3Allowed(seller) > 0) {
+                val out =
+                  new HeapRecord(
+                    23,
+                    i,
+                    seller,
+                    q3Allowed(seller),
+                    q3Auctions(seller).toLong,
+                    i.toLong,
+                    null
+                  )
+                appendRecord(bucket, out)
+              }
+            case _ => ()
+          }
+
+        case "q4" =>
+          val cat = category(i)
+          val bidPrice = price(i)
+          q4Counts(cat) += 1
+          q4Sums(cat) += bidPrice
+          appendRecord(
+            bucket,
+            new HeapRecord(24, i, cat, q4Counts(cat), bidPrice, i.toLong, null)
+          )
+          if (i % cfg.sampleEvery == 0) {
+            val avg = q4Sums(cat) / q4Counts(cat).toLong
+            checksum = fold(checksum, 44, i, cat, q4Counts(cat), avg, startSeconds)
+            outputCount += 1L
+          }
+
         case "q5" =>
           val auction = auctionId(i)
           val bidPrice = price(i)
@@ -599,6 +737,33 @@ object NexmarkRegionMatrixHelpers {
               }
             case _ =>
               ()
+          }
+
+        case "q9" =>
+          val auction = auctionId(i)
+          val bidPrice = price(i)
+          val bid = new HeapRecord(39, i, auction, bidderId(i), bidPrice, i.toLong, null)
+          appendRecord(bucket, bid)
+          if (bidPrice >= q9Max(auction)) {
+            q9Max(auction) = bidPrice
+            appendRecord(
+              bucket,
+              new HeapRecord(49, i, auction, bid.value, bidPrice, i.toLong, null)
+            )
+          }
+
+        case "q11" =>
+          val bidder = bidderId(i)
+          q11Counts(bidder) += 1
+          appendRecord(
+            bucket,
+            new HeapRecord(31, i, bidder, q11Counts(bidder), price(i), i.toLong, null)
+          )
+          if ((q11Counts(bidder) & 3) == 1) {
+            appendRecord(
+              bucket,
+              new HeapRecord(41, i, bidder, q11Counts(bidder), price(i), i.toLong, null)
+            )
           }
       }
       i += 1
@@ -776,6 +941,18 @@ object NexmarkRegionMatrixHelpers {
       if (query == "q8") new Array[Int](cfg.personSpace) else null
     val q8Auctions =
       if (query == "q8") new Array[Int](cfg.personSpace) else null
+    val q3Allowed =
+      if (query == "q3") new Array[Int](cfg.personSpace) else null
+    val q3Auctions =
+      if (query == "q3") new Array[Int](cfg.personSpace) else null
+    val q4Counts =
+      if (query == "q4") new Array[Int](cfg.categorySpace) else null
+    val q4Sums =
+      if (query == "q4") new Array[Long](cfg.categorySpace) else null
+    val q9Max =
+      if (query == "q9") new Array[Long](cfg.auctionSpace) else null
+    val q11Counts =
+      if (query == "q11") new Array[Int](cfg.personSpace) else null
     var first: TrustedBucket = null
     var last: TrustedBucket = null
     var current: TrustedBucket = null
@@ -816,6 +993,61 @@ object NexmarkRegionMatrixHelpers {
           record.key,
           q8Persons(record.key),
           q8Auctions(record.key).toLong,
+          bucket.startSeconds
+        )
+      } else if (query == "q3" && record.kind == 13) {
+        q3Allowed(record.key) -= record.value
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          q3Allowed(record.key),
+          record.price,
+          bucket.startSeconds
+        )
+      } else if (query == "q3" && record.kind == 14) {
+        q3Auctions(record.key) -= 1
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          q3Auctions(record.key),
+          record.price,
+          bucket.startSeconds
+        )
+      } else if (query == "q4" && record.kind == 24) {
+        q4Counts(record.key) -= 1
+        q4Sums(record.key) -= record.price
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          q4Counts(record.key),
+          q4Sums(record.key),
+          bucket.startSeconds
+        )
+      } else if (query == "q9" && record.kind == 39) {
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          record.value,
+          q9Max(record.key),
+          bucket.startSeconds
+        )
+      } else if (query == "q11" && record.kind == 31) {
+        q11Counts(record.key) -= 1
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          q11Counts(record.key),
+          record.price,
           bucket.startSeconds
         )
       } else if (query == "q0" || record.kind != 2) {
@@ -934,6 +1166,71 @@ object NexmarkRegionMatrixHelpers {
               appendRecord(bucket, out)
             }
 
+          case "q3" =>
+            eventKind(i) match {
+              case 0 =>
+                val id = personId(i)
+                val allowed = allowedSeller(id, category(i))
+                q3Allowed(id) += allowed
+                appendRecord(
+                  bucket,
+                  region.alloc(
+                    new TrustedRecord(13, i, id, allowed, price(i), i.toLong, null)
+                  )
+                )
+              case 1 =>
+                val seller = auctionSeller(i)
+                q3Auctions(seller) += 1
+                appendRecord(
+                  bucket,
+                  region.alloc(
+                    new TrustedRecord(
+                      14,
+                      i,
+                      seller,
+                      auctionId(i),
+                      price(i),
+                      i.toLong,
+                      null
+                    )
+                  )
+                )
+                if (q3Allowed(seller) > 0) {
+                  appendRecord(
+                    bucket,
+                    region.alloc(
+                      new TrustedRecord(
+                        23,
+                        i,
+                        seller,
+                        q3Allowed(seller),
+                        q3Auctions(seller).toLong,
+                        i.toLong,
+                        null
+                      )
+                    )
+                  )
+                }
+              case _ => ()
+            }
+
+          case "q4" =>
+            val cat = category(i)
+            val bidPrice = price(i)
+            q4Counts(cat) += 1
+            q4Sums(cat) += bidPrice
+            appendRecord(
+              bucket,
+              region.alloc(
+                new TrustedRecord(24, i, cat, q4Counts(cat), bidPrice, i.toLong, null)
+              )
+            )
+            if (i % cfg.sampleEvery == 0) {
+              val avg = q4Sums(cat) / q4Counts(cat).toLong
+              checksum = fold(checksum, 44, i, cat, q4Counts(cat), avg, startSeconds)
+              outputCount += 1L
+            }
+
           case "q5" =>
             val auction = auctionId(i)
             val bidPrice = price(i)
@@ -1027,6 +1324,58 @@ object NexmarkRegionMatrixHelpers {
               case _ =>
                 ()
             }
+
+          case "q9" =>
+            val auction = auctionId(i)
+            val bidPrice = price(i)
+            val bid =
+              region.alloc(
+                new TrustedRecord(39, i, auction, bidderId(i), bidPrice, i.toLong, null)
+              )
+            appendRecord(bucket, bid)
+            if (bidPrice >= q9Max(auction)) {
+              q9Max(auction) = bidPrice
+              appendRecord(
+                bucket,
+                region.alloc(
+                  new TrustedRecord(49, i, auction, bid.value, bidPrice, i.toLong, null)
+                )
+              )
+            }
+
+          case "q11" =>
+            val bidder = bidderId(i)
+            q11Counts(bidder) += 1
+            appendRecord(
+              bucket,
+              region.alloc(
+                new TrustedRecord(
+                  31,
+                  i,
+                  bidder,
+                  q11Counts(bidder),
+                  price(i),
+                  i.toLong,
+                  null
+                )
+              )
+            )
+            if ((q11Counts(bidder) & 3) == 1) {
+              appendRecord(
+                bucket,
+                region.alloc(
+                  new TrustedRecord(
+                    41,
+                    i,
+                    bidder,
+                    q11Counts(bidder),
+                    price(i),
+                    i.toLong,
+                    null
+                  )
+                )
+              )
+            }
         }
         i += 1
       }
@@ -1059,6 +1408,18 @@ object NexmarkRegionMatrixHelpers {
       if (query == "q8") new Array[Int](cfg.personSpace) else null
     val q8Auctions =
       if (query == "q8") new Array[Int](cfg.personSpace) else null
+    val q3Allowed =
+      if (query == "q3") new Array[Int](cfg.personSpace) else null
+    val q3Auctions =
+      if (query == "q3") new Array[Int](cfg.personSpace) else null
+    val q4Counts =
+      if (query == "q4") new Array[Int](cfg.categorySpace) else null
+    val q4Sums =
+      if (query == "q4") new Array[Long](cfg.categorySpace) else null
+    val q9Max =
+      if (query == "q9") new Array[Long](cfg.auctionSpace) else null
+    val q11Counts =
+      if (query == "q11") new Array[Int](cfg.personSpace) else null
     var first: SafeZoneBucket = null
     var last: SafeZoneBucket = null
     var current: SafeZoneBucket = null
@@ -1102,6 +1463,61 @@ object NexmarkRegionMatrixHelpers {
           record.key,
           q8Persons(record.key),
           q8Auctions(record.key).toLong,
+          bucket.startSeconds
+        )
+      } else if (query == "q3" && record.kind == 13) {
+        q3Allowed(record.key) -= record.value
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          q3Allowed(record.key),
+          record.price,
+          bucket.startSeconds
+        )
+      } else if (query == "q3" && record.kind == 14) {
+        q3Auctions(record.key) -= 1
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          q3Auctions(record.key),
+          record.price,
+          bucket.startSeconds
+        )
+      } else if (query == "q4" && record.kind == 24) {
+        q4Counts(record.key) -= 1
+        q4Sums(record.key) -= record.price
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          q4Counts(record.key),
+          q4Sums(record.key),
+          bucket.startSeconds
+        )
+      } else if (query == "q9" && record.kind == 39) {
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          record.value,
+          q9Max(record.key),
+          bucket.startSeconds
+        )
+      } else if (query == "q11" && record.kind == 31) {
+        q11Counts(record.key) -= 1
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.id,
+          record.key,
+          q11Counts(record.key),
+          record.price,
           bucket.startSeconds
         )
       } else if (query == "q0" || record.kind != 2) {
@@ -1267,6 +1683,83 @@ object NexmarkRegionMatrixHelpers {
               appendRecord(bucket, out)
             }
 
+          case "q3" =>
+            eventKind(i) match {
+              case 0 =>
+                val id = personId(i)
+                val allowed = allowedSeller(id, category(i))
+                q3Allowed(id) += allowed
+                appendRecord(
+                  bucket,
+                  SafeZoneAllocator
+                    .allocate(
+                      zone,
+                      new SafeZoneRecord(13, i, id, allowed, price(i), i.toLong, null)
+                    )
+                    .asInstanceOf[SafeZoneRecord]
+                )
+              case 1 =>
+                val seller = auctionSeller(i)
+                q3Auctions(seller) += 1
+                appendRecord(
+                  bucket,
+                  SafeZoneAllocator
+                    .allocate(
+                      zone,
+                      new SafeZoneRecord(
+                        14,
+                        i,
+                        seller,
+                        auctionId(i),
+                        price(i),
+                        i.toLong,
+                        null
+                      )
+                    )
+                    .asInstanceOf[SafeZoneRecord]
+                )
+                if (q3Allowed(seller) > 0) {
+                  appendRecord(
+                    bucket,
+                    SafeZoneAllocator
+                      .allocate(
+                        zone,
+                        new SafeZoneRecord(
+                          23,
+                          i,
+                          seller,
+                          q3Allowed(seller),
+                          q3Auctions(seller).toLong,
+                          i.toLong,
+                          null
+                        )
+                      )
+                      .asInstanceOf[SafeZoneRecord]
+                  )
+                }
+              case _ => ()
+            }
+
+          case "q4" =>
+            val cat = category(i)
+            val bidPrice = price(i)
+            q4Counts(cat) += 1
+            q4Sums(cat) += bidPrice
+            appendRecord(
+              bucket,
+              SafeZoneAllocator
+                .allocate(
+                  zone,
+                  new SafeZoneRecord(24, i, cat, q4Counts(cat), bidPrice, i.toLong, null)
+                )
+                .asInstanceOf[SafeZoneRecord]
+            )
+            if (i % cfg.sampleEvery == 0) {
+              val avg = q4Sums(cat) / q4Counts(cat).toLong
+              checksum = fold(checksum, 44, i, cat, q4Counts(cat), avg, startSeconds)
+              outputCount += 1L
+            }
+
           case "q5" =>
             val auction = auctionId(i)
             val bidPrice = price(i)
@@ -1383,6 +1876,70 @@ object NexmarkRegionMatrixHelpers {
               case _ =>
                 ()
             }
+
+          case "q9" =>
+            val auction = auctionId(i)
+            val bidPrice = price(i)
+            val bid =
+              SafeZoneAllocator
+                .allocate(
+                  zone,
+                  new SafeZoneRecord(39, i, auction, bidderId(i), bidPrice, i.toLong, null)
+                )
+                .asInstanceOf[SafeZoneRecord]
+            appendRecord(bucket, bid)
+            if (bidPrice >= q9Max(auction)) {
+              q9Max(auction) = bidPrice
+              appendRecord(
+                bucket,
+                SafeZoneAllocator
+                  .allocate(
+                    zone,
+                    new SafeZoneRecord(49, i, auction, bid.value, bidPrice, i.toLong, null)
+                  )
+                  .asInstanceOf[SafeZoneRecord]
+              )
+            }
+
+          case "q11" =>
+            val bidder = bidderId(i)
+            q11Counts(bidder) += 1
+            appendRecord(
+              bucket,
+              SafeZoneAllocator
+                .allocate(
+                  zone,
+                  new SafeZoneRecord(
+                    31,
+                    i,
+                    bidder,
+                    q11Counts(bidder),
+                    price(i),
+                    i.toLong,
+                    null
+                  )
+                )
+                .asInstanceOf[SafeZoneRecord]
+            )
+            if ((q11Counts(bidder) & 3) == 1) {
+              appendRecord(
+                bucket,
+                SafeZoneAllocator
+                  .allocate(
+                    zone,
+                    new SafeZoneRecord(
+                      41,
+                      i,
+                      bidder,
+                      q11Counts(bidder),
+                      price(i),
+                      i.toLong,
+                      null
+                    )
+                  )
+                  .asInstanceOf[SafeZoneRecord]
+              )
+            }
         }
         i += 1
       }
@@ -1415,6 +1972,18 @@ object NexmarkRegionMatrixHelpers {
       if (query == "q8") new Array[Int](cfg.personSpace) else null
     val q8Auctions =
       if (query == "q8") new Array[Int](cfg.personSpace) else null
+    val q3Allowed =
+      if (query == "q3") new Array[Int](cfg.personSpace) else null
+    val q3Auctions =
+      if (query == "q3") new Array[Int](cfg.personSpace) else null
+    val q4Counts =
+      if (query == "q4") new Array[Int](cfg.categorySpace) else null
+    val q4Sums =
+      if (query == "q4") new Array[Long](cfg.categorySpace) else null
+    val q9Max =
+      if (query == "q9") new Array[Long](cfg.auctionSpace) else null
+    val q11Counts =
+      if (query == "q11") new Array[Int](cfg.personSpace) else null
     var outputCount = 0L
     val checksum = RiftRegion.streaming { stream ?=>
       final class Record(
@@ -1470,6 +2039,61 @@ object NexmarkRegionMatrixHelpers {
               record.key,
               q8Persons(record.key),
               q8Auctions(record.key).toLong,
+              bucket.startSeconds
+            )
+          } else if (query == "q3" && record.kind == 13) {
+            q3Allowed(record.key) -= record.value
+            running = fold(
+              running,
+              record.kind + 40,
+              record.id,
+              record.key,
+              q3Allowed(record.key),
+              record.price,
+              bucket.startSeconds
+            )
+          } else if (query == "q3" && record.kind == 14) {
+            q3Auctions(record.key) -= 1
+            running = fold(
+              running,
+              record.kind + 40,
+              record.id,
+              record.key,
+              q3Auctions(record.key),
+              record.price,
+              bucket.startSeconds
+            )
+          } else if (query == "q4" && record.kind == 24) {
+            q4Counts(record.key) -= 1
+            q4Sums(record.key) -= record.price
+            running = fold(
+              running,
+              record.kind + 40,
+              record.id,
+              record.key,
+              q4Counts(record.key),
+              q4Sums(record.key),
+              bucket.startSeconds
+            )
+          } else if (query == "q9" && record.kind == 39) {
+            running = fold(
+              running,
+              record.kind + 40,
+              record.id,
+              record.key,
+              record.value,
+              q9Max(record.key),
+              bucket.startSeconds
+            )
+          } else if (query == "q11" && record.kind == 31) {
+            q11Counts(record.key) -= 1
+            running = fold(
+              running,
+              record.kind + 40,
+              record.id,
+              record.key,
+              q11Counts(record.key),
+              record.price,
               bucket.startSeconds
             )
           } else if (query == "q0" || record.kind != 2) {
@@ -1568,6 +2192,58 @@ object NexmarkRegionMatrixHelpers {
               RiftRegion.appendWindow(stream, window, bucket, out)
             }
 
+          case "q3" =>
+            eventKind(i) match {
+              case 0 =>
+                val id = personId(i)
+                val allowed = allowedSeller(id, category(i))
+                q3Allowed(id) += allowed
+                val person: Record^{stream} =
+                  RiftRegion.alloc(
+                    new Record(13, i, id, allowed, price(i), i.toLong)
+                  )(using bucketRegion)
+                RiftRegion.appendWindow(stream, window, bucket, person)
+              case 1 =>
+                val seller = auctionSeller(i)
+                q3Auctions(seller) += 1
+                val auction: Record^{stream} =
+                  RiftRegion.alloc(
+                    new Record(14, i, seller, auctionId(i), price(i), i.toLong)
+                  )(using bucketRegion)
+                RiftRegion.appendWindow(stream, window, bucket, auction)
+                if (q3Allowed(seller) > 0) {
+                  val out: Record^{stream} =
+                    RiftRegion.alloc(
+                      new Record(
+                        23,
+                        i,
+                        seller,
+                        q3Allowed(seller),
+                        q3Auctions(seller).toLong,
+                        i.toLong
+                      )
+                    )(using bucketRegion)
+                  RiftRegion.appendWindow(stream, window, bucket, out)
+                }
+              case _ => ()
+            }
+
+          case "q4" =>
+            val cat = category(i)
+            val bidPrice = price(i)
+            q4Counts(cat) += 1
+            q4Sums(cat) += bidPrice
+            val bid: Record^{stream} =
+              RiftRegion.alloc(
+                new Record(24, i, cat, q4Counts(cat), bidPrice, i.toLong)
+              )(using bucketRegion)
+            RiftRegion.appendWindow(stream, window, bucket, bid)
+            if (i % cfg.sampleEvery == 0) {
+              val avg = q4Sums(cat) / q4Counts(cat).toLong
+              running = fold(running, 44, i, cat, q4Counts(cat), avg, startSeconds)
+              outputs += 1L
+            }
+
           case "q5" =>
             val auction = auctionId(i)
             val bidPrice = price(i)
@@ -1649,6 +2325,39 @@ object NexmarkRegionMatrixHelpers {
                 }
               case _ =>
                 ()
+            }
+
+          case "q9" =>
+            val auction = auctionId(i)
+            val bidPrice = price(i)
+            val bid: Record^{stream} =
+              RiftRegion.alloc(
+                new Record(39, i, auction, bidderId(i), bidPrice, i.toLong)
+              )(using bucketRegion)
+            RiftRegion.appendWindow(stream, window, bucket, bid)
+            if (bidPrice >= q9Max(auction)) {
+              q9Max(auction) = bidPrice
+              val out: Record^{stream} =
+                RiftRegion.alloc(
+                  new Record(49, i, auction, bid.value, bidPrice, i.toLong)
+                )(using bucketRegion)
+              RiftRegion.appendWindow(stream, window, bucket, out)
+            }
+
+          case "q11" =>
+            val bidder = bidderId(i)
+            q11Counts(bidder) += 1
+            val bid: Record^{stream} =
+              RiftRegion.alloc(
+                new Record(31, i, bidder, q11Counts(bidder), price(i), i.toLong)
+              )(using bucketRegion)
+            RiftRegion.appendWindow(stream, window, bucket, bid)
+            if ((q11Counts(bidder) & 3) == 1) {
+              val out: Record^{stream} =
+                RiftRegion.alloc(
+                  new Record(41, i, bidder, q11Counts(bidder), price(i), i.toLong)
+                )(using bucketRegion)
+              RiftRegion.appendWindow(stream, window, bucket, out)
             }
         }
         i += 1
@@ -1874,7 +2583,9 @@ object NexmarkRegionMatrixHelpers {
 
   def validateQuery(query: String): Unit =
     query match {
-      case "q0" | "q1" | "q2" | "q5" | "q8" => ()
+      case "q0" | "q1" | "q2" | "q3" | "q4" | "q5" | "q8" | "q9" |
+          "q11" =>
+        ()
       case other =>
         throw new IllegalArgumentException(s"unknown NEXMark query '$other'")
     }
@@ -1899,6 +2610,7 @@ object NexmarkRegionMatrixHelpers {
 
     val elapsedMs = new Array[Double](cfg.benchmarkRuns)
     val gcNanos = new Array[Long](cfg.benchmarkRuns)
+    val gcCollections = new Array[Long](cfg.benchmarkRuns)
     val riftOpNanos = new Array[Long](cfg.benchmarkRuns)
     val riftObjects = new Array[Long](cfg.benchmarkRuns)
     val riftOpens = new Array[Long](cfg.benchmarkRuns)
@@ -1925,6 +2637,7 @@ object NexmarkRegionMatrixHelpers {
 
       elapsedMs(run) = (end - start) / 1000000.0
       gcNanos(run) = runtime.gcNanos
+      gcCollections(run) = runtime.gcCollections
       riftOpNanos(run) = runtime.riftRegionOpNanos
       riftObjects(run) = runtime.riftAllocObjectTotal
       riftOpens(run) = runtime.riftRegionOpenTotal
@@ -1948,6 +2661,9 @@ object NexmarkRegionMatrixHelpers {
 
     val medianElapsed = medianDouble(elapsedMs)
     val medianGc = medianLong(gcNanos)
+    val maxGc = maxLong(gcNanos)
+    val runsWithGc = countPositive(gcCollections)
+    val maxGcCollections = maxLong(gcCollections)
     val medianRiftOp = medianLong(riftOpNanos)
     val medianObjects = medianLong(riftObjects)
     val medianOpens = medianLong(riftOpens)
@@ -1959,6 +2675,9 @@ object NexmarkRegionMatrixHelpers {
         f"query=$query mode=$mode input=${cfg.inputLabel} " +
         f"median_ms=$medianElapsed%.3f " +
         f"median_gc_ms=${medianGc / 1000000.0}%.3f " +
+        f"max_gc_ms=${maxGc / 1000000.0}%.3f " +
+        f"runs_with_gc=$runsWithGc%d " +
+        f"max_gc_collections=$maxGcCollections%d " +
         f"median_rift_op_ms=${medianRiftOp / 1000000.0}%.3f " +
         f"median_rift_alloc_object_total=$medianObjects%d " +
         f"median_rift_open_total=$medianOpens%d " +

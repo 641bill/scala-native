@@ -9,7 +9,7 @@ import scala.scalanative.runtime.{
   SafeZoneAllocator
 }
 
-object WikimediaRegionConfig {
+object RiotBenchRegionConfig {
   private def parsePositiveInt(value: String): Option[Int] =
     try {
       val parsed = value.toInt
@@ -32,80 +32,61 @@ object WikimediaRegionConfig {
   private def envNonNegativeInt(name: String, default: Int): Int =
     sys.env.get(name).flatMap(parseNonNegativeInt).getOrElse(default)
 
-  val events: Int = envInt("WIKIMEDIA_EVENTS", 100000)
-  val eventsPerBucket: Int = envInt("WIKIMEDIA_EVENTS_PER_BUCKET", 2500)
-  val liveBuckets: Int = envInt("WIKIMEDIA_LIVE_BUCKETS", 4)
-  val projectSpace: Int = envInt("WIKIMEDIA_PROJECT_SPACE", 64)
-  val articleSpace: Int = envInt("WIKIMEDIA_ARTICLE_SPACE", 65536)
-  val sampleEvery: Int = envInt("WIKIMEDIA_SAMPLE_EVERY", 4096)
-  val warmupRuns: Int = envNonNegativeInt("WIKIMEDIA_WARMUPS", 1)
-  val benchmarkRuns: Int = envInt("WIKIMEDIA_BENCHMARK_RUNS", 3)
-  val inputPath: String = BenchmarkInputSupport.envString("WIKIMEDIA_INPUT")
-  val inputKind: String =
-    sys.env.get("WIKIMEDIA_INPUT_KIND").map(_.trim).filter(_.nonEmpty) match {
-      case Some(value) => value
-      case None =>
-        if (inputPath.contains("clickstream")) "clickstream"
-        else if (inputPath.nonEmpty) "pageviews"
-        else "generated"
-    }
+  val events: Int = envInt("RIOTBENCH_EVENTS", 1000000)
+  val eventsPerBucket: Int = envInt("RIOTBENCH_EVENTS_PER_BUCKET", 25000)
+  val liveBuckets: Int = envInt("RIOTBENCH_LIVE_BUCKETS", 4)
+  val sensorSpace: Int = envInt("RIOTBENCH_SENSOR_SPACE", 4096)
+  val deviceSpace: Int = envInt("RIOTBENCH_DEVICE_SPACE", 1024)
+  val warmupRuns: Int = envNonNegativeInt("RIOTBENCH_WARMUPS", 1)
+  val benchmarkRuns: Int = envInt("RIOTBENCH_BENCHMARK_RUNS", 3)
+  val inputPath: String = BenchmarkInputSupport.envString("RIOTBENCH_INPUT")
 }
 
-object WikimediaRegionMatrixHelpers {
+object RiotBenchRegionMatrixHelpers {
   @volatile private var checksumSink = 0L
   @volatile private var outputSink = 0L
 
-  private final class HeapEvent(
+  private final class HeapRecord(
       val kind: Int,
       val timestamp: Long,
-      val project: Int,
-      val article: Int,
-      val peer: Int,
+      val sensorId: Int,
+      val deviceId: Int,
       val value: Int,
-      val bytes: Long,
+      val quality: Int,
       val hash: Long,
-      var next: HeapEvent
+      var next: HeapRecord
   )
 
-  private final class HeapBucket(
-      val startEvent: Long,
-      var next: HeapBucket
-  ) {
-    var head: HeapEvent = null
-    var tail: HeapEvent = null
+  private final class HeapBucket(val startEvent: Long, var next: HeapBucket) {
+    var head: HeapRecord = null
+    var tail: HeapRecord = null
   }
 
-  private final class SafeEvent(
+  private final class SafeRecord(
       val kind: Int,
       val timestamp: Long,
-      val project: Int,
-      val article: Int,
-      val peer: Int,
+      val sensorId: Int,
+      val deviceId: Int,
       val value: Int,
-      val bytes: Long,
+      val quality: Int,
       val hash: Long,
-      var next: SafeEvent
+      var next: SafeRecord
   )
 
-  private final class SafeBucket(
-      val zone: SafeZone,
-      val startEvent: Long,
-      var next: SafeBucket
-  ) {
-    var head: SafeEvent = null
-    var tail: SafeEvent = null
+  private final class SafeBucket(val zone: SafeZone, val startEvent: Long, var next: SafeBucket) {
+    var head: SafeRecord = null
+    var tail: SafeRecord = null
   }
 
-  private final class TrustedEvent(
+  private final class TrustedRecord(
       val kind: Int,
       val timestamp: Long,
-      val project: Int,
-      val article: Int,
-      val peer: Int,
+      val sensorId: Int,
+      val deviceId: Int,
       val value: Int,
-      val bytes: Long,
+      val quality: Int,
       val hash: Long,
-      var next: TrustedEvent
+      var next: TrustedRecord
   )
 
   private final class TrustedBucket(
@@ -113,8 +94,8 @@ object WikimediaRegionMatrixHelpers {
       val startEvent: Long,
       var next: TrustedBucket
   ) {
-    var head: TrustedEvent = null
-    var tail: TrustedEvent = null
+    var head: TrustedRecord = null
+    var tail: TrustedRecord = null
   }
 
   final case class RunOutcome(checksum: Long, outputCount: Long)
@@ -133,37 +114,27 @@ object WikimediaRegionMatrixHelpers {
   private final class InputData(
       val label: String,
       val events: Int,
-      val projects: Array[Int],
-      val articles: Array[Int],
-      val peers: Array[Int],
+      val sensorIds: Array[Int],
+      val deviceIds: Array[Int],
       val values: Array[Int],
-      val bytes: Array[Long],
+      val qualities: Array[Int],
       val hashes: Array[Long]
   ) {
-    def projectAt(index: Int): Int =
-      if (projects == null) projectFor(index) else projects(index)
+    def sensorAt(index: Int): Int =
+      if (sensorIds == null) sensorFor(index) else sensorIds(index)
 
-    def articleAt(index: Int): Int =
-      if (articles == null) articleFor(index) else articles(index)
-
-    def peerAt(index: Int): Int =
-      if (peers == null) peerFor(index) else peers(index)
+    def deviceAt(index: Int): Int =
+      if (deviceIds == null) deviceFor(index) else deviceIds(index)
 
     def valueAt(index: Int): Int =
-      if (values == null) viewsFor(index) else values(index)
+      if (values == null) valueFor(index) else values(index)
 
-    def bytesAt(index: Int): Long =
-      if (bytes == null) bytesFor(index) else bytes(index)
+    def qualityAt(index: Int): Int =
+      if (qualities == null) qualityFor(index) else qualities(index)
 
-    def hashAt(
-        kind: Int,
-        index: Int,
-        project: Int,
-        article: Int,
-        peer: Int
-    ): Long =
-      if (hashes == null) eventHash(kind, index, project, article, peer)
-      else hashes(index) ^ (kind.toLong * 1099511628211L)
+    def hashAt(index: Int, sensor: Int, value: Int): Long =
+      if (hashes == null) readingHash(index, sensor, value)
+      else hashes(index) ^ (value.toLong * 1099511628211L)
   }
 
   private lazy val inputData: InputData = loadInput()
@@ -268,49 +239,38 @@ object WikimediaRegionMatrixHelpers {
     count
   }
 
+  private def sensorFor(index: Int): Int =
+    mix(index * 1103515245 + 12345) % RiotBenchRegionConfig.sensorSpace
+
+  private def deviceFor(index: Int): Int =
+    mix(index * 1664525 + 1013904223) % RiotBenchRegionConfig.deviceSpace
+
+  private def valueFor(index: Int): Int =
+    (mix(index * 8191 + 17) % 240) - 40
+
+  private def qualityFor(index: Int): Int =
+    if ((mix(index * 65537 + 19) % 100) < 94) 1 else 0
+
+  private def readingHash(index: Int, sensor: Int, value: Int): Long =
+    mix(index * 1000003 + sensor * 8191 + value * 131).toLong
+
   private def bucketStart(eventIndex: Int): Long = {
-    val cfg = WikimediaRegionConfig
+    val cfg = RiotBenchRegionConfig
     (eventIndex / cfg.eventsPerBucket).toLong * cfg.eventsPerBucket.toLong
   }
 
   private def closeCutoff(currentStartEvent: Long): Long = {
-    val cfg = WikimediaRegionConfig
+    val cfg = RiotBenchRegionConfig
     currentStartEvent -
       (cfg.liveBuckets.toLong - 1L) * cfg.eventsPerBucket.toLong
   }
 
-  private def projectFor(eventIndex: Int): Int =
-    mix(eventIndex * 1103515245 + 12345) % WikimediaRegionConfig.projectSpace
-
-  private def articleFor(eventIndex: Int): Int =
-    mix(eventIndex * 1000003 + 8191) % WikimediaRegionConfig.articleSpace
-
-  private def peerFor(eventIndex: Int): Int =
-    mix(eventIndex * 9176 + 131071) % WikimediaRegionConfig.articleSpace
-
-  private def viewsFor(eventIndex: Int): Int =
-    1 + (mix(eventIndex * 3571 + 53) % 64)
-
-  private def bytesFor(eventIndex: Int): Long =
-    128L + (mix(eventIndex * 104729 + 17) % 8192).toLong
-
-  private def eventHash(
-      kind: Int,
-      eventIndex: Int,
-      project: Int,
-      article: Int,
-      peer: Int
-  ): Long =
-    mix(eventIndex * 1000003 + kind * 8191 + project * 131 + article + peer)
-      .toLong
-
   private def loadInput(): InputData = {
-    val cfg = WikimediaRegionConfig
+    val cfg = RiotBenchRegionConfig
     if (cfg.inputPath.isEmpty)
       return new InputData(
-        "generated-tsv-shaped",
+        "generated-riotbench-shaped",
         cfg.events,
-        null,
         null,
         null,
         null,
@@ -318,65 +278,34 @@ object WikimediaRegionMatrixHelpers {
         null
       )
 
-    val projects = scala.collection.mutable.ArrayBuffer.empty[Int]
-    val articles = scala.collection.mutable.ArrayBuffer.empty[Int]
-    val peers = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val sensors = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val devices = scala.collection.mutable.ArrayBuffer.empty[Int]
     val values = scala.collection.mutable.ArrayBuffer.empty[Int]
-    val bytes = scala.collection.mutable.ArrayBuffer.empty[Long]
+    val qualities = scala.collection.mutable.ArrayBuffer.empty[Int]
     val hashes = scala.collection.mutable.ArrayBuffer.empty[Long]
     val reader = BenchmarkInputSupport.openText(cfg.inputPath)
 
-    def append(
-        projectText: String,
-        articleText: String,
-        peerText: String,
-        valueText: String,
-        bytesText: String,
-        rowHashText: String
-    ): Unit = {
-      val project =
-        BenchmarkInputSupport.positiveModulo(
-          BenchmarkInputSupport.stableHash(projectText),
-          cfg.projectSpace
-        )
-      val article =
-        BenchmarkInputSupport.positiveModulo(
-          BenchmarkInputSupport.stableHash(articleText),
-          cfg.articleSpace
-        )
-      val peer =
-        BenchmarkInputSupport.positiveModulo(
-          BenchmarkInputSupport.stableHash(peerText),
-          cfg.articleSpace
-        )
-      val value = BenchmarkInputSupport.parseInt(valueText, 1)
-      val rowBytes =
-        BenchmarkInputSupport.parseLong(
-          bytesText,
-          projectText.length.toLong + articleText.length.toLong +
-            peerText.length.toLong
-        )
-      projects += project
-      articles += article
-      peers += peer
-      values += (if (value > 0) value else 1)
-      bytes += (if (rowBytes >= 0L) rowBytes else 0L)
-      hashes += BenchmarkInputSupport.stableHash(rowHashText).toLong
-    }
-
     try {
       var line = reader.readLine()
-      while (line != null && projects.length < cfg.events) {
-        if (line.nonEmpty) {
-          if (cfg.inputKind == "clickstream") {
-            val parts = line.split("\t", -1)
-            if (parts.length >= 4)
-              append(parts(2), parts(1), parts(0), parts(3), "", line)
-          } else {
-            val parts = line.split(" ", -1)
-            if (parts.length >= 4)
-              append(parts(0), parts(1), "", parts(2), parts(3), line)
-          }
+      while (line != null && sensors.length < cfg.events) {
+        val trimmed = line.trim
+        if (trimmed.nonEmpty && trimmed.charAt(0) != '#') {
+          val fields = trimmed.split("[,\\t ]+")
+          val sensorText = if (fields.length > 0) fields(0) else trimmed
+          val deviceText = if (fields.length > 1) fields(1) else sensorText
+          val valueText = if (fields.length > 2) fields(2) else "0"
+          val qualityText = if (fields.length > 3) fields(3) else "1"
+          sensors += BenchmarkInputSupport.positiveModulo(
+            BenchmarkInputSupport.stableHash(sensorText),
+            cfg.sensorSpace
+          )
+          devices += BenchmarkInputSupport.positiveModulo(
+            BenchmarkInputSupport.stableHash(deviceText),
+            cfg.deviceSpace
+          )
+          values += BenchmarkInputSupport.parseInt(valueText, 0)
+          qualities += (if (BenchmarkInputSupport.parseInt(qualityText, 1) > 0) 1 else 0)
+          hashes += BenchmarkInputSupport.stableHash(trimmed).toLong
         }
         line = reader.readLine()
       }
@@ -384,120 +313,133 @@ object WikimediaRegionMatrixHelpers {
       reader.close()
     }
 
-    if (projects.isEmpty)
+    if (sensors.isEmpty)
       throw new IllegalArgumentException(
-        s"Wikimedia input '${cfg.inputPath}' did not contain any usable ${cfg.inputKind} rows"
+        s"RIoTBench input '${cfg.inputPath}' did not contain usable rows"
       )
 
     new InputData(
-      s"real-${cfg.inputKind}-preloaded",
-      projects.length,
-      projects.toArray,
-      articles.toArray,
-      peers.toArray,
+      "real-riotbench-preloaded",
+      sensors.length,
+      sensors.toArray,
+      devices.toArray,
       values.toArray,
-      bytes.toArray,
+      qualities.toArray,
       hashes.toArray
     )
   }
+
+  private def cleanValue(value: Int): Int =
+    if (value < -20) -20 else if (value > 180) 180 else value
+
+  private def isClean(quality: Int, value: Int): Boolean =
+    quality > 0 && value >= -30 && value <= 190
 
   private def fold(
       checksum: Long,
       kind: Int,
       timestamp: Long,
-      project: Int,
-      article: Int,
-      peer: Int,
+      sensorId: Int,
+      deviceId: Int,
       value: Int,
-      bytes: Long,
+      quality: Int,
       hash: Long,
       bucketStartEvent: Long
   ): Long = {
     var h = checksum ^ kind.toLong
     h = (h * 1099511628211L) ^ timestamp
-    h = (h * 1099511628211L) ^ project.toLong
-    h = (h * 1099511628211L) ^ article.toLong
-    h = (h * 1099511628211L) ^ peer.toLong
+    h = (h * 1099511628211L) ^ sensorId.toLong
+    h = (h * 1099511628211L) ^ deviceId.toLong
     h = (h * 1099511628211L) ^ value.toLong
-    h = (h * 1099511628211L) ^ bytes
+    h = (h * 1099511628211L) ^ quality.toLong
     h ^ hash ^ bucketStartEvent
   }
 
-  private def appendEvent(bucket: HeapBucket, event: HeapEvent): Unit =
+  private def appendRecord(bucket: HeapBucket, record: HeapRecord): Unit =
     if (bucket.head == null) {
-      bucket.head = event
-      bucket.tail = event
+      bucket.head = record
+      bucket.tail = record
     } else {
-      bucket.tail.next = event
-      bucket.tail = event
+      bucket.tail.next = record
+      bucket.tail = record
     }
 
-  private def appendEvent(bucket: SafeBucket, event: SafeEvent): Unit =
+  private def appendRecord(bucket: SafeBucket, record: SafeRecord): Unit =
     if (bucket.head == null) {
-      bucket.head = event
-      bucket.tail = event
+      bucket.head = record
+      bucket.tail = record
     } else {
-      bucket.tail.next = event
-      bucket.tail = event
+      bucket.tail.next = record
+      bucket.tail = record
     }
 
-  private def appendEvent(bucket: TrustedBucket, event: TrustedEvent): Unit =
+  private def appendRecord(bucket: TrustedBucket, record: TrustedRecord): Unit =
     if (bucket.head == null) {
-      bucket.head = event
-      bucket.tail = event
+      bucket.head = record
+      bucket.tail = record
     } else {
-      bucket.tail.next = event
-      bucket.tail = event
+      bucket.tail.next = record
+      bucket.tail = record
     }
 
   def validateMode(mode: String): Unit =
     mode match {
       case "heap" | "safezone" | "rift-hp" | "rift-streaming" => ()
       case other =>
-        throw new IllegalArgumentException(
-          s"unknown Wikimedia mode '$other'"
-        )
+        throw new IllegalArgumentException(s"unknown RIoTBench mode '$other'")
     }
 
   def validateQuery(query: String): Unit =
     query match {
-      case "q0-pageviews" | "q1-counts" | "q2-clickstream" => ()
+      case "q0-parse" | "q1-clean-annotate" | "q2-window-stats" => ()
       case other =>
-        throw new IllegalArgumentException(
-          s"unknown Wikimedia query '$other'"
-        )
-    }
-
-  private def extraRecords(query: String): Int =
-    query match {
-      case "q0-pageviews"   => 0
-      case "q1-counts"      => 1
-      case "q2-clickstream" => 1
+        throw new IllegalArgumentException(s"unknown RIoTBench query '$other'")
     }
 
   private def runHeap(query: String): RunOutcome = {
-    val cfg = WikimediaRegionConfig
+    val cfg = RiotBenchRegionConfig
     val input = inputData
+    val sums =
+      if (query == "q2-window-stats") new Array[Long](cfg.sensorSpace)
+      else null
+    val counts =
+      if (query == "q2-window-stats") new Array[Int](cfg.sensorSpace)
+      else null
     var first: HeapBucket = null
     var last: HeapBucket = null
     var current: HeapBucket = null
     var checksum = 0L
     var outputCount = 0L
 
-    def consume(bucket: HeapBucket, event: HeapEvent): Unit = {
-      checksum = fold(
-        checksum,
-        event.kind,
-        event.timestamp,
-        event.project,
-        event.article,
-        event.peer,
-        event.value,
-        event.bytes,
-        event.hash,
-        bucket.startEvent
-      )
-      outputCount += 1L
+    def consume(bucket: HeapBucket, record: HeapRecord): Unit = {
+      if (query == "q2-window-stats") {
+        sums(record.sensorId) -= record.value.toLong
+        counts(record.sensorId) -= 1
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.timestamp,
+          record.sensorId,
+          record.deviceId,
+          counts(record.sensorId),
+          record.quality,
+          record.hash,
+          bucket.startEvent
+        )
+      } else {
+        checksum = fold(
+          checksum,
+          record.kind,
+          record.timestamp,
+          record.sensorId,
+          record.deviceId,
+          record.value,
+          record.quality,
+          record.hash,
+          bucket.startEvent
+        )
+        outputCount += 1L
+      }
     }
 
     def closeExpired(cutoffEvent: Long): Unit =
@@ -506,10 +448,10 @@ object WikimediaRegionMatrixHelpers {
         first.startEvent + cfg.eventsPerBucket.toLong <= cutoffEvent
       ) {
         val bucket = first
-        var event = bucket.head
-        while (event != null) {
-          consume(bucket, event)
-          event = event.next
+        var record = bucket.head
+        while (record != null) {
+          consume(bucket, record)
+          record = record.next
         }
         first = bucket.next
         if (first == null) last = null
@@ -535,79 +477,35 @@ object WikimediaRegionMatrixHelpers {
         bucket
       }
 
-    var eventIndex = 0
-    while (eventIndex < input.events) {
-      val project = input.projectAt(eventIndex)
-      val article = input.articleAt(eventIndex)
-      val peer = input.peerAt(eventIndex)
-      val views = input.valueAt(eventIndex)
-      val bytes = input.bytesAt(eventIndex)
-      val start = bucketStart(eventIndex)
+    var i = 0
+    while (i < input.events) {
+      val start = bucketStart(i)
       val bucket = bucketFor(start)
-      val timestamp = eventIndex.toLong
+      val sensor = input.sensorAt(i)
+      val device = input.deviceAt(i)
+      val rawValue = input.valueAt(i)
+      val quality = input.qualityAt(i)
+      val hash = input.hashAt(i, sensor, rawValue)
+      val cleaned = cleanValue(rawValue)
 
-      appendEvent(
-        bucket,
-        new HeapEvent(
-          1,
-          timestamp,
-          project,
-          article,
-          0,
-          views,
-          bytes,
-          input.hashAt(1, eventIndex, project, article, 0),
-          null
-        )
-      )
-
-      if (query == "q1-counts") {
-        appendEvent(
-          bucket,
-          new HeapEvent(
-            2,
-            timestamp,
-            project,
-            article,
-            0,
-            views,
-            bytes,
-            input.hashAt(2, eventIndex, project, article, 0),
-            null
-          )
-        )
-      } else if (query == "q2-clickstream") {
-        appendEvent(
-          bucket,
-          new HeapEvent(
-            3,
-            timestamp,
-            project,
-            article,
-            peer,
-            1,
-            bytes,
-            input.hashAt(3, eventIndex, project, article, peer),
-            null
-          )
-        )
+      query match {
+        case "q0-parse" =>
+          appendRecord(bucket, new HeapRecord(10, i.toLong, sensor, device, rawValue, quality, hash, null))
+        case "q1-clean-annotate" =>
+          appendRecord(bucket, new HeapRecord(10, i.toLong, sensor, device, rawValue, quality, hash, null))
+          if (isClean(quality, rawValue))
+            appendRecord(bucket, new HeapRecord(21, i.toLong, sensor, device, cleaned, 2, hash, null))
+        case "q2-window-stats" =>
+          if (isClean(quality, rawValue)) {
+            sums(sensor) += cleaned.toLong
+            counts(sensor) += 1
+            appendRecord(bucket, new HeapRecord(22, i.toLong, sensor, device, cleaned, 2, hash, null))
+            val avg = (sums(sensor) / counts(sensor)).toInt
+            checksum = fold(checksum, 32, i.toLong, sensor, device, avg, counts(sensor), hash, start)
+            outputCount += 1L
+          }
       }
-
-      if (eventIndex % cfg.sampleEvery == 0)
-        checksum = fold(
-          checksum,
-          9,
-          timestamp,
-          project,
-          article,
-          peer,
-          extraRecords(query),
-          bytes,
-          input.hashAt(9, eventIndex, project, article, peer),
-          bucket.startEvent
-        )
-
-      eventIndex += 1
+      i += 1
     }
 
     closeExpired(Long.MaxValue)
@@ -617,35 +515,55 @@ object WikimediaRegionMatrixHelpers {
   }
 
   private def runSafeZone(query: String): RunOutcome = {
-    val cfg = WikimediaRegionConfig
+    val cfg = RiotBenchRegionConfig
     val input = inputData
+    val sums =
+      if (query == "q2-window-stats") new Array[Long](cfg.sensorSpace)
+      else null
+    val counts =
+      if (query == "q2-window-stats") new Array[Int](cfg.sensorSpace)
+      else null
     var first: SafeBucket = null
     var last: SafeBucket = null
     var current: SafeBucket = null
     var checksum = 0L
     var outputCount = 0L
 
-    def consume(bucket: SafeBucket, event: SafeEvent): Unit = {
-      checksum = fold(
-        checksum,
-        event.kind,
-        event.timestamp,
-        event.project,
-        event.article,
-        event.peer,
-        event.value,
-        event.bytes,
-        event.hash,
-        bucket.startEvent
-      )
-      outputCount += 1L
-    }
+    def consume(bucket: SafeBucket, record: SafeRecord): Unit =
+      if (query == "q2-window-stats") {
+        sums(record.sensorId) -= record.value.toLong
+        counts(record.sensorId) -= 1
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.timestamp,
+          record.sensorId,
+          record.deviceId,
+          counts(record.sensorId),
+          record.quality,
+          record.hash,
+          bucket.startEvent
+        )
+      } else {
+        checksum = fold(
+          checksum,
+          record.kind,
+          record.timestamp,
+          record.sensorId,
+          record.deviceId,
+          record.value,
+          record.quality,
+          record.hash,
+          bucket.startEvent
+        )
+        outputCount += 1L
+      }
 
     def closeBucket(bucket: SafeBucket): Unit = {
-      var event = bucket.head
-      while (event != null) {
-        consume(bucket, event)
-        event = event.next
+      var record = bucket.head
+      while (record != null) {
+        consume(bucket, record)
+        record = record.next
       }
       bucket.head = null
       bucket.tail = null
@@ -681,96 +599,57 @@ object WikimediaRegionMatrixHelpers {
         bucket
       }
 
-    var eventIndex = 0
+    var i = 0
     try {
-      while (eventIndex < input.events) {
-        val project = input.projectAt(eventIndex)
-        val article = input.articleAt(eventIndex)
-        val peer = input.peerAt(eventIndex)
-        val views = input.valueAt(eventIndex)
-        val bytes = input.bytesAt(eventIndex)
-        val start = bucketStart(eventIndex)
+      while (i < input.events) {
+        val start = bucketStart(i)
         val bucket = bucketFor(start)
         val zone = bucket.zone
-        val timestamp = eventIndex.toLong
+        val sensor = input.sensorAt(i)
+        val device = input.deviceAt(i)
+        val rawValue = input.valueAt(i)
+        val quality = input.qualityAt(i)
+        val hash = input.hashAt(i, sensor, rawValue)
+        val cleaned = cleanValue(rawValue)
 
-        appendEvent(
-          bucket,
-          SafeZoneAllocator
-            .allocate(
-              zone,
-              new SafeEvent(
-                1,
-                timestamp,
-                project,
-                article,
-                0,
-                views,
-                bytes,
-                  input.hashAt(1, eventIndex, project, article, 0),
-                null
-              )
+        query match {
+          case "q0-parse" =>
+            appendRecord(
+              bucket,
+              SafeZoneAllocator
+                .allocate(zone, new SafeRecord(10, i.toLong, sensor, device, rawValue, quality, hash, null))
+                .asInstanceOf[SafeRecord]
             )
-            .asInstanceOf[SafeEvent]
-        )
-
-        if (query == "q1-counts") {
-          appendEvent(
-            bucket,
-            SafeZoneAllocator
-              .allocate(
-                zone,
-                new SafeEvent(
-                  2,
-                  timestamp,
-                  project,
-                  article,
-                  0,
-                  views,
-                  bytes,
-                  input.hashAt(2, eventIndex, project, article, 0),
-                  null
-                )
+          case "q1-clean-annotate" =>
+            appendRecord(
+              bucket,
+              SafeZoneAllocator
+                .allocate(zone, new SafeRecord(10, i.toLong, sensor, device, rawValue, quality, hash, null))
+                .asInstanceOf[SafeRecord]
+            )
+            if (isClean(quality, rawValue))
+              appendRecord(
+                bucket,
+                SafeZoneAllocator
+                  .allocate(zone, new SafeRecord(21, i.toLong, sensor, device, cleaned, 2, hash, null))
+                  .asInstanceOf[SafeRecord]
               )
-              .asInstanceOf[SafeEvent]
-          )
-        } else if (query == "q2-clickstream") {
-          appendEvent(
-            bucket,
-            SafeZoneAllocator
-              .allocate(
-                zone,
-                new SafeEvent(
-                  3,
-                  timestamp,
-                  project,
-                  article,
-                  peer,
-                  1,
-                  bytes,
-                  input.hashAt(3, eventIndex, project, article, peer),
-                  null
-                )
+          case "q2-window-stats" =>
+            if (isClean(quality, rawValue)) {
+              sums(sensor) += cleaned.toLong
+              counts(sensor) += 1
+              appendRecord(
+                bucket,
+                SafeZoneAllocator
+                  .allocate(zone, new SafeRecord(22, i.toLong, sensor, device, cleaned, 2, hash, null))
+                  .asInstanceOf[SafeRecord]
               )
-              .asInstanceOf[SafeEvent]
-          )
+              val avg = (sums(sensor) / counts(sensor)).toInt
+              checksum = fold(checksum, 32, i.toLong, sensor, device, avg, counts(sensor), hash, start)
+              outputCount += 1L
+            }
         }
-
-        if (eventIndex % cfg.sampleEvery == 0)
-          checksum = fold(
-            checksum,
-            9,
-            timestamp,
-            project,
-            article,
-            peer,
-            extraRecords(query),
-            bytes,
-            input.hashAt(9, eventIndex, project, article, peer),
-            bucket.startEvent
-          )
-
-        eventIndex += 1
+        i += 1
       }
       closeExpired(Long.MaxValue)
     } finally {
@@ -787,35 +666,55 @@ object WikimediaRegionMatrixHelpers {
   }
 
   private def runRiftTrusted(query: String, kind: Int): RunOutcome = {
-    val cfg = WikimediaRegionConfig
+    val cfg = RiotBenchRegionConfig
     val input = inputData
+    val sums =
+      if (query == "q2-window-stats") new Array[Long](cfg.sensorSpace)
+      else null
+    val counts =
+      if (query == "q2-window-stats") new Array[Int](cfg.sensorSpace)
+      else null
     var first: TrustedBucket = null
     var last: TrustedBucket = null
     var current: TrustedBucket = null
     var checksum = 0L
     var outputCount = 0L
 
-    def consume(bucket: TrustedBucket, event: TrustedEvent): Unit = {
-      checksum = fold(
-        checksum,
-        event.kind,
-        event.timestamp,
-        event.project,
-        event.article,
-        event.peer,
-        event.value,
-        event.bytes,
-        event.hash,
-        bucket.startEvent
-      )
-      outputCount += 1L
-    }
+    def consume(bucket: TrustedBucket, record: TrustedRecord): Unit =
+      if (query == "q2-window-stats") {
+        sums(record.sensorId) -= record.value.toLong
+        counts(record.sensorId) -= 1
+        checksum = fold(
+          checksum,
+          record.kind + 40,
+          record.timestamp,
+          record.sensorId,
+          record.deviceId,
+          counts(record.sensorId),
+          record.quality,
+          record.hash,
+          bucket.startEvent
+        )
+      } else {
+        checksum = fold(
+          checksum,
+          record.kind,
+          record.timestamp,
+          record.sensorId,
+          record.deviceId,
+          record.value,
+          record.quality,
+          record.hash,
+          bucket.startEvent
+        )
+        outputCount += 1L
+      }
 
     def closeBucket(bucket: TrustedBucket): Unit = {
-      var event = bucket.head
-      while (event != null) {
-        consume(bucket, event)
-        event = event.next
+      var record = bucket.head
+      while (record != null) {
+        consume(bucket, record)
+        record = record.next
       }
       bucket.head = null
       bucket.tail = null
@@ -851,87 +750,37 @@ object WikimediaRegionMatrixHelpers {
         bucket
       }
 
-    var eventIndex = 0
+    var i = 0
     try {
-      while (eventIndex < input.events) {
-        val project = input.projectAt(eventIndex)
-        val article = input.articleAt(eventIndex)
-        val peer = input.peerAt(eventIndex)
-        val views = input.valueAt(eventIndex)
-        val bytes = input.bytesAt(eventIndex)
-        val start = bucketStart(eventIndex)
+      while (i < input.events) {
+        val start = bucketStart(i)
         val bucket = bucketFor(start)
         val region = bucket.region
-        val timestamp = eventIndex.toLong
+        val sensor = input.sensorAt(i)
+        val device = input.deviceAt(i)
+        val rawValue = input.valueAt(i)
+        val quality = input.qualityAt(i)
+        val hash = input.hashAt(i, sensor, rawValue)
+        val cleaned = cleanValue(rawValue)
 
-        appendEvent(
-          bucket,
-          region.alloc(
-            new TrustedEvent(
-              1,
-              timestamp,
-              project,
-              article,
-              0,
-              views,
-              bytes,
-              input.hashAt(1, eventIndex, project, article, 0),
-              null
-            )
-          )
-        )
-
-        if (query == "q1-counts") {
-          appendEvent(
-            bucket,
-            region.alloc(
-              new TrustedEvent(
-                2,
-                timestamp,
-                project,
-                article,
-                0,
-                views,
-                bytes,
-                input.hashAt(2, eventIndex, project, article, 0),
-                null
-              )
-            )
-          )
-        } else if (query == "q2-clickstream") {
-          appendEvent(
-            bucket,
-            region.alloc(
-              new TrustedEvent(
-                3,
-                timestamp,
-                project,
-                article,
-                peer,
-                1,
-                bytes,
-                input.hashAt(3, eventIndex, project, article, peer),
-                null
-              )
-            )
-          )
+        query match {
+          case "q0-parse" =>
+            appendRecord(bucket, region.alloc(new TrustedRecord(10, i.toLong, sensor, device, rawValue, quality, hash, null)))
+          case "q1-clean-annotate" =>
+            appendRecord(bucket, region.alloc(new TrustedRecord(10, i.toLong, sensor, device, rawValue, quality, hash, null)))
+            if (isClean(quality, rawValue))
+              appendRecord(bucket, region.alloc(new TrustedRecord(21, i.toLong, sensor, device, cleaned, 2, hash, null)))
+          case "q2-window-stats" =>
+            if (isClean(quality, rawValue)) {
+              sums(sensor) += cleaned.toLong
+              counts(sensor) += 1
+              appendRecord(bucket, region.alloc(new TrustedRecord(22, i.toLong, sensor, device, cleaned, 2, hash, null)))
+              val avg = (sums(sensor) / counts(sensor)).toInt
+              checksum = fold(checksum, 32, i.toLong, sensor, device, avg, counts(sensor), hash, start)
+              outputCount += 1L
+            }
         }
-
-        if (eventIndex % cfg.sampleEvery == 0)
-          checksum = fold(
-            checksum,
-            9,
-            timestamp,
-            project,
-            article,
-            peer,
-            extraRecords(query),
-            bytes,
-            input.hashAt(9, eventIndex, project, article, peer),
-            bucket.startEvent
-          )
-
-        eventIndex += 1
+        i += 1
       }
       closeExpired(Long.MaxValue)
     } finally {
@@ -954,13 +803,11 @@ object WikimediaRegionMatrixHelpers {
       case "rift-hp"        => runRiftTrusted(query, RiftRegion.HPZone)
       case "rift-streaming" => runRiftTrusted(query, RiftRegion.Streaming)
       case other =>
-        throw new IllegalArgumentException(
-          s"unknown Wikimedia mode '$other'"
-        )
+        throw new IllegalArgumentException(s"unknown RIoTBench mode '$other'")
     }
 
   def runBenchmark(mode: String, query: String): Unit = {
-    val cfg = WikimediaRegionConfig
+    val cfg = RiotBenchRegionConfig
     val input = inputData
     val usesRift = mode == "rift-hp" || mode == "rift-streaming"
     val expected = runHeap(query)
@@ -986,9 +833,7 @@ object WikimediaRegionMatrixHelpers {
     val riftCloses = new Array[Long](cfg.benchmarkRuns)
     val riftResets = new Array[Long](cfg.benchmarkRuns)
 
-    println(
-      s"Running wikimedia-$query-$mode for ${cfg.benchmarkRuns} timed runs"
-    )
+    println(s"Running riotbench-$query-$mode for ${cfg.benchmarkRuns} timed runs")
 
     var run = 0
     while (run < cfg.benchmarkRuns) {
@@ -1040,7 +885,7 @@ object WikimediaRegionMatrixHelpers {
     val medianResets = medianLong(riftResets)
 
     println(
-      f"RESULT name=wikimedia-$query-$mode " +
+      f"RESULT name=riotbench-$query-$mode " +
         f"query=$query mode=$mode input=${input.label} " +
         f"median_ms=$medianElapsed%.3f " +
         f"median_gc_ms=${medianGc / 1000000.0}%.3f " +
@@ -1058,26 +903,26 @@ object WikimediaRegionMatrixHelpers {
   }
 
   def printConfig(mode: String, query: String): Unit = {
-    val cfg = WikimediaRegionConfig
+    val cfg = RiotBenchRegionConfig
     val input = inputData
     println(
-      s"CONFIG mode=$mode query=$query events=${input.events} configured_events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} live_buckets=${cfg.liveBuckets} project_space=${cfg.projectSpace} article_space=${cfg.articleSpace} sample_every=${cfg.sampleEvery} warmups=${cfg.warmupRuns} runs=${cfg.benchmarkRuns} input=${input.label} input_path=${cfg.inputPath} input_kind=${cfg.inputKind}"
+      s"CONFIG mode=$mode query=$query events=${input.events} configured_events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} live_buckets=${cfg.liveBuckets} sensor_space=${cfg.sensorSpace} device_space=${cfg.deviceSpace} warmups=${cfg.warmupRuns} runs=${cfg.benchmarkRuns} input=${input.label} input_path=${cfg.inputPath}"
     )
   }
 }
 
-@main def WikimediaRegionMatrix(
+@main def RiotBenchRegionMatrix(
     mode: String = "heap",
-    query: String = "q1-counts"
+    query: String = "q2-window-stats"
 ): Unit = {
-  WikimediaRegionMatrixHelpers.validateMode(mode)
-  WikimediaRegionMatrixHelpers.validateQuery(query)
-  WikimediaRegionMatrixHelpers.printConfig(mode, query)
+  RiotBenchRegionMatrixHelpers.validateMode(mode)
+  RiotBenchRegionMatrixHelpers.validateQuery(query)
+  RiotBenchRegionMatrixHelpers.printConfig(mode, query)
 
   val usesRift = mode == "rift-hp" || mode == "rift-streaming"
   if (usesRift) RiftRegion.init(0)
   try {
-    WikimediaRegionMatrixHelpers.runBenchmark(mode, query)
+    RiotBenchRegionMatrixHelpers.runBenchmark(mode, query)
   } finally {
     if (usesRift) RiftRegion.shutdown()
   }

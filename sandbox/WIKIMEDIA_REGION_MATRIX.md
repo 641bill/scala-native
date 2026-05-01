@@ -122,6 +122,9 @@ zsh sandbox/run_wikimedia_region_matrix.sh
 - Real `svwiki` clickstream smoke matched checksum/output count for heap and
   HPZone with `input=real-clickstream-preloaded`. This validates input wiring
   only; it is not median performance evidence.
+- Real `pageviews-20260301-000000.gz` Q0/Q1 100k medians matched
+  checksum/output count across heap, current/improved SafeZone, HPZone, and
+  Streaming.
 
 ## 100k Results
 
@@ -234,6 +237,26 @@ Interpretation:
   retained objects.
 - Regions reduce 1M RSS versus heap, but by less than the elapsed slowdown
   would justify as a case-study claim.
+
+## Real Pageviews Q0/Q1 Preloaded Results
+
+Input:
+`/Users/siyaoliu/rift/cache/benchmark-data/wikimedia/pageviews-20260301-000000.gz`
+
+| Query | Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | Rift op ms | Region objects | RSS bytes | Outputs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| q0-pageviews | heap | 5.329 | 0.000 | 0.000 | 0 | 0.000 | 0 | 98533376 | 100000 |
+| q0-pageviews | safezone-improved | 5.800 | 0.000 | 0.000 | 0 | 0.000 | 0 | 77594624 | 100000 |
+| q0-pageviews | rift-hp | 5.934 | 0.000 | 0.000 | 0 | 0.014 | 100000 | 77627392 | 100000 |
+| q0-pageviews | rift-streaming | 5.952 | 0.000 | 0.000 | 0 | 0.017 | 100000 | 77725696 | 100000 |
+| q1-counts | heap | 12.384 | 0.000 | 7.362 | 1 | 0.000 | 0 | 147521536 | 200000 |
+| q1-counts | safezone-improved | 14.118 | 0.000 | 0.000 | 0 | 0.000 | 0 | 96747520 | 200000 |
+| q1-counts | rift-hp | 15.948 | 0.000 | 0.000 | 0 | 0.026 | 200000 | 96583680 | 200000 |
+| q1-counts | rift-streaming | 14.998 | 0.000 | 0.000 | 0 | 0.029 | 200000 | 96583680 | 200000 |
+
+- Q0 and Q1 confirm the real-input ceiling. Heap is fastest; Q1 has one heap
+  collection outlier, but median GC is zero and region modes do not win elapsed
+  time.
 
 ## Interpretation
 

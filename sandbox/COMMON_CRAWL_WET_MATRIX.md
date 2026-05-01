@@ -152,6 +152,31 @@ request only found `21425` usable conversion records in this shard, so that row
 is a larger small-input control rather than headline 50k evidence. Checksums
 and output counts matched across all modes.
 
+The post-refocus control pass also ran `q0-parse` with the same real WET shard
+after the runner gained max-GC/outlier reporting:
+
+```bash
+COMMON_CRAWL_WET_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/common-crawl/CC-MAIN-2026-17/CC-MAIN-20260410081153-20260410111153-00000.warc.wet \
+COMMON_CRAWL_WET_PAGES=10000 \
+COMMON_CRAWL_WET_BENCHMARK_RUNS=3 \
+COMMON_CRAWL_WET_WARMUPS=1 \
+COMMON_CRAWL_WET_QUERIES=q0-parse \
+COMMON_CRAWL_WET_OUTPUT_DIR=/tmp/common-crawl-real-q0-10k \
+zsh sandbox/run_common_crawl_wet_matrix.sh
+```
+
+| Query | Requested pages | Actual pages | Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | Rift op ms | Region objects | Opens/closes | RSS bytes | Outputs |
+|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| q0-parse | 10000 | 10000 | heap | 2.372 | 0.000 | 0.000 | 0 | 0.000 | 0 | 0 / 0 | 415498240 | 88024 |
+| q0-parse | 10000 | 10000 | safezone-current | 2.968 | 0.000 | 0.000 | 0 | 0.000 | 0 | 0 / 0 | 412893184 | 88024 |
+| q0-parse | 10000 | 10000 | safezone-improved | 2.669 | 0.000 | 0.000 | 0 | 0.000 | 0 | 0 / 0 | 412860416 | 88024 |
+| q0-parse | 10000 | 10000 | rift-hp | 2.862 | 0.000 | 0.000 | 0 | 0.006 | 88024 | 4 / 4 | 419020800 | 88024 |
+| q0-parse | 10000 | 10000 | rift-streaming | 2.912 | 0.000 | 0.000 | 0 | 0.007 | 88024 | 4 / 4 | 419069952 | 88024 |
+
+Interpretation for `q0-parse`: this real preloaded parse row is heap-fastest
+and reports zero median and max timed GC. It does not expose memory-management
+headroom for Rift.
+
 | Requested pages | Actual pages | Mode | Median ms | GC ms | Rift op ms | Region objects | Opens/closes | RSS bytes | Outputs |
 |---:|---:|---|---:|---:|---:|---:|---:|---:|---:|
 | 10000 | 10000 | heap | 12.079 | 0.000 | 0.000 | 0 | 0 / 0 | 415465472 | 349709 |

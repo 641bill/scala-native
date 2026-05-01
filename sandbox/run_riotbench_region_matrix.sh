@@ -4,12 +4,12 @@ set -euo pipefail
 
 script_dir=${0:A:h}
 repo_dir=${script_dir:h}
-output_dir=${WIKIMEDIA_OUTPUT_DIR:-"/tmp/wikimedia-region-matrix"}
-summary=${WIKIMEDIA_SUMMARY:-"${output_dir}/summary.tsv"}
-build=${WIKIMEDIA_BUILD:-1}
+output_dir=${RIOTBENCH_OUTPUT_DIR:-"/tmp/riotbench-region-matrix"}
+summary=${RIOTBENCH_SUMMARY:-"${output_dir}/summary.tsv"}
+build=${RIOTBENCH_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${WIKIMEDIA_MODES:-"heap safezone-current safezone-improved rift-hp rift-streaming"}})
-queries=(${(z)${WIKIMEDIA_QUERIES:-"q0-pageviews q1-counts q2-clickstream"}})
+modes=(${(z)${RIOTBENCH_MODES:-"heap safezone-current safezone-improved rift-hp rift-streaming"}})
+queries=(${(z)${RIOTBENCH_QUERIES:-"q0-parse q1-clean-annotate q2-window-stats"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"
@@ -21,17 +21,17 @@ cd "${repo_dir}"
 if [[ "${build}" != "0" ]]; then
   sbt \
     "project sandbox3_next" \
-    "set Compile / mainClass := Some(\"WikimediaRegionMatrix\")" \
+    "set Compile / mainClass := Some(\"RiotBenchRegionMatrix\")" \
     nativeLink
 fi
 
-binary=${WIKIMEDIA_BINARY:-}
+binary=${RIOTBENCH_BINARY:-}
 if [[ -z "${binary}" ]]; then
-  binary=$(find sandbox/.3-next/target -path "*/native/WikimediaRegionMatrix" -type f -perm -111 -print | sort | tail -n 1)
+  binary=$(find sandbox/.3-next/target -path "*/native/RiotBenchRegionMatrix" -type f -perm -111 -print | sort | tail -n 1)
 fi
 
 if [[ -z "${binary}" || ! -x "${binary}" ]]; then
-  echo "missing WikimediaRegionMatrix native binary; set WIKIMEDIA_BINARY or enable WIKIMEDIA_BUILD" >&2
+  echo "missing RiotBenchRegionMatrix native binary; set RIOTBENCH_BINARY or enable RIOTBENCH_BUILD" >&2
   exit 1
 fi
 
@@ -57,7 +57,7 @@ write_result_row() {
   local line token key value
   typeset -A fields
 
-  line=$(grep "^RESULT name=wikimedia-${query}-${binary_mode} " "${run_log}" | tail -n 1)
+  line=$(grep "^RESULT name=riotbench-${query}-${binary_mode} " "${run_log}" | tail -n 1)
   fields=()
   for token in ${(z)line}; do
     if [[ "${token}" == *=* ]]; then
@@ -126,15 +126,15 @@ run_case() {
   command_status=$?
   set -e
 
-  if ! grep -q "^RESULT name=wikimedia-${query}-${binary_mode} " "${run_log}"; then
+  if ! grep -q "^RESULT name=riotbench-${query}-${binary_mode} " "${run_log}"; then
     cat "${run_log}" >&2
     cat "${time_log}" >&2
     exit "${command_status}"
   fi
 
   max_rss_bytes=$(read_max_rss_bytes "${time_log}")
-  grep "^RESULT name=wikimedia-${query}-${binary_mode} " "${run_log}"
-  echo "WIKIMEDIA_RSS_RESULT query=${query} mode=${mode} max_rss_bytes=${max_rss_bytes}"
+  grep "^RESULT name=riotbench-${query}-${binary_mode} " "${run_log}"
+  echo "RIOTBENCH_RSS_RESULT query=${query} mode=${mode} max_rss_bytes=${max_rss_bytes}"
   write_result_row "${query}" "${mode}" "${binary_mode}" "${run_log}" "${max_rss_bytes}"
 }
 
@@ -146,5 +146,5 @@ for query in "${queries[@]}"; do
 done
 
 echo
-echo "Wikimedia matrix complete"
+echo "RIoTBench region matrix complete"
 echo "Summary: ${summary}"

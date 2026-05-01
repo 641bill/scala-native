@@ -9,7 +9,7 @@ import scala.scalanative.runtime.{
   SafeZoneAllocator
 }
 
-object WikimediaRegionConfig {
+object YahooAdRegionConfig {
   private def parsePositiveInt(value: String): Option[Int] =
     try {
       val parsed = value.toInt
@@ -32,45 +32,35 @@ object WikimediaRegionConfig {
   private def envNonNegativeInt(name: String, default: Int): Int =
     sys.env.get(name).flatMap(parseNonNegativeInt).getOrElse(default)
 
-  val events: Int = envInt("WIKIMEDIA_EVENTS", 100000)
-  val eventsPerBucket: Int = envInt("WIKIMEDIA_EVENTS_PER_BUCKET", 2500)
-  val liveBuckets: Int = envInt("WIKIMEDIA_LIVE_BUCKETS", 4)
-  val projectSpace: Int = envInt("WIKIMEDIA_PROJECT_SPACE", 64)
-  val articleSpace: Int = envInt("WIKIMEDIA_ARTICLE_SPACE", 65536)
-  val sampleEvery: Int = envInt("WIKIMEDIA_SAMPLE_EVERY", 4096)
-  val warmupRuns: Int = envNonNegativeInt("WIKIMEDIA_WARMUPS", 1)
-  val benchmarkRuns: Int = envInt("WIKIMEDIA_BENCHMARK_RUNS", 3)
-  val inputPath: String = BenchmarkInputSupport.envString("WIKIMEDIA_INPUT")
-  val inputKind: String =
-    sys.env.get("WIKIMEDIA_INPUT_KIND").map(_.trim).filter(_.nonEmpty) match {
-      case Some(value) => value
-      case None =>
-        if (inputPath.contains("clickstream")) "clickstream"
-        else if (inputPath.nonEmpty) "pageviews"
-        else "generated"
-    }
+  val events: Int = envInt("YAHOO_AD_EVENTS", 1000000)
+  val eventsPerBucket: Int = envInt("YAHOO_AD_EVENTS_PER_BUCKET", 25000)
+  val liveBuckets: Int = envInt("YAHOO_AD_LIVE_BUCKETS", 4)
+  val campaignSpace: Int = envInt("YAHOO_AD_CAMPAIGN_SPACE", 100)
+  val adsPerCampaign: Int = envInt("YAHOO_ADS_PER_CAMPAIGN", 10)
+  val sampleEvery: Int = envInt("YAHOO_AD_SAMPLE_EVERY", 4096)
+  val warmupRuns: Int = envNonNegativeInt("YAHOO_AD_WARMUPS", 1)
+  val benchmarkRuns: Int = envInt("YAHOO_AD_BENCHMARK_RUNS", 3)
+  val inputPath: String = BenchmarkInputSupport.envString("YAHOO_AD_INPUT")
+
+  val adSpace: Int = math.max(1, campaignSpace * adsPerCampaign)
 }
 
-object WikimediaRegionMatrixHelpers {
+object YahooAdRegionMatrixHelpers {
   @volatile private var checksumSink = 0L
   @volatile private var outputSink = 0L
 
   private final class HeapEvent(
       val kind: Int,
       val timestamp: Long,
-      val project: Int,
-      val article: Int,
-      val peer: Int,
+      val adId: Int,
+      val campaignId: Int,
+      val eventType: Int,
       val value: Int,
-      val bytes: Long,
       val hash: Long,
       var next: HeapEvent
   )
 
-  private final class HeapBucket(
-      val startEvent: Long,
-      var next: HeapBucket
-  ) {
+  private final class HeapBucket(val startEvent: Long, var next: HeapBucket) {
     var head: HeapEvent = null
     var tail: HeapEvent = null
   }
@@ -78,20 +68,15 @@ object WikimediaRegionMatrixHelpers {
   private final class SafeEvent(
       val kind: Int,
       val timestamp: Long,
-      val project: Int,
-      val article: Int,
-      val peer: Int,
+      val adId: Int,
+      val campaignId: Int,
+      val eventType: Int,
       val value: Int,
-      val bytes: Long,
       val hash: Long,
       var next: SafeEvent
   )
 
-  private final class SafeBucket(
-      val zone: SafeZone,
-      val startEvent: Long,
-      var next: SafeBucket
-  ) {
+  private final class SafeBucket(val zone: SafeZone, val startEvent: Long, var next: SafeBucket) {
     var head: SafeEvent = null
     var tail: SafeEvent = null
   }
@@ -99,11 +84,10 @@ object WikimediaRegionMatrixHelpers {
   private final class TrustedEvent(
       val kind: Int,
       val timestamp: Long,
-      val project: Int,
-      val article: Int,
-      val peer: Int,
+      val adId: Int,
+      val campaignId: Int,
+      val eventType: Int,
       val value: Int,
-      val bytes: Long,
       val hash: Long,
       var next: TrustedEvent
   )
@@ -133,37 +117,28 @@ object WikimediaRegionMatrixHelpers {
   private final class InputData(
       val label: String,
       val events: Int,
-      val projects: Array[Int],
-      val articles: Array[Int],
-      val peers: Array[Int],
+      val adIds: Array[Int],
+      val eventTypes: Array[Int],
       val values: Array[Int],
-      val bytes: Array[Long],
       val hashes: Array[Long]
   ) {
-    def projectAt(index: Int): Int =
-      if (projects == null) projectFor(index) else projects(index)
+    def adAt(index: Int): Int =
+      if (adIds == null) adFor(index) else adIds(index)
 
-    def articleAt(index: Int): Int =
-      if (articles == null) articleFor(index) else articles(index)
+    def campaignAt(adId: Int): Int =
+      if (YahooAdRegionConfig.campaignSpace <= 1) 0
+      else (adId / YahooAdRegionConfig.adsPerCampaign) %
+        YahooAdRegionConfig.campaignSpace
 
-    def peerAt(index: Int): Int =
-      if (peers == null) peerFor(index) else peers(index)
+    def eventTypeAt(index: Int): Int =
+      if (eventTypes == null) eventTypeFor(index) else eventTypes(index)
 
     def valueAt(index: Int): Int =
-      if (values == null) viewsFor(index) else values(index)
+      if (values == null) valueFor(index) else values(index)
 
-    def bytesAt(index: Int): Long =
-      if (bytes == null) bytesFor(index) else bytes(index)
-
-    def hashAt(
-        kind: Int,
-        index: Int,
-        project: Int,
-        article: Int,
-        peer: Int
-    ): Long =
-      if (hashes == null) eventHash(kind, index, project, article, peer)
-      else hashes(index) ^ (kind.toLong * 1099511628211L)
+    def hashAt(index: Int, adId: Int, eventType: Int): Long =
+      if (hashes == null) eventHash(index, adId, eventType)
+      else hashes(index) ^ (eventType.toLong * 1099511628211L)
   }
 
   private lazy val inputData: InputData = loadInput()
@@ -268,115 +243,99 @@ object WikimediaRegionMatrixHelpers {
     count
   }
 
+  private def adFor(index: Int): Int =
+    mix(index * 1103515245 + 12345) % YahooAdRegionConfig.adSpace
+
+  private def eventTypeFor(index: Int): Int =
+    mix(index * 1664525 + 1013904223) % 4
+
+  private def valueFor(index: Int): Int =
+    1 + (mix(index * 8191 + 17) % 64)
+
+  private def eventHash(index: Int, adId: Int, eventType: Int): Long =
+    mix(index * 1000003 + adId * 8191 + eventType * 131).toLong
+
   private def bucketStart(eventIndex: Int): Long = {
-    val cfg = WikimediaRegionConfig
+    val cfg = YahooAdRegionConfig
     (eventIndex / cfg.eventsPerBucket).toLong * cfg.eventsPerBucket.toLong
   }
 
   private def closeCutoff(currentStartEvent: Long): Long = {
-    val cfg = WikimediaRegionConfig
+    val cfg = YahooAdRegionConfig
     currentStartEvent -
       (cfg.liveBuckets.toLong - 1L) * cfg.eventsPerBucket.toLong
   }
 
-  private def projectFor(eventIndex: Int): Int =
-    mix(eventIndex * 1103515245 + 12345) % WikimediaRegionConfig.projectSpace
-
-  private def articleFor(eventIndex: Int): Int =
-    mix(eventIndex * 1000003 + 8191) % WikimediaRegionConfig.articleSpace
-
-  private def peerFor(eventIndex: Int): Int =
-    mix(eventIndex * 9176 + 131071) % WikimediaRegionConfig.articleSpace
-
-  private def viewsFor(eventIndex: Int): Int =
-    1 + (mix(eventIndex * 3571 + 53) % 64)
-
-  private def bytesFor(eventIndex: Int): Long =
-    128L + (mix(eventIndex * 104729 + 17) % 8192).toLong
-
-  private def eventHash(
-      kind: Int,
-      eventIndex: Int,
-      project: Int,
-      article: Int,
-      peer: Int
-  ): Long =
-    mix(eventIndex * 1000003 + kind * 8191 + project * 131 + article + peer)
-      .toLong
-
   private def loadInput(): InputData = {
-    val cfg = WikimediaRegionConfig
+    val cfg = YahooAdRegionConfig
     if (cfg.inputPath.isEmpty)
       return new InputData(
-        "generated-tsv-shaped",
+        "generated-yahoo-ad-shaped",
         cfg.events,
-        null,
-        null,
         null,
         null,
         null,
         null
       )
 
-    val projects = scala.collection.mutable.ArrayBuffer.empty[Int]
-    val articles = scala.collection.mutable.ArrayBuffer.empty[Int]
-    val peers = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val ads = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val eventTypes = scala.collection.mutable.ArrayBuffer.empty[Int]
     val values = scala.collection.mutable.ArrayBuffer.empty[Int]
-    val bytes = scala.collection.mutable.ArrayBuffer.empty[Long]
     val hashes = scala.collection.mutable.ArrayBuffer.empty[Long]
     val reader = BenchmarkInputSupport.openText(cfg.inputPath)
 
-    def append(
-        projectText: String,
-        articleText: String,
-        peerText: String,
-        valueText: String,
-        bytesText: String,
-        rowHashText: String
-    ): Unit = {
-      val project =
-        BenchmarkInputSupport.positiveModulo(
-          BenchmarkInputSupport.stableHash(projectText),
-          cfg.projectSpace
-        )
-      val article =
-        BenchmarkInputSupport.positiveModulo(
-          BenchmarkInputSupport.stableHash(articleText),
-          cfg.articleSpace
-        )
-      val peer =
-        BenchmarkInputSupport.positiveModulo(
-          BenchmarkInputSupport.stableHash(peerText),
-          cfg.articleSpace
-        )
-      val value = BenchmarkInputSupport.parseInt(valueText, 1)
-      val rowBytes =
-        BenchmarkInputSupport.parseLong(
-          bytesText,
-          projectText.length.toLong + articleText.length.toLong +
-            peerText.length.toLong
-        )
-      projects += project
-      articles += article
-      peers += peer
-      values += (if (value > 0) value else 1)
-      bytes += (if (rowBytes >= 0L) rowBytes else 0L)
-      hashes += BenchmarkInputSupport.stableHash(rowHashText).toLong
+    def field(line: String, key: String): String = {
+      val marker = "\"" + key + "\""
+      val start = line.indexOf(marker)
+      if (start < 0) ""
+      else {
+        val colon = line.indexOf(':', start + marker.length)
+        if (colon < 0) ""
+        else {
+          var i = colon + 1
+          while (i < line.length && (line.charAt(i) == ' ' || line.charAt(i) == '"'))
+            i += 1
+          val begin = i
+          while (
+            i < line.length &&
+            line.charAt(i) != ',' &&
+            line.charAt(i) != '}' &&
+            line.charAt(i) != '"'
+          ) i += 1
+          line.substring(begin, i)
+        }
+      }
     }
 
     try {
       var line = reader.readLine()
-      while (line != null && projects.length < cfg.events) {
+      while (line != null && ads.length < cfg.events) {
         if (line.nonEmpty) {
-          if (cfg.inputKind == "clickstream") {
-            val parts = line.split("\t", -1)
-            if (parts.length >= 4)
-              append(parts(2), parts(1), parts(0), parts(3), "", line)
-          } else {
-            val parts = line.split(" ", -1)
-            if (parts.length >= 4)
-              append(parts(0), parts(1), "", parts(2), parts(3), line)
+          val adText = {
+            val parsed = field(line, "ad_id")
+            if (parsed.nonEmpty) parsed else line
           }
+          val eventText = {
+            val parsed = field(line, "event_type")
+            if (parsed.nonEmpty) parsed else "view"
+          }
+          val valueText = field(line, "value")
+          val ad =
+            BenchmarkInputSupport.positiveModulo(
+              BenchmarkInputSupport.stableHash(adText),
+              cfg.adSpace
+            )
+          val eventType =
+            if (eventText == "view" || eventText == "0") 0
+            else BenchmarkInputSupport.positiveModulo(
+              BenchmarkInputSupport.stableHash(eventText),
+              4
+            )
+          val value = BenchmarkInputSupport.parseInt(valueText, 1)
+          ads += ad
+          eventTypes += eventType
+          values += (if (value > 0) value else 1)
+          hashes += BenchmarkInputSupport.stableHash(line).toLong
         }
         line = reader.readLine()
       }
@@ -384,19 +343,17 @@ object WikimediaRegionMatrixHelpers {
       reader.close()
     }
 
-    if (projects.isEmpty)
+    if (ads.isEmpty)
       throw new IllegalArgumentException(
-        s"Wikimedia input '${cfg.inputPath}' did not contain any usable ${cfg.inputKind} rows"
+        s"Yahoo ad input '${cfg.inputPath}' did not contain usable rows"
       )
 
     new InputData(
-      s"real-${cfg.inputKind}-preloaded",
-      projects.length,
-      projects.toArray,
-      articles.toArray,
-      peers.toArray,
+      "real-yahoo-ad-preloaded",
+      ads.length,
+      ads.toArray,
+      eventTypes.toArray,
       values.toArray,
-      bytes.toArray,
       hashes.toArray
     )
   }
@@ -405,21 +362,19 @@ object WikimediaRegionMatrixHelpers {
       checksum: Long,
       kind: Int,
       timestamp: Long,
-      project: Int,
-      article: Int,
-      peer: Int,
+      adId: Int,
+      campaignId: Int,
+      eventType: Int,
       value: Int,
-      bytes: Long,
       hash: Long,
       bucketStartEvent: Long
   ): Long = {
     var h = checksum ^ kind.toLong
     h = (h * 1099511628211L) ^ timestamp
-    h = (h * 1099511628211L) ^ project.toLong
-    h = (h * 1099511628211L) ^ article.toLong
-    h = (h * 1099511628211L) ^ peer.toLong
+    h = (h * 1099511628211L) ^ adId.toLong
+    h = (h * 1099511628211L) ^ campaignId.toLong
+    h = (h * 1099511628211L) ^ eventType.toLong
     h = (h * 1099511628211L) ^ value.toLong
-    h = (h * 1099511628211L) ^ bytes
     h ^ hash ^ bucketStartEvent
   }
 
@@ -454,51 +409,56 @@ object WikimediaRegionMatrixHelpers {
     mode match {
       case "heap" | "safezone" | "rift-hp" | "rift-streaming" => ()
       case other =>
-        throw new IllegalArgumentException(
-          s"unknown Wikimedia mode '$other'"
-        )
+        throw new IllegalArgumentException(s"unknown Yahoo ad mode '$other'")
     }
 
   def validateQuery(query: String): Unit =
     query match {
-      case "q0-pageviews" | "q1-counts" | "q2-clickstream" => ()
+      case "q0-parse" | "q1-filter" | "q2-campaign-window" => ()
       case other =>
-        throw new IllegalArgumentException(
-          s"unknown Wikimedia query '$other'"
-        )
-    }
-
-  private def extraRecords(query: String): Int =
-    query match {
-      case "q0-pageviews"   => 0
-      case "q1-counts"      => 1
-      case "q2-clickstream" => 1
+        throw new IllegalArgumentException(s"unknown Yahoo ad query '$other'")
     }
 
   private def runHeap(query: String): RunOutcome = {
-    val cfg = WikimediaRegionConfig
+    val cfg = YahooAdRegionConfig
     val input = inputData
+    val counts =
+      if (query == "q2-campaign-window") new Array[Int](cfg.campaignSpace)
+      else null
     var first: HeapBucket = null
     var last: HeapBucket = null
     var current: HeapBucket = null
     var checksum = 0L
     var outputCount = 0L
 
-    def consume(bucket: HeapBucket, event: HeapEvent): Unit = {
-      checksum = fold(
-        checksum,
-        event.kind,
-        event.timestamp,
-        event.project,
-        event.article,
-        event.peer,
-        event.value,
-        event.bytes,
-        event.hash,
-        bucket.startEvent
-      )
-      outputCount += 1L
-    }
+    def consume(bucket: HeapBucket, event: HeapEvent): Unit =
+      if (query == "q2-campaign-window" && event.kind == 22) {
+        counts(event.campaignId) -= 1
+        checksum = fold(
+          checksum,
+          event.kind + 40,
+          event.timestamp,
+          event.adId,
+          event.campaignId,
+          event.eventType,
+          counts(event.campaignId),
+          event.hash,
+          bucket.startEvent
+        )
+      } else {
+        checksum = fold(
+          checksum,
+          event.kind,
+          event.timestamp,
+          event.adId,
+          event.campaignId,
+          event.eventType,
+          event.value,
+          event.hash,
+          bucket.startEvent
+        )
+        outputCount += 1L
+      }
 
     def closeExpired(cutoffEvent: Long): Unit =
       while (
@@ -535,79 +495,32 @@ object WikimediaRegionMatrixHelpers {
         bucket
       }
 
-    var eventIndex = 0
-    while (eventIndex < input.events) {
-      val project = input.projectAt(eventIndex)
-      val article = input.articleAt(eventIndex)
-      val peer = input.peerAt(eventIndex)
-      val views = input.valueAt(eventIndex)
-      val bytes = input.bytesAt(eventIndex)
-      val start = bucketStart(eventIndex)
+    var i = 0
+    while (i < input.events) {
+      val start = bucketStart(i)
       val bucket = bucketFor(start)
-      val timestamp = eventIndex.toLong
+      val ad = input.adAt(i)
+      val campaign = input.campaignAt(ad)
+      val eventType = input.eventTypeAt(i)
+      val value = input.valueAt(i)
+      val hash = input.hashAt(i, ad, eventType)
 
-      appendEvent(
-        bucket,
-        new HeapEvent(
-          1,
-          timestamp,
-          project,
-          article,
-          0,
-          views,
-          bytes,
-          input.hashAt(1, eventIndex, project, article, 0),
-          null
-        )
-      )
-
-      if (query == "q1-counts") {
-        appendEvent(
-          bucket,
-          new HeapEvent(
-            2,
-            timestamp,
-            project,
-            article,
-            0,
-            views,
-            bytes,
-            input.hashAt(2, eventIndex, project, article, 0),
-            null
-          )
-        )
-      } else if (query == "q2-clickstream") {
-        appendEvent(
-          bucket,
-          new HeapEvent(
-            3,
-            timestamp,
-            project,
-            article,
-            peer,
-            1,
-            bytes,
-            input.hashAt(3, eventIndex, project, article, peer),
-            null
-          )
-        )
+      query match {
+        case "q0-parse" =>
+          appendEvent(bucket, new HeapEvent(10, i.toLong, ad, campaign, eventType, value, hash, null))
+        case "q1-filter" =>
+          appendEvent(bucket, new HeapEvent(10, i.toLong, ad, campaign, eventType, value, hash, null))
+          if (eventType == 0)
+            appendEvent(bucket, new HeapEvent(21, i.toLong, ad, campaign, eventType, value, hash, null))
+        case "q2-campaign-window" =>
+          if (eventType == 0) {
+            counts(campaign) += 1
+            appendEvent(bucket, new HeapEvent(22, i.toLong, ad, campaign, eventType, value, hash, null))
+            checksum = fold(checksum, 32, i.toLong, ad, campaign, eventType, counts(campaign), hash, start)
+            outputCount += 1L
+          }
       }
-
-      if (eventIndex % cfg.sampleEvery == 0)
-        checksum = fold(
-          checksum,
-          9,
-          timestamp,
-          project,
-          article,
-          peer,
-          extraRecords(query),
-          bytes,
-          input.hashAt(9, eventIndex, project, article, peer),
-          bucket.startEvent
-        )
-
-      eventIndex += 1
+      i += 1
     }
 
     closeExpired(Long.MaxValue)
@@ -617,29 +530,45 @@ object WikimediaRegionMatrixHelpers {
   }
 
   private def runSafeZone(query: String): RunOutcome = {
-    val cfg = WikimediaRegionConfig
+    val cfg = YahooAdRegionConfig
     val input = inputData
+    val counts =
+      if (query == "q2-campaign-window") new Array[Int](cfg.campaignSpace)
+      else null
     var first: SafeBucket = null
     var last: SafeBucket = null
     var current: SafeBucket = null
     var checksum = 0L
     var outputCount = 0L
 
-    def consume(bucket: SafeBucket, event: SafeEvent): Unit = {
-      checksum = fold(
-        checksum,
-        event.kind,
-        event.timestamp,
-        event.project,
-        event.article,
-        event.peer,
-        event.value,
-        event.bytes,
-        event.hash,
-        bucket.startEvent
-      )
-      outputCount += 1L
-    }
+    def consume(bucket: SafeBucket, event: SafeEvent): Unit =
+      if (query == "q2-campaign-window" && event.kind == 22) {
+        counts(event.campaignId) -= 1
+        checksum = fold(
+          checksum,
+          event.kind + 40,
+          event.timestamp,
+          event.adId,
+          event.campaignId,
+          event.eventType,
+          counts(event.campaignId),
+          event.hash,
+          bucket.startEvent
+        )
+      } else {
+        checksum = fold(
+          checksum,
+          event.kind,
+          event.timestamp,
+          event.adId,
+          event.campaignId,
+          event.eventType,
+          event.value,
+          event.hash,
+          bucket.startEvent
+        )
+        outputCount += 1L
+      }
 
     def closeBucket(bucket: SafeBucket): Unit = {
       var event = bucket.head
@@ -681,96 +610,54 @@ object WikimediaRegionMatrixHelpers {
         bucket
       }
 
-    var eventIndex = 0
+    var i = 0
     try {
-      while (eventIndex < input.events) {
-        val project = input.projectAt(eventIndex)
-        val article = input.articleAt(eventIndex)
-        val peer = input.peerAt(eventIndex)
-        val views = input.valueAt(eventIndex)
-        val bytes = input.bytesAt(eventIndex)
-        val start = bucketStart(eventIndex)
+      while (i < input.events) {
+        val start = bucketStart(i)
         val bucket = bucketFor(start)
         val zone = bucket.zone
-        val timestamp = eventIndex.toLong
+        val ad = input.adAt(i)
+        val campaign = input.campaignAt(ad)
+        val eventType = input.eventTypeAt(i)
+        val value = input.valueAt(i)
+        val hash = input.hashAt(i, ad, eventType)
 
-        appendEvent(
-          bucket,
-          SafeZoneAllocator
-            .allocate(
-              zone,
-              new SafeEvent(
-                1,
-                timestamp,
-                project,
-                article,
-                0,
-                views,
-                bytes,
-                  input.hashAt(1, eventIndex, project, article, 0),
-                null
-              )
+        query match {
+          case "q0-parse" =>
+            appendEvent(
+              bucket,
+              SafeZoneAllocator
+                .allocate(zone, new SafeEvent(10, i.toLong, ad, campaign, eventType, value, hash, null))
+                .asInstanceOf[SafeEvent]
             )
-            .asInstanceOf[SafeEvent]
-        )
-
-        if (query == "q1-counts") {
-          appendEvent(
-            bucket,
-            SafeZoneAllocator
-              .allocate(
-                zone,
-                new SafeEvent(
-                  2,
-                  timestamp,
-                  project,
-                  article,
-                  0,
-                  views,
-                  bytes,
-                  input.hashAt(2, eventIndex, project, article, 0),
-                  null
-                )
+          case "q1-filter" =>
+            appendEvent(
+              bucket,
+              SafeZoneAllocator
+                .allocate(zone, new SafeEvent(10, i.toLong, ad, campaign, eventType, value, hash, null))
+                .asInstanceOf[SafeEvent]
+            )
+            if (eventType == 0)
+              appendEvent(
+                bucket,
+                SafeZoneAllocator
+                  .allocate(zone, new SafeEvent(21, i.toLong, ad, campaign, eventType, value, hash, null))
+                  .asInstanceOf[SafeEvent]
               )
-              .asInstanceOf[SafeEvent]
-          )
-        } else if (query == "q2-clickstream") {
-          appendEvent(
-            bucket,
-            SafeZoneAllocator
-              .allocate(
-                zone,
-                new SafeEvent(
-                  3,
-                  timestamp,
-                  project,
-                  article,
-                  peer,
-                  1,
-                  bytes,
-                  input.hashAt(3, eventIndex, project, article, peer),
-                  null
-                )
+          case "q2-campaign-window" =>
+            if (eventType == 0) {
+              counts(campaign) += 1
+              appendEvent(
+                bucket,
+                SafeZoneAllocator
+                  .allocate(zone, new SafeEvent(22, i.toLong, ad, campaign, eventType, value, hash, null))
+                  .asInstanceOf[SafeEvent]
               )
-              .asInstanceOf[SafeEvent]
-          )
+              checksum = fold(checksum, 32, i.toLong, ad, campaign, eventType, counts(campaign), hash, start)
+              outputCount += 1L
+            }
         }
-
-        if (eventIndex % cfg.sampleEvery == 0)
-          checksum = fold(
-            checksum,
-            9,
-            timestamp,
-            project,
-            article,
-            peer,
-            extraRecords(query),
-            bytes,
-            input.hashAt(9, eventIndex, project, article, peer),
-            bucket.startEvent
-          )
-
-        eventIndex += 1
+        i += 1
       }
       closeExpired(Long.MaxValue)
     } finally {
@@ -787,29 +674,45 @@ object WikimediaRegionMatrixHelpers {
   }
 
   private def runRiftTrusted(query: String, kind: Int): RunOutcome = {
-    val cfg = WikimediaRegionConfig
+    val cfg = YahooAdRegionConfig
     val input = inputData
+    val counts =
+      if (query == "q2-campaign-window") new Array[Int](cfg.campaignSpace)
+      else null
     var first: TrustedBucket = null
     var last: TrustedBucket = null
     var current: TrustedBucket = null
     var checksum = 0L
     var outputCount = 0L
 
-    def consume(bucket: TrustedBucket, event: TrustedEvent): Unit = {
-      checksum = fold(
-        checksum,
-        event.kind,
-        event.timestamp,
-        event.project,
-        event.article,
-        event.peer,
-        event.value,
-        event.bytes,
-        event.hash,
-        bucket.startEvent
-      )
-      outputCount += 1L
-    }
+    def consume(bucket: TrustedBucket, event: TrustedEvent): Unit =
+      if (query == "q2-campaign-window" && event.kind == 22) {
+        counts(event.campaignId) -= 1
+        checksum = fold(
+          checksum,
+          event.kind + 40,
+          event.timestamp,
+          event.adId,
+          event.campaignId,
+          event.eventType,
+          counts(event.campaignId),
+          event.hash,
+          bucket.startEvent
+        )
+      } else {
+        checksum = fold(
+          checksum,
+          event.kind,
+          event.timestamp,
+          event.adId,
+          event.campaignId,
+          event.eventType,
+          event.value,
+          event.hash,
+          bucket.startEvent
+        )
+        outputCount += 1L
+      }
 
     def closeBucket(bucket: TrustedBucket): Unit = {
       var event = bucket.head
@@ -851,87 +754,34 @@ object WikimediaRegionMatrixHelpers {
         bucket
       }
 
-    var eventIndex = 0
+    var i = 0
     try {
-      while (eventIndex < input.events) {
-        val project = input.projectAt(eventIndex)
-        val article = input.articleAt(eventIndex)
-        val peer = input.peerAt(eventIndex)
-        val views = input.valueAt(eventIndex)
-        val bytes = input.bytesAt(eventIndex)
-        val start = bucketStart(eventIndex)
+      while (i < input.events) {
+        val start = bucketStart(i)
         val bucket = bucketFor(start)
         val region = bucket.region
-        val timestamp = eventIndex.toLong
+        val ad = input.adAt(i)
+        val campaign = input.campaignAt(ad)
+        val eventType = input.eventTypeAt(i)
+        val value = input.valueAt(i)
+        val hash = input.hashAt(i, ad, eventType)
 
-        appendEvent(
-          bucket,
-          region.alloc(
-            new TrustedEvent(
-              1,
-              timestamp,
-              project,
-              article,
-              0,
-              views,
-              bytes,
-              input.hashAt(1, eventIndex, project, article, 0),
-              null
-            )
-          )
-        )
-
-        if (query == "q1-counts") {
-          appendEvent(
-            bucket,
-            region.alloc(
-              new TrustedEvent(
-                2,
-                timestamp,
-                project,
-                article,
-                0,
-                views,
-                bytes,
-                input.hashAt(2, eventIndex, project, article, 0),
-                null
-              )
-            )
-          )
-        } else if (query == "q2-clickstream") {
-          appendEvent(
-            bucket,
-            region.alloc(
-              new TrustedEvent(
-                3,
-                timestamp,
-                project,
-                article,
-                peer,
-                1,
-                bytes,
-                input.hashAt(3, eventIndex, project, article, peer),
-                null
-              )
-            )
-          )
+        query match {
+          case "q0-parse" =>
+            appendEvent(bucket, region.alloc(new TrustedEvent(10, i.toLong, ad, campaign, eventType, value, hash, null)))
+          case "q1-filter" =>
+            appendEvent(bucket, region.alloc(new TrustedEvent(10, i.toLong, ad, campaign, eventType, value, hash, null)))
+            if (eventType == 0)
+              appendEvent(bucket, region.alloc(new TrustedEvent(21, i.toLong, ad, campaign, eventType, value, hash, null)))
+          case "q2-campaign-window" =>
+            if (eventType == 0) {
+              counts(campaign) += 1
+              appendEvent(bucket, region.alloc(new TrustedEvent(22, i.toLong, ad, campaign, eventType, value, hash, null)))
+              checksum = fold(checksum, 32, i.toLong, ad, campaign, eventType, counts(campaign), hash, start)
+              outputCount += 1L
+            }
         }
-
-        if (eventIndex % cfg.sampleEvery == 0)
-          checksum = fold(
-            checksum,
-            9,
-            timestamp,
-            project,
-            article,
-            peer,
-            extraRecords(query),
-            bytes,
-            input.hashAt(9, eventIndex, project, article, peer),
-            bucket.startEvent
-          )
-
-        eventIndex += 1
+        i += 1
       }
       closeExpired(Long.MaxValue)
     } finally {
@@ -949,18 +799,16 @@ object WikimediaRegionMatrixHelpers {
 
   private def runMode(mode: String, query: String): RunOutcome =
     mode match {
-      case "heap"           => runHeap(query)
-      case "safezone"       => runSafeZone(query)
-      case "rift-hp"        => runRiftTrusted(query, RiftRegion.HPZone)
+      case "heap"          => runHeap(query)
+      case "safezone"      => runSafeZone(query)
+      case "rift-hp"       => runRiftTrusted(query, RiftRegion.HPZone)
       case "rift-streaming" => runRiftTrusted(query, RiftRegion.Streaming)
       case other =>
-        throw new IllegalArgumentException(
-          s"unknown Wikimedia mode '$other'"
-        )
+        throw new IllegalArgumentException(s"unknown Yahoo ad mode '$other'")
     }
 
   def runBenchmark(mode: String, query: String): Unit = {
-    val cfg = WikimediaRegionConfig
+    val cfg = YahooAdRegionConfig
     val input = inputData
     val usesRift = mode == "rift-hp" || mode == "rift-streaming"
     val expected = runHeap(query)
@@ -986,9 +834,7 @@ object WikimediaRegionMatrixHelpers {
     val riftCloses = new Array[Long](cfg.benchmarkRuns)
     val riftResets = new Array[Long](cfg.benchmarkRuns)
 
-    println(
-      s"Running wikimedia-$query-$mode for ${cfg.benchmarkRuns} timed runs"
-    )
+    println(s"Running yahoo-ad-$query-$mode for ${cfg.benchmarkRuns} timed runs")
 
     var run = 0
     while (run < cfg.benchmarkRuns) {
@@ -1040,7 +886,7 @@ object WikimediaRegionMatrixHelpers {
     val medianResets = medianLong(riftResets)
 
     println(
-      f"RESULT name=wikimedia-$query-$mode " +
+      f"RESULT name=yahoo-ad-$query-$mode " +
         f"query=$query mode=$mode input=${input.label} " +
         f"median_ms=$medianElapsed%.3f " +
         f"median_gc_ms=${medianGc / 1000000.0}%.3f " +
@@ -1058,26 +904,26 @@ object WikimediaRegionMatrixHelpers {
   }
 
   def printConfig(mode: String, query: String): Unit = {
-    val cfg = WikimediaRegionConfig
+    val cfg = YahooAdRegionConfig
     val input = inputData
     println(
-      s"CONFIG mode=$mode query=$query events=${input.events} configured_events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} live_buckets=${cfg.liveBuckets} project_space=${cfg.projectSpace} article_space=${cfg.articleSpace} sample_every=${cfg.sampleEvery} warmups=${cfg.warmupRuns} runs=${cfg.benchmarkRuns} input=${input.label} input_path=${cfg.inputPath} input_kind=${cfg.inputKind}"
+      s"CONFIG mode=$mode query=$query events=${input.events} configured_events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} live_buckets=${cfg.liveBuckets} campaign_space=${cfg.campaignSpace} ads_per_campaign=${cfg.adsPerCampaign} sample_every=${cfg.sampleEvery} warmups=${cfg.warmupRuns} runs=${cfg.benchmarkRuns} input=${input.label} input_path=${cfg.inputPath}"
     )
   }
 }
 
-@main def WikimediaRegionMatrix(
+@main def YahooAdRegionMatrix(
     mode: String = "heap",
-    query: String = "q1-counts"
+    query: String = "q2-campaign-window"
 ): Unit = {
-  WikimediaRegionMatrixHelpers.validateMode(mode)
-  WikimediaRegionMatrixHelpers.validateQuery(query)
-  WikimediaRegionMatrixHelpers.printConfig(mode, query)
+  YahooAdRegionMatrixHelpers.validateMode(mode)
+  YahooAdRegionMatrixHelpers.validateQuery(query)
+  YahooAdRegionMatrixHelpers.printConfig(mode, query)
 
   val usesRift = mode == "rift-hp" || mode == "rift-streaming"
   if (usesRift) RiftRegion.init(0)
   try {
-    WikimediaRegionMatrixHelpers.runBenchmark(mode, query)
+    YahooAdRegionMatrixHelpers.runBenchmark(mode, query)
   } finally {
     if (usesRift) RiftRegion.shutdown()
   }
