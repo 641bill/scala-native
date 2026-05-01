@@ -117,6 +117,81 @@ Input:
 | q1-tolls | heap | 2.781 | 0.000 | 0.000 | 0 | 0 / 0 | 8044544 | 0.833 | 11.083 | 558 |
 | q1-tolls | rift-hp | 2.303 | 0.000 | 0.008 | 558 | 1 / 1 | 8093696 | 21.791 | 8.333 | 558 |
 
+## Official Data Driver Preloaded Results
+
+Input:
+`/Users/siyaoliu/rift/cache/benchmark-data/linear-road/test-data/datafile3hours.dat`
+
+Command:
+
+```bash
+LINEAR_ROAD_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/linear-road/test-data/datafile3hours.dat \
+LINEAR_ROAD_EVENTS=100000 \
+LINEAR_ROAD_BENCHMARK_RUNS=3 \
+LINEAR_ROAD_WARMUPS=1 \
+LINEAR_ROAD_QUERIES="q0-reports q1-tolls q2-accidents" \
+LINEAR_ROAD_MODES="heap safezone-current safezone-improved rift-hp rift-streaming" \
+LINEAR_ROAD_OUTPUT_DIR=/tmp/linear-road-real-100k \
+zsh sandbox/run_linear_road_region_matrix.sh
+
+LINEAR_ROAD_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/linear-road/test-data/datafile3hours.dat \
+LINEAR_ROAD_EVENTS=1000000 \
+LINEAR_ROAD_BENCHMARK_RUNS=3 \
+LINEAR_ROAD_WARMUPS=1 \
+LINEAR_ROAD_QUERIES="q0-reports q1-tolls q2-accidents" \
+LINEAR_ROAD_MODES="heap safezone-current safezone-improved rift-hp rift-streaming" \
+LINEAR_ROAD_OUTPUT_DIR=/tmp/linear-road-real-1m \
+LINEAR_ROAD_BUILD=0 \
+zsh sandbox/run_linear_road_region_matrix.sh
+```
+
+These rows preload official Data Driver position reports before timing. They
+are stream-memory probes over official rows, not full Linear Road validation.
+Checksums and output counts matched across all modes.
+
+100k medians:
+
+| Query | Mode | Median ms | GC ms | Rift op ms | Objects | Opens/closes | RSS bytes | Event p95 us | Bucket close max us | Outputs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| q0-reports | heap | 11.517 | 0.000 | 0.000 | 0 | 0 / 0 | 122421248 | 0.167 | 258.250 | 100000 |
+| q0-reports | safezone-improved | 12.103 | 0.000 | 0.000 | 0 | 0 / 0 | 95797248 | 0.208 | 270.500 | 100000 |
+| q0-reports | rift-hp | 12.185 | 0.000 | 0.012 | 100000 | 4 / 4 | 96190464 | 0.208 | 257.292 | 100000 |
+| q0-reports | rift-streaming | 12.137 | 0.000 | 0.013 | 100000 | 4 / 4 | 96108544 | 0.167 | 258.834 | 100000 |
+| q1-tolls | heap | 19.149 | 0.000 | 0.000 | 0 | 0 / 0 | 147210240 | 0.250 | 516.916 | 200000 |
+| q1-tolls | safezone-improved | 20.322 | 0.000 | 0.000 | 0 | 0 / 0 | 128417792 | 0.292 | 537.583 | 200000 |
+| q1-tolls | rift-hp | 20.558 | 0.000 | 0.025 | 200000 | 4 / 4 | 128204800 | 0.292 | 514.125 | 200000 |
+| q1-tolls | rift-streaming | 20.391 | 0.000 | 0.025 | 200000 | 4 / 4 | 128155648 | 0.250 | 514.875 | 200000 |
+| q2-accidents | heap | 19.945 | 0.000 | 0.000 | 0 | 0 / 0 | 147226624 | 0.250 | 518.333 | 200000 |
+| q2-accidents | safezone-improved | 21.019 | 0.000 | 0.000 | 0 | 0 / 0 | 128417792 | 0.292 | 541.000 | 200000 |
+| q2-accidents | rift-hp | 20.984 | 0.000 | 0.026 | 200000 | 4 / 4 | 128696320 | 0.291 | 519.083 | 200000 |
+| q2-accidents | rift-streaming | 21.325 | 0.000 | 0.022 | 200000 | 4 / 4 | 128614400 | 0.292 | 524.125 | 200000 |
+
+1M medians:
+
+| Query | Mode | Median ms | GC ms | Rift op ms | Objects | Opens/closes | RSS bytes | Event p95 us | Bucket close max us | Outputs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| q0-reports | heap | 88.750 | 0.000 | 0.000 | 0 | 0 / 0 | 816283648 | 0.167 | 266.792 | 1000000 |
+| q0-reports | safezone-improved | 103.086 | 0.000 | 0.000 | 0 | 0 / 0 | 686751744 | 0.208 | 283.584 | 1000000 |
+| q0-reports | rift-hp | 100.949 | 0.000 | 0.125 | 1000000 | 40 / 40 | 686882816 | 0.167 | 281.709 | 1000000 |
+| q0-reports | rift-streaming | 99.769 | 0.000 | 0.124 | 1000000 | 40 / 40 | 687063040 | 0.167 | 275.666 | 1000000 |
+| q1-tolls | heap | 162.668 | 0.000 | 0.000 | 0 | 0 / 0 | 819593216 | 0.209 | 537.375 | 2000000 |
+| q1-tolls | safezone-improved | 179.205 | 0.000 | 0.000 | 0 | 0 / 0 | 829784064 | 0.291 | 575.000 | 2000000 |
+| q1-tolls | rift-hp | 180.277 | 0.000 | 0.241 | 2000000 | 40 / 40 | 829603840 | 0.250 | 519.500 | 2000000 |
+| q1-tolls | rift-streaming | 180.964 | 0.000 | 0.227 | 2000000 | 40 / 40 | 829521920 | 0.250 | 529.000 | 2000000 |
+| q2-accidents | heap | 167.811 | 0.000 | 0.000 | 0 | 0 / 0 | 819593216 | 0.250 | 612.292 | 2000000 |
+| q2-accidents | safezone-improved | 199.116 | 0.000 | 0.000 | 0 | 0 / 0 | 821641216 | 0.292 | 597.292 | 2000000 |
+| q2-accidents | rift-hp | 202.528 | 0.000 | 0.299 | 2000000 | 40 / 40 | 829636608 | 0.292 | 781.125 | 2000000 |
+| q2-accidents | rift-streaming | 198.863 | 0.000 | 0.300 | 2000000 | 40 / 40 | 829554688 | 0.292 | 685.000 | 2000000 |
+
+Interpretation:
+
+- Official-input rows are more negative than the generated Linear Road rows:
+  measured timed GC is zero in all 100k and 1M timed sections.
+- Heap is fastest for all three 1M queries. Region modes lower RSS only for
+  q0 reports; they do not improve RSS on q1/q2 toll/accident outputs.
+- Current SafeZone remains much slower than improved SafeZone, but improved
+  SafeZone is still slower than heap on this preloaded official input.
+
 ## 100k Results
 
 | Query | Mode | Median ms | GC ms | Rift op ms | Objects | Opens/closes | RSS bytes | Event p95 us | Bucket close max us | Outputs |

@@ -1,6 +1,6 @@
 # Common Crawl WET Matrix
 
-Date: 2026-04-30
+Date: 2026-05-01
 
 Status: generated WET-shaped detector plus first real Common Crawl WET input
 wiring. Real WET input is currently preloaded before timing so parser and
@@ -117,6 +117,64 @@ Input:
 
 This is a plumbing smoke only. The row count is too small for performance
 claims.
+
+### Real WET Preloaded Tokenization
+
+Input:
+`/Users/siyaoliu/rift/cache/benchmark-data/common-crawl/CC-MAIN-2026-17/CC-MAIN-20260410081153-20260410111153-00000.warc.wet`
+
+Command:
+
+```bash
+COMMON_CRAWL_WET_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/common-crawl/CC-MAIN-2026-17/CC-MAIN-20260410081153-20260410111153-00000.warc.wet \
+COMMON_CRAWL_WET_PAGES=10000 \
+COMMON_CRAWL_WET_BENCHMARK_RUNS=3 \
+COMMON_CRAWL_WET_WARMUPS=1 \
+COMMON_CRAWL_WET_QUERIES="q1-tokenize" \
+COMMON_CRAWL_WET_MODES="heap safezone-current safezone-improved rift-hp rift-streaming" \
+COMMON_CRAWL_WET_OUTPUT_DIR=/tmp/common-crawl-real-q1-10k \
+zsh sandbox/run_common_crawl_wet_matrix.sh
+
+COMMON_CRAWL_WET_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/common-crawl/CC-MAIN-2026-17/CC-MAIN-20260410081153-20260410111153-00000.warc.wet \
+COMMON_CRAWL_WET_PAGES=50000 \
+COMMON_CRAWL_WET_BENCHMARK_RUNS=3 \
+COMMON_CRAWL_WET_WARMUPS=1 \
+COMMON_CRAWL_WET_QUERIES="q1-tokenize" \
+COMMON_CRAWL_WET_MODES="heap safezone-current safezone-improved rift-hp rift-streaming" \
+COMMON_CRAWL_WET_OUTPUT_DIR=/tmp/common-crawl-real-q1-50k \
+COMMON_CRAWL_WET_BUILD=0 \
+zsh sandbox/run_common_crawl_wet_matrix.sh
+```
+
+These rows preload WET-derived page/line/token hashes before timing. They are
+memory-management probes, not WET parser or decompression benchmarks. The 50k
+request only found `21425` usable conversion records in this shard, so that row
+is a larger small-input control rather than headline 50k evidence. Checksums
+and output counts matched across all modes.
+
+| Requested pages | Actual pages | Mode | Median ms | GC ms | Rift op ms | Region objects | Opens/closes | RSS bytes | Outputs |
+|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 10000 | 10000 | heap | 12.079 | 0.000 | 0.000 | 0 | 0 / 0 | 415465472 | 349709 |
+| 10000 | 10000 | safezone-current | 19.825 | 0.000 | 0.000 | 0 | 0 / 0 | 429719552 | 349709 |
+| 10000 | 10000 | safezone-improved | 16.093 | 0.000 | 0.000 | 0 | 0 / 0 | 429752320 | 349709 |
+| 10000 | 10000 | rift-hp | 16.155 | 0.000 | 0.027 | 349709 | 4 / 4 | 429572096 | 349709 |
+| 10000 | 10000 | rift-streaming | 15.651 | 0.000 | 0.029 | 349709 | 4 / 4 | 429588480 | 349709 |
+| 50000 | 21425 | heap | 26.452 | 0.000 | 0.000 | 0 | 0 / 0 | 814252032 | 752797 |
+| 50000 | 21425 | safezone-current | 46.710 | 0.000 | 0.000 | 0 | 0 / 0 | 842645504 | 752797 |
+| 50000 | 21425 | safezone-improved | 30.730 | 0.000 | 0.000 | 0 | 0 / 0 | 842612736 | 752797 |
+| 50000 | 21425 | rift-hp | 32.809 | 0.000 | 0.050 | 752797 | 9 / 9 | 842465280 | 752797 |
+| 50000 | 21425 | rift-streaming | 33.103 | 0.000 | 0.049 | 752797 | 9 / 9 | 841154560 | 752797 |
+
+Interpretation:
+
+- Real WET tokenization does not reproduce the generated WET allocation win.
+  Heap is fastest at both requested scales.
+- Measured timed GC is zero in the timed section. The dominant cost here is not
+  collection time after preloading; it is token/hash loop CPU plus the live
+  preloaded input footprint.
+- Current/improved SafeZone and Rift all add region object/linking overhead in
+  this real shard. Do not continue tuning Common Crawl from this row without a
+  new input shard or a focused cheap checked page/token operator.
 
 ### 5k Smoke
 

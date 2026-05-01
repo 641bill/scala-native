@@ -175,6 +175,62 @@ Single-run only:
 | q2-clickstream | rift-hp | 1462.015 | 21.341 | 2.511 | 20000000 | 4000 / 4000 | 13746176 | 20000000 |
 | q2-clickstream | rift-streaming | 1464.663 | 21.189 | 2.830 | 20000000 | 4000 / 4000 | 13729792 | 20000000 |
 
+## Real Enwiki Clickstream Preloaded Results
+
+Input:
+`/Users/siyaoliu/rift/cache/benchmark-data/wikimedia/clickstream-enwiki-2026-03.tsv.gz`
+
+Command:
+
+```bash
+WIKIMEDIA_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/wikimedia/clickstream-enwiki-2026-03.tsv.gz \
+WIKIMEDIA_INPUT_KIND=clickstream \
+WIKIMEDIA_EVENTS=100000 \
+WIKIMEDIA_BENCHMARK_RUNS=3 \
+WIKIMEDIA_WARMUPS=1 \
+WIKIMEDIA_QUERIES="q2-clickstream" \
+WIKIMEDIA_MODES="heap safezone-current safezone-improved rift-hp rift-streaming" \
+WIKIMEDIA_OUTPUT_DIR=/tmp/wikimedia-real-enwiki-q2-100k \
+zsh sandbox/run_wikimedia_region_matrix.sh
+
+WIKIMEDIA_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/wikimedia/clickstream-enwiki-2026-03.tsv.gz \
+WIKIMEDIA_INPUT_KIND=clickstream \
+WIKIMEDIA_EVENTS=1000000 \
+WIKIMEDIA_BENCHMARK_RUNS=3 \
+WIKIMEDIA_WARMUPS=1 \
+WIKIMEDIA_QUERIES="q2-clickstream" \
+WIKIMEDIA_MODES="heap safezone-current safezone-improved rift-hp rift-streaming" \
+WIKIMEDIA_OUTPUT_DIR=/tmp/wikimedia-real-enwiki-q2-1m \
+WIKIMEDIA_BUILD=0 \
+zsh sandbox/run_wikimedia_region_matrix.sh
+```
+
+These rows preload TSV records before timing, so they are memory-management
+probes over real rows, not gzip/TSV parser benchmarks. Checksums and output
+counts matched across all modes.
+
+| Events | Mode | Median ms | GC ms | Rift op ms | Region objects | Opens/closes | RSS bytes | Outputs |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 100k | heap | 11.534 | 0.000 | 0.000 | 0 | 0 / 0 | 147554304 | 200000 |
+| 100k | safezone-current | 15.267 | 0.000 | 0.000 | 0 | 0 / 0 | 148717568 | 200000 |
+| 100k | safezone-improved | 14.835 | 0.000 | 0.000 | 0 | 0 / 0 | 148733952 | 200000 |
+| 100k | rift-hp | 15.202 | 0.000 | 0.025 | 200000 | 40 / 40 | 148652032 | 200000 |
+| 100k | rift-streaming | 15.293 | 0.000 | 0.027 | 200000 | 40 / 40 | 148717568 | 200000 |
+| 1M | heap | 126.800 | 0.000 | 0.000 | 0 | 0 / 0 | 1153630208 | 2000000 |
+| 1M | safezone-current | 155.202 | 0.000 | 0.000 | 0 | 0 / 0 | 892796928 | 2000000 |
+| 1M | safezone-improved | 149.062 | 0.000 | 0.000 | 0 | 0 / 0 | 885784576 | 2000000 |
+| 1M | rift-hp | 158.831 | 0.000 | 0.300 | 2000000 | 400 / 400 | 885227520 | 2000000 |
+| 1M | rift-streaming | 157.449 | 0.000 | 0.352 | 2000000 | 400 / 400 | 892583936 | 2000000 |
+
+Interpretation:
+
+- Real enwiki clickstream Q2 does not reproduce the generated Q2 elapsed win.
+  Heap is fastest at both 100k and 1M.
+- Measured timed GC is zero in the timed section for every mode. The large RSS
+  mostly reflects the preloaded real input, not query-local retained objects.
+- Regions reduce 1M RSS versus heap, but by less than the elapsed slowdown
+  would justify as a case-study claim.
+
 ## Interpretation
 
 - Generated Wikimedia Q0 and Q1 are not strong Rift cases. Heap or improved
@@ -184,7 +240,7 @@ Single-run only:
   `35.238 ms` to `2.206 ms`.
 - The 10M single-run Q2 check weakens the story: HPZone remains much lower-GC,
   but elapsed is effectively a near-tie with heap and improved SafeZone.
+- The real enwiki clickstream row weakens it further: with preloaded real TSV
+  rows, heap is fastest and timed GC is zero.
 - This generated TSV-shaped matrix should stay as stream-benchmark ladder
-  evidence, not a headline case study. The next candidate should be Linear
-  Road-style position reports and toll outputs, where latency/deadline metrics
-  may expose a stronger region-management benefit.
+  evidence, not a headline case study.

@@ -1,6 +1,6 @@
 # NEXMark Region Matrix
 
-Date: 2026-04-30
+Date: 2026-05-01
 
 Status: first NEXMark-style methodology benchmark for the broader
 stream-processing win envelope. This is not an exact Apache Beam NEXMark
@@ -221,6 +221,91 @@ Interpretation:
 - Q5 remains mostly an aggregate/top-scan shape, not a Rift checked win.
 - Q8 is a near-tie among heap, SafeZone, and Rift, with Streaming fastest in
   this local 100k run.
+
+### Beam-Default Generated Profile
+
+Command:
+
+```bash
+NEXMARK_BEAM_DEFAULTS=1 \
+NEXMARK_BEAM_SOURCE=/Users/siyaoliu/rift/cache/benchmark-data/apache-beam/apache-beam-2.73.0-source-release.zip \
+NEXMARK_EVENTS=100000 \
+NEXMARK_BENCHMARK_RUNS=3 \
+NEXMARK_WARMUPS=1 \
+NEXMARK_OUTPUT_DIR=/tmp/nexmark-beam-100k \
+zsh sandbox/run_nexmark_region_matrix.sh
+
+NEXMARK_BEAM_DEFAULTS=1 \
+NEXMARK_BEAM_SOURCE=/Users/siyaoliu/rift/cache/benchmark-data/apache-beam/apache-beam-2.73.0-source-release.zip \
+NEXMARK_EVENTS=1000000 \
+NEXMARK_BENCHMARK_RUNS=3 \
+NEXMARK_WARMUPS=1 \
+NEXMARK_QUERIES="q1 q2 q8" \
+NEXMARK_OUTPUT_DIR=/tmp/nexmark-beam-1m-q1-q2-q8 \
+NEXMARK_BUILD=0 \
+zsh sandbox/run_nexmark_region_matrix.sh
+```
+
+This is still generated input. It aligns this local generator with Beam-default
+configuration knobs; it is not an Apache Beam runner result. Checksums and
+output counts matched across all modes.
+
+100k medians:
+
+| Query | Mode | Median ms | GC ms | Rift op ms | Region objects | Opens/closes | RSS bytes | Outputs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| q0 | heap | 28.095 | 3.211 | 0.000 | 0 | 0 / 0 | 39354368 | 100000 |
+| q0 | safezone-improved | 30.021 | 2.059 | 0.000 | 0 | 0 / 0 | 27230208 | 100000 |
+| q0 | rift-checked | 29.596 | 1.004 | 0.014 | 100000 | 11 / 11 | 26591232 | 100000 |
+| q0 | rift-hp | 28.968 | 0.995 | 0.014 | 100000 | 10 / 10 | 27377664 | 100000 |
+| q1 | heap | 60.097 | 7.093 | 0.000 | 0 | 0 / 0 | 75104256 | 100000 |
+| q1 | safezone-improved | 56.151 | 2.904 | 0.000 | 0 | 0 / 0 | 50724864 | 100000 |
+| q1 | rift-checked | 58.841 | 1.982 | 0.032 | 200000 | 11 / 11 | 49070080 | 100000 |
+| q1 | rift-hp | 56.495 | 2.073 | 0.034 | 200000 | 10 / 10 | 50839552 | 100000 |
+| q2 | heap | 35.990 | 0.000 | 0.000 | 0 | 0 / 0 | 75071488 | 958 |
+| q2 | safezone-improved | 40.565 | 2.310 | 0.000 | 0 | 0 / 0 | 45236224 | 958 |
+| q2 | rift-checked | 43.844 | 1.986 | 0.035 | 100958 | 11 / 11 | 44498944 | 958 |
+| q2 | rift-hp | 38.701 | 2.030 | 0.066 | 100958 | 10 / 10 | 45285376 | 958 |
+| q5 | heap | 29.654 | 0.000 | 0.000 | 0 | 0 / 0 | 75087872 | 13 |
+| q5 | safezone-improved | 29.987 | 0.000 | 0.000 | 0 | 0 / 0 | 45105152 | 13 |
+| q5 | rift-checked | 31.204 | 0.000 | 0.015 | 100000 | 11 / 11 | 44498944 | 13 |
+| q5 | rift-hp | 29.963 | 0.000 | 0.029 | 100000 | 10 / 10 | 45285376 | 13 |
+| q8 | heap | 35.044 | 2.787 | 0.000 | 0 | 0 / 0 | 39337984 | 19000 |
+| q8 | safezone-improved | 32.256 | 1.441 | 0.000 | 0 | 0 / 0 | 23740416 | 19000 |
+| q8 | rift-checked | 31.468 | 0.992 | 0.012 | 39000 | 11 / 11 | 23592960 | 19000 |
+| q8 | rift-hp | 32.794 | 1.017 | 0.013 | 39000 | 10 / 10 | 23756800 | 19000 |
+
+1M medians for the planned Q1/Q2/Q8 subset:
+
+| Query | Mode | Median ms | GC ms | Rift op ms | Region objects | Opens/closes | RSS bytes | Outputs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| q1 | heap | 579.038 | 93.511 | 0.000 | 0 | 0 / 0 | 75153408 | 1000000 |
+| q1 | safezone-improved | 561.787 | 43.793 | 0.000 | 0 | 0 / 0 | 86605824 | 1000000 |
+| q1 | rift-checked | 557.251 | 18.468 | 0.202 | 2000000 | 101 / 101 | 84885504 | 1000000 |
+| q1 | rift-hp | 538.451 | 18.399 | 0.217 | 2000000 | 100 / 100 | 86654976 | 1000000 |
+| q1 | rift-streaming | 541.503 | 18.332 | 0.223 | 2000000 | 100 / 100 | 86491136 | 1000000 |
+| q2 | heap | 375.514 | 38.751 | 0.000 | 0 | 0 / 0 | 75153408 | 9988 |
+| q2 | safezone-improved | 382.855 | 18.669 | 0.000 | 0 | 0 / 0 | 81035264 | 9988 |
+| q2 | rift-checked | 390.105 | 15.129 | 0.239 | 1009988 | 101 / 101 | 80297984 | 9988 |
+| q2 | rift-hp | 379.646 | 18.960 | 0.140 | 1009988 | 100 / 100 | 81084416 | 9988 |
+| q2 | rift-streaming | 377.816 | 15.056 | 0.187 | 1009988 | 100 / 100 | 80920576 | 9988 |
+| q8 | heap | 331.599 | 24.097 | 0.000 | 0 | 0 / 0 | 75137024 | 199000 |
+| q8 | safezone-improved | 326.569 | 12.809 | 0.000 | 0 | 0 / 0 | 77496320 | 199000 |
+| q8 | rift-checked | 315.545 | 11.895 | 0.058 | 399000 | 101 / 101 | 77348864 | 199000 |
+| q8 | rift-hp | 321.910 | 11.274 | 0.111 | 399000 | 100 / 100 | 77479936 | 199000 |
+| q8 | rift-streaming | 321.610 | 11.208 | 0.092 | 399000 | 100 / 100 | 77627392 | 199000 |
+
+Interpretation:
+
+- Beam-default Q1 is now the most promising NEXMark-profile row: HPZone is
+  faster than heap and improved SafeZone, and checked Rift is slightly faster
+  than improved SafeZone while cutting measured GC sharply.
+- Beam-default Q8 is a smaller checked win: checked Rift is faster than heap
+  and improved SafeZone, but the margin is below the case-study threshold.
+- Beam-default Q2 is a ceiling result. Rift lowers GC, but elapsed time remains
+  near heap/improved SafeZone or slower.
+- These rows are useful win-envelope evidence, not exact Beam NEXMark
+  evidence.
 
 ### Q8 Join API 100k Follow-Up
 

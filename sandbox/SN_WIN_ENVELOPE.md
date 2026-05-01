@@ -1,6 +1,6 @@
 # Scala Native Win Envelope
 
-Date: 2026-04-29
+Date: 2026-05-01
 
 Status: Phase 6/7 evidence synthesis. This note classifies where Rift currently
 wins against Scala Native Immix, where it only reduces memory pressure, and
@@ -67,12 +67,20 @@ live window payload still dominate.
 | NEXMark-lite Q8 window join | 1M events | checked `291.832 ms` | heap `322.210 ms` | Region-friendly checked join-window win | Local methodology benchmark, not exact Beam NEXMark |
 | NEXMark-lite Q8 `StreamJoinWindow` API | 1M events | packed checked join API `20.987 ms` | heap join API `17.393 ms` | Specialized checked join API is lower-GC/lower-RSS but slower than fair heap control | Focused framework evidence; not a speed claim |
 | NEXMark-lite Q5 diagnostic | 1M events | checked `393.415 ms` clean; top scan `46.823 ms` diagnostic | heap `361.882 ms` clean; top scan `45.340 ms` diagnostic | Window aggregate checked overhead | Diagnostic profile plus clean control |
+| NEXMark Beam-default profile Q1 | 1M events | HPZone `538.451 ms`; checked `557.251 ms` | heap `579.038 ms`; improved SafeZone `561.787 ms` | Promising stream-map profile row | Generated Beam-default profile, not Beam runner evidence |
+| NEXMark Beam-default profile Q8 | 1M events | checked `315.545 ms` | heap `331.599 ms`; improved SafeZone `326.569 ms` | Modest checked join/window win | Generated Beam-default profile, not Beam runner evidence |
+| NEXMark Beam-default profile Q2 | 1M events | Streaming `377.816 ms` | heap `375.514 ms`; improved SafeZone `382.855 ms` | Lower GC but elapsed near-tie | Generated Beam-default profile |
 | Common Crawl WET-shaped tokenization | 100k pages / 13.7M records | HPZone `404.123 ms`, Streaming `403.935 ms` | heap `427.942 ms`; improved SafeZone `381.006 ms` | Object-heavy parser/token stream, but improved SafeZone wins | Generated input only; not a Rift case-study win |
 | Common Crawl WET small-bucket control | 100k pages / 13.7M records | Streaming `419.779 ms` | heap `386.807 ms`; improved SafeZone `381.109 ms` | Heap/SafeZone recover with tighter lifetimes | Generated input; not a case-study row |
+| Common Crawl real WET tokenization | 10k requested pages / 349709 token records | Streaming `15.651 ms` | heap `12.079 ms`; improved SafeZone `16.093 ms` | Real preloaded WET is CPU/live-input-bound, not GC-bound | Real preloaded input; no parser/decompression timing |
+| Common Crawl real WET tokenization larger shard row | 50k requested, 21425 actual pages / 752797 token records | HPZone `32.809 ms`, Streaming `33.103 ms` | heap `26.452 ms`; improved SafeZone `30.730 ms` | Heap wins; timed GC zero | Real preloaded input; actual page count below request |
 | Wikimedia generated clickstream | 1M events / 2M records | HPZone `147.163 ms`, Streaming `148.364 ms` | heap `159.746 ms`; improved SafeZone `147.936 ms` | Promising Q2 row but not a 10% win over improved SafeZone | Generated TSV-shaped input only |
 | Wikimedia generated clickstream scale check | 10M events / 20M records | HPZone `1462.015 ms`, Streaming `1464.663 ms` | heap `1459.438 ms`; improved SafeZone `1473.088 ms` | Lower GC but elapsed near-tie | Single run only |
+| Wikimedia real enwiki clickstream | 1M events / 2M records | Streaming `157.449 ms` | heap `126.800 ms`; improved SafeZone `149.062 ms` | Heap wins; timed GC zero | Real preloaded TSV input |
 | Linear Road generated tolls | 1M events / 2M records | HPZone `191.896 ms`, Streaming `228.226 ms` | heap `170.464 ms`; improved SafeZone `196.138 ms` | Removes GC but heap wins elapsed | Generated methodology only |
 | Linear Road generated accidents | 1M events / 2M records | HPZone `203.793 ms`, Streaming `217.685 ms` | heap `194.520 ms`; improved SafeZone `215.808 ms` | HPZone beats improved SafeZone but not heap | Generated methodology only |
+| Linear Road official input reports | 1M events | Streaming `99.769 ms` | heap `88.750 ms`; improved SafeZone `103.086 ms` | Heap wins; region modes lower RSS | Real preloaded official input, not full validator |
+| Linear Road official input tolls/accidents | 1M events / 2M outputs | best region `180.277 ms` q1, `198.863 ms` q2 | heap `162.668 ms` q1, `167.811 ms` q2 | Heap wins; timed GC zero | Real preloaded official input, not full validator |
 | DEBS RunBoth checked, bounded 1M after Q1/Q2 append-window integration | 3-run median | checked `5349.444 ms` | heap `5219.189 ms` | API generalization, CPU-limited | Latest bounded control; not a speedup claim |
 | DEBS RunBoth checked, full month | 3-run median | checked `66.804 s` | heap `67.122 s` | Near-tie throughput, memory validation | Full-month evidence, not large speedup |
 
@@ -180,6 +188,9 @@ The strongest local categories are:
 - NEXMark-lite Q1 conversion, checked Q2 selection, and checked Q8 window
   joins, where ordinary stream input/output objects are bucket-owned and
   measured GC time drops materially;
+- NEXMark Beam-default profile Q1 and Q8, which preserve the same local logical
+  program under Beam-default generator settings and show modest trusted/checked
+  wins while cutting measured GC;
 - checked RegionBuffer and the manual checked AppendWindow child-bucket shape,
   which show the safe API direction can win on simple collection/operator
   shapes when abstraction overhead stays low.
@@ -238,7 +249,15 @@ The strongest local categories are:
   HPZone removes measured GC and beats improved SafeZone on q1/q2, but heap is
   still fastest at 1M (`170.464 ms` q1 and `194.520 ms` q2). RSS also does not
   improve for q1/q2 at the default bucket size because the bucket-retained
-  event/output objects dominate the live set.
+  output objects dominate the live set.
+- The real-input ladder makes this stricter. Real enwiki clickstream, real
+  Common Crawl WET, and official Linear Road preloaded rows all report
+  `0.000 ms` timed GC in the measured section and heap is fastest. These rows
+  are useful ceiling results: preloading real input can make RSS large while
+  leaving little collection-time headroom for regions to recover.
+- NEXMark Beam-default Q1/Q8 are the only new real-profile rows that remain
+  promising, but their margins are modest and the rows are generated-profile
+  evidence, not exact Beam runner evidence.
 - DEBS full-month is currently a near-tie in elapsed time with much better
   memory/lifetime evidence than earlier checkpoints, not a large application
   speedup.
