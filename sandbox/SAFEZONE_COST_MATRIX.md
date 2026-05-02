@@ -185,10 +185,13 @@ Generated 1M pages, `137000000` token records.
 
 The `unsafe-hp-32k` Common Crawl q1 row is a severe negative/pathology under
 trace. It matched checksum/output count, and its root/reclaim counters are low,
-so the slowdown is not explained by root registration. Do not build a checked
-SafeZone-HP backend on the assumption that rootless 32 KiB SafeZone is always
-the fastest substrate. This row needs a targeted non-trace rerun and allocator
-inspection before using `unsafe-hp-32k` for parser/token workloads.
+so the slowdown is not explained by root registration. A follow-up non-trace
+Common Crawl-like 1M q1/q2 run did not reproduce this pathology:
+`unsafezone-hp` q1 was `4665.711 ms` and q2 was `4511.995 ms`, close to
+`safezone-improved-32k` q1 `4674.258 ms` and q2 `4471.463 ms`. Treat the trace
+row as an instrumentation-sensitive warning, not as normal-run evidence that
+UnsafeZone-HP cannot handle tokenization. Still do not build a checked backend
+on the assumption that rootless 32 KiB SafeZone is always the fastest substrate.
 
 ## Headline Interpretation
 
@@ -203,18 +206,16 @@ inspection before using `unsafe-hp-32k` for parser/token workloads.
 - Chunk-root mode is competitive on Dataflow and Common Crawl q1, and may be a
   safer intermediate substrate than fully rootless regions.
 - `unsafezone-hp` remains useful as an unsafe lower-bound/control, but the cost
-  matrix does not justify making it the first checked backend target. The next
+  matrix does not justify making it the only checked backend target. The next
   safer target is improved SafeZone with explicit page-size/chunk-root
-  configuration, plus a separate investigation of the Common Crawl
-  `unsafe-hp-32k` pathology.
+  configuration, with rootless UnsafeZone-HP kept as a lower-bound comparator.
 
 ## Resulting Next Steps
 
-1. Add non-trace focused reruns for `improved-32k`, `chunk-default`, and
-   `unsafe-hp-32k` on Common Crawl-like q1/q2/q3 before using
-   `unsafe-hp-32k` as a backend substrate.
-2. Treat `improved-32k` as the leading SafeZone-family configuration to study
-   for a checked backend, with chunk roots as the safer fallback candidate.
+1. Investigate why `SAFEZONE_TRACE=1` makes Common Crawl q1 pathological for
+   `unsafe-hp-32k`, since non-trace q1/q2 do not reproduce it.
+2. Treat `improved-32k` as the leading safe SafeZone-family configuration to
+   study for a checked backend, with chunk roots as the safer fallback
+   candidate and `unsafezone-hp` as the unsafe lower-bound comparator.
 3. Do not implement `rift-checked-safezone-hp` until unsupported mixed
-   references and the root-free lowering policy are clear and the unsafe q1
-   pathology is explained.
+   references and the root-free lowering policy are clear.

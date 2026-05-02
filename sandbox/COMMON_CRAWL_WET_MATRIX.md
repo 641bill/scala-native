@@ -57,6 +57,9 @@ failed, and `StreamAppendWindow` is only proven for append/cursor shapes. This
 detector first asks whether the underlying workload has enough allocation/GC
 pressure to justify a checked Common Crawl implementation.
 
+The q2/q3 expansion and the 100k/1M SafeZone-family follow-up are summarized in
+`COMMON_CRAWL_LIKE_MATRIX.md`.
+
 ## Commands
 
 Compile:
