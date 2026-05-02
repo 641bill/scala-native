@@ -43,6 +43,10 @@ Modes:
   `SAFEZONE_ROOTS_MODE=0`.
 - `safezone-improved`: closeable SafeZone per page bucket with
   `SAFEZONE_ROOTS_MODE=1`.
+- `safezone-improved-32k`: closeable SafeZone per page bucket with
+  `SAFEZONE_ROOTS_MODE=1` and `SAFEZONE_PAGE_SIZE=32768`.
+- `safezone-chunk`: closeable SafeZone per page bucket with
+  `SAFEZONE_ROOTS_MODE=2`.
 - `unsafezone-hp`: benchmark-only rootless SafeZone with
   `SAFEZONE_ROOTS_MODE=3` and `SAFEZONE_PAGE_SIZE=32768`.
 - `rift-hp`: trusted HPZone per page bucket.

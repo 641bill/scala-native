@@ -23,8 +23,11 @@ Current runner: `sandbox/run_common_crawl_wet_matrix.sh`.
 | `q3-parser-scratch` | Allocate page/line/token scratch records and consume them immediately. | Parser scratch objects with bucket/page-like lifetime. |
 
 The default runner now includes all four queries. It still has only heap,
-SafeZone-family, and trusted Rift modes. Checked modes remain out until the
-corresponding checked append/scratch/window operator clears a focused gate.
+SafeZone-family, and trusted Rift modes. The SafeZone-family labels include
+`safezone-improved-32k` and `safezone-chunk` so non-trace follow-up rows can be
+compared against `unsafezone-hp` without ambiguous environment overrides.
+Checked modes remain out until the corresponding checked append/scratch/window
+operator clears a focused gate.
 
 ## Command
 

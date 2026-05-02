@@ -8,7 +8,7 @@ output_dir=${COMMON_CRAWL_WET_OUTPUT_DIR:-"/tmp/common-crawl-wet-matrix"}
 summary=${COMMON_CRAWL_WET_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${COMMON_CRAWL_WET_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${COMMON_CRAWL_WET_MODES:-"heap safezone-current safezone-improved unsafezone-hp rift-hp rift-streaming"}})
+modes=(${(z)${COMMON_CRAWL_WET_MODES:-"heap safezone-current safezone-improved safezone-improved-32k safezone-chunk unsafezone-hp rift-hp rift-streaming"}})
 queries=(${(z)${COMMON_CRAWL_WET_QUERIES:-"q0-parse q1-tokenize q2-domain-window q3-parser-scratch"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
@@ -105,6 +105,15 @@ run_case() {
     safezone-improved)
       binary_mode="safezone"
       roots_mode="1"
+      ;;
+    safezone-improved-32k)
+      binary_mode="safezone"
+      roots_mode="1"
+      page_size="32768"
+      ;;
+    safezone-chunk)
+      binary_mode="safezone"
+      roots_mode="2"
       ;;
     unsafezone-hp)
       binary_mode="safezone"
