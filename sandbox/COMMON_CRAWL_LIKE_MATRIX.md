@@ -1,7 +1,8 @@
 # Common Crawl-Like Object-Heavy Stream Matrix
 
 Status: WET-shaped q1/q2/q3 generated follow-up recorded; q1/q2 rerun after
-Rift fast-allocation counter cleanup.
+Rift fast-allocation counter cleanup; checked `StreamAppendWindow` follow-up
+recorded for q1/q2.
 
 Date: 2026-05-02
 
@@ -25,12 +26,13 @@ Current runner: `sandbox/run_common_crawl_wet_matrix.sh`.
 | `q2-domain-window` | Allocate page/line/token records, then aggregate per domain at bucket close. | Bucket records plus close-time aggregate summaries. |
 | `q3-parser-scratch` | Allocate page/line/token scratch records and consume them immediately. | Parser scratch objects with bucket/page-like lifetime. |
 
-The default runner now includes all four queries. It still has only heap,
-SafeZone-family, and trusted Rift modes. The SafeZone-family labels include
-`safezone-improved-32k` and `safezone-chunk` so non-trace follow-up rows can be
-compared against `unsafezone-hp` without ambiguous environment overrides.
-Checked modes remain out until the corresponding checked append/scratch/window
-operator clears a focused gate.
+The default runner now includes all four queries. The default mode set still
+uses heap, SafeZone-family, and trusted Rift modes. The SafeZone-family labels
+include `safezone-improved-32k` and `safezone-chunk` so non-trace follow-up
+rows can be compared against `unsafezone-hp` without ambiguous environment
+overrides. `rift-checked` is available as an opt-in q1/q2 follow-up mode using
+the reusable checked `StreamAppendWindow` cursor API; it is not in the default
+mode list because it has not cleared the application-scale performance gate.
 
 ## Command
 
@@ -267,6 +269,109 @@ default benchmark instrumentation.
 - q3-parser-scratch remains a negative control from the earlier follow-up:
   heap wins elapsed despite material GC, so not every object-heavy parser
   shape benefits from region placement.
+
+## Checked StreamAppendWindow Follow-Up
+
+Run outputs:
+
+- 100k summary:
+  `/Users/siyaoliu/rift/cache/common-crawl-like-checked-2026-05-02-100k/summary.tsv`
+- 1M RSS-complete summary:
+  `/Users/siyaoliu/rift/cache/common-crawl-like-checked-2026-05-02-1m-rss/summary.tsv`
+- earlier 1M timing-only summary, before rerunning for RSS:
+  `/Users/siyaoliu/rift/cache/common-crawl-like-checked-2026-05-02-1m/summary.tsv`
+
+Implementation being measured:
+
+- `rift-checked` allocates ordinary page, line, and token `CheckedRecord`
+  objects in checked child bucket regions.
+- Records are retained through `RiftRegion.StreamAppendWindow` and consumed at
+  close with `StreamAppendCursor`.
+- q2 still uses a heap `Array[Int]` as close-time aggregate scratch, matching
+  the heap/trusted logical aggregation shape. This follow-up checks the record
+  lifetime path, not a checked aggregate-table path.
+- A helper that hid record provenance was rejected by the checked compiler; the
+  final implementation appends immediately at the allocation site. Treat that
+  as positive safety evidence for the owner-token boundary.
+
+Commands:
+
+```sh
+COMMON_CRAWL_WET_PAGES=100000 \
+COMMON_CRAWL_WET_BENCHMARK_RUNS=3 \
+COMMON_CRAWL_WET_WARMUPS=1 \
+COMMON_CRAWL_WET_QUERIES="q1-tokenize q2-domain-window" \
+COMMON_CRAWL_WET_MODES="heap safezone-improved-32k unsafezone-hp rift-hp rift-streaming rift-checked" \
+COMMON_CRAWL_WET_OUTPUT_DIR=/Users/siyaoliu/rift/cache/common-crawl-like-checked-2026-05-02-100k \
+zsh sandbox/run_common_crawl_wet_matrix.sh
+
+COMMON_CRAWL_WET_BUILD=0 \
+COMMON_CRAWL_WET_PAGES=1000000 \
+COMMON_CRAWL_WET_BENCHMARK_RUNS=3 \
+COMMON_CRAWL_WET_WARMUPS=1 \
+COMMON_CRAWL_WET_QUERIES="q1-tokenize q2-domain-window" \
+COMMON_CRAWL_WET_MODES="heap safezone-improved-32k unsafezone-hp rift-hp rift-streaming rift-checked" \
+COMMON_CRAWL_WET_OUTPUT_DIR=/Users/siyaoliu/rift/cache/common-crawl-like-checked-2026-05-02-1m-rss \
+zsh sandbox/run_common_crawl_wet_matrix.sh
+```
+
+All checked q1/q2 rows matched heap checksum/output count. A separate 2k
+q0/q3 smoke also matched heap checksum/output count, but those rows are not
+headline evidence.
+
+### 100k Checked Medians
+
+| Query | Mode | Median ms | GC ms | Max GC ms | Rift op ms | Region objects | RSS bytes |
+|---|---|---:|---:|---:|---:|---:|---:|
+| q1-tokenize | heap | 542.053 | 152.272 | 165.341 | 0.000 | 0 | 408567808 |
+| q1-tokenize | safezone-improved-32k | 464.362 | 0.000 | 0.000 | 0.000 | 0 | 356057088 |
+| q1-tokenize | unsafezone-hp | 461.104 | 0.000 | 0.000 | 0.000 | 0 | 356089856 |
+| q1-tokenize | rift-hp | 435.515 | 0.000 | 0.000 | 1.052 | 13700000 | 355975168 |
+| q1-tokenize | rift-streaming | 439.115 | 0.000 | 0.000 | 1.154 | 13700000 | 355926016 |
+| q1-tokenize | rift-checked | 502.220 | 0.000 | 0.000 | 1.080 | 13700000 | 355975168 |
+| q2-domain-window | heap | 519.357 | 147.222 | 147.278 | 0.000 | 0 | 408567808 |
+| q2-domain-window | safezone-improved-32k | 446.110 | 0.000 | 0.000 | 0.000 | 0 | 417546240 |
+| q2-domain-window | unsafezone-hp | 446.831 | 0.000 | 0.000 | 0.000 | 0 | 417513472 |
+| q2-domain-window | rift-hp | 425.856 | 0.000 | 0.000 | 1.051 | 13700000 | 420315136 |
+| q2-domain-window | rift-streaming | 420.024 | 0.000 | 0.000 | 1.043 | 13700000 | 420265984 |
+| q2-domain-window | rift-checked | 495.141 | 0.000 | 0.000 | 1.048 | 13700000 | 420364288 |
+
+### 1M Checked Medians, RSS-Complete Rerun
+
+| Query | Mode | Median ms | GC ms | Max GC ms | Rift op ms | Region objects | RSS bytes |
+|---|---|---:|---:|---:|---:|---:|---:|
+| q1-tokenize | heap | 5670.270 | 1745.758 | 1759.718 | 0.000 | 0 | 408567808 |
+| q1-tokenize | safezone-improved-32k | 4644.747 | 31.787 | 37.550 | 0.000 | 0 | 474726400 |
+| q1-tokenize | unsafezone-hp | 4704.843 | 26.283 | 27.625 | 0.000 | 0 | 474628096 |
+| q1-tokenize | rift-hp | 4403.007 | 20.323 | 20.773 | 11.058 | 137000000 | 474546176 |
+| q1-tokenize | rift-streaming | 4412.562 | 23.385 | 25.489 | 11.014 | 137000000 | 474480640 |
+| q1-tokenize | rift-checked | 5088.712 | 20.942 | 27.348 | 11.291 | 137000000 | 474529792 |
+| q2-domain-window | heap | 5342.373 | 1605.929 | 1626.253 | 0.000 | 0 | 408567808 |
+| q2-domain-window | safezone-improved-32k | 4444.954 | 31.255 | 32.049 | 0.000 | 0 | 474742784 |
+| q2-domain-window | unsafezone-hp | 4473.369 | 18.939 | 20.839 | 0.000 | 0 | 474628096 |
+| q2-domain-window | rift-hp | 4258.549 | 21.095 | 22.736 | 10.900 | 137000000 | 474546176 |
+| q2-domain-window | rift-streaming | 4268.362 | 20.499 | 21.368 | 10.807 | 137000000 | 474480640 |
+| q2-domain-window | rift-checked | 5061.479 | 24.889 | 27.841 | 11.230 | 137000000 | 474529792 |
+
+### Checked Follow-Up Interpretation
+
+- Checked q1/q2 now validate the safe record-lifetime story in this
+  object-heavy workload: `137000000` ordinary records are region allocated,
+  checksums/output counts match, and heap GC drops from about `1.6-1.7 s` to
+  about `20-25 ms`.
+- The checked mode does beat heap elapsed in the 1M rerun: q1 by about `10%`
+  and q2 by about `5%`.
+- It does not clear the case-study gate because improved SafeZone-32k and
+  trusted Rift are substantially faster. At 1M, checked q1 is `444 ms` slower
+  than improved-32k and `686 ms` slower than trusted HPZone; checked q2 is
+  `617 ms` slower than improved-32k and `803 ms` slower than trusted HPZone.
+- Measured Rift runtime op time is only about `11 ms`, so the gap is not
+  allocator open/close/reclaim. The likely cost is checked
+  `StreamAppendWindow` append/cursor/container overhead in application-shaped
+  hot loops.
+- RSS is still not a region-family win at 1M: heap RSS is lower than the
+  SafeZone/Rift rows. Use this follow-up as correctness and checked-overhead
+  evidence, not a checked application performance claim.
 
 ## Next Similar Workloads
 

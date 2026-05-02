@@ -103,8 +103,8 @@ live window payload still dominate.
 | NEXMark Beam-default Q8 | 1M generated-profile events | checked `457.518 ms` | heap `470.798 ms`; improved SafeZone `457.725 ms` | Checked near-tie with improved SafeZone | Clean generated Beam-default profile |
 | NEXMark Beam-default Q11 | 1M generated-profile events | HPZone `228.741 ms`, checked `234.401 ms` | heap `218.774 ms`; improved SafeZone `229.557 ms` | Heap wins elapsed; region rows lower GC only | Clean generated Beam-default profile |
 | UnsafeZone-HP stream follow-up | 1M generated/profile stream rows | NEXMark q3 checked `292.371 ms`, q8 checked `450.904 ms`; Common Crawl q1 HPZone `4322.349 ms` | unsafezone-hp q0/q1/q4/q5/q8/q11 often near-best; heap Common Crawl q1 `4743.205 ms`; improved SafeZone Common Crawl q1 `4028.067 ms` | UnsafeZone-HP is often best SafeZone-family stream row, but current Rift still rarely beats improved SafeZone by a case-study margin | Clean UnsafeZone stream sweep |
-| Common Crawl WET-shaped tokenization | 1M generated pages / 137M token records | HPZone `4386.590 ms`, Streaming `4395.599 ms` | heap `5466.535 ms`; improved SafeZone-32k `4608.641 ms`; unsafezone-hp `4640.245 ms` | GC-heavy stream-object win after Rift fast-allocation counter cleanup; not an RSS win | Generated input; checked modes absent |
-| Common Crawl WET-shaped q2 domain window | 1M generated pages / 137M token records | Streaming `4164.288 ms`, HPZone `4176.919 ms` | heap `5267.784 ms`; improved SafeZone-32k `4425.273 ms`; unsafezone-hp `4437.924 ms` | GC-heavy stream/window win after counter cleanup; same logical generated program | Generated input; checked modes absent |
+| Common Crawl WET-shaped tokenization | 1M generated pages / 137M token records | trusted HPZone `4386.590 ms`; checked `5088.712 ms` in RSS-complete rerun | heap `5466.535 ms` / RSS rerun `5670.270 ms`; improved SafeZone-32k `4608.641 ms` / RSS rerun `4644.747 ms` | Trusted GC-heavy stream-object win; checked beats heap but misses improved-SafeZone/trusted gate | Generated input; checked q1/q2 follow-up recorded |
+| Common Crawl WET-shaped q2 domain window | 1M generated pages / 137M token records | trusted Streaming `4164.288 ms`; checked `5061.479 ms` in RSS-complete rerun | heap `5267.784 ms` / RSS rerun `5342.373 ms`; improved SafeZone-32k `4425.273 ms` / RSS rerun `4444.954 ms` | Trusted GC-heavy stream/window win; checked beats heap modestly but misses improved-SafeZone/trusted gate | Generated input; checked q1/q2 follow-up recorded |
 | Common Crawl WET-shaped q3 parser scratch | 1M generated pages / 137M token records | Streaming `11206.504 ms`, HPZone `11233.751 ms` | heap `10330.962 ms` with `859.220 ms` GC | Negative scratch-shape control where heap wins elapsed despite GC | Generated input; checked modes absent |
 | Common Crawl WET small-bucket control | 100k pages / 13.7M records | Streaming `419.779 ms` | heap `386.807 ms`; improved SafeZone `381.109 ms` | Heap/SafeZone recover with tighter lifetimes | Generated input; not a case-study row |
 | Common Crawl real WET tokenization | 10k requested pages / 349709 token records | Streaming `15.651 ms` | heap `12.079 ms`; improved SafeZone `16.093 ms` | Real preloaded WET is CPU/live-input-bound, not GC-bound | Real preloaded input; no parser/decompression timing |
@@ -241,10 +241,13 @@ The strongest local categories are:
   which show the safe API direction can win on simple collection/operator
   shapes when abstraction overhead stays low.
 - generated Common Crawl WET-shaped q1/q2, where trusted Rift cuts heap GC
-  from about `1.56-1.58 s` to about `20 ms`, allocates `137000000` ordinary
-  stream objects in regions, and now beats heap, improved SafeZone-32k, and
-  UnsafeZone-HP after removing default per-allocation global byte-counter
-  atomics.
+  from about `1.56-1.75 s` to about `20-25 ms`, allocates `137000000`
+  ordinary stream objects in regions, and now beats heap, improved
+  SafeZone-32k, and UnsafeZone-HP after removing default per-allocation global
+  byte-counter atomics. The new checked q1/q2 follow-up validates the safe
+  record-lifetime path and beats heap elapsed, but still loses to improved
+  SafeZone and trusted Rift, so it is checked-overhead evidence rather than a
+  checked application win.
 
 ## Where Immix Or SafeZone Remain Hard To Beat
 
@@ -283,11 +286,13 @@ The strongest local categories are:
   object-heavy shape passes a focused gate.
 - The generated Common Crawl WET-shaped detector is now split. q1 tokenization
   and q2 domain-window aggregation are strong trusted-Rift elapsed/GC wins
-  after fast-path counter cleanup, but not RSS wins, and checked modes are
-  still absent. q3 parser scratch remains a negative control where heap wins
-  despite material GC. Smaller token lifetimes and real WET shards can still be
-  CPU/live-input-bound, so these rows should guide backend/operator work before
-  becoming final case-study claims.
+  after fast-path counter cleanup, but not RSS wins. Checked q1/q2 allocate the
+  same `137000000` ordinary records through `StreamAppendWindow`, match
+  checksums/output counts, and beat heap, but miss the case-study gate against
+  improved SafeZone and trusted Rift. q3 parser scratch remains a negative
+  control where heap wins despite material GC. Smaller token lifetimes and real
+  WET shards can still be CPU/live-input-bound, so these rows should guide
+  backend/operator work before becoming final case-study claims.
 - The generated Wikimedia detector is also mixed. Q2 clickstream is promising
   at 1M (`147.163 ms` HPZone vs `159.746 ms` heap and `147.936 ms` improved
   SafeZone), but the 10M single-run scale check collapses to a near-tie with

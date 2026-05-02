@@ -435,7 +435,9 @@ object CommonCrawlWetMatrixHelpers {
 
   def validateMode(mode: String): Unit =
     mode match {
-      case "heap" | "safezone" | "rift-hp" | "rift-streaming" => ()
+      case "heap" | "safezone" | "rift-hp" | "rift-streaming" |
+          "rift-checked" =>
+        ()
       case other =>
         throw new IllegalArgumentException(
           s"unknown Common Crawl WET mode '$other'"
@@ -925,12 +927,178 @@ object CommonCrawlWetMatrixHelpers {
     RunOutcome(checksum, outputCount)
   }
 
+  def runRiftChecked(query: String): RunOutcome =
+    RiftRegion.streaming { stream ?=>
+      val cfg = CommonCrawlWetConfig
+      val input = inputData
+
+      final class CheckedRecord(
+          val kind: Int,
+          val pageId: Int,
+          val domain: Int,
+          val value: Int,
+          val hash: Long
+      ) extends RiftRegion.StreamAppendNode
+
+      val window =
+        RiftRegion.streamAppendWindow[CheckedRecord](
+          cfg.pagesPerBucket.toLong
+        )
+      var checksum = 0L
+      var outputCount = 0L
+
+      def consume(
+          bucket: RiftRegion.StreamBucket^{stream},
+          record: CheckedRecord^{stream}
+      ): Unit = {
+        checksum = fold(
+          checksum,
+          record.kind,
+          record.pageId,
+          record.domain,
+          record.value,
+          record.hash,
+          bucket.startSeconds
+        )
+        outputCount += 1L
+      }
+
+      def consumeDomainSummary(
+          bucket: RiftRegion.StreamBucket^{stream},
+          domain: Int,
+          count: Int
+      ): Unit = {
+        checksum = fold(
+          checksum,
+          4,
+          bucket.startSeconds.toInt,
+          domain,
+          count,
+          (domain.toLong << 32) ^ count.toLong,
+          bucket.startSeconds
+        )
+        outputCount += 1L
+      }
+
+      def closeRecords(
+          bucket: RiftRegion.StreamBucket^{stream},
+          cursor: RiftRegion.StreamAppendCursor[CheckedRecord]^{stream}
+      ): Unit =
+        if (query == "q2-domain-window") {
+          val counts = new Array[Int](cfg.domainSpace)
+          while (cursor.hasNext) {
+            val record: CheckedRecord^{stream} = cursor.next()
+            counts(record.domain) += 1
+          }
+          var domain = 0
+          while (domain < counts.length) {
+            val count = counts(domain)
+            if (count != 0)
+              consumeDomainSummary(bucket, domain, count)
+            domain += 1
+          }
+        } else {
+          while (cursor.hasNext) {
+            val record: CheckedRecord^{stream} = cursor.next()
+            consume(bucket, record)
+          }
+        }
+
+      def closeExpired(cutoffPage: Long): Unit =
+        RiftRegion.closeAppendWindowBucketsBeforeWithCursor(
+          stream,
+          window,
+          cutoffPage
+        ) { (bucket, cursor) =>
+          closeRecords(bucket, cursor)
+        }
+
+      var currentStartPage = Long.MinValue
+      var currentBucket: RiftRegion.StreamBucket^{stream} = null
+      var currentBucketRegion: RiftRegion.StreamingRegion^{stream} = null
+      var page = 0
+      while (page < input.pages) {
+        val domain = input.domainAt(page)
+        val startPage = bucketStart(page)
+        if (startPage != currentStartPage) {
+          closeExpired(closeCutoff(startPage))
+          currentStartPage = startPage
+          currentBucket =
+            RiftRegion.streamAppendWindowBucketFor(stream, window, startPage)
+          currentBucketRegion =
+            RiftRegion.streamBucketRegion(stream, currentBucket)
+        }
+        val bucket = currentBucket
+        val bucketRegion = currentBucketRegion
+
+        val pageRecord: CheckedRecord^{stream} =
+          RiftRegion.alloc(
+            new CheckedRecord(1, page, domain, 0, input.lineHashAt(page, 0))
+          )(using bucketRegion)
+        if (scratchQuery(query)) consume(bucket, pageRecord)
+        else RiftRegion.appendWindow(stream, window, bucket, pageRecord)
+
+        var line = 0
+        val lines = input.lineCountAt(page)
+        while (line < lines) {
+          val lh = input.lineHashAt(page, line)
+          val lineRecord: CheckedRecord^{stream} =
+            RiftRegion.alloc(new CheckedRecord(2, page, domain, line, lh))(
+              using bucketRegion
+            )
+          if (scratchQuery(query)) consume(bucket, lineRecord)
+          else RiftRegion.appendWindow(stream, window, bucket, lineRecord)
+          if (tokenQuery(query)) {
+            var token = 0
+            val tokens = input.tokenCountAt(page, line)
+            while (token < tokens) {
+              val tokenRecord: CheckedRecord^{stream} =
+                RiftRegion.alloc(
+                  new CheckedRecord(
+                    3,
+                    page,
+                    domain,
+                    token,
+                    input.tokenHashAt(page, line, token)
+                  )
+                )(using bucketRegion)
+              if (scratchQuery(query)) consume(bucket, tokenRecord)
+              else RiftRegion.appendWindow(stream, window, bucket, tokenRecord)
+              token += 1
+            }
+          }
+          line += 1
+        }
+        if (page % cfg.sampleEvery == 0)
+          checksum = fold(
+            checksum,
+            9,
+            page,
+            domain,
+            line,
+            input.lineHashAt(page, if (line == 0) 0 else line - 1),
+            bucket.startSeconds
+          )
+        page += 1
+      }
+
+      RiftRegion.closeAllAppendWindowBucketsWithCursor(stream, window) {
+        (bucket, cursor) =>
+          closeRecords(bucket, cursor)
+      }
+
+      checksumSink = checksum
+      outputSink = outputCount
+      RunOutcome(checksum, outputCount)
+    }
+
   private def runMode(mode: String, query: String): RunOutcome =
     mode match {
       case "heap"          => runHeap(query)
       case "safezone"      => runSafeZone(query)
       case "rift-hp"       => runRiftTrusted(query, RiftRegion.HPZone)
       case "rift-streaming" => runRiftTrusted(query, RiftRegion.Streaming)
+      case "rift-checked"  => runRiftChecked(query)
       case other =>
         throw new IllegalArgumentException(
           s"unknown Common Crawl WET mode '$other'"
@@ -940,7 +1108,8 @@ object CommonCrawlWetMatrixHelpers {
   def runBenchmark(mode: String, query: String): Unit = {
     val cfg = CommonCrawlWetConfig
     val input = inputData
-    val usesRift = mode == "rift-hp" || mode == "rift-streaming"
+    val usesRift =
+      mode == "rift-hp" || mode == "rift-streaming" || mode == "rift-checked"
     val expected = runHeap(query)
 
     var warmup = 0
