@@ -111,6 +111,12 @@ object CommonCrawlWetMatrixHelpers {
       riftRegionCloseTotal: Long,
       riftRegionResetTotal: Long,
       riftAllocObjectTotal: Long,
+      riftAllocRawBytesTotal: Long,
+      riftAllocSlowTotal: Long,
+      riftMmapSlabTotal: Long,
+      riftMmapBytesTotal: Long,
+      riftTlsReuseTotal: Long,
+      riftPoolReuseTotal: Long,
       riftRegionOpNanos: Long,
       riftSlowAllocNanos: Long
   )
@@ -149,7 +155,7 @@ object CommonCrawlWetMatrixHelpers {
 
   private object RuntimeSample {
     val zero: RuntimeSample =
-      RuntimeSample(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L)
+      RuntimeSample(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L)
 
     private def rawSizeToLong(value: RawSize): Long =
       fromRawUSize(value).toLong
@@ -178,6 +184,18 @@ object CommonCrawlWetMatrixHelpers {
             rawSizeToLong(RiftAllocator.Impl.statsRegionResetTotal()),
           riftAllocObjectTotal =
             rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal()),
+          riftAllocRawBytesTotal =
+            rawSizeToLong(RiftAllocator.Impl.statsAllocRawBytesTotal()),
+          riftAllocSlowTotal =
+            rawSizeToLong(RiftAllocator.Impl.statsAllocSlowTotal()),
+          riftMmapSlabTotal =
+            rawSizeToLong(RiftAllocator.Impl.statsMmapSlabTotal()),
+          riftMmapBytesTotal =
+            rawSizeToLong(RiftAllocator.Impl.statsMmapBytesTotal()),
+          riftTlsReuseTotal =
+            rawSizeToLong(RiftAllocator.Impl.statsTlsReuseTotal()),
+          riftPoolReuseTotal =
+            rawSizeToLong(RiftAllocator.Impl.statsPoolReuseTotal()),
           riftRegionOpNanos =
             rawSizeToLong(RiftAllocator.Impl.statsRegionOpNanos()),
           riftSlowAllocNanos =
@@ -198,6 +216,18 @@ object CommonCrawlWetMatrixHelpers {
           delta(end.riftRegionResetTotal, start.riftRegionResetTotal),
         riftAllocObjectTotal =
           delta(end.riftAllocObjectTotal, start.riftAllocObjectTotal),
+        riftAllocRawBytesTotal =
+          delta(end.riftAllocRawBytesTotal, start.riftAllocRawBytesTotal),
+        riftAllocSlowTotal =
+          delta(end.riftAllocSlowTotal, start.riftAllocSlowTotal),
+        riftMmapSlabTotal =
+          delta(end.riftMmapSlabTotal, start.riftMmapSlabTotal),
+        riftMmapBytesTotal =
+          delta(end.riftMmapBytesTotal, start.riftMmapBytesTotal),
+        riftTlsReuseTotal =
+          delta(end.riftTlsReuseTotal, start.riftTlsReuseTotal),
+        riftPoolReuseTotal =
+          delta(end.riftPoolReuseTotal, start.riftPoolReuseTotal),
         riftRegionOpNanos =
           delta(end.riftRegionOpNanos, start.riftRegionOpNanos),
         riftSlowAllocNanos =
@@ -930,6 +960,13 @@ object CommonCrawlWetMatrixHelpers {
     val gcCollections = new Array[Long](cfg.benchmarkRuns)
     val riftOpNanos = new Array[Long](cfg.benchmarkRuns)
     val riftObjects = new Array[Long](cfg.benchmarkRuns)
+    val riftRawBytes = new Array[Long](cfg.benchmarkRuns)
+    val riftSlowAllocs = new Array[Long](cfg.benchmarkRuns)
+    val riftMmapSlabs = new Array[Long](cfg.benchmarkRuns)
+    val riftMmapBytes = new Array[Long](cfg.benchmarkRuns)
+    val riftTlsReuse = new Array[Long](cfg.benchmarkRuns)
+    val riftPoolReuse = new Array[Long](cfg.benchmarkRuns)
+    val riftSlowAllocNanos = new Array[Long](cfg.benchmarkRuns)
     val riftOpens = new Array[Long](cfg.benchmarkRuns)
     val riftCloses = new Array[Long](cfg.benchmarkRuns)
     val riftResets = new Array[Long](cfg.benchmarkRuns)
@@ -957,6 +994,13 @@ object CommonCrawlWetMatrixHelpers {
       gcCollections(run) = runtime.gcCollections
       riftOpNanos(run) = runtime.riftRegionOpNanos
       riftObjects(run) = runtime.riftAllocObjectTotal
+      riftRawBytes(run) = runtime.riftAllocRawBytesTotal
+      riftSlowAllocs(run) = runtime.riftAllocSlowTotal
+      riftMmapSlabs(run) = runtime.riftMmapSlabTotal
+      riftMmapBytes(run) = runtime.riftMmapBytesTotal
+      riftTlsReuse(run) = runtime.riftTlsReuseTotal
+      riftPoolReuse(run) = runtime.riftPoolReuseTotal
+      riftSlowAllocNanos(run) = runtime.riftSlowAllocNanos
       riftOpens(run) = runtime.riftRegionOpenTotal
       riftCloses(run) = runtime.riftRegionCloseTotal
       riftResets(run) = runtime.riftRegionResetTotal
@@ -983,6 +1027,13 @@ object CommonCrawlWetMatrixHelpers {
     val maxGcCollections = maxLong(gcCollections)
     val medianRiftOp = medianLong(riftOpNanos)
     val medianObjects = medianLong(riftObjects)
+    val medianRawBytes = medianLong(riftRawBytes)
+    val medianSlowAllocs = medianLong(riftSlowAllocs)
+    val medianMmapSlabs = medianLong(riftMmapSlabs)
+    val medianMmapBytes = medianLong(riftMmapBytes)
+    val medianTlsReuse = medianLong(riftTlsReuse)
+    val medianPoolReuse = medianLong(riftPoolReuse)
+    val medianSlowAllocNanos = medianLong(riftSlowAllocNanos)
     val medianOpens = medianLong(riftOpens)
     val medianCloses = medianLong(riftCloses)
     val medianResets = medianLong(riftResets)
@@ -996,7 +1047,14 @@ object CommonCrawlWetMatrixHelpers {
         f"runs_with_gc=$runsWithGc%d " +
         f"max_gc_collections=$maxGcCollections%d " +
         f"median_rift_op_ms=${medianRiftOp / 1000000.0}%.3f " +
+        f"median_rift_slow_alloc_ms=${medianSlowAllocNanos / 1000000.0}%.3f " +
         f"median_rift_alloc_object_total=$medianObjects%d " +
+        f"median_rift_alloc_raw_bytes_total=$medianRawBytes%d " +
+        f"median_rift_alloc_slow_total=$medianSlowAllocs%d " +
+        f"median_rift_mmap_slab_total=$medianMmapSlabs%d " +
+        f"median_rift_mmap_bytes_total=$medianMmapBytes%d " +
+        f"median_rift_tls_reuse_total=$medianTlsReuse%d " +
+        f"median_rift_pool_reuse_total=$medianPoolReuse%d " +
         f"median_rift_open_total=$medianOpens%d " +
         f"median_rift_close_total=$medianCloses%d " +
         f"median_rift_reset_total=$medianResets%d " +

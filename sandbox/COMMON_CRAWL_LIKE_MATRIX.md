@@ -1,15 +1,18 @@
 # Common Crawl-Like Object-Heavy Stream Matrix
 
-Status: WET-shaped q1/q2/q3 generated 100k/1M follow-up recorded.
+Status: WET-shaped q1/q2/q3 generated follow-up recorded; q1/q2 rerun after
+Rift fast-allocation counter cleanup.
 
-Date: 2026-05-01
+Date: 2026-05-02
 
 ## Purpose
 
 Common Crawl WET-shaped tokenization is currently the clearest local
-stream/object-pressure detector: heap spends material time in GC on the
-generated 1M tokenization row, but improved SafeZone still beats trusted Rift.
-This matrix expands that workload family before more DEBS-specific tuning.
+stream/object-pressure detector: heap spends material time in GC on generated
+1M q1/q2 rows, and trusted Rift now beats heap plus improved SafeZone-32k after
+removing default per-allocation global byte-counter atomics from the Rift fast
+path. This matrix expands that workload family before more DEBS-specific
+tuning.
 
 ## Implemented Queries
 
@@ -187,6 +190,83 @@ Interpretation:
 - The `SAFEZONE_TRACE=1` unsafe-hp q1 pathology from
   `SAFEZONE_COST_MATRIX.md` does not reproduce without tracing. Keep it as a
   tracing/instrumentation warning.
+
+## Rift Fast Allocation Counter Follow-Up
+
+Run outputs:
+
+- 100k summary:
+  `/Users/siyaoliu/rift/cache/common-crawl-like-fastalloc-2026-05-02-100k/summary.tsv`
+- 1M summary:
+  `/Users/siyaoliu/rift/cache/common-crawl-like-fastalloc-2026-05-02-1m/summary.tsv`
+- precise-allocation-stats control:
+  `/Users/siyaoliu/rift/cache/common-crawl-like-precise-stats-2026-05-02-100k/summary.tsv`
+
+Implementation change being measured:
+
+- Rift still counts region objects and total raw bytes.
+- Total raw bytes are now accumulated in the region and flushed at close/reset
+  instead of updating global/family atomics on every allocation.
+- Precise active allocated-byte current/peak counters are now diagnostic-only:
+  set `RIFT_PRECISE_ALLOC_STATS=1` when those active-byte counters matter.
+
+All rows below matched checksum/output count within each query.
+
+### 100k Medians After Counter Cleanup
+
+| Query | Mode | Median ms | GC ms | Max GC ms | Rift op ms | Rift slow alloc ms | Region objects | Raw region bytes | RSS bytes |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| q1-tokenize | heap | 541.742 | 150.036 | 161.032 | 0.000 | 0.000 | 0 | 0 | 408584192 |
+| q1-tokenize | safezone-improved-32k | 460.259 | 0.000 | 0.000 | 0.000 | 0.000 | 0 | 0 | 356073472 |
+| q1-tokenize | unsafezone-hp | 458.006 | 0.000 | 0.000 | 0.000 | 0.000 | 0 | 0 | 356057088 |
+| q1-tokenize | rift-hp | 439.129 | 0.000 | 0.000 | 1.061 | 0.745 | 13700000 | 657600000 | 355991552 |
+| q1-tokenize | rift-streaming | 438.521 | 0.000 | 0.000 | 1.062 | 0.739 | 13700000 | 657600000 | 355909632 |
+| q2-domain-window | heap | 518.950 | 147.000 | 150.176 | 0.000 | 0.000 | 0 | 0 | 408584192 |
+| q2-domain-window | safezone-improved-32k | 444.618 | 0.000 | 0.000 | 0.000 | 0.000 | 0 | 0 | 420397056 |
+| q2-domain-window | unsafezone-hp | 446.103 | 0.000 | 0.000 | 0.000 | 0.000 | 0 | 0 | 420413440 |
+| q2-domain-window | rift-hp | 424.586 | 0.000 | 0.000 | 1.043 | 0.739 | 13700000 | 657600000 | 420331520 |
+| q2-domain-window | rift-streaming | 422.458 | 0.000 | 0.000 | 1.067 | 0.757 | 13700000 | 657600000 | 420265984 |
+
+### 1M Medians After Counter Cleanup
+
+| Query | Mode | Median ms | GC ms | Max GC ms | Rift op ms | Rift slow alloc ms | Region objects | Raw region bytes | RSS bytes |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| q1-tokenize | heap | 5466.535 | 1580.847 | 1602.118 | 0.000 | 0.000 | 0 | 0 | 408584192 |
+| q1-tokenize | safezone-improved-32k | 4608.641 | 30.657 | 33.693 | 0.000 | 0.000 | 0 | 0 | 474710016 |
+| q1-tokenize | unsafezone-hp | 4640.245 | 20.298 | 20.603 | 0.000 | 0.000 | 0 | 0 | 474644480 |
+| q1-tokenize | rift-hp | 4386.590 | 20.298 | 20.326 | 10.863 | 7.609 | 137000000 | 6576000000 | 474546176 |
+| q1-tokenize | rift-streaming | 4395.599 | 20.227 | 20.489 | 11.235 | 7.903 | 137000000 | 6576000000 | 474480640 |
+| q2-domain-window | heap | 5267.784 | 1561.851 | 1591.108 | 0.000 | 0.000 | 0 | 0 | 408584192 |
+| q2-domain-window | safezone-improved-32k | 4425.273 | 28.307 | 34.794 | 0.000 | 0.000 | 0 | 0 | 474742784 |
+| q2-domain-window | unsafezone-hp | 4437.924 | 19.419 | 21.288 | 0.000 | 0.000 | 0 | 0 | 474644480 |
+| q2-domain-window | rift-hp | 4176.919 | 20.335 | 20.799 | 10.631 | 7.510 | 137000000 | 6576000000 | 474546176 |
+| q2-domain-window | rift-streaming | 4164.288 | 20.044 | 20.112 | 10.446 | 7.293 | 137000000 | 6576000000 | 474480640 |
+
+### Precise Stats Control
+
+At 100k q1, `rift-hp` with default fast allocation counters is `439.129 ms`.
+With `RIFT_PRECISE_ALLOC_STATS=1`, the same mode is `473.750 ms`.
+
+This supports the diagnosis that the previous Common Crawl-like Rift gap was
+partly measurement overhead from per-allocation global/family allocated-byte
+atomics. Keep precise active allocated-byte counters as diagnostics, not
+default benchmark instrumentation.
+
+### Updated Interpretation
+
+- q1 and q2 are now the strongest local GC-heavy stream/object evidence for
+  current Rift HP/Streaming: the 1M rows region-allocate `137000000` ordinary
+  token/page/line objects and `6.576 GB` of raw region payload, cut heap GC
+  from about `1.56-1.58 s` to about `20 ms`, and beat heap by about
+  `20-21%`.
+- After removing default per-allocation global byte-counter atomics, Rift also
+  beats improved SafeZone-32k and UnsafeZone-HP on q1/q2 elapsed time.
+- RSS is not a Rift win at 1M: heap peak RSS is lower in these runs, while
+  SafeZone/Rift retain a larger pool/working set. Use these rows as elapsed/GC
+  wins, not memory-footprint wins.
+- q3-parser-scratch remains a negative control from the earlier follow-up:
+  heap wins elapsed despite material GC, so not every object-heavy parser
+  shape benefits from region placement.
 
 ## Next Similar Workloads
 

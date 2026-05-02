@@ -190,8 +190,15 @@ Common Crawl-like 1M q1/q2 run did not reproduce this pathology:
 `unsafezone-hp` q1 was `4665.711 ms` and q2 was `4511.995 ms`, close to
 `safezone-improved-32k` q1 `4674.258 ms` and q2 `4471.463 ms`. Treat the trace
 row as an instrumentation-sensitive warning, not as normal-run evidence that
-UnsafeZone-HP cannot handle tokenization. Still do not build a checked backend
-on the assumption that rootless 32 KiB SafeZone is always the fastest substrate.
+UnsafeZone-HP cannot handle tokenization.
+
+A later Rift fast-allocation counter cleanup also changed the non-trace
+Common Crawl-like q1/q2 ordering: after removing default per-allocation global
+allocated-byte atomics from the Rift fast path, 1M `rift-hp` is `4386.590 ms`
+on q1 and `4176.919 ms` on q2, beating `safezone-improved-32k` (`4608.641 ms`
+and `4425.273 ms`). This does not invalidate the SafeZone trace cost
+decomposition, but it weakens the earlier conclusion that SafeZone-family
+internals are always the faster substrate for tokenization-shaped streams.
 
 ## Headline Interpretation
 

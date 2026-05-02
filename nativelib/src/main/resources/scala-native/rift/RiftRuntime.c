@@ -2,6 +2,7 @@
 #include "rift/RiftRuntime.h"
 
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -105,6 +106,9 @@ static _Atomic(size_t) scalanative_rift_stats_close_ns_value = 0;
 static _Atomic(size_t) scalanative_rift_stats_reset_ns_value = 0;
 static _Atomic(size_t) scalanative_rift_stats_slow_alloc_ns_value = 0;
 
+static bool scalanative_rift_precise_alloc_stats_initialized = false;
+static bool scalanative_rift_precise_alloc_stats_value = false;
+
 static __thread scalanative_rift_slab *
     scalanative_rift_tls_cache[SCALANATIVE_RIFT_TLS_SLAB_CACHE_MAX];
 static __thread int scalanative_rift_tls_count = 0;
@@ -125,6 +129,17 @@ static inline uint64_t scalanative_rift_now_ns(void) {
 static inline void scalanative_rift_stats_add(_Atomic(size_t) *counter,
                                               size_t value) {
     atomic_fetch_add_explicit(counter, value, memory_order_relaxed);
+}
+
+static inline bool scalanative_rift_precise_alloc_stats_enabled(void) {
+    if (!scalanative_rift_precise_alloc_stats_initialized) {
+        const char *value = getenv("RIFT_PRECISE_ALLOC_STATS");
+        scalanative_rift_precise_alloc_stats_value =
+            value != NULL && value[0] != '\0' &&
+            !(value[0] == '0' && value[1] == '\0');
+        scalanative_rift_precise_alloc_stats_initialized = true;
+    }
+    return scalanative_rift_precise_alloc_stats_value;
 }
 
 static inline void scalanative_rift_stats_update_peak(
@@ -248,11 +263,8 @@ static inline void scalanative_rift_stats_record_alloc_bytes(
 
     if (region == NULL) return;
     region->alloc_raw_bytes += bytes;
-    scalanative_rift_stats_add(
-        &scalanative_rift_stats_alloc_raw_bytes_total_value, bytes);
-    scalanative_rift_stats_family_add_total(
-        scalanative_rift_stats_family_alloc_raw_bytes_total_values,
-        region->family, bytes);
+    if (bytes == 0 || !scalanative_rift_precise_alloc_stats_enabled()) return;
+
     current = atomic_fetch_add_explicit(
                   &scalanative_rift_stats_active_alloc_bytes_current_value,
                   bytes, memory_order_relaxed) +
@@ -268,12 +280,14 @@ static inline void scalanative_rift_stats_record_alloc_bytes(
 static inline void scalanative_rift_stats_release_alloc_bytes(
     scalanative_rift_region *region) {
     if (region == NULL || region->alloc_raw_bytes == 0) return;
-    atomic_fetch_sub_explicit(
-        &scalanative_rift_stats_active_alloc_bytes_current_value,
-        region->alloc_raw_bytes, memory_order_relaxed);
-    scalanative_rift_stats_family_sub_current(
-        scalanative_rift_stats_family_active_alloc_bytes_current_values,
-        region->family, region->alloc_raw_bytes);
+    if (scalanative_rift_precise_alloc_stats_enabled()) {
+        atomic_fetch_sub_explicit(
+            &scalanative_rift_stats_active_alloc_bytes_current_value,
+            region->alloc_raw_bytes, memory_order_relaxed);
+        scalanative_rift_stats_family_sub_current(
+            scalanative_rift_stats_family_active_alloc_bytes_current_values,
+            region->family, region->alloc_raw_bytes);
+    }
     region->alloc_raw_bytes = 0;
 }
 
@@ -594,6 +608,14 @@ static void scalanative_rift_region_flush_alloc_stats(
                                    region->alloc_slow_count);
         region->alloc_slow_count = 0;
     }
+    if (region->alloc_raw_bytes != 0) {
+        scalanative_rift_stats_add(
+            &scalanative_rift_stats_alloc_raw_bytes_total_value,
+            region->alloc_raw_bytes);
+        scalanative_rift_stats_family_add_total(
+            scalanative_rift_stats_family_alloc_raw_bytes_total_values,
+            region->family, region->alloc_raw_bytes);
+    }
 }
 
 static void scalanative_rift_release_slab_chain(
@@ -809,9 +831,11 @@ void scalanative_rift_region_set_family(void *rawregion, uint32_t family) {
     scalanative_rift_stats_family_sub_current(
         scalanative_rift_stats_family_active_bytes_current_values, old_family,
         mapped_bytes);
-    scalanative_rift_stats_family_sub_current(
-        scalanative_rift_stats_family_active_alloc_bytes_current_values,
-        old_family, alloc_bytes);
+    if (scalanative_rift_precise_alloc_stats_enabled()) {
+        scalanative_rift_stats_family_sub_current(
+            scalanative_rift_stats_family_active_alloc_bytes_current_values,
+            old_family, alloc_bytes);
+    }
 
     region->family = next_family;
 
@@ -819,10 +843,12 @@ void scalanative_rift_region_set_family(void *rawregion, uint32_t family) {
         scalanative_rift_stats_family_active_bytes_current_values,
         scalanative_rift_stats_family_active_bytes_peak_values, next_family,
         mapped_bytes);
-    scalanative_rift_stats_family_add_current(
-        scalanative_rift_stats_family_active_alloc_bytes_current_values,
-        scalanative_rift_stats_family_active_alloc_bytes_peak_values,
-        next_family, alloc_bytes);
+    if (scalanative_rift_precise_alloc_stats_enabled()) {
+        scalanative_rift_stats_family_add_current(
+            scalanative_rift_stats_family_active_alloc_bytes_current_values,
+            scalanative_rift_stats_family_active_alloc_bytes_peak_values,
+            next_family, alloc_bytes);
+    }
 }
 
 void scalanative_rift_region_close(void *rawregion) {

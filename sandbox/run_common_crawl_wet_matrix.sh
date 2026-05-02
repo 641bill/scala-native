@@ -45,7 +45,7 @@ read_max_rss_bytes() {
 }
 
 write_summary_header() {
-  printf "query\tmode\tinput\tmedian_ms\tmedian_gc_ms\tmax_gc_ms\truns_with_gc\tmax_gc_collections\tmedian_rift_op_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\toutput_count\tmax_rss_bytes\n" > "${summary}"
+  printf "query\tmode\tinput\tmedian_ms\tmedian_gc_ms\tmax_gc_ms\truns_with_gc\tmax_gc_collections\tmedian_rift_op_ms\tmedian_rift_slow_alloc_ms\tmedian_rift_alloc_object_total\tmedian_rift_alloc_raw_bytes_total\tmedian_rift_alloc_slow_total\tmedian_rift_mmap_slab_total\tmedian_rift_mmap_bytes_total\tmedian_rift_tls_reuse_total\tmedian_rift_pool_reuse_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\toutput_count\tmax_rss_bytes\n" > "${summary}"
 }
 
 write_result_row() {
@@ -67,7 +67,7 @@ write_result_row() {
     fi
   done
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "${query}" \
     "${mode}" \
     "${fields[input]-}" \
@@ -77,7 +77,14 @@ write_result_row() {
     "${fields[runs_with_gc]-}" \
     "${fields[max_gc_collections]-}" \
     "${fields[median_rift_op_ms]-}" \
+    "${fields[median_rift_slow_alloc_ms]-}" \
     "${fields[median_rift_alloc_object_total]-}" \
+    "${fields[median_rift_alloc_raw_bytes_total]-}" \
+    "${fields[median_rift_alloc_slow_total]-}" \
+    "${fields[median_rift_mmap_slab_total]-}" \
+    "${fields[median_rift_mmap_bytes_total]-}" \
+    "${fields[median_rift_tls_reuse_total]-}" \
+    "${fields[median_rift_pool_reuse_total]-}" \
     "${fields[median_rift_open_total]-}" \
     "${fields[median_rift_close_total]-}" \
     "${fields[median_rift_reset_total]-}" \
