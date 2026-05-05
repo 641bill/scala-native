@@ -8,7 +8,7 @@ output_dir=${CHECKED_APPEND_OUTPUT_DIR:-"/tmp/checked-append-window"}
 summary=${CHECKED_APPEND_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${CHECKED_APPEND_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${CHECKED_APPEND_MODES:-"heap-immix heap-prepend heap-immix-chunk rift-checked rift-checked-api rift-checked-rift rift-checked-page-token rift-checked-chunk-token rift-checked-safezone-page-token rift-checked-safezone-chunk-token rift-checked-api-prepend-cursor rift-trusted-hp rift-trusted-streaming"}})
+modes=(${(z)${CHECKED_APPEND_MODES:-"heap-immix heap-prepend heap-epoch heap-immix-chunk rift-checked rift-checked-api rift-checked-rift rift-checked-page-token rift-checked-epoch-buffer rift-checked-chunk-token rift-checked-safezone-page-token rift-checked-safezone-epoch-buffer rift-checked-safezone-chunk-token rift-checked-api-prepend-cursor rift-trusted-hp rift-trusted-streaming"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"
@@ -109,7 +109,7 @@ run_mode() {
       roots_mode="3"
       page_size="32768"
       ;;
-    safezone-improved-32k|rift-checked-safezone-32k|rift-checked-safezone-page-token)
+    safezone-improved-32k|rift-checked-safezone-32k|rift-checked-safezone-page-token|rift-checked-safezone-epoch-buffer)
       roots_mode="1"
       page_size="32768"
       ;;

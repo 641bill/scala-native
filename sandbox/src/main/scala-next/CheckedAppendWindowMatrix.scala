@@ -309,6 +309,66 @@ object CheckedAppendWindowMatrixHelpers {
     checksum
   }
 
+  def runHeapEpoch(): Long = {
+    val cfg = CheckedAppendWindowConfig
+    val totals = new Array[Long](cfg.keySpace)
+    var current: HeapBucket = null
+    var checksum = 0L
+
+    def closeCurrent(): Unit =
+      if (current != null) {
+        val bucket = current
+        var record = bucket.head
+        while (record != null) {
+          val nextTotal =
+            (totals(record.key) + record.total) & 0xffffffffL
+          totals(record.key) = nextTotal
+          checksum =
+            fold(checksum, record.key, record.value, nextTotal, bucket.startSeconds)
+          record = record.next
+        }
+        bucket.head = null
+        bucket.tail = null
+        current = null
+      }
+
+    var i = 0
+    while (i < cfg.events) {
+      val seed = mix(i * 1103515245 + 12345)
+      val key = seed % cfg.keySpace
+      val value = (mix(seed + 17) & 0xffff) + 1
+      val startSeconds = bucketStart(i)
+      if (current == null || current.startSeconds != startSeconds) {
+        closeCurrent()
+        current = new HeapBucket(startSeconds, null)
+      }
+      val bucket = current
+      val record = new HeapRecord(key, value, value.toLong, null)
+      record.value += seed & 3
+      record.total += record.value.toLong
+      if (bucket.head == null) {
+        bucket.head = record
+        bucket.tail = record
+      } else {
+        bucket.tail.next = record
+        bucket.tail = record
+      }
+      if (i % cfg.sampleEvery == 0)
+        checksum = fold(
+          checksum,
+          record.key,
+          record.value,
+          record.total,
+          bucket.startSeconds
+        )
+      i += 1
+    }
+
+    closeCurrent()
+    checksumSink = checksum
+    checksum
+  }
+
   def runHeapChunk(): Long = {
     val cfg = CheckedAppendWindowConfig
     val totals = new Array[Long](cfg.keySpace)
@@ -997,6 +1057,96 @@ object CheckedAppendWindowMatrixHelpers {
     checksum
   }
 
+  private def runRiftCheckedEpochBufferBody()(using
+      stream: RiftRegion.StreamingRegion^
+  ): Long = {
+    val cfg = CheckedAppendWindowConfig
+    val totals = new Array[Long](cfg.keySpace)
+    final class Record(
+        val key: Int,
+        var value: Int,
+        var total: Long
+    ) extends RiftRegion.StreamAppendNode
+    val buffer = RiftRegion.epochBuffer[Record]()
+    var running = 0L
+    var currentStartSeconds = Long.MinValue
+    var currentRegion: RiftRegion.StreamingRegion^{stream} = null
+    var closingStartSeconds = 0L
+
+    def consume(
+        bucket: RiftRegion.StreamBucket^{stream},
+        cursor: RiftRegion.StreamAppendCursor[Record]^{stream}
+    ): Unit =
+      while (cursor.hasNext) {
+        val record: Record^{stream} = cursor.next()
+        val nextTotal =
+          (totals(record.key) + record.total) & 0xffffffffL
+        totals(record.key) = nextTotal
+        running = fold(
+          running,
+          record.key,
+          record.value,
+          nextTotal,
+          closingStartSeconds
+        )
+      }
+
+    def closeCurrentEpoch(): Unit =
+      if (currentRegion != null) {
+        closingStartSeconds = currentStartSeconds
+        currentRegion = null
+        RiftRegion.closeEpochBufferWithCursor(stream, buffer)(consume)
+      }
+
+    var i = 0
+    while (i < cfg.events) {
+      val seed = mix(i * 1103515245 + 12345)
+      val key = seed % cfg.keySpace
+      val value = (mix(seed + 17) & 0xffff) + 1
+      val startSeconds = bucketStart(i)
+      if (startSeconds != currentStartSeconds) {
+        closeCurrentEpoch()
+        currentStartSeconds = startSeconds
+        currentRegion = RiftRegion.epochBufferRegionFor(stream, buffer)
+      }
+      val record: Record^{stream} =
+        RiftRegion.alloc(new Record(key, value, value.toLong))(
+          using currentRegion
+        )
+      record.value += seed & 3
+      record.total += record.value.toLong
+      RiftRegion.appendEpochBuffer(stream, buffer, record)
+      if (i % cfg.sampleEvery == 0)
+        running = fold(
+          running,
+          record.key,
+          record.value,
+          record.total,
+          currentStartSeconds
+        )
+      i += 1
+    }
+
+    closeCurrentEpoch()
+    running
+  }
+
+  private def runRiftCheckedEpochBuffer(): Long = {
+    val checksum = RiftRegion.streaming { stream ?=>
+      runRiftCheckedEpochBufferBody()
+    }
+    checksumSink = checksum
+    checksum
+  }
+
+  private def runRiftCheckedSafeZoneEpochBuffer(): Long = {
+    val checksum = RiftRegion.streamingSafeZone { stream ?=>
+      runRiftCheckedEpochBufferBody()
+    }
+    checksumSink = checksum
+    checksum
+  }
+
   private def runRiftCheckedChunkTokenBody()(using
       stream: RiftRegion.StreamingRegion^
   ): Long = {
@@ -1307,6 +1457,7 @@ object CheckedAppendWindowMatrixHelpers {
       case "rift-checked" | "rift-checked-api" |
           "rift-checked-api-cursor" |
           "rift-checked-page-token" |
+          "rift-checked-epoch-buffer" |
           "rift-checked-chunk-token" |
           "rift-checked-api-prepend-cursor" | "rift-trusted-hp" |
           "rift-trusted-streaming" =>
@@ -1318,16 +1469,20 @@ object CheckedAppendWindowMatrixHelpers {
     canonicalMode(mode) match {
       case "heap"                   => runHeap()
       case "heap-prepend"           => runHeap(prepend = true)
+      case "heap-epoch"             => runHeapEpoch()
       case "heap-chunk"             => runHeapChunk()
       case "rift-checked"           => runRiftChecked()
       case "rift-checked-api"       => runRiftCheckedApi()
       case "rift-checked-api-cursor" => runRiftCheckedApiCursor()
       case "rift-checked-page-token" => runRiftCheckedPageToken()
+      case "rift-checked-epoch-buffer" => runRiftCheckedEpochBuffer()
       case "rift-checked-chunk-token" => runRiftCheckedChunkToken()
       case "rift-checked-safezone-32k" | "rift-checked-rootfree-safezone-hp" =>
         runRiftCheckedSafeZoneApiCursor()
       case "rift-checked-safezone-page-token" =>
         runRiftCheckedSafeZonePageToken()
+      case "rift-checked-safezone-epoch-buffer" =>
+        runRiftCheckedSafeZoneEpochBuffer()
       case "rift-checked-safezone-chunk-token" =>
         runRiftCheckedSafeZoneChunkToken()
       case "rift-checked-api-prepend-cursor" =>
@@ -1348,12 +1503,15 @@ object CheckedAppendWindowMatrixHelpers {
     mode match {
       case "heap" | "heap-prepend" | "heap-chunk" | "rift-checked" | "rift-trusted-hp" |
           "rift-trusted-streaming" | "rift-checked-api" |
+          "heap-epoch" |
           "rift-checked-api-cursor" | "rift-checked-page-token" |
+          "rift-checked-epoch-buffer" |
           "rift-checked-chunk-token" |
           "rift-checked-api-prepend-cursor" |
           "rift-checked-safezone-32k" |
           "rift-checked-rootfree-safezone-hp" |
           "rift-checked-safezone-page-token" |
+          "rift-checked-safezone-epoch-buffer" |
           "rift-checked-safezone-chunk-token" | "safezone-improved-32k" |
           "unsafezone-hp" =>
         mode
@@ -1370,7 +1528,12 @@ object CheckedAppendWindowMatrixHelpers {
     val prependMode =
       internalMode == "heap-prepend" ||
         internalMode == "rift-checked-api-prepend-cursor"
-    val expectedChecksum = runHeap(prepend = prependMode)
+    val epochMode =
+      internalMode == "heap-epoch" ||
+        internalMode == "rift-checked-epoch-buffer" ||
+        internalMode == "rift-checked-safezone-epoch-buffer"
+    val expectedChecksum =
+      if (epochMode) runHeapEpoch() else runHeap(prepend = prependMode)
 
     var warmup = 0
     while (warmup < cfg.warmupRuns) {

@@ -155,6 +155,7 @@ trait NirGenExpr(using Context) {
           name == "streamWindowTableRankLexicographic" ||
           name == "streamAppendWindow" ||
           name == "pageTokenMapFilter" ||
+          name == "epochBuffer" ||
           name == "streamChunkAppendWindow" ||
           name == "epochFold"
       ) &&
@@ -211,6 +212,7 @@ trait NirGenExpr(using Context) {
         name == "appendWindow" ||
           name == "appendPageToken" ||
           name == "emitPageTokenMapFilter" ||
+          name == "appendEpochBuffer" ||
           name == "appendChunkToken" ||
           name == "prependWindow" ||
           name == "putJoinLeftInBucket" ||

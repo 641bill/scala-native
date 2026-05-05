@@ -1771,6 +1771,49 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked object buffer cannot store an unrooted heap object"
     )
 
+  @Test def epochBufferStoresChildEpochRecords(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    val buffer = RiftRegion.epochBuffer[Event]()
+      |    var total = 0
+      |    def consume(
+      |        bucket: RiftRegion.StreamBucket^{stream},
+      |        cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+      |    ): Unit =
+      |      while cursor.hasNext do
+      |        total += cursor.next().value + bucket.startSeconds.toInt
+      |    val region = RiftRegion.epochBufferRegionFor(stream, buffer)
+      |    val event: Event^{stream} =
+      |      RiftRegion.alloc(new Event(41))(using region)
+      |    RiftRegion.appendEpochBuffer(stream, buffer, event)
+      |    RiftRegion.closeEpochBufferWithCursor(stream, buffer)(consume)
+      |    total + RiftRegion.epochBufferLength(stream, buffer)
+      |  }
+      |""".stripMargin)
+
+  @Test def epochBufferRejectsDirectHeapRecord(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    val buffer = RiftRegion.epochBuffer[Event]()
+      |    val event: Event^{stream} = new Event(41)
+      |    RiftRegion.appendEpochBuffer(stream, buffer, event)
+      |  }
+      |""".stripMargin,
+      "Rift checked object buffer cannot store an unrooted heap object"
+    )
+
   @Test def streamChunkAppendWindowStoresChildBucketRecords(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking

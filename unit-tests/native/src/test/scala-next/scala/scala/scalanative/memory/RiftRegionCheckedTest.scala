@@ -1527,6 +1527,49 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def epochBufferAllocatesAndDrainsRecords(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val buffer = RiftRegion.epochBuffer[Event]()
+        var sum = 0
+
+        def consume(
+            bucket: RiftRegion.StreamBucket^{stream},
+            cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+        ): Unit =
+          while (cursor.hasNext)
+            sum += cursor.next().value + bucket.startSeconds.toInt
+
+        val firstRegion = RiftRegion.epochBufferRegionFor(stream, buffer)
+        val first: Event^{stream} =
+          RiftRegion.alloc(new Event(20))(using firstRegion)
+        val second: Event^{stream} =
+          RiftRegion.alloc(new Event(21))(using firstRegion)
+        RiftRegion.appendEpochBuffer(stream, buffer, first)
+        RiftRegion.appendEpochBuffer(stream, buffer, second)
+        assertEquals(2, RiftRegion.epochBufferLength(stream, buffer))
+
+        RiftRegion.closeEpochBufferWithCursor(stream, buffer)(consume)
+        assertEquals(0, RiftRegion.epochBufferLength(stream, buffer))
+
+        val nextRegion = RiftRegion.epochBufferRegionFor(stream, buffer)
+        val third: Event^{stream} =
+          RiftRegion.alloc(new Event(1))(using nextRegion)
+        RiftRegion.appendEpochBuffer(stream, buffer, third)
+        RiftRegion.closeAllEpochBufferBucketsWithCursor(stream, buffer)(consume)
+
+        sum
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def streamChunkAppendWindowAllocatesAndDrainsRecords(): Unit = {
     RiftRegion.init(1)
     try {

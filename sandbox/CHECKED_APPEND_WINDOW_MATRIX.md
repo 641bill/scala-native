@@ -1,6 +1,6 @@
 # Checked Append Window Matrix
 
-Last updated: 2026-05-05 13:43:52 CEST
+Last updated: 2026-05-05 20:52:18 CEST
 
 Status: focused cheap checked-operator benchmark. This is framework evidence,
 not DEBS application evidence.
@@ -36,9 +36,14 @@ The difference is allocation placement:
   drained through a close-time cursor so close callback dispatch is once per
   bucket rather than once per entry;
 - `heap-prepend`: heap baseline for order-insensitive/head-insert buckets;
+- `heap-epoch`: heap baseline for epoch/batch append-drain;
 - `heap-immix-chunk`: heap baseline for fixed object-array chunks;
 - `rift-checked-api-prepend-cursor`: checked `StreamAppendWindow` with
   head-insert `prependWindow` and cursor close;
+- `rift-checked-epoch-buffer`: checked `EpochBuffer`, an operator-owned
+  append/drain epoch path with one active child region per epoch;
+- `rift-checked-safezone-epoch-buffer`: the same epoch path over the
+  SafeZone-backed checked backend;
 - `rift-checked-chunk-token`: checked `StreamChunkAppendWindow`, an
   operator-owned fixed object-array chunk path;
 - `rift-checked-safezone-chunk-token`: the same chunk path over the
@@ -153,10 +158,61 @@ Validation run on 2026-04-29:
   also matched checksums across all five modes.
 - The cached bucket/region follow-up and cursor close follow-up matched
   checksums across all six modes.
+- The 2026-05-05 `EpochBuffer` follow-up matched checksums for `heap-epoch`,
+  `rift-checked-epoch-buffer`, and `rift-checked-safezone-epoch-buffer` at
+  20k, 100k, and 1M.
 - `CHECKED_APPEND_API_DIAG=1` was added after the no-callback gate still
   failed. Diagnostic elapsed times are not headline numbers.
 - The RSS-backed 100k and 1M runs were rerun outside the sandbox because macOS
   `/usr/bin/time -l` could not read RSS counters inside the sandbox.
+
+## 2026-05-05 EpochBuffer Follow-Up
+
+`EpochBuffer[T]` is the new reusable checked operator for batch/epoch lifetime
+shapes. It is not a sliding-window replacement: the heap control is
+`heap-epoch`, which appends records into one epoch bucket, drains the epoch in
+bulk, and then moves to the next epoch. The checked modes allocate ordinary
+Scala record objects in the active child epoch region and drain with
+`closeEpochBufferWithCursor`.
+
+Commands:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+CHECKED_APPEND_BUILD=0 \
+CHECKED_APPEND_EVENTS=1000000 \
+CHECKED_APPEND_BENCHMARK_RUNS=3 \
+CHECKED_APPEND_WARMUPS=1 \
+CHECKED_APPEND_MODES="heap-epoch rift-checked-epoch-buffer rift-checked-safezone-epoch-buffer" \
+CHECKED_APPEND_OUTPUT_DIR=/tmp/checked-append-epoch-1m \
+  zsh sandbox/run_checked_append_window_matrix.sh
+```
+
+Validation before the focused rows:
+
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile`
+  passed.
+- `RiftRegionCheckedCompilerTest` passed `108/108`.
+- `RiftRegionCheckedTest` passed `48/48`.
+
+| Scale | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens | Closes | Peak RSS bytes | Checksum |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 20k | `heap-epoch` | 1.410 | 0.000 | 0.000 | 0 | 0 | 0 | 7127040 | -1919398397124784300 |
+| 20k | `rift-checked-epoch-buffer` | 0.932 | 0.000 | 0.043 | 20000 | 2 | 2 | 6930432 | -1919398397124784300 |
+| 20k | `rift-checked-safezone-epoch-buffer` | 0.783 | 0.000 | 0.000 | 0 | 0 | 0 | 6914048 | -1919398397124784300 |
+| 100k | `heap-epoch` | 2.463 | 0.000 | 0.000 | 0 | 0 | 0 | 21364736 | 5190533824430307482 |
+| 100k | `rift-checked-epoch-buffer` | 2.703 | 0.000 | 0.007 | 100000 | 5 | 5 | 10731520 | 5190533824430307482 |
+| 100k | `rift-checked-safezone-epoch-buffer` | 2.615 | 0.000 | 0.000 | 0 | 0 | 0 | 10747904 | 5190533824430307482 |
+| 1M | `heap-epoch` | 27.164 | 5.707 | 0.000 | 0 | 0 | 0 | 21446656 | 6798353749814785397 |
+| 1M | `rift-checked-epoch-buffer` | 26.673 | 0.000 | 0.065 | 1000000 | 41 | 41 | 22446080 | 6798353749814785397 |
+| 1M | `rift-checked-safezone-epoch-buffer` | 25.448 | 0.000 | 0.000 | 0 | 0 | 0 | 22462464 | 6798353749814785397 |
+
+Interpretation: `EpochBuffer` is a focused positive reusable-operator row at
+1M. It is a small elapsed win over the fair heap epoch control by removing a
+`5.707 ms` heap GC component, with SafeZone-backed checked allocation fastest.
+At 100k, heap is still slightly faster because there is no GC pressure; the
+checked rows mainly reduce RSS. This is framework evidence for Yak/StreamFlex
+style append/drain epochs, not yet application evidence.
 
 ## 20k Smoke
 

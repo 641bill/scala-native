@@ -1,15 +1,16 @@
 # Cheap Operator Family Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-05 16:15:34 CEST
+Last updated: 2026-05-05 20:52:18 CEST
 
 Status: focused checkpoint. The first staged smoke rows have been followed by
 targeted 1M-shape 3-run medians for Dataflow SELECT, Dataflow AGGREGATE, and
 ListOfLists linked builder. `PageTokenMapFilter` and `RegionList` are now real
 reusable APIs with compiler/runtime probes. `EpochFold` also exists as a real
 API, but its first Dataflow AGGREGATE row fails the speed gate and is recorded
-as a negative/gated operator result. This is still not the full comprehensive
-headline sweep.
+as a negative/gated operator result. `EpochBuffer` has now been added as a
+reusable batch/epoch append-drain API and passes its first focused 1M gate. This
+is still not the full comprehensive headline sweep.
 
 ## Purpose
 
@@ -20,6 +21,8 @@ families" direction:
 - `checked-region-scoped` page-token over the SafeZone-backed checked backend;
 - `checked-epoch-fold` for additive aggregate-shaped rows;
 - `checked-listoflists-builder` for linked ListOfLists topology evidence.
+- `checked-epoch-buffer` for batch/epoch append-drain rows without ranking or
+  hash-table maintenance.
 
 Reusable API status:
 
@@ -28,6 +31,7 @@ Reusable API status:
 | `PageTokenMapFilter[T]` | Implemented and validated | Thin reusable API over the fast page-token child-bucket path. Dataflow SELECT now uses this named operator. |
 | `EpochFold[T]` | Implemented but gated/negative | Correct and tested, but the first real aggregate row is `91.938 ms`, far slower than the older checked aggregate path. Do not use as headline evidence yet. |
 | `RegionList[T]` | Implemented and validated | ListOfLists checked builder now uses the reusable region-list API and improves to `5927.385 ms` median. |
+| `EpochBuffer[T]` | Implemented and focused-positive | Batch/epoch append-drain API. At 1M, `rift-checked-epoch-buffer` is `26.673 ms` and SafeZone-backed checked is `25.448 ms` versus `heap-epoch` `27.164 ms` with `5.707 ms` GC. |
 
 The implementation goal is not to rename public APIs. It is to report the
 system in terms of descriptive memory modes while keeping raw benchmark labels
@@ -45,16 +49,46 @@ ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memor
 
 Latest safety results after the reusable API slice:
 
-- compiler checked suite: `106/106`;
-- runtime checked suite: `47/47`;
+- compiler checked suite: `108/108` after adding `EpochBuffer`;
+- runtime checked suite: `48/48` after adding `EpochBuffer`;
 - Dataflow SELECT page-token smoke matched checksum;
 - Dataflow AGGREGATE `EpochFold` row matched checksum but failed the speed gate;
 - ListOfLists checked builder smoke completed.
+- `EpochBuffer` compiler/runtime probes passed; focused 20k, 100k, and 1M
+  rows matched checksums.
 
 The first attempt to run the staged performance script stopped at
 `checked-region-buffer` because its zsh default mode-list parsing treated the
 whole mode list as one value. The script was fixed and the checked/stream
 staged smoke leg was rerun successfully.
+
+## EpochBuffer Focused Follow-Up
+
+Date/time: 2026-05-05 20:52:18 CEST.
+
+`EpochBuffer[T]` is the reusable API for a whole-epoch/batch lifetime: user
+records are ordinary Scala objects allocated in one active child region, and
+`closeEpochBufferWithCursor` drains the epoch before closing that child region.
+The fair heap control is `heap-epoch`, not the sliding-window heap row.
+
+| Scale | Mode | Median elapsed ms | Median GC ms | RSS bytes | Interpretation |
+|---|---|---:|---:|---:|---|
+| 20k | `heap-epoch` | 1.410 | 0.000 | 7127040 | smoke baseline |
+| 20k | `rift-checked-epoch-buffer` | 0.932 | 0.000 | 6930432 | checksum matched |
+| 20k | `rift-checked-safezone-epoch-buffer` | 0.783 | 0.000 | 6914048 | fastest smoke row |
+| 100k | `heap-epoch` | 2.463 | 0.000 | 21364736 | heap still slightly faster at no-GC scale |
+| 100k | `rift-checked-epoch-buffer` | 2.703 | 0.000 | 10731520 | lower RSS, slight elapsed overhead |
+| 100k | `rift-checked-safezone-epoch-buffer` | 2.615 | 0.000 | 10747904 | lower RSS, closer to heap |
+| 1M | `heap-epoch` | 27.164 | 5.707 | 21446656 | heap now pays material GC |
+| 1M | `rift-checked-epoch-buffer` | 26.673 | 0.000 | 22446080 | focused checked win over heap |
+| 1M | `rift-checked-safezone-epoch-buffer` | 25.448 | 0.000 | 22462464 | fastest focused epoch row |
+
+Interpretation: this is positive framework evidence for the next cheap
+operator family. It should be tried on Yak/StreamFlex-style epoch buffers
+before any rank/hash-heavy application path. The win is modest, but it is
+exactly the desired mechanism: structured-lifetime records leave the heap,
+heap GC goes to zero, and the checked API remains close enough that SafeZone
+backend mechanics beat the heap epoch control at 1M.
 
 ## Staged Dataflow Probe
 
