@@ -1570,6 +1570,62 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def transactionRegionAllocatesAndDrainsMultipleLists(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val tx = RiftRegion.transactionRegion(2)
+        val input = RiftRegion.transactionList[Event](stream, tx, 0)
+        val output = RiftRegion.transactionList[Event](stream, tx, 1)
+        val region = RiftRegion.transactionRegionFor(stream, tx)
+
+        val first: Event^{stream} =
+          RiftRegion.alloc(new Event(20))(using region)
+        val second: Event^{stream} =
+          RiftRegion.alloc(new Event(21))(using region)
+        RiftRegion.appendTransactionList(stream, input, first)
+        RiftRegion.appendTransactionList(stream, input, second)
+        assertEquals(2, RiftRegion.transactionListLength(stream, input))
+        assertEquals(0, RiftRegion.transactionListLength(stream, output))
+
+        RiftRegion.drainTransactionListWithCursor(stream, input) { cursor =>
+          while (cursor.hasNext) {
+            val event = cursor.next()
+            val projected: Event^{stream} =
+              RiftRegion.alloc(new Event(event.value + 1))(using region)
+            RiftRegion.appendTransactionList(stream, output, projected)
+          }
+        }
+        assertEquals(0, RiftRegion.transactionListLength(stream, input))
+        assertEquals(2, RiftRegion.transactionListLength(stream, output))
+
+        var sum = 0
+        RiftRegion.drainTransactionListWithCursor(stream, output) { cursor =>
+          while (cursor.hasNext)
+            sum += cursor.next().value
+        }
+        RiftRegion.closeTransactionRegion(stream, tx)
+
+        val nextRegion = RiftRegion.transactionRegionFor(stream, tx)
+        val third: Event^{stream} =
+          RiftRegion.alloc(new Event(0))(using nextRegion)
+        RiftRegion.appendTransactionList(stream, input, third)
+        RiftRegion.drainTransactionListWithCursor(stream, input) { cursor =>
+          while (cursor.hasNext)
+            sum += cursor.next().value
+        }
+        RiftRegion.closeTransactionRegion(stream, tx)
+        sum
+      }
+
+      assertEquals(43, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def streamChunkAppendWindowAllocatesAndDrainsRecords(): Unit = {
     RiftRegion.init(1)
     try {

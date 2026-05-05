@@ -1,6 +1,6 @@
 # StreamFlex Region Matrix
 
-Last updated: 2026-05-05 22:37:14 CEST
+Last updated: 2026-05-05 23:47:54 CEST
 
 Status: StreamFlex-style methodology reproduction harness with validated local
 smoke, default median, and allocation-pressure median runs.
@@ -52,6 +52,8 @@ only as an explicit provenance control. The default set is:
 - `rift-streaming`
 - `rift-checked-epoch-buffer`
 - `rift-checked-safezone-epoch-buffer`
+- `rift-checked-transaction-region`
+- `rift-checked-safezone-transaction-region`
 
 ## Commands
 
@@ -179,6 +181,129 @@ overhead. It is still useful: the next reusable operator for multi-stage
 pipelines should be a transaction or multi-list epoch region that opens one
 child region per batch and owns several internal lists, rather than stacking
 several independent `EpochBuffer`s.
+
+## Checked TransactionRegion Follow-Up
+
+Date/time: 2026-05-05 23:47:54 CEST.
+
+`TransactionRegion` is the reusable checked operator for a multi-stage
+transaction/batch lifetime. It opens one child region for the active
+transaction, exposes several typed internal append lists, drains each list with
+a cursor, and closes the child region once at transaction end. This is the
+general API shape that replaces the StreamFlex-specific stack of four
+independent `EpochBuffer`s.
+
+The first implementation kept list heads/tails/lengths in indexed arrays. That
+cut child-region opens/closes but was slower than stacked `EpochBuffer` on
+throughput. The implementation was then changed so each `TransactionList` owns
+its hot `head`/`tail`/`length` fields; the parent `TransactionRegion` keeps only
+the active child region, a reusable cursor, and the list registry used for
+close cleanup.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"
+```
+
+Results: compile passed; checked compiler suite passed `110/110`; checked
+native runtime suite passed `49/49`.
+
+Smoke command after list-state optimization:
+
+```sh
+STREAMFLEX_EVENTS=20000 \
+STREAMFLEX_LATENCY_EVENTS=1000 \
+STREAMFLEX_BENCHMARK_RUNS=1 \
+STREAMFLEX_WARMUPS=0 \
+STREAMFLEX_MODES="heap rift-streaming rift-checked-epoch-buffer rift-checked-transaction-region rift-checked-safezone-transaction-region" \
+STREAMFLEX_OUTPUT_DIR=/tmp/streamflex-transaction-smoke3 \
+  zsh sandbox/run_streamflex_region_instrumented_matrix.sh
+```
+
+200k throughput command:
+
+```sh
+STREAMFLEX_BUILD=0 \
+STREAMFLEX_WORKLOAD=throughput \
+STREAMFLEX_EVENTS=200000 \
+STREAMFLEX_BENCHMARK_RUNS=3 \
+STREAMFLEX_WARMUPS=1 \
+STREAMFLEX_MODES="heap improved-safezone rift-streaming rift-checked-epoch-buffer rift-checked-safezone-epoch-buffer rift-checked-transaction-region rift-checked-safezone-transaction-region" \
+STREAMFLEX_OUTPUT_DIR=/tmp/streamflex-transaction-throughput-200k-v2 \
+  zsh sandbox/run_streamflex_region_instrumented_matrix.sh
+```
+
+Latency command:
+
+```sh
+STREAMFLEX_BUILD=0 \
+STREAMFLEX_WORKLOAD=latency \
+STREAMFLEX_LATENCY_EVENTS=10000 \
+STREAMFLEX_BENCHMARK_RUNS=3 \
+STREAMFLEX_WARMUPS=1 \
+STREAMFLEX_MODES="heap improved-safezone rift-streaming rift-checked-epoch-buffer rift-checked-safezone-epoch-buffer rift-checked-transaction-region rift-checked-safezone-transaction-region" \
+STREAMFLEX_OUTPUT_DIR=/tmp/streamflex-transaction-latency-10k-v2 \
+  zsh sandbox/run_streamflex_region_instrumented_matrix.sh
+```
+
+20k smoke rows:
+
+| Workload | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Peak RSS bytes | Checksum |
+|---|---|---:|---:|---:|---:|---:|---:|
+| throughput | heap | 5.056 | 0.824 | 0.000 | 0 | 7962624 | 334131456973800 |
+| throughput | Rift Streaming | 4.472 | 0.000 | 0.030 | 249937 | 8093696 | 334131456973800 |
+| throughput | checked EpochBuffer | 4.897 | 0.000 | 0.055 | 249937 | 8126464 | 334131456973800 |
+| throughput | checked TransactionRegion | 4.624 | 0.000 | 0.033 | 249937 | 8142848 | 334131456973800 |
+| throughput | scoped checked TransactionRegion | 4.141 | 0.000 | 0.000 | 0 | 8126464 | 334131456973800 |
+| latency | heap | 0.954 | 0.000 | 0.000 | 0 | 7962624 | 62885581450470 |
+| latency | Rift Streaming | 0.980 | 0.000 | 0.025 | 49910 | 8093696 | 62885581450470 |
+| latency | checked EpochBuffer | 2.885 | 0.000 | 0.373 | 49910 | 8126464 | 62885581450470 |
+| latency | checked TransactionRegion | 1.519 | 0.000 | 0.084 | 49910 | 8142848 | 62885581450470 |
+| latency | scoped checked TransactionRegion | 1.430 | 0.000 | 0.000 | 0 | 8126464 | 62885581450470 |
+
+200k throughput rows:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Region opens/closes/resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---|---:|---:|
+| heap | 41.995 | 8.135 | 0.000 | 0 | 0 / 0 / 0 | 7979008 | 3320210680833752 |
+| improved SafeZone | 41.871 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 8142848 | 3320210680833752 |
+| Rift Streaming | 36.365 | 0.000 | 0.127 | 2499843 | 1 / 1 / 781 | 8093696 | 3320210680833752 |
+| checked EpochBuffer | 48.052 | 0.000 | 0.403 | 2499843 | 3129 / 3129 / 0 | 8126464 | 3320210680833752 |
+| scoped checked EpochBuffer | 44.987 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 8077312 | 3320210680833752 |
+| checked TransactionRegion | 44.881 | 0.000 | 0.189 | 2499843 | 783 / 783 / 0 | 8142848 | 3320210680833752 |
+| scoped checked TransactionRegion | 41.375 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 8126464 | 3320210680833752 |
+
+10k latency rows:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | p50 ns | p99 ns | p999 ns | Max ns | Deadline misses | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heap | 10.033 | 1.185 | 0.000 | 0 | 708 | 917 | 1333 | 296250 | 4 | 7962624 |
+| improved SafeZone | 11.046 | 0.283 | 0.000 | 0 | 917 | 1208 | 2709 | 25041 | 0 | 8028160 |
+| Rift Streaming | 9.804 | 0.000 | 0.238 | 499789 | 792 | 1042 | 1541 | 17417 | 0 | 7995392 |
+| checked EpochBuffer | 27.454 | 1.293 | 3.508 | 499789 | 2250 | 2916 | 8834 | 399167 | 4 | 8077312 |
+| scoped checked EpochBuffer | 23.072 | 1.221 | 0.000 | 0 | 1958 | 2541 | 7250 | 323583 | 4 | 8093696 |
+| checked TransactionRegion | 15.493 | 0.298 | 0.824 | 499789 | 1292 | 1667 | 2000 | 39625 | 0 | 8044544 |
+| scoped checked TransactionRegion | 13.580 | 0.287 | 0.000 | 0 | 1125 | 1458 | 2375 | 20000 | 0 | 8044544 |
+
+Interpretation:
+
+- `TransactionRegion` fixes the specific `EpochBuffer` granularity problem:
+  at 200k throughput, checked Rift opens/closes `783` child regions instead of
+  `3129`, and measured Rift op time drops from `0.403 ms` to `0.189 ms`.
+- The SafeZone-backed checked transaction row is the best checked StreamFlex
+  row so far: `41.375 ms`, slightly faster than heap (`41.995 ms`) and
+  improved SafeZone (`41.871 ms`), but still slower than trusted Rift Streaming
+  (`36.365 ms`).
+- The Rift-native checked transaction row improves over checked EpochBuffer
+  but remains slower than heap on throughput (`44.881 ms` vs `41.995 ms`).
+  Remaining cost is checked/operator CPU, not collection.
+- Latency improves materially versus stacked EpochBuffers. Checked
+  TransactionRegion removes the heap/EpochBuffer deadline misses in this local
+  configuration, but trusted Rift Streaming is still the fastest latency row.
 
 ## Native-Only Local 3-Run Median, Default Configuration
 

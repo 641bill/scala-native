@@ -1,7 +1,7 @@
 # Cheap Operator Family Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-05 20:52:18 CEST
+Last updated: 2026-05-05 23:47:54 CEST
 
 Status: focused checkpoint. The first staged smoke rows have been followed by
 targeted 1M-shape 3-run medians for Dataflow SELECT, Dataflow AGGREGATE, and
@@ -10,7 +10,9 @@ reusable APIs with compiler/runtime probes. `EpochFold` also exists as a real
 API, but its first Dataflow AGGREGATE row fails the speed gate and is recorded
 as a negative/gated operator result. `EpochBuffer` has now been added as a
 reusable batch/epoch append-drain API and passes its first focused 1M gate. This
-is still not the full comprehensive headline sweep.
+has now been followed by `TransactionRegion`, a multi-list transaction/batch
+API for pipelines that would otherwise stack several epoch buffers. This is
+still not the full comprehensive headline sweep.
 
 ## Purpose
 
@@ -23,6 +25,8 @@ families" direction:
 - `checked-listoflists-builder` for linked ListOfLists topology evidence.
 - `checked-epoch-buffer` for batch/epoch append-drain rows without ranking or
   hash-table maintenance.
+- `checked-transaction-region` for multi-stage batch pipelines with several
+  internal lists but one child region per batch.
 
 Reusable API status:
 
@@ -32,6 +36,7 @@ Reusable API status:
 | `EpochFold[T]` | Implemented but gated/negative | Correct and tested, but the first real aggregate row is `91.938 ms`, far slower than the older checked aggregate path. Do not use as headline evidence yet. |
 | `RegionList[T]` | Implemented and validated | ListOfLists checked builder now uses the reusable region-list API and improves to `5927.385 ms` median. |
 | `EpochBuffer[T]` | Implemented and focused-positive | Batch/epoch append-drain API. At 1M, `rift-checked-epoch-buffer` is `26.673 ms` and SafeZone-backed checked is `25.448 ms` versus `heap-epoch` `27.164 ms` with `5.707 ms` GC. |
+| `TransactionRegion` + `TransactionList[T]` | Implemented and partially validated | Multi-list batch API. In StreamFlex 200k throughput, scoped checked `TransactionRegion` is `41.375 ms`, slightly faster than heap `41.995 ms` and improved SafeZone `41.871 ms`; Rift-native checked transaction improves over stacked EpochBuffer but remains slower than heap. |
 
 The implementation goal is not to rename public APIs. It is to report the
 system in terms of descriptive memory modes while keeping raw benchmark labels
@@ -51,11 +56,15 @@ Latest safety results after the reusable API slice:
 
 - compiler checked suite: `108/108` after adding `EpochBuffer`;
 - runtime checked suite: `48/48` after adding `EpochBuffer`;
+- compiler checked suite: `110/110` after adding `TransactionRegion`;
+- runtime checked suite: `49/49` after adding `TransactionRegion`;
 - Dataflow SELECT page-token smoke matched checksum;
 - Dataflow AGGREGATE `EpochFold` row matched checksum but failed the speed gate;
 - ListOfLists checked builder smoke completed.
 - `EpochBuffer` compiler/runtime probes passed; focused 20k, 100k, and 1M
   rows matched checksums.
+- `TransactionRegion` compiler/runtime probes passed; StreamFlex 20k smoke,
+  200k throughput, and 10k latency rows matched checksums.
 
 The first attempt to run the staged performance script stopped at
 `checked-region-buffer` because its zsh default mode-list parsing treated the
@@ -89,6 +98,65 @@ before any rank/hash-heavy application path. The win is modest, but it is
 exactly the desired mechanism: structured-lifetime records leave the heap,
 heap GC goes to zero, and the checked API remains close enough that SafeZone
 backend mechanics beat the heap epoch control at 1M.
+
+## TransactionRegion StreamFlex Follow-Up
+
+Date/time: 2026-05-05 23:47:54 CEST.
+
+`TransactionRegion` generalizes the multi-stage stream-pipeline shape:
+one transaction owns one active child region and several typed
+`TransactionList[T]` append lists. This lets packets, decoded records,
+classified records, and alerts share one batch lifetime in StreamFlex-style
+code instead of opening one `EpochBuffer` child region per stage.
+
+The first implementation used indexed arrays for list heads/tails/lengths and
+was slower than `EpochBuffer` despite fewer region opens. The current
+implementation moves hot list state into each typed list handle. That keeps
+the safety/lifetime structure the same while removing array indexing from the
+append/drain hot path.
+
+Validation:
+
+```sh
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"
+```
+
+Results: compile passed; checked compiler suite passed `110/110`; checked
+native runtime suite passed `49/49`.
+
+200k StreamFlex throughput:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens/closes/resets | Interpretation |
+|---|---:|---:|---:|---:|---|---|
+| heap | 41.995 | 8.135 | 0.000 | 0 | 0 / 0 / 0 | baseline |
+| improved SafeZone | 41.871 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | fair scoped baseline |
+| Rift Streaming | 36.365 | 0.000 | 0.127 | 2499843 | 1 / 1 / 781 | best trusted row |
+| checked EpochBuffer | 48.052 | 0.000 | 0.403 | 2499843 | 3129 / 3129 / 0 | negative stacked-buffer control |
+| scoped checked EpochBuffer | 44.987 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | still slower than heap |
+| checked TransactionRegion | 44.881 | 0.000 | 0.189 | 2499843 | 783 / 783 / 0 | improves EpochBuffer, still speed-gated |
+| scoped checked TransactionRegion | 41.375 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | best checked StreamFlex-shaped row |
+
+10k StreamFlex latency:
+
+| Mode | Median elapsed ms | p50 ns | p99 ns | p999 ns | Max ns | Deadline misses |
+|---|---:|---:|---:|---:|---:|---:|
+| heap | 10.033 | 708 | 917 | 1333 | 296250 | 4 |
+| improved SafeZone | 11.046 | 917 | 1208 | 2709 | 25041 | 0 |
+| Rift Streaming | 9.804 | 792 | 1042 | 1541 | 17417 | 0 |
+| checked EpochBuffer | 27.454 | 2250 | 2916 | 8834 | 399167 | 4 |
+| scoped checked EpochBuffer | 23.072 | 1958 | 2541 | 7250 | 323583 | 4 |
+| checked TransactionRegion | 15.493 | 1292 | 1667 | 2000 | 39625 | 0 |
+| scoped checked TransactionRegion | 13.580 | 1125 | 1458 | 2375 | 20000 | 0 |
+
+Interpretation: `TransactionRegion` is the right general operator shape for
+multi-stage epoch pipelines, but only the SafeZone-backed checked row clears a
+small throughput win at this scale. Rift-native checked transaction improves
+region lifecycle cost but still has too much checked/operator CPU to beat heap.
+This is a partial win and a useful design signal: multi-list operators should
+use one child lifetime, but their hot list metadata must be field-based and
+operator-owned.
 
 ## Staged Dataflow Probe
 

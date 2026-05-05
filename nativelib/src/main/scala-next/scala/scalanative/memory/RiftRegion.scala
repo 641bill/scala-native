@@ -275,6 +275,31 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     private[memory] var currentBucket: StreamBucket = null
   }
 
+  /** Checked multi-list transaction/batch region.
+   *
+   *  A transaction owns one active child region and several typed append lists.
+   *  This is the reusable shape for stream pipelines with multiple temporary
+   *  stages inside the same batch: open one child region, append/drain several
+   *  lists, then close the child region once at transaction end.
+   */
+  final class TransactionRegion private[memory] (
+      private[memory] val lists: Array[Object]
+  ) {
+    private[memory] var child: ChildBucket = null
+    private[memory] val cursor: StreamAppendCursor[StreamAppendNode] =
+      new StreamAppendCursor[StreamAppendNode](null)
+  }
+
+  /** Typed append list inside a checked transaction region. */
+  final class TransactionList[T <: StreamAppendNode] private[memory] (
+      private[memory] val tx: TransactionRegion,
+      private[memory] val index: Int
+  ) {
+    private[memory] var head: Object = null
+    private[memory] var tail: Object = null
+    private[memory] var length0: Int = 0
+  }
+
   /** One region-owned fixed chunk for checked chunk append windows. */
   final class StreamChunk private[memory] (
       private[memory] val items: Array[Object]
@@ -2936,6 +2961,35 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
         .asInstanceOf[StreamAppendWindow[T]]
     ).asInstanceOf[EpochBuffer[T]^{parent}]
 
+  /** Opens a checked transaction region with `listCount` internal lists. */
+  def transactionRegion(listCount: Int)(using
+      parent: StreamingRegion^
+  ): TransactionRegion^{parent} = {
+    if (listCount <= 0)
+      throw new IllegalArgumentException("listCount must be positive")
+    new TransactionRegion(new Array[Object](listCount))
+      .asInstanceOf[TransactionRegion^{parent}]
+  }
+
+  /** Returns a typed list handle for a transaction-internal list slot. */
+  def transactionList[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      tx: TransactionRegion^{parent},
+      index: Int
+  ): TransactionList[T]^{parent} = {
+    if (index < 0 || index >= tx.lists.length)
+      throw new IndexOutOfBoundsException("transaction list index out of range")
+    val raw = tx.asInstanceOf[TransactionRegion]
+    val existing = raw.lists(index)
+    if (existing != null)
+      existing.asInstanceOf[TransactionList[T]^{parent}]
+    else {
+      val created = new TransactionList[T](raw, index)
+      raw.lists(index) = created.asInstanceOf[Object]
+      created.asInstanceOf[TransactionList[T]^{parent}]
+    }
+  }
+
   /** Opens a checked fixed-chunk append window.
    *
    *  Call `chunkAppendRegionFor` when entering a bucket, allocate records in
@@ -3583,6 +3637,27 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     streamBucketRegionTrusted(parent, bucket)
   }
 
+  /** Returns the active child region for a checked transaction.
+   *
+   *  The same region is reused by all transaction-internal lists until
+   *  `closeTransactionRegion` closes the transaction.
+   */
+  def transactionRegionFor(
+      parent: StreamingRegion^,
+      tx: TransactionRegion^{parent}
+  ): StreamingRegion^{parent} = {
+    val current = tx.child
+    val child =
+      if (current != null)
+        current.asInstanceOf[ChildBucket^{parent}]
+      else {
+        val opened = childBucket(using parent)
+        tx.child = opened.asInstanceOf[ChildBucket]
+        opened
+      }
+    child.region.asInstanceOf[StreamingRegion]
+  }
+
   /** Appends a record to the page/token window's current bucket.
    *
    *  The current bucket is selected by `pageTokenAppendRegionFor`. This hot path
@@ -3608,6 +3683,28 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     val append = buffer.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
     val bucket = buffer.currentBucket.asInstanceOf[StreamBucket^{parent}]
     appendWindowOwnedOpen(parent, append, bucket, value)
+  }
+
+  /** Appends one record to a transaction-internal list. */
+  def appendTransactionList[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      list: TransactionList[T]^{parent},
+      value: T^{parent}
+  ): Unit = {
+    val tx = list.tx
+    if (tx.child == null)
+      throw new IllegalStateException("Rift TransactionRegion is not open")
+    value.appendNext = null
+    if (list.head == null) {
+      list.head = value.asInstanceOf[Object]
+      list.tail = value.asInstanceOf[Object]
+    } else {
+      list.tail
+        .asInstanceOf[StreamAppendNode]
+        .appendNext = value.asInstanceOf[StreamAppendNode]
+      list.tail = value.asInstanceOf[Object]
+    }
+    list.length0 += 1
   }
 
   /** Emits one projected record into the current map/filter page bucket. */
@@ -4090,6 +4187,13 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   ): Int =
     buffer.append.totalLength
 
+  /** Returns the number of live records in a transaction-internal list. */
+  def transactionListLength[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      list: TransactionList[T]^{parent}
+  ): Int =
+    list.length0
+
   /** Prepends `value` to a checked region-owned linked list. */
   def prependRegionList[T <: RegionListNode](
       region: RiftRegion^,
@@ -4433,6 +4537,49 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       StreamAppendCursor[T]^{parent}
   ) => Unit): Unit =
     closeEpochBufferWithCursor(parent, buffer)(onBucket)
+
+  /** Drains one transaction-internal list without closing the transaction. */
+  def drainTransactionListWithCursor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      list: TransactionList[T]^{parent}
+  )(onCursor: StreamAppendCursor[T]^{parent} => Unit): Unit = {
+    val tx = list.tx
+    val cursor = tx.cursor.asInstanceOf[StreamAppendCursor[T]^{parent}]
+    cursor.current = list.head.asInstanceOf[StreamAppendNode]
+    list.head = null
+    list.tail = null
+    list.length0 = 0
+    try onCursor(cursor)
+    finally {
+      while (cursor.hasNext) cursor.next()
+      cursor.current = null
+    }
+  }
+
+  /** Closes the active transaction child region after all list metadata is cleared. */
+  def closeTransactionRegion(
+      parent: StreamingRegion^,
+      tx: TransactionRegion^{parent}
+  ): Unit = {
+    val child = tx.child
+    if (child != null) {
+      tx.child = null
+      var i = 0
+      while (i < tx.lists.length) {
+        val list = tx.lists(i).asInstanceOf[TransactionList[StreamAppendNode]]
+        if (list != null) {
+          list.head = null
+          list.tail = null
+          list.length0 = 0
+        }
+        i += 1
+      }
+      tx.cursor.current = null
+      closeChildBucket(parent, child.asInstanceOf[ChildBucket^{parent}]) {
+        ()
+      }
+    }
+  }
 
   /** Closes fixed-chunk append buckets fully before `cutoffSeconds`. */
   def closeChunkAppendBucketsBeforeWithCursor[T <: Object](

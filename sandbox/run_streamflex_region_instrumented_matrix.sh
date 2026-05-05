@@ -9,7 +9,7 @@ summary=${STREAMFLEX_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${STREAMFLEX_BUILD:-1}
 workload=${STREAMFLEX_WORKLOAD:-all}
 platform=$(uname -s)
-modes=(${(z)${STREAMFLEX_MODES:-"heap improved-safezone unsafezone-hp rift-hp rift-streaming rift-checked-epoch-buffer rift-checked-safezone-epoch-buffer"}})
+modes=(${(z)${STREAMFLEX_MODES:-"heap improved-safezone unsafezone-hp rift-hp rift-streaming rift-checked-epoch-buffer rift-checked-safezone-epoch-buffer rift-checked-transaction-region rift-checked-safezone-transaction-region"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"
@@ -136,6 +136,12 @@ for selected_mode in "${modes[@]}"; do
       ;;
     rift-checked-safezone-epoch-buffer)
       run_mode "rift-checked-safezone-epoch-buffer" "rift-checked-safezone-epoch-buffer" "1" "32768"
+      ;;
+    rift-checked-transaction-region)
+      run_mode "rift-checked-transaction-region" "rift-checked-transaction-region" "0"
+      ;;
+    rift-checked-safezone-transaction-region)
+      run_mode "rift-checked-safezone-transaction-region" "rift-checked-safezone-transaction-region" "1" "32768"
       ;;
     *)
       echo "unknown STREAMFLEX_MODES entry: ${selected_mode}" >&2

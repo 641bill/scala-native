@@ -1814,6 +1814,59 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked object buffer cannot store an unrooted heap object"
     )
 
+  @Test def transactionRegionStoresChildRecordsInMultipleLists(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    val tx = RiftRegion.transactionRegion(2)
+      |    val input = RiftRegion.transactionList[Event](stream, tx, 0)
+      |    val output = RiftRegion.transactionList[Event](stream, tx, 1)
+      |    val region = RiftRegion.transactionRegionFor(stream, tx)
+      |    val event: Event^{stream} =
+      |      RiftRegion.alloc(new Event(41))(using region)
+      |    RiftRegion.appendTransactionList(stream, input, event)
+      |
+      |    RiftRegion.drainTransactionListWithCursor(stream, input) { cursor =>
+      |      while cursor.hasNext do
+      |        val next: Event^{stream} =
+      |          RiftRegion.alloc(new Event(cursor.next().value + 1))(using region)
+      |        RiftRegion.appendTransactionList(stream, output, next)
+      |    }
+      |
+      |    var total = 0
+      |    RiftRegion.drainTransactionListWithCursor(stream, output) { cursor =>
+      |      while cursor.hasNext do
+      |        total += cursor.next().value
+      |    }
+      |    RiftRegion.closeTransactionRegion(stream, tx)
+      |    total + RiftRegion.transactionListLength(stream, input)
+      |  }
+      |""".stripMargin)
+
+  @Test def transactionRegionRejectsDirectHeapRecord(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    val tx = RiftRegion.transactionRegion(1)
+      |    val input = RiftRegion.transactionList[Event](stream, tx, 0)
+      |    RiftRegion.transactionRegionFor(stream, tx)
+      |    val event: Event^{stream} = new Event(41)
+      |    RiftRegion.appendTransactionList(stream, input, event)
+      |  }
+      |""".stripMargin,
+      "Rift checked object buffer cannot store an unrooted heap object"
+    )
+
   @Test def streamChunkAppendWindowStoresChildBucketRecords(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking
