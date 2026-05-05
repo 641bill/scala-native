@@ -10,6 +10,7 @@ export JAVA_HOME="$(cs java-home --jvm temurin:17)"
 export PATH="$JAVA_HOME/bin:$PATH"
 
 operator=${DATAFLOW_OPERATOR:-all}
+modes=(${(z)${DATAFLOW_MODES:-"heap improved-safezone unsafezone-hp rift-hp rift-streaming rift-checked checked-page-token checked-page-token-scoped checked-epoch-fold"}})
 
 run_mode() {
   local label="$1"
@@ -30,13 +31,41 @@ run_mode() {
 
 cd "${repo_dir}"
 
-run_mode "Immix heap" "heap"
-run_mode "Current SafeZone" "safezone" "0"
-run_mode "Improved SafeZone" "safezone" "1"
-run_mode "UnsafeZone-HP" "safezone" "3" "32768"
-run_mode "Rift HPZone" "rift-hp"
-run_mode "Rift Streaming" "rift-streaming"
-run_mode "Rift checked RegionBuffer" "rift-checked"
-run_mode "Checked page-token SELECT" "checked-page-token" "" "" "select"
-run_mode "Checked scoped page-token SELECT" "checked-page-token-scoped" "1" "32768" "select"
-run_mode "Checked epoch-fold AGGREGATE" "checked-epoch-fold" "" "" "aggregate"
+for selected_mode in "${modes[@]}"; do
+  case "${selected_mode}" in
+    heap)
+      run_mode "Immix heap" "heap"
+      ;;
+    current-safezone)
+      run_mode "Current SafeZone" "safezone" "0"
+      ;;
+    improved-safezone)
+      run_mode "Improved SafeZone" "safezone" "1"
+      ;;
+    unsafezone-hp)
+      run_mode "UnsafeZone-HP" "safezone" "3" "32768"
+      ;;
+    rift-hp)
+      run_mode "Rift HPZone" "rift-hp"
+      ;;
+    rift-streaming)
+      run_mode "Rift Streaming" "rift-streaming"
+      ;;
+    rift-checked)
+      run_mode "Rift checked RegionBuffer" "rift-checked"
+      ;;
+    checked-page-token)
+      run_mode "Checked page-token SELECT" "checked-page-token" "" "" "select"
+      ;;
+    checked-page-token-scoped)
+      run_mode "Checked scoped page-token SELECT" "checked-page-token-scoped" "1" "32768" "select"
+      ;;
+    checked-epoch-fold)
+      run_mode "Checked epoch-fold AGGREGATE" "checked-epoch-fold" "" "" "aggregate"
+      ;;
+    *)
+      echo "unknown DATAFLOW_MODES entry: ${selected_mode}" >&2
+      exit 1
+      ;;
+  esac
+done

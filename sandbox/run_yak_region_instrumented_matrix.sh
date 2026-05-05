@@ -9,6 +9,7 @@ summary=${YAK_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${YAK_BUILD:-1}
 workload=${YAK_WORKLOAD:-all}
 platform=$(uname -s)
+modes=(${(z)${YAK_MODES:-"heap improved-safezone unsafezone-hp rift-hp rift-streaming yak-runtime heap-promotion yak-runtime-promotion"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"
@@ -115,20 +116,59 @@ run_mode() {
 
 write_summary_header
 
-if [[ "${workload}" != "promotion" ]]; then
-  run_mode "heap" "heap" "0"
-  run_mode "current-safezone" "safezone" "0"
-  run_mode "improved-safezone" "safezone" "1"
-  run_mode "unsafezone-hp" "safezone" "3" "${workload}" "32768"
-  run_mode "rift-hp" "rift-hp" "0"
-  run_mode "rift-streaming" "rift-streaming" "0"
-  run_mode "yak-runtime" "yak-runtime" "0"
-fi
-
-if [[ "${workload}" == "all" || "${workload}" == "promotion" ]]; then
-  run_mode "heap-promotion" "heap" "0" "promotion"
-  run_mode "yak-runtime-promotion" "yak-runtime" "0" "promotion"
-fi
+for selected_mode in "${modes[@]}"; do
+  case "${selected_mode}" in
+    heap)
+      if [[ "${workload}" != "promotion" ]]; then
+        run_mode "heap" "heap" "0"
+      fi
+      ;;
+    current-safezone)
+      if [[ "${workload}" != "promotion" ]]; then
+        run_mode "current-safezone" "safezone" "0"
+      fi
+      ;;
+    improved-safezone)
+      if [[ "${workload}" != "promotion" ]]; then
+        run_mode "improved-safezone" "safezone" "1"
+      fi
+      ;;
+    unsafezone-hp)
+      if [[ "${workload}" != "promotion" ]]; then
+        run_mode "unsafezone-hp" "safezone" "3" "${workload}" "32768"
+      fi
+      ;;
+    rift-hp)
+      if [[ "${workload}" != "promotion" ]]; then
+        run_mode "rift-hp" "rift-hp" "0"
+      fi
+      ;;
+    rift-streaming)
+      if [[ "${workload}" != "promotion" ]]; then
+        run_mode "rift-streaming" "rift-streaming" "0"
+      fi
+      ;;
+    yak-runtime)
+      if [[ "${workload}" != "promotion" ]]; then
+        run_mode "yak-runtime" "yak-runtime" "0"
+      fi
+      ;;
+    heap-promotion)
+      if [[ "${workload}" == "all" || "${workload}" == "promotion" ]]; then
+        run_mode "heap-promotion" "heap" "0" "promotion"
+      fi
+      ;;
+    yak-runtime-promotion)
+      if [[ "${workload}" == "all" || "${workload}" == "promotion" ]]; then
+        run_mode "yak-runtime-promotion" "yak-runtime" "0" "promotion"
+      fi
+      ;;
+    *)
+      echo "unknown YAK_MODES entry: ${selected_mode}" >&2
+      exit 1
+      ;;
+  esac
+done
 
 echo
 echo "Yak instrumented matrix complete"

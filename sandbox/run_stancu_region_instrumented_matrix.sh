@@ -8,6 +8,7 @@ output_dir=${STANCU_OUTPUT_DIR:-"/tmp/stancu-region-instrumented"}
 summary=${STANCU_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${STANCU_BUILD:-1}
 platform=$(uname -s)
+modes=(${(z)${STANCU_MODES:-"heap improved-safezone unsafezone-hp rift-hp rift-streaming"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"
@@ -109,12 +110,32 @@ run_mode() {
 
 write_summary_header
 
-run_mode "heap" "heap" "0"
-run_mode "current-safezone" "safezone" "0"
-run_mode "improved-safezone" "safezone" "1"
-run_mode "unsafezone-hp" "safezone" "3" "32768"
-run_mode "rift-hp" "rift-hp" "0"
-run_mode "rift-streaming" "rift-streaming" "0"
+for selected_mode in "${modes[@]}"; do
+  case "${selected_mode}" in
+    heap)
+      run_mode "heap" "heap" "0"
+      ;;
+    current-safezone)
+      run_mode "current-safezone" "safezone" "0"
+      ;;
+    improved-safezone)
+      run_mode "improved-safezone" "safezone" "1"
+      ;;
+    unsafezone-hp)
+      run_mode "unsafezone-hp" "safezone" "3" "32768"
+      ;;
+    rift-hp)
+      run_mode "rift-hp" "rift-hp" "0"
+      ;;
+    rift-streaming)
+      run_mode "rift-streaming" "rift-streaming" "0"
+      ;;
+    *)
+      echo "unknown STANCU_MODES entry: ${selected_mode}" >&2
+      exit 1
+      ;;
+  esac
+done
 
 echo
 echo "Stancu instrumented matrix complete"
