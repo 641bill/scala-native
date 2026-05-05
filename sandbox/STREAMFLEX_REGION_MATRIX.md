@@ -1,5 +1,7 @@
 # StreamFlex Region Matrix
 
+Last updated: 2026-05-05 22:37:14 CEST
+
 Status: StreamFlex-style methodology reproduction harness with validated local
 smoke, default median, and allocation-pressure median runs.
 
@@ -39,6 +41,17 @@ allocate them with `region.alloc`.
 | `STREAMFLEX_BENCHMARK_RUNS` | `3` |
 
 Use `STREAMFLEX_WORKLOAD=throughput`, `latency`, or `all`.
+
+Default script modes now skip current SafeZone because root-mode-0 is retained
+only as an explicit provenance control. The default set is:
+
+- `heap`
+- `improved-safezone`
+- `unsafezone-hp`
+- `rift-hp`
+- `rift-streaming`
+- `rift-checked-epoch-buffer`
+- `rift-checked-safezone-epoch-buffer`
 
 ## Commands
 
@@ -96,6 +109,76 @@ STREAMFLEX_OUTPUT_DIR=/tmp/streamflex-region-pressure \
 The smoke run rebuilt and native-linked the benchmark successfully. During the
 sbt native-link setup the JVM emitted a code-cache warning, but the native
 binary linked and all heap/SafeZone/Rift checksums matched.
+
+## Checked EpochBuffer Follow-Up
+
+Date/time: 2026-05-05 22:37:14 CEST.
+
+This follow-up wires the reusable `RiftRegion.EpochBuffer[T]` into the
+StreamFlex-shaped pipeline. The checked path uses four epoch buffers per
+batch/event: packets, decoded records, classified records, and alerts. That is
+safe and checksum-equivalent, but it also means four child regions are opened
+and closed for every batch in throughput mode and every event in latency mode.
+
+Smoke command:
+
+```sh
+STREAMFLEX_EVENTS=20000 \
+STREAMFLEX_LATENCY_EVENTS=1000 \
+STREAMFLEX_BENCHMARK_RUNS=1 \
+STREAMFLEX_WARMUPS=0 \
+STREAMFLEX_MODES="heap improved-safezone rift-hp rift-streaming rift-checked-epoch-buffer rift-checked-safezone-epoch-buffer" \
+STREAMFLEX_OUTPUT_DIR=/tmp/streamflex-epoch-buffer-smoke \
+  zsh sandbox/run_streamflex_region_instrumented_matrix.sh
+```
+
+Default-scale throughput command:
+
+```sh
+STREAMFLEX_BUILD=0 \
+STREAMFLEX_WORKLOAD=throughput \
+STREAMFLEX_EVENTS=200000 \
+STREAMFLEX_BENCHMARK_RUNS=3 \
+STREAMFLEX_WARMUPS=1 \
+STREAMFLEX_MODES="heap improved-safezone rift-hp rift-streaming rift-checked-epoch-buffer rift-checked-safezone-epoch-buffer" \
+STREAMFLEX_OUTPUT_DIR=/tmp/streamflex-epoch-buffer-throughput-200k \
+  zsh sandbox/run_streamflex_region_instrumented_matrix.sh
+```
+
+Smoke rows:
+
+| Workload | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Peak RSS bytes | Checksum |
+|---|---|---:|---:|---:|---:|---:|---:|
+| throughput | heap | 6.148 | 1.096 | 0.000 | 0 | 7929856 | 334131456973800 |
+| throughput | improved SafeZone | 5.343 | 0.000 | 0.000 | 0 | 8093696 | 334131456973800 |
+| throughput | Rift HPZone | 4.100 | 0.000 | 0.031 | 249937 | 8093696 | 334131456973800 |
+| throughput | Rift Streaming | 3.707 | 0.000 | 0.019 | 249937 | 8044544 | 334131456973800 |
+| throughput | checked EpochBuffer | 4.756 | 0.000 | 0.048 | 249937 | 8077312 | 334131456973800 |
+| throughput | scoped checked EpochBuffer | 4.378 | 0.000 | 0.000 | 0 | 8028160 | 334131456973800 |
+| latency | heap | 0.863 | 0.000 | 0.000 | 0 | 7929856 | 62885581450470 |
+| latency | improved SafeZone | 1.400 | 0.000 | 0.000 | 0 | 8093696 | 62885581450470 |
+| latency | Rift HPZone | 1.208 | 0.000 | 0.075 | 49910 | 8093696 | 62885581450470 |
+| latency | Rift Streaming | 0.972 | 0.000 | 0.023 | 49910 | 8044544 | 62885581450470 |
+| latency | checked EpochBuffer | 2.376 | 0.000 | 0.329 | 49910 | 8077312 | 62885581450470 |
+| latency | scoped checked EpochBuffer | 2.075 | 0.000 | 0.000 | 0 | 8028160 | 62885581450470 |
+
+Default-scale throughput rows:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|
+| heap | 42.504 | 8.942 | 0.000 | 0 | 7946240 | 3320210680833752 |
+| improved SafeZone | 40.224 | 0.000 | 0.000 | 0 | 8077312 | 3320210680833752 |
+| Rift HPZone | 38.201 | 0.000 | 0.168 | 2499843 | 8093696 | 3320210680833752 |
+| Rift Streaming | 36.357 | 0.000 | 0.119 | 2499843 | 8044544 | 3320210680833752 |
+| checked EpochBuffer | 47.462 | 0.000 | 0.386 | 2499843 | 8077312 | 3320210680833752 |
+| scoped checked EpochBuffer | 44.504 | 0.000 | 0.000 | 0 | 8044544 | 3320210680833752 |
+
+Interpretation: this is not a checked StreamFlex win. The checked rows remove
+heap GC, but the four-buffer implementation pays too much operator/lifecycle
+overhead. It is still useful: the next reusable operator for multi-stage
+pipelines should be a transaction or multi-list epoch region that opens one
+child region per batch and owns several internal lists, rather than stacking
+several independent `EpochBuffer`s.
 
 ## Native-Only Local 3-Run Median, Default Configuration
 

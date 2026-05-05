@@ -86,6 +86,30 @@ object StreamFlexRegionMatrixHelpers {
       val next: Alert
   )
 
+  private final class CheckedPacket(
+      val seq: Int,
+      val key: Int,
+      val payload: Int
+  ) extends RiftRegion.StreamAppendNode
+
+  private final class CheckedDecoded(
+      val seq: Int,
+      val lane: Int,
+      val magnitude: Int
+  ) extends RiftRegion.StreamAppendNode
+
+  private final class CheckedClassified(
+      val seq: Int,
+      val lane: Int,
+      val score: Long
+  ) extends RiftRegion.StreamAppendNode
+
+  private final class CheckedAlert(
+      val seq: Int,
+      val lane: Int,
+      val score: Long
+  ) extends RiftRegion.StreamAppendNode
+
   final case class RuntimeSample(
       gcCollections: Long,
       gcNanos: Long,
@@ -325,6 +349,154 @@ object StreamFlexRegionMatrixHelpers {
     }
     checksum
   }
+
+  private def processCheckedEpochBatch(
+      stream: RiftRegion.StreamingRegion^,
+      startSeq: Int,
+      count: Int,
+      objectsPerEvent: Int
+  ): Long = {
+    val packets = RiftRegion.epochBuffer[CheckedPacket]()(using stream)
+    val decoded = RiftRegion.epochBuffer[CheckedDecoded]()(using stream)
+    val classified = RiftRegion.epochBuffer[CheckedClassified]()(using stream)
+    val alerts = RiftRegion.epochBuffer[CheckedAlert]()(using stream)
+
+    val packetRegion = RiftRegion.epochBufferRegionFor(stream, packets)
+    var i = 0
+    while (i < count) {
+      val seq = startSeq + i
+      var fragment = 0
+      while (fragment < objectsPerEvent) {
+        val seed = mix(seq * 1009 + fragment * 9176)
+        val packet: CheckedPacket^{stream} =
+          RiftRegion.alloc(
+            new CheckedPacket(seq, seed & 0xff, mix(seed + 31))
+          )(using packetRegion)
+        RiftRegion.appendEpochBuffer(stream, packets, packet)
+        fragment += 1
+      }
+      i += 1
+    }
+
+    val decodedRegion = RiftRegion.epochBufferRegionFor(stream, decoded)
+    RiftRegion.closeEpochBufferWithCursor(stream, packets) { (_, cursor) =>
+      while (cursor.hasNext) {
+        val packet: CheckedPacket^{stream} = cursor.next()
+        val lane = (packet.key ^ (packet.payload >>> 7)) & 0x3f
+        val magnitude = mix(packet.payload + lane)
+        val value: CheckedDecoded^{stream} =
+          RiftRegion.alloc(
+            new CheckedDecoded(packet.seq, lane, magnitude)
+          )(using decodedRegion)
+        RiftRegion.appendEpochBuffer(stream, decoded, value)
+      }
+    }
+
+    val classifiedRegion = RiftRegion.epochBufferRegionFor(stream, classified)
+    RiftRegion.closeEpochBufferWithCursor(stream, decoded) { (_, cursor) =>
+      while (cursor.hasNext) {
+        val dec: CheckedDecoded^{stream} = cursor.next()
+        val score =
+          (dec.magnitude.toLong * 31L) ^ (dec.lane.toLong << 11) ^ dec.seq.toLong
+        val value: CheckedClassified^{stream} =
+          RiftRegion.alloc(
+            new CheckedClassified(dec.seq, dec.lane, score)
+          )(using classifiedRegion)
+        RiftRegion.appendEpochBuffer(stream, classified, value)
+      }
+    }
+
+    val alertRegion = RiftRegion.epochBufferRegionFor(stream, alerts)
+    RiftRegion.closeEpochBufferWithCursor(stream, classified) { (_, cursor) =>
+      while (cursor.hasNext) {
+        val cls: CheckedClassified^{stream} = cursor.next()
+        if (((cls.score ^ (cls.score >>> 13)) & 7L) == 0L) {
+          val value: CheckedAlert^{stream} =
+            RiftRegion.alloc(
+              new CheckedAlert(cls.seq, cls.lane, cls.score)
+            )(using alertRegion)
+          RiftRegion.appendEpochBuffer(stream, alerts, value)
+        }
+      }
+    }
+
+    var checksum = 0L
+    RiftRegion.closeEpochBufferWithCursor(stream, alerts) { (_, cursor) =>
+      while (cursor.hasNext) {
+        val alert: CheckedAlert^{stream} = cursor.next()
+        checksum += alert.score ^ alert.seq.toLong ^ alert.lane.toLong
+      }
+    }
+    checksum
+  }
+
+  def runCheckedEpochThroughputBody()(using
+      stream: RiftRegion.StreamingRegion^
+  ): Long = {
+    val cfg = StreamFlexRegionConfig
+    var checksum = 0L
+    var processed = 0
+    while (processed < cfg.events) {
+      val count = math.min(cfg.batchSize, cfg.events - processed)
+      checksum += processCheckedEpochBatch(
+        stream,
+        processed,
+        count,
+        cfg.objectsPerEvent
+      )
+      processed += count
+    }
+    checksum
+  }
+
+  def runCheckedEpochThroughput(): Long = {
+    val checksum = RiftRegion.streaming { stream ?=>
+      runCheckedEpochThroughputBody()
+    }
+    checksumSink = checksum
+    checksum
+  }
+
+  def runCheckedSafeZoneEpochThroughput(): Long = {
+    val checksum = RiftRegion.streamingSafeZone { stream ?=>
+      runCheckedEpochThroughputBody()
+    }
+    checksumSink = checksum
+    checksum
+  }
+
+  def runCheckedEpochLatencyBody()(using
+      stream: RiftRegion.StreamingRegion^
+  ): LatencyRun = {
+    val cfg = StreamFlexRegionConfig
+    val samples = new Array[Long](cfg.latencyEvents)
+    var checksum = 0L
+    var i = 0
+    while (i < cfg.latencyEvents) {
+      val start = System.nanoTime()
+      checksum += processCheckedEpochBatch(
+        stream,
+        i,
+        1,
+        cfg.latencyObjectsPerEvent
+      )
+      val end = System.nanoTime()
+      samples(i) = end - start
+      i += 1
+    }
+    checksumSink = checksum
+    summarizeLatency(samples, checksum)
+  }
+
+  def runCheckedEpochLatency(): LatencyRun =
+    RiftRegion.streaming { stream ?=>
+      runCheckedEpochLatencyBody()
+    }
+
+  def runCheckedSafeZoneEpochLatency(): LatencyRun =
+    RiftRegion.streamingSafeZone { stream ?=>
+      runCheckedEpochLatencyBody()
+    }
 
   def runHeapOrRiftThroughput(modeName: String): Long = {
     val cfg = StreamFlexRegionConfig
@@ -597,15 +769,24 @@ object StreamFlexRegionMatrixHelpers {
 
   private def runThroughput(mode: String): Long =
     if (mode == "safezone") runSafeZoneThroughput()
+    else if (mode == "rift-checked-epoch-buffer") runCheckedEpochThroughput()
+    else if (mode == "rift-checked-safezone-epoch-buffer")
+      runCheckedSafeZoneEpochThroughput()
     else runHeapOrRiftThroughput(mode)
 
   private def runLatency(mode: String): LatencyRun =
     if (mode == "safezone") runSafeZoneLatency()
+    else if (mode == "rift-checked-epoch-buffer") runCheckedEpochLatency()
+    else if (mode == "rift-checked-safezone-epoch-buffer")
+      runCheckedSafeZoneEpochLatency()
     else runHeapOrRiftLatency(mode)
 
   def runThroughputBenchmark(mode: String): Unit = {
     val cfg = StreamFlexRegionConfig
-    val usesRift = mode == "rift-hp" || mode == "rift-streaming"
+    val usesRift =
+      mode == "rift-hp" ||
+        mode == "rift-streaming" ||
+        mode == "rift-checked-epoch-buffer"
     val expected = runThroughput("heap")
 
     var warmup = 0
@@ -674,7 +855,10 @@ object StreamFlexRegionMatrixHelpers {
 
   def runLatencyBenchmark(mode: String): Unit = {
     val cfg = StreamFlexRegionConfig
-    val usesRift = mode == "rift-hp" || mode == "rift-streaming"
+    val usesRift =
+      mode == "rift-hp" ||
+        mode == "rift-streaming" ||
+        mode == "rift-checked-epoch-buffer"
     val expected = runLatency("heap").checksum
 
     var warmup = 0
@@ -760,10 +944,13 @@ object StreamFlexRegionMatrixHelpers {
 
   def validateMode(mode: String): Unit =
     mode match {
-      case "heap" | "safezone" | "rift-hp" | "rift-streaming" => ()
+      case "heap" | "safezone" | "rift-hp" | "rift-streaming" |
+          "rift-checked-epoch-buffer" |
+          "rift-checked-safezone-epoch-buffer" =>
+        ()
       case other =>
         throw new IllegalArgumentException(
-          s"unknown StreamFlex mode '$other'; expected heap, safezone, rift-hp, or rift-streaming"
+          s"unknown StreamFlex mode '$other'; expected heap, safezone, rift-hp, rift-streaming, rift-checked-epoch-buffer, or rift-checked-safezone-epoch-buffer"
         )
     }
 }
@@ -775,7 +962,10 @@ object StreamFlexRegionMatrixHelpers {
   StreamFlexRegionMatrixHelpers.validateMode(mode)
   StreamFlexRegionMatrixHelpers.printConfig(mode, workload)
 
-  val usesRift = mode == "rift-hp" || mode == "rift-streaming"
+  val usesRift =
+    mode == "rift-hp" ||
+      mode == "rift-streaming" ||
+      mode == "rift-checked-epoch-buffer"
   if (usesRift) RiftRegion.init(0)
   try {
     workload match {
