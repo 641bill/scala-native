@@ -8,6 +8,7 @@ output_dir=${CHECKED_BUFFER_OUTPUT_DIR:-"/tmp/checked-region-buffer"}
 summary=${CHECKED_BUFFER_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${CHECKED_BUFFER_BUILD:-1}
 platform=$(uname -s)
+modes=(${(z)${CHECKED_BUFFER_MODES:-"heap-buffer heap-array rift-checked-buffer rift-checked-object-buffer rift-checked-array"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"
@@ -97,8 +98,9 @@ run_mode() {
 }
 
 write_summary_header
-run_mode "heap"
-run_mode "rift-checked"
+for mode in "${modes[@]}"; do
+  run_mode "${mode}"
+done
 
 echo
 echo "Checked RegionBuffer matrix complete"

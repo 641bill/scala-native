@@ -318,6 +318,53 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def safeZoneBackedChildBucketsCloseThroughCursorBoundary(): Unit = {
+    val total = RiftRegion.streamingSafeZone { stream ?=>
+      final class Event(val value: Int)
+          extends RiftRegion.StreamAppendNode
+
+      val window = RiftRegion.streamAppendWindow[Event](10L)
+      val bucket = RiftRegion.streamAppendWindowBucketFor(stream, window, 7L)
+      val child = RiftRegion.streamBucketRegion(stream, bucket)
+      val event: Event^{stream} =
+        RiftRegion.alloc(new Event(41))(using child)
+      RiftRegion.appendWindow(stream, window, bucket, event)
+
+      var sum = 0
+      RiftRegion.closeAllAppendWindowBucketsWithCursor(stream, window) {
+        (_, cursor) =>
+          while (cursor.hasNext)
+            sum += cursor.next().value
+      }
+
+      assertTrue(bucket.isClosed)
+      assertThrows(
+        classOf[IllegalStateException],
+        () => {
+          val afterClose = RiftRegion.alloc(new Event(1))(using child)
+          java.lang.System.identityHashCode(afterClose)
+          ()
+        }
+      )
+      sum + 1
+    }
+
+    assertEquals(42, total)
+  }
+
+  @Test def safeZoneBackedStreamingRejectsUnsupportedRawAndReset(): Unit = {
+    RiftRegion.streamingSafeZone { stream ?=>
+      assertThrows(
+        classOf[UnsupportedOperationException],
+        () => stream.alloc(8)
+      )
+      assertThrows(
+        classOf[UnsupportedOperationException],
+        () => stream.reset()
+      )
+    }
+  }
+
   @Test def streamBucketArenaReusesAndClosesBuckets(): Unit = {
     RiftRegion.init(1)
     try {
@@ -1327,6 +1374,205 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def streamAppendWindowRejectsStaleBucketAfterCloseBefore(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val window = RiftRegion.streamAppendWindow[Event](10)
+        val bucket =
+          RiftRegion.streamAppendWindowBucketFor(stream, window, 7L)
+        val region = RiftRegion.streamBucketRegion(stream, bucket)
+        val event: Event^{stream} =
+          RiftRegion.alloc(new Event(41))(using region)
+        RiftRegion.appendWindow(stream, window, bucket, event)
+        RiftRegion.closeAppendWindowBucketsBeforeWithCursor(stream, window, 10L) {
+          (_, cursor) =>
+            while (cursor.hasNext) cursor.next()
+        }
+
+        assertTrue(bucket.isClosed)
+        assertThrows(
+          classOf[IllegalStateException],
+          () => {
+            RiftRegion.streamBucketRegion(stream, bucket)
+            ()
+          }
+        )
+      }
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def streamAppendWindowRejectsStaleBucketAfterCloseAll(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val window = RiftRegion.streamAppendWindow[Event](10)
+        val bucket =
+          RiftRegion.streamAppendWindowBucketFor(stream, window, 7L)
+        val region = RiftRegion.streamBucketRegion(stream, bucket)
+        val event: Event^{stream} =
+          RiftRegion.alloc(new Event(41))(using region)
+        RiftRegion.appendWindow(stream, window, bucket, event)
+        RiftRegion.closeAllAppendWindowBucketsWithCursor(stream, window) {
+          (_, cursor) =>
+            while (cursor.hasNext) cursor.next()
+        }
+
+        assertTrue(bucket.isClosed)
+        assertThrows(
+          classOf[IllegalStateException],
+          () => {
+            RiftRegion.streamBucketRegion(stream, bucket)
+            ()
+          }
+        )
+      }
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def streamPageTokenAppendWindowAllocatesAndDrainsRecords(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val window = RiftRegion.streamPageTokenAppendWindow[Event](10)
+        var sum = 0
+
+        def consume(
+            bucket: RiftRegion.StreamBucket^{stream},
+            cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+        ): Unit =
+          while (cursor.hasNext)
+            sum += cursor.next().value + bucket.startSeconds.toInt
+
+        val firstRegion =
+          RiftRegion.pageTokenAppendRegionFor(stream, window, 7L, Long.MinValue)(
+            consume
+          )
+        val first: Event^{stream} =
+          RiftRegion.alloc(new Event(20))(using firstRegion)
+        RiftRegion.appendPageToken(stream, window, first)
+
+        val secondRegion =
+          RiftRegion.pageTokenAppendRegionFor(stream, window, 17L, 10L)(consume)
+        val second: Event^{stream} =
+          RiftRegion.alloc(new Event(12))(using secondRegion)
+        RiftRegion.appendPageToken(stream, window, second)
+
+        RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
+          consume
+        )
+        sum
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def pageTokenMapFilterAllocatesAndDrainsRecords(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val operator = RiftRegion.pageTokenMapFilter[Event](10)
+        var sum = 0
+
+        def consume(
+            bucket: RiftRegion.StreamBucket^{stream},
+            cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+        ): Unit =
+          while (cursor.hasNext)
+            sum += cursor.next().value + bucket.startSeconds.toInt
+
+        val firstRegion =
+          RiftRegion.pageTokenMapFilterRegionFor(
+            stream,
+            operator,
+            7L,
+            Long.MinValue
+          )(consume)
+        val first: Event^{stream} =
+          RiftRegion.alloc(new Event(20))(using firstRegion)
+        RiftRegion.emitPageTokenMapFilter(stream, operator, first)
+
+        val secondRegion =
+          RiftRegion.pageTokenMapFilterRegionFor(stream, operator, 17L, 10L)(
+            consume
+          )
+        val second: Event^{stream} =
+          RiftRegion.alloc(new Event(12))(using secondRegion)
+        RiftRegion.emitPageTokenMapFilter(stream, operator, second)
+
+        RiftRegion.closeAllPageTokenMapFilterBucketsWithCursor(stream, operator)(
+          consume
+        )
+        sum
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def streamChunkAppendWindowAllocatesAndDrainsRecords(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int)
+
+        val window = RiftRegion.streamChunkAppendWindow[Event](10, 2)
+        var sum = 0
+
+        def consume(
+            bucket: RiftRegion.StreamBucket^{stream},
+            cursor: RiftRegion.StreamChunkCursor[Event]^{stream}
+        ): Unit =
+          while (cursor.hasNext)
+            sum += cursor.next().value + bucket.startSeconds.toInt
+
+        val firstRegion =
+          RiftRegion.chunkAppendRegionFor(stream, window, 7L, Long.MinValue)(
+            consume
+          )
+        val first: Event^{stream} =
+          RiftRegion.alloc(new Event(10))(using firstRegion)
+        val second: Event^{stream} =
+          RiftRegion.alloc(new Event(10))(using firstRegion)
+        RiftRegion.appendChunkToken(stream, window, first)
+        RiftRegion.appendChunkToken(stream, window, second)
+
+        val secondRegion =
+          RiftRegion.chunkAppendRegionFor(stream, window, 17L, 10L)(consume)
+        val third: Event^{stream} =
+          RiftRegion.alloc(new Event(12))(using secondRegion)
+        RiftRegion.appendChunkToken(stream, window, third)
+
+        assertEquals(1, RiftRegion.chunkAppendWindowLength(stream, window))
+        RiftRegion.closeAllChunkAppendBucketsWithCursor(stream, window)(
+          consume
+        )
+        sum
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def streamAppendWindowPrependConsumesAndClosesBuckets(): Unit = {
     RiftRegion.init(1)
     try {
@@ -1644,6 +1890,78 @@ class RiftRegionCheckedTest {
       }
 
       assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def epochFoldAggregatesAndClearsCurrentBucket(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val key: Int, val delta: Long, val value: Int)
+            extends RiftRegion.StreamAppendNode
+
+        val fold = RiftRegion.epochFold[Event](10, 16)
+        val region = RiftRegion.epochFoldRegionFor(stream, fold, 7L)
+        val first: Event^{stream} =
+          RiftRegion.alloc(new Event(3, 20L, 20))(using region)
+        val second: Event^{stream} =
+          RiftRegion.alloc(new Event(3, 21L, 21))(using region)
+        val firstSum =
+          RiftRegion.putEpochFold(stream, fold, first.key, first.delta, first)
+        val secondSum =
+          RiftRegion.putEpochFold(stream, fold, second.key, second.delta, second)
+
+        assertEquals(20L, firstSum)
+        assertEquals(41L, secondSum)
+        assertTrue(RiftRegion.containsEpochFoldKey(stream, fold, 3))
+        assertEquals(41L, RiftRegion.epochFoldValue(stream, fold, 3))
+        assertEquals(2, RiftRegion.epochFoldCount(stream, fold, 3))
+
+        var closed = 0
+        RiftRegion.closeEpochFoldCurrentBucketAndClear(stream, fold) {
+          (_, cursor) =>
+            while (cursor.hasNext)
+              closed += cursor.next().value
+        }
+
+        assertFalse(RiftRegion.containsEpochFoldKey(stream, fold, 3))
+        assertEquals(0L, RiftRegion.epochFoldValue(stream, fold, 3))
+        assertEquals(0, RiftRegion.epochFoldCount(stream, fold, 3))
+        closed + 1
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def regionListBuildsAndTraversesNodes(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.scoped { region ?=>
+        final class Node(val value: Int) extends RiftRegion.RegionListNode
+
+        val list = RiftRegion.regionList[Node]()
+        var i = 0
+        while (i < 4) {
+          val node: Node^{region} = RiftRegion.alloc(new Node(i + 1))
+          RiftRegion.prependRegionList(region, list, node)
+          i += 1
+        }
+
+        var sum = 0
+        var cursor = RiftRegion.regionListHead(region, list)
+        while (cursor != null) {
+          sum += cursor.value
+          cursor = RiftRegion.regionListNext(region, cursor)
+        }
+        sum + RiftRegion.regionListLength(region, list)
+      }
+
+      assertEquals(14, total)
     } finally {
       RiftRegion.shutdown()
     }

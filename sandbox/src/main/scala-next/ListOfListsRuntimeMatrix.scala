@@ -131,6 +131,50 @@ object ListOfListsRuntimeMatrixHelpers {
     } finally region.close()
   }
 
+  private def runCheckedListBuilderStructure(n: Int): Long =
+    RiftRegion.scoped { region ?=>
+      final class BasicObject(val value: Int) extends RiftRegion.RegionListNode
+      final class InnerList(
+          val values: RiftRegion.RegionList[BasicObject]^{region}
+      ) extends RiftRegion.RegionListNode
+
+      def buildOneStructure(): RiftRegion.RegionList[InnerList]^{region} = {
+        val outerList = RiftRegion.regionList[InnerList]()
+        var outer = 0
+        while (outer < n) {
+          val innerList = RiftRegion.regionList[BasicObject]()
+          var inner = 0
+          while (inner < n) {
+            val obj: BasicObject^{region} =
+              RiftRegion.alloc(
+                new BasicObject((outer + inner) & 0x7fffffff)
+              )
+            RiftRegion.prependRegionList(region, innerList, obj)
+            inner += 1
+          }
+          val row: InnerList^{region} =
+            RiftRegion.alloc(new InnerList(innerList))
+          RiftRegion.prependRegionList(region, outerList, row)
+          outer += 1
+        }
+        outerList
+      }
+
+      var checksum = 0L
+      var root = buildOneStructure()
+      var outerCursor = RiftRegion.regionListHead(region, root)
+      while (outerCursor != null) {
+        var innerCursor = RiftRegion.regionListHead(region, outerCursor.values)
+        while (innerCursor != null) {
+          checksum += innerCursor.value.toLong
+          innerCursor = RiftRegion.regionListNext(region, innerCursor)
+        }
+        outerCursor = RiftRegion.regionListNext(region, outerCursor)
+      }
+      root = null
+      checksum
+    }
+
   def runHeap(): Boolean = {
     val cfg = ListOfListsConfig
     var checksum = 0L
@@ -167,6 +211,27 @@ object ListOfListsRuntimeMatrixHelpers {
     checksum == expectedChecksum(cfg.n, cfg.structures)
   }
 
+  def runCheckedListBuilder(): Boolean = {
+    val cfg = ListOfListsConfig
+    var checksum = 0L
+    var structures = 0
+    while (structures < cfg.structures) {
+      checksum += runCheckedListBuilderStructure(cfg.n)
+      structures += 1
+    }
+    checksumSink = checksum
+    checksum == expectedChecksum(cfg.n, cfg.structures)
+  }
+
+  def canonicalMode(mode: String): String =
+    mode match {
+      case "gc-heap" => "heap"
+      case "region-scoped-rooted" | "region-scoped-rootless" => "safezone"
+      case "checked-listoflists-builder" | "checked-region-listoflists-builder" =>
+        "rift-checked-list-builder"
+      case other => other
+    }
+
   def printConfig(mode: String): Unit = {
     val cfg = ListOfListsConfig
     val rootsMode = sys.env.getOrElse("SAFEZONE_ROOTS_MODE", "0")
@@ -179,8 +244,11 @@ object ListOfListsRuntimeMatrixHelpers {
 
 @main def ListOfListsRuntimeMatrix(mode: String = "heap"): Unit = {
   ListOfListsRuntimeMatrixHelpers.printConfig(mode)
+  val internalMode = ListOfListsRuntimeMatrixHelpers.canonicalMode(mode)
+  val usesRift = internalMode == "rift-hp" || internalMode == "rift-checked-list-builder"
+  if (usesRift) RiftRegion.init(0)
 
-  val stats = mode match {
+  val stats = try internalMode match {
     case "heap" =>
       BenchmarkRunner.runBenchmark(
         name = "listoflists-heap",
@@ -196,10 +264,17 @@ object ListOfListsRuntimeMatrixHelpers {
         name = "listoflists-rift-hp",
         numRuns = ListOfListsConfig.benchmarkRuns
       )(ListOfListsRuntimeMatrixHelpers.runRift(RiftRegion.HPZone))
+    case "rift-checked-list-builder" =>
+      BenchmarkRunner.runBenchmark(
+        name = "listoflists-rift-checked-list-builder",
+        numRuns = ListOfListsConfig.benchmarkRuns
+      )(ListOfListsRuntimeMatrixHelpers.runCheckedListBuilder())
     case other =>
       throw new IllegalArgumentException(
-        s"unknown mode '$other'; expected heap, safezone, or rift-hp"
+        s"unknown mode '$other'; expected heap, safezone, rift-hp, or rift-checked-list-builder"
       )
+  } finally {
+    if (usesRift) RiftRegion.shutdown()
   }
 
   if (stats.medianMs.isNaN)

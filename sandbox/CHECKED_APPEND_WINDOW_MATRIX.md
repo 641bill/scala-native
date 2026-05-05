@@ -1,5 +1,7 @@
 # Checked Append Window Matrix
 
+Last updated: 2026-05-05 13:43:52 CEST
+
 Status: focused cheap checked-operator benchmark. This is framework evidence,
 not DEBS application evidence.
 
@@ -34,8 +36,13 @@ The difference is allocation placement:
   drained through a close-time cursor so close callback dispatch is once per
   bucket rather than once per entry;
 - `heap-prepend`: heap baseline for order-insensitive/head-insert buckets;
+- `heap-immix-chunk`: heap baseline for fixed object-array chunks;
 - `rift-checked-api-prepend-cursor`: checked `StreamAppendWindow` with
   head-insert `prependWindow` and cursor close;
+- `rift-checked-chunk-token`: checked `StreamChunkAppendWindow`, an
+  operator-owned fixed object-array chunk path;
+- `rift-checked-safezone-chunk-token`: the same chunk path over the
+  SafeZone-backed checked backend;
 - `rift-trusted-hp`: trusted `RiftRegion.open(HPZone)` once per bucket;
 - `rift-trusted-streaming`: trusted `RiftRegion.open(Streaming)` once per
   bucket.
@@ -54,6 +61,7 @@ Defaults:
 | `CHECKED_APPEND_WINDOW_BUCKETS` | `8` |
 | `CHECKED_APPEND_KEY_SPACE` | `65536` |
 | `CHECKED_APPEND_SAMPLE_EVERY` | `4096` |
+| `CHECKED_APPEND_CHUNK_SIZE` | `64` |
 | `CHECKED_APPEND_WARMUPS` | `1` |
 | `CHECKED_APPEND_BENCHMARK_RUNS` | `3` |
 
@@ -61,10 +69,13 @@ Modes:
 
 - `heap`
 - `heap-prepend`
+- `heap-immix-chunk`
 - `rift-checked`
 - `rift-checked-api`
 - `rift-checked-api-cursor`
 - `rift-checked-api-prepend-cursor`
+- `rift-checked-chunk-token`
+- `rift-checked-safezone-chunk-token`
 - `rift-trusted-hp`
 - `rift-trusted-streaming`
 

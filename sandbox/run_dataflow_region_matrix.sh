@@ -16,6 +16,7 @@ run_mode() {
   local mode="$2"
   local roots_mode="${3:-${SAFEZONE_ROOTS_MODE:-}}"
   local page_size="${4:-${SAFEZONE_PAGE_SIZE:-}}"
+  local mode_operator="${5:-${operator}}"
 
   echo
   echo "== ${label} =="
@@ -24,7 +25,7 @@ run_mode() {
   sbt \
     "project sandbox3_next" \
     "set Compile / mainClass := Some(\"DataflowRegionMatrix\")" \
-    "run ${mode} ${operator}"
+    "run ${mode} ${mode_operator}"
 }
 
 cd "${repo_dir}"
@@ -36,3 +37,6 @@ run_mode "UnsafeZone-HP" "safezone" "3" "32768"
 run_mode "Rift HPZone" "rift-hp"
 run_mode "Rift Streaming" "rift-streaming"
 run_mode "Rift checked RegionBuffer" "rift-checked"
+run_mode "Checked page-token SELECT" "checked-page-token" "" "" "select"
+run_mode "Checked scoped page-token SELECT" "checked-page-token-scoped" "1" "32768" "select"
+run_mode "Checked epoch-fold AGGREGATE" "checked-epoch-fold" "" "" "aggregate"

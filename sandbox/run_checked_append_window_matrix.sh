@@ -8,7 +8,7 @@ output_dir=${CHECKED_APPEND_OUTPUT_DIR:-"/tmp/checked-append-window"}
 summary=${CHECKED_APPEND_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${CHECKED_APPEND_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${CHECKED_APPEND_MODES:-"heap heap-prepend rift-checked rift-checked-api rift-checked-api-cursor rift-checked-api-prepend-cursor rift-trusted-hp rift-trusted-streaming"}})
+modes=(${(z)${CHECKED_APPEND_MODES:-"heap-immix heap-prepend heap-immix-chunk rift-checked rift-checked-api rift-checked-rift rift-checked-page-token rift-checked-chunk-token rift-checked-safezone-page-token rift-checked-safezone-chunk-token rift-checked-api-prepend-cursor rift-trusted-hp rift-trusted-streaming"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"
@@ -79,18 +79,59 @@ write_result_row() {
 
 run_mode() {
   local mode="$1"
+  local binary_mode="${mode}"
   local run_log="${output_dir}/run-${mode}.log"
   local time_log="${output_dir}/time-${mode}.log"
   local max_rss_bytes
   local command_status
+  local roots_mode=""
+  local page_size=""
+
+  case "${mode}" in
+    heap-immix)
+      binary_mode="heap"
+      ;;
+    rift-checked-rift)
+      binary_mode="rift-checked-api-cursor"
+      ;;
+    safezone-rootless-32k)
+      binary_mode="unsafezone-hp"
+      roots_mode="3"
+      page_size="32768"
+      ;;
+    rift-checked-safezone-improved-32k)
+      binary_mode="rift-checked-safezone-32k"
+      roots_mode="1"
+      page_size="32768"
+      ;;
+    rift-checked-safezone-rootless-32k)
+      binary_mode="rift-checked-rootfree-safezone-hp"
+      roots_mode="3"
+      page_size="32768"
+      ;;
+    safezone-improved-32k|rift-checked-safezone-32k|rift-checked-safezone-page-token)
+      roots_mode="1"
+      page_size="32768"
+      ;;
+    rift-checked-safezone-chunk-token)
+      roots_mode="1"
+      page_size="32768"
+      ;;
+    unsafezone-hp|rift-checked-rootfree-safezone-hp)
+      roots_mode="3"
+      page_size="32768"
+      ;;
+  esac
 
   echo
   echo "== ${mode} =="
   set +e
   if [[ "${platform}" == "Darwin" ]]; then
-    /usr/bin/time -l "${binary}" "${mode}" > "${run_log}" 2> "${time_log}"
+    SAFEZONE_ROOTS_MODE="${roots_mode}" SAFEZONE_PAGE_SIZE="${page_size}" \
+      /usr/bin/time -l "${binary}" "${binary_mode}" > "${run_log}" 2> "${time_log}"
   else
-    /usr/bin/time -v "${binary}" "${mode}" > "${run_log}" 2> "${time_log}"
+    SAFEZONE_ROOTS_MODE="${roots_mode}" SAFEZONE_PAGE_SIZE="${page_size}" \
+      /usr/bin/time -v "${binary}" "${binary_mode}" > "${run_log}" 2> "${time_log}"
   fi
   command_status=$?
   set -e

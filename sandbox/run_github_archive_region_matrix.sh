@@ -4,12 +4,12 @@ set -euo pipefail
 
 script_dir=${0:A:h}
 repo_dir=${script_dir:h}
-output_dir=${NEXMARK_OUTPUT_DIR:-"/tmp/nexmark-region-matrix"}
-summary=${NEXMARK_SUMMARY:-"${output_dir}/summary.tsv"}
-build=${NEXMARK_BUILD:-1}
+output_dir=${GITHUB_ARCHIVE_OUTPUT_DIR:-"/tmp/github-archive-region-matrix"}
+summary=${GITHUB_ARCHIVE_SUMMARY:-"${output_dir}/summary.tsv"}
+build=${GITHUB_ARCHIVE_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${NEXMARK_MODES:-"heap safezone-current safezone-improved unsafezone-hp rift-checked rift-hp rift-streaming"}})
-queries=(${(z)${NEXMARK_QUERIES:-"q0 q1 q2 q3 q4 q5 q8 q9 q11"}})
+modes=(${(z)${GITHUB_ARCHIVE_MODES:-"heap-immix safezone-improved-32k safezone-rootless-32k rift-trusted-hp rift-trusted-streaming rift-checked-page-token rift-checked-safezone-page-token"}})
+queries=(${(z)${GITHUB_ARCHIVE_QUERIES:-"q0-events q1-fields q2-repo-window"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"
@@ -21,17 +21,17 @@ cd "${repo_dir}"
 if [[ "${build}" != "0" ]]; then
   sbt \
     "project sandbox3_next" \
-    "set Compile / mainClass := Some(\"NexmarkRegionMatrix\")" \
+    "set Compile / mainClass := Some(\"GithubArchiveRegionMatrix\")" \
     nativeLink
 fi
 
-binary=${NEXMARK_BINARY:-}
+binary=${GITHUB_ARCHIVE_BINARY:-}
 if [[ -z "${binary}" ]]; then
-  binary=$(find sandbox/.3-next/target -path "*/native/NexmarkRegionMatrix" -type f -perm -111 -print | sort | tail -n 1)
+  binary=$(find sandbox/.3-next/target -path "*/native/GithubArchiveRegionMatrix" -type f -perm -111 -print | sort | tail -n 1)
 fi
 
 if [[ -z "${binary}" || ! -x "${binary}" ]]; then
-  echo "missing NexmarkRegionMatrix native binary; set NEXMARK_BINARY or enable NEXMARK_BUILD" >&2
+  echo "missing GithubArchiveRegionMatrix native binary; set GITHUB_ARCHIVE_BINARY or enable GITHUB_ARCHIVE_BUILD" >&2
   exit 1
 fi
 
@@ -45,7 +45,7 @@ read_max_rss_bytes() {
 }
 
 write_summary_header() {
-  printf "query\tmode\theap_cap\tstatus\tinput\tmedian_ms\tmedian_gc_ms\tmax_gc_ms\truns_with_gc\tmax_gc_collections\tmedian_rift_op_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\toutput_count\tmax_rss_bytes\n" > "${summary}"
+  printf "query\tmode\theap_cap\tstatus\tinput\tloaded_events\tinput_files\tmedian_ms\tmedian_gc_ms\tmax_gc_ms\truns_with_gc\tmax_gc_collections\tmedian_rift_op_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\toutput_count\tmax_rss_bytes\n" > "${summary}"
 }
 
 write_result_row() {
@@ -59,7 +59,7 @@ write_result_row() {
   local line token key value
   typeset -A fields
 
-  line=$(grep "^RESULT name=nexmark-${query}-${binary_mode} " "${run_log}" | tail -n 1)
+  line=$(grep "^RESULT name=github-archive-${query}-${binary_mode} " "${run_log}" | tail -n 1)
   fields=()
   for token in ${(z)line}; do
     if [[ "${token}" == *=* ]]; then
@@ -69,12 +69,14 @@ write_result_row() {
     fi
   done
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "${query}" \
     "${mode}" \
     "${heap_cap}" \
     "${run_status}" \
     "${fields[input]-}" \
+    "${fields[loaded_events]-}" \
+    "${fields[input_files]-}" \
     "${fields[median_ms]-}" \
     "${fields[median_gc_ms]-}" \
     "${fields[max_gc_ms]-}" \
@@ -97,8 +99,12 @@ write_failed_row() {
   local run_status="$4"
   local max_rss_bytes="$5"
 
-  printf "%s\t%s\t%s\t%s\t\t\t\t\t\t\t\t\t\t\t\t\t\t%s\n" \
-    "${query}" "${mode}" "${heap_cap}" "${run_status}" "${max_rss_bytes}" >> "${summary}"
+  printf "%s\t%s\t%s\t%s\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t%s\n" \
+    "${query}" \
+    "${mode}" \
+    "${heap_cap}" \
+    "${run_status}" \
+    "${max_rss_bytes}" >> "${summary}"
 }
 
 run_case() {
@@ -123,13 +129,30 @@ run_case() {
       binary_mode="safezone"
       roots_mode="0"
       ;;
-    safezone-improved)
+    safezone-improved|safezone-improved-32k)
       binary_mode="safezone"
       roots_mode="1"
+      if [[ "${mode}" == "safezone-improved-32k" ]]; then
+        page_size="32768"
+      fi
       ;;
-    unsafezone-hp)
+    safezone-rootless-32k|unsafezone-hp)
       binary_mode="safezone"
       roots_mode="3"
+      page_size="32768"
+      ;;
+    rift-trusted-hp)
+      binary_mode="rift-hp"
+      ;;
+    rift-trusted-streaming)
+      binary_mode="rift-streaming"
+      ;;
+    rift-checked-page-token)
+      binary_mode="${mode}"
+      ;;
+    rift-checked-safezone-page-token)
+      binary_mode="${mode}"
+      roots_mode="1"
       page_size="32768"
       ;;
   esac
@@ -156,40 +179,40 @@ run_case() {
   command_status=$?
   set -e
 
-  if ! grep -q "^RESULT name=nexmark-${query}-${binary_mode} " "${run_log}"; then
+  if ! grep -q "^RESULT name=github-archive-${query}-${binary_mode} " "${run_log}"; then
     cat "${run_log}" >&2
     cat "${time_log}" >&2
     max_rss_bytes=$(read_max_rss_bytes "${time_log}")
-    echo "NEXMARK_RESULT query=${query} mode=${mode} heap_cap=${heap_cap} status=failed exit_status=${command_status} max_rss_bytes=${max_rss_bytes}" >&2
+    echo "GITHUB_ARCHIVE_RESULT query=${query} mode=${mode} heap_cap=${heap_cap} status=failed exit_status=${command_status} max_rss_bytes=${max_rss_bytes}" >&2
     write_failed_row "${query}" "${mode}" "${heap_cap}" "failed:${command_status}" "${max_rss_bytes}"
     return 0
   fi
 
   max_rss_bytes=$(read_max_rss_bytes "${time_log}")
-  grep "^RESULT name=nexmark-${query}-${binary_mode} " "${run_log}"
-  echo "NEXMARK_RSS_RESULT query=${query} mode=${mode} heap_cap=${heap_cap} max_rss_bytes=${max_rss_bytes}"
+  grep "^RESULT name=github-archive-${query}-${binary_mode} " "${run_log}"
+  echo "GITHUB_ARCHIVE_RSS_RESULT query=${query} mode=${mode} heap_cap=${heap_cap} max_rss_bytes=${max_rss_bytes}"
   write_result_row "${query}" "${mode}" "${heap_cap}" "ok" "${binary_mode}" "${run_log}" "${max_rss_bytes}"
 }
 
 write_summary_header
 for query in "${queries[@]}"; do
   for mode in "${modes[@]}"; do
-    if [[ ("${mode}" == "heap" || "${mode}" == "heap-immix") && -n "${NEXMARK_HEAP_CAPS:-}" ]]; then
-      heap_caps=(${(z)${NEXMARK_HEAP_CAPS}})
+    if [[ "${mode}" == "heap-immix" && -n "${GITHUB_ARCHIVE_HEAP_CAPS:-}" ]]; then
+      heap_caps=(${(z)${GITHUB_ARCHIVE_HEAP_CAPS}})
       for heap_cap in "${heap_caps[@]}"; do
         run_case "${query}" "${mode}" "${heap_cap}"
       done
-    elif [[ "${mode}" != "heap" && "${mode}" != "heap-immix" && -n "${NEXMARK_REGION_HEAP_CAPS:-}" ]]; then
-      region_caps=(${(z)${NEXMARK_REGION_HEAP_CAPS}})
+    elif [[ "${mode}" != "heap-immix" && -n "${GITHUB_ARCHIVE_REGION_HEAP_CAPS:-}" ]]; then
+      region_caps=(${(z)${GITHUB_ARCHIVE_REGION_HEAP_CAPS}})
       for heap_cap in "${region_caps[@]}"; do
         run_case "${query}" "${mode}" "${heap_cap}"
       done
     else
-      run_case "${query}" "${mode}" "${NEXMARK_HEAP_CAP:-uncapped}"
+      run_case "${query}" "${mode}" "${GITHUB_ARCHIVE_HEAP_CAP:-uncapped}"
     fi
   done
 done
 
 echo
-echo "NEXMark region matrix complete"
+echo "GH Archive region matrix complete"
 echo "Summary: ${summary}"

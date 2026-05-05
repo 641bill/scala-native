@@ -2,9 +2,11 @@
 
 Status: WET-shaped q1/q2/q3 generated follow-up recorded; q1/q2 rerun after
 Rift fast-allocation counter cleanup; checked `StreamAppendWindow` follow-up
-recorded for q1/q2.
+recorded for q1/q2; checked SafeZone-backed backend follow-up recorded; new
+checked page/token operator follow-up recorded and clears the generated
+application-shaped gate.
 
-Date: 2026-05-02
+Date: 2026-05-03
 
 ## Purpose
 
@@ -25,14 +27,19 @@ Current runner: `sandbox/run_common_crawl_wet_matrix.sh`.
 | `q1-tokenize` | Allocate page, line, and token records retained until bucket close. | Ordinary token records in bucket regions. |
 | `q2-domain-window` | Allocate page/line/token records, then aggregate per domain at bucket close. | Bucket records plus close-time aggregate summaries. |
 | `q3-parser-scratch` | Allocate page/line/token scratch records and consume them immediately. | Parser scratch objects with bucket/page-like lifetime. |
+| `q4-wat-links` | On real WAT input, allocate page records plus extracted link/URL records. | WAT link records with bucket/page lifetime. |
+| `q5-wat-link-domain-window` | On real WAT input, allocate page/link records, then aggregate link domains at bucket close. | Bucket-owned link records plus close-time domain summaries. |
 
-The default runner now includes all four queries. The default mode set still
+The default runner now includes the generated WET-shaped queries. Real WAT
+q4/q5 are opt-in because they require a WAT input file. The default mode set still
 uses heap, SafeZone-family, and trusted Rift modes. The SafeZone-family labels
 include `safezone-improved-32k` and `safezone-chunk` so non-trace follow-up
 rows can be compared against `unsafezone-hp` without ambiguous environment
 overrides. `rift-checked` is available as an opt-in q1/q2 follow-up mode using
-the reusable checked `StreamAppendWindow` cursor API; it is not in the default
-mode list because it has not cleared the application-scale performance gate.
+the reusable checked `StreamAppendWindow` cursor API. The newer
+`rift-checked-page-token` and `rift-checked-safezone-page-token` modes use
+`StreamPageTokenAppendWindow`, an operator-owned path that removes redundant
+per-record checks and child-region lookups.
 
 ## Command
 
@@ -63,6 +70,102 @@ zsh sandbox/run_common_crawl_wet_matrix.sh
   beats heap and improved SafeZone by about 10%, or materially cuts GC/RSS with
   no more than 5% elapsed overhead.
 - UnsafeZone rows are backend lower bounds, not safety evidence.
+
+## Checked SafeZone-Backed Backend Follow-Up
+
+Detailed source: `evidence/CHECKED_SAFEZONE_BACKEND_MATRIX.md`.
+
+The 2026-05-03 follow-up adds `rift-checked-safezone-32k`, a benchmark-only
+checked backend that runs the existing checked `StreamAppendWindow` q1/q2 path
+over SafeZone allocator internals with `SAFEZONE_ROOTS_MODE=1` and
+`SAFEZONE_PAGE_SIZE=32768`.
+
+At 1M generated pages:
+
+| Query | heap | improved-32k | unsafezone-hp | trusted best | rift-checked | checked SafeZone-backed | Interpretation |
+|---|---:|---:|---:|---:|---:|---:|---|
+| q1-tokenize | `5412.668 ms` | `4570.772 ms` | `4534.978 ms` | HPZone `4278.440 ms` | `4744.872 ms` | `4512.743 ms` | SafeZone-backed checked is `4.9%` faster than current checked and close to improved-32k, but still trails trusted HPZone. |
+| q2-domain-window | `5190.246 ms` | `4362.405 ms` | `4342.620 ms` | HPZone `4075.431 ms` | `4698.903 ms` | `4431.865 ms` | SafeZone-backed checked is `5.7%` faster than current checked, but trails improved-32k and trusted Rift. |
+
+All q1/q2 rows matched checksum/output count. Heap remains strongly GC-heavy
+at 1M (`1.55-1.59 s` median GC), while region/SafeZone-family rows reduce GC
+to about `19-32 ms`. The checked SafeZone-backed backend is useful backend
+evidence, but it misses the application follow-up gate and should not be used
+as a checked application-speed claim.
+
+## Checked Page/Token Operator Follow-Up
+
+Detailed source: `evidence/CHECKED_PAGE_TOKEN_APPEND_MATRIX.md`.
+
+The 2026-05-03 follow-up adds `StreamPageTokenAppendWindow`, a checked
+operator-owned page/token append path. It still allocates ordinary Scala record
+objects in child bucket regions, but user code does not receive reusable bucket
+tokens on the hot append path. The operator owns bucket lookup, child-region
+caching, append, and close.
+
+At 1M generated pages:
+
+| Query | heap | improved-32k | trusted best | current checked | checked page-token | checked SafeZone page-token | Interpretation |
+|---|---:|---:|---:|---:|---:|---:|---|
+| q1-tokenize | `5412.618 ms` | `4637.981 ms` | HPZone `4367.265 ms` | `4855.133 ms` | `3956.366 ms` | `3728.286 ms` | Page-token checked improves current checked by `18.5%` and beats trusted HPZone by `9.4%`; SafeZone-backed page-token is fastest in this generated row. |
+| q2-domain-window | `5252.803 ms` | `4580.687 ms` | Streaming `4212.494 ms` | `4820.611 ms` | `4039.855 ms` | `3816.247 ms` | Page-token checked improves current checked by `16.2%` and beats trusted Streaming by `4.1%`; SafeZone-backed page-token is fastest in this generated row. |
+
+All rows matched checksum/output count. Heap GC remains about `1.57 s`, while
+region/SafeZone-family rows reduce GC to about `19-35 ms`. Both page-token
+rows reduce RSS by about `10-11 MiB` relative to the previous checked rows.
+
+Interpretation: this is the first checked operator/application-shaped Common
+Crawl-like result that clears the generated q1/q2 gate. It directly supports
+the static-safety overhead-removal story: when the operator owns the lifetime
+boundary, it can avoid redundant per-record dynamic checks without changing the
+logical program. Caveat: it remains generated WET-shaped stressor evidence, not
+real Common Crawl input proof.
+
+## Real WAT Link-Metadata Control
+
+Input:
+`/Users/siyaoliu/rift/cache/benchmark-data/common-crawl/CC-MAIN-2026-17/CC-MAIN-20260410081153-20260410111153-00000.warc.wat`
+
+Command:
+
+```sh
+COMMON_CRAWL_WET_BUILD=0 \
+COMMON_CRAWL_WET_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/common-crawl/CC-MAIN-2026-17/CC-MAIN-20260410081153-20260410111153-00000.warc.wat \
+COMMON_CRAWL_WET_PAGES=50000 \
+COMMON_CRAWL_WET_BENCHMARK_RUNS=3 \
+COMMON_CRAWL_WET_WARMUPS=1 \
+COMMON_CRAWL_WET_QUERIES="q4-wat-links q5-wat-link-domain-window" \
+COMMON_CRAWL_WET_MODES="heap-immix safezone-improved-32k rift-trusted-hp rift-trusted-streaming rift-checked-page-token rift-checked-safezone-page-token" \
+COMMON_CRAWL_WET_OUTPUT_DIR=/Users/siyaoliu/rift/cache/common-crawl-wat-links-2026-05-03 \
+zsh sandbox/run_common_crawl_wet_matrix.sh
+```
+
+All rows matched checksum/output count. These rows use real Common Crawl WAT
+metadata and materialize ordinary page/link records, but heap still reports
+zero timed GC on this shard.
+
+| Query | Mode | Median ms | GC ms | Runs with GC | RSS bytes | Output count |
+|---|---|---:|---:|---:|---:|---:|
+| q4-wat-links | `heap-immix` | `33.646` | `0.000` | 0 | `968704000` | `1006742` |
+| q4-wat-links | `safezone-improved-32k` | `39.551` | `0.000` | 0 | `1061011456` | `1006742` |
+| q4-wat-links | `rift-trusted-hp` | `38.766` | `0.000` | 0 | `1166393344` | `1006742` |
+| q4-wat-links | `rift-trusted-streaming` | `38.541` | `0.000` | 0 | `1143963648` | `1006742` |
+| q4-wat-links | `rift-checked-page-token` | `35.085` | `0.000` | 0 | `1142358016` | `1006742` |
+| q4-wat-links | `rift-checked-safezone-page-token` | `31.792` | `0.000` | 0 | `1171996672` | `1006742` |
+| q5-wat-link-domain-window | `heap-immix` | `35.066` | `0.000` | 0 | `957562880` | `293020` |
+| q5-wat-link-domain-window | `safezone-improved-32k` | `39.579` | `0.000` | 0 | `1156055040` | `293020` |
+| q5-wat-link-domain-window | `rift-trusted-hp` | `38.682` | `0.000` | 0 | `1143980032` | `293020` |
+| q5-wat-link-domain-window | `rift-trusted-streaming` | `38.656` | `0.000` | 0 | `1030471680` | `293020` |
+| q5-wat-link-domain-window | `rift-checked-page-token` | `36.546` | `0.000` | 0 | `962789376` | `293020` |
+| q5-wat-link-domain-window | `rift-checked-safezone-page-token` | `33.937` | `0.000` | 0 | `1144209408` | `293020` |
+
+One 100k requested-page q4 probe also stayed median/max-GC-zero: heap
+`43.274 ms`, SafeZone-backed page-token `42.226 ms`, output count `1339183`.
+
+Interpretation: real WAT link extraction is a useful correctness and
+real-input control, and the SafeZone-backed page-token path is modestly fastest
+on this shard. It is not a GC-heavy case-study row because heap has zero timed
+collections even at the larger one-run probe.
 
 ## Smoke Result
 

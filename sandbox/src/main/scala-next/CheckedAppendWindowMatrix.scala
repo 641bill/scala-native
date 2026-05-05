@@ -1,7 +1,13 @@
 import scala.language.experimental.captureChecking
 
-import scala.scalanative.memory.RiftRegion
-import scala.scalanative.runtime.{fromRawUSize, GC, RawSize, RiftAllocator}
+import scala.scalanative.memory.{RiftRegion, SafeZone}
+import scala.scalanative.runtime.{
+  fromRawUSize,
+  GC,
+  RawSize,
+  RiftAllocator,
+  SafeZoneAllocator
+}
 
 object CheckedAppendWindowConfig {
   private def parsePositiveInt(value: String): Option[Int] =
@@ -32,6 +38,7 @@ object CheckedAppendWindowConfig {
   val windowBuckets: Int = envInt("CHECKED_APPEND_WINDOW_BUCKETS", 8)
   val keySpace: Int = envInt("CHECKED_APPEND_KEY_SPACE", 65536)
   val sampleEvery: Int = envInt("CHECKED_APPEND_SAMPLE_EVERY", 4096)
+  val chunkSize: Int = envInt("CHECKED_APPEND_CHUNK_SIZE", 64)
   val warmupRuns: Int = envNonNegativeInt("CHECKED_APPEND_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("CHECKED_APPEND_BENCHMARK_RUNS", 3)
   val apiDiagnostics: Boolean =
@@ -58,6 +65,19 @@ object CheckedAppendWindowMatrixHelpers {
     var tail: HeapRecord = null
   }
 
+  private final class HeapChunk(val items: Array[HeapRecord]) {
+    var used: Int = 0
+    var next: HeapChunk = null
+  }
+
+  private final class HeapChunkBucket(
+      val startSeconds: Long,
+      var next: HeapChunkBucket
+  ) {
+    var head: HeapChunk = null
+    var tail: HeapChunk = null
+  }
+
   private final class TrustedRecord(
       val key: Int,
       var value: Int,
@@ -72,6 +92,22 @@ object CheckedAppendWindowMatrixHelpers {
   ) {
     var head: TrustedRecord = null
     var tail: TrustedRecord = null
+  }
+
+  private final class SafeZoneRecord(
+      val key: Int,
+      var value: Int,
+      var total: Long,
+      var next: SafeZoneRecord
+  )
+
+  private final class SafeZoneBucket(
+      val zone: SafeZone,
+      val startSeconds: Long,
+      var next: SafeZoneBucket
+  ) {
+    var head: SafeZoneRecord = null
+    var tail: SafeZoneRecord = null
   }
 
   final case class RuntimeSample(
@@ -257,6 +293,110 @@ object CheckedAppendWindowMatrixHelpers {
         bucket.tail.next = record
         bucket.tail = record
       }
+      if (i % cfg.sampleEvery == 0)
+        checksum = fold(
+          checksum,
+          record.key,
+          record.value,
+          record.total,
+          bucket.startSeconds
+        )
+      i += 1
+    }
+
+    closeExpired(Long.MaxValue)
+    checksumSink = checksum
+    checksum
+  }
+
+  def runHeapChunk(): Long = {
+    val cfg = CheckedAppendWindowConfig
+    val totals = new Array[Long](cfg.keySpace)
+    var first: HeapChunkBucket = null
+    var last: HeapChunkBucket = null
+    var current: HeapChunkBucket = null
+    var checksum = 0L
+
+    def closeExpired(cutoffSeconds: Long): Unit =
+      while (
+        first != null &&
+        first.startSeconds + cfg.eventsPerBucket.toLong <= cutoffSeconds
+      ) {
+        val bucket = first
+        var chunk = bucket.head
+        while (chunk != null) {
+          var index = 0
+          while (index < chunk.used) {
+            val record = chunk.items(index)
+            val nextTotal =
+              (totals(record.key) + record.total) & 0xffffffffL
+            totals(record.key) = nextTotal
+            checksum = fold(
+              checksum,
+              record.key,
+              record.value,
+              nextTotal,
+              bucket.startSeconds
+            )
+            chunk.items(index) = null
+            index += 1
+          }
+          val nextChunk = chunk.next
+          chunk.next = null
+          chunk = nextChunk
+        }
+        first = bucket.next
+        if (first == null) last = null
+        if (current eq bucket) current = null
+        bucket.head = null
+        bucket.tail = null
+        bucket.next = null
+      }
+
+    def bucketFor(startSeconds: Long): HeapChunkBucket =
+      if (current != null && current.startSeconds == startSeconds) current
+      else {
+        closeExpired(closeCutoff(startSeconds))
+        val bucket = new HeapChunkBucket(startSeconds, null)
+        if (first == null) {
+          first = bucket
+          last = bucket
+        } else {
+          last.next = bucket
+          last = bucket
+        }
+        current = bucket
+        bucket
+      }
+
+    def append(bucket: HeapChunkBucket, record: HeapRecord): Unit = {
+      var tail = bucket.tail
+      if (tail == null || tail.used >= cfg.chunkSize) {
+        val chunk = new HeapChunk(new Array[HeapRecord](cfg.chunkSize))
+        if (bucket.head == null) {
+          bucket.head = chunk
+          bucket.tail = chunk
+        } else {
+          tail.next = chunk
+          bucket.tail = chunk
+        }
+        tail = chunk
+      }
+      tail.items(tail.used) = record
+      tail.used += 1
+    }
+
+    var i = 0
+    while (i < cfg.events) {
+      val seed = mix(i * 1103515245 + 12345)
+      val key = seed % cfg.keySpace
+      val value = (mix(seed + 17) & 0xffff) + 1
+      val startSeconds = bucketStart(i)
+      val bucket = bucketFor(startSeconds)
+      val record = new HeapRecord(key, value, value.toLong, null)
+      record.value += seed & 3
+      record.total += record.value.toLong
+      append(bucket, record)
       if (i % cfg.sampleEvery == 0)
         checksum = fold(
           checksum,
@@ -678,6 +818,376 @@ object CheckedAppendWindowMatrixHelpers {
     checksum
   }
 
+  private def runRiftCheckedSafeZoneApiCursor(): Long = {
+    val cfg = CheckedAppendWindowConfig
+    val totals = new Array[Long](cfg.keySpace)
+    val checksum = RiftRegion.streamingSafeZone { stream ?=>
+      final class Record(
+          val key: Int,
+          var value: Int,
+          var total: Long
+      ) extends RiftRegion.StreamAppendNode
+      val window =
+        RiftRegion.streamAppendWindow[Record](cfg.eventsPerBucket.toLong)
+      var running = 0L
+
+      def consume(
+          bucket: RiftRegion.StreamBucket^{stream},
+          cursor: RiftRegion.StreamAppendCursor[Record]^{stream}
+      ): Unit =
+        while (cursor.hasNext) {
+          val record: Record^{stream} = cursor.next()
+          val nextTotal =
+            (totals(record.key) + record.total) & 0xffffffffL
+          totals(record.key) = nextTotal
+          running = fold(
+            running,
+            record.key,
+            record.value,
+            nextTotal,
+            bucket.startSeconds
+          )
+        }
+
+      def closeExpired(cutoffSeconds: Long): Unit =
+        RiftRegion.closeAppendWindowBucketsBeforeWithCursor(
+          stream,
+          window,
+          cutoffSeconds
+        ) { (bucket, cursor) =>
+          consume(bucket, cursor)
+        }
+
+      var currentStartSeconds = Long.MinValue
+      var currentBucket: RiftRegion.StreamBucket^{stream} = null
+      var currentBucketRegion: RiftRegion.StreamingRegion^{stream} = null
+      var i = 0
+      while (i < cfg.events) {
+        val seed = mix(i * 1103515245 + 12345)
+        val key = seed % cfg.keySpace
+        val value = (mix(seed + 17) & 0xffff) + 1
+        val startSeconds = bucketStart(i)
+        if (startSeconds != currentStartSeconds) {
+          closeExpired(closeCutoff(startSeconds))
+          currentStartSeconds = startSeconds
+          currentBucket =
+            RiftRegion.streamAppendWindowBucketFor(stream, window, startSeconds)
+          currentBucketRegion =
+            RiftRegion.streamBucketRegion(stream, currentBucket)
+        }
+        val bucket = currentBucket
+        val bucketRegion = currentBucketRegion
+        val record: Record^{stream} =
+          RiftRegion.alloc(new Record(key, value, value.toLong))(
+            using bucketRegion
+          )
+        record.value += seed & 3
+        record.total += record.value.toLong
+        RiftRegion.appendWindow(stream, window, bucket, record)
+        if (i % cfg.sampleEvery == 0)
+          running = fold(
+            running,
+            record.key,
+            record.value,
+            record.total,
+            bucket.startSeconds
+          )
+        i += 1
+      }
+
+      RiftRegion.closeAllAppendWindowBucketsWithCursor(stream, window) {
+        (bucket, cursor) =>
+          consume(bucket, cursor)
+      }
+      running
+    }
+    checksumSink = checksum
+    checksum
+  }
+
+  private def runRiftCheckedPageTokenBody()(using
+      stream: RiftRegion.StreamingRegion^
+  ): Long = {
+    val cfg = CheckedAppendWindowConfig
+    val totals = new Array[Long](cfg.keySpace)
+    final class Record(
+        val key: Int,
+        var value: Int,
+        var total: Long
+    ) extends RiftRegion.StreamAppendNode
+    val window =
+      RiftRegion.streamPageTokenAppendWindow[Record](
+        cfg.eventsPerBucket.toLong
+      )
+    var running = 0L
+
+    def consume(
+        bucket: RiftRegion.StreamBucket^{stream},
+        cursor: RiftRegion.StreamAppendCursor[Record]^{stream}
+    ): Unit =
+      while (cursor.hasNext) {
+        val record: Record^{stream} = cursor.next()
+        val nextTotal =
+          (totals(record.key) + record.total) & 0xffffffffL
+        totals(record.key) = nextTotal
+        running = fold(
+          running,
+          record.key,
+          record.value,
+          nextTotal,
+          bucket.startSeconds
+        )
+      }
+
+    var currentStartSeconds = Long.MinValue
+    var currentRegion: RiftRegion.StreamingRegion^{stream} = null
+    var i = 0
+    while (i < cfg.events) {
+      val seed = mix(i * 1103515245 + 12345)
+      val key = seed % cfg.keySpace
+      val value = (mix(seed + 17) & 0xffff) + 1
+      val startSeconds = bucketStart(i)
+      if (startSeconds != currentStartSeconds) {
+        currentStartSeconds = startSeconds
+        currentRegion =
+          RiftRegion.pageTokenAppendRegionFor(
+            stream,
+            window,
+            startSeconds,
+            closeCutoff(startSeconds)
+          )(consume)
+      }
+      val record: Record^{stream} =
+        RiftRegion.alloc(new Record(key, value, value.toLong))(
+          using currentRegion
+        )
+      record.value += seed & 3
+      record.total += record.value.toLong
+      RiftRegion.appendPageToken(stream, window, record)
+      if (i % cfg.sampleEvery == 0)
+        running = fold(
+          running,
+          record.key,
+          record.value,
+          record.total,
+          currentStartSeconds
+        )
+      i += 1
+    }
+
+    RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
+      consume
+    )
+    running
+  }
+
+  private def runRiftCheckedPageToken(): Long = {
+    val checksum = RiftRegion.streaming { stream ?=>
+      runRiftCheckedPageTokenBody()
+    }
+    checksumSink = checksum
+    checksum
+  }
+
+  private def runRiftCheckedSafeZonePageToken(): Long = {
+    val checksum = RiftRegion.streamingSafeZone { stream ?=>
+      runRiftCheckedPageTokenBody()
+    }
+    checksumSink = checksum
+    checksum
+  }
+
+  private def runRiftCheckedChunkTokenBody()(using
+      stream: RiftRegion.StreamingRegion^
+  ): Long = {
+    val cfg = CheckedAppendWindowConfig
+    val totals = new Array[Long](cfg.keySpace)
+    final class Record(
+        val key: Int,
+        var value: Int,
+        var total: Long
+    )
+    val window =
+      RiftRegion.streamChunkAppendWindow[Record](
+        cfg.eventsPerBucket.toLong,
+        cfg.chunkSize
+      )
+    var running = 0L
+
+    def consume(
+        bucket: RiftRegion.StreamBucket^{stream},
+        cursor: RiftRegion.StreamChunkCursor[Record]^{stream}
+    ): Unit =
+      while (cursor.hasNext) {
+        val record: Record^{stream} = cursor.next()
+        val nextTotal =
+          (totals(record.key) + record.total) & 0xffffffffL
+        totals(record.key) = nextTotal
+        running = fold(
+          running,
+          record.key,
+          record.value,
+          nextTotal,
+          bucket.startSeconds
+        )
+      }
+
+    var currentStartSeconds = Long.MinValue
+    var currentRegion: RiftRegion.StreamingRegion^{stream} = null
+    var i = 0
+    while (i < cfg.events) {
+      val seed = mix(i * 1103515245 + 12345)
+      val key = seed % cfg.keySpace
+      val value = (mix(seed + 17) & 0xffff) + 1
+      val startSeconds = bucketStart(i)
+      if (startSeconds != currentStartSeconds) {
+        currentStartSeconds = startSeconds
+        currentRegion =
+          RiftRegion.chunkAppendRegionFor(
+            stream,
+            window,
+            startSeconds,
+            closeCutoff(startSeconds)
+          )(consume)
+      }
+      val record: Record^{stream} =
+        RiftRegion.alloc(new Record(key, value, value.toLong))(
+          using currentRegion
+        )
+      record.value += seed & 3
+      record.total += record.value.toLong
+      RiftRegion.appendChunkToken(stream, window, record)
+      if (i % cfg.sampleEvery == 0)
+        running = fold(
+          running,
+          record.key,
+          record.value,
+          record.total,
+          currentStartSeconds
+        )
+      i += 1
+    }
+
+    RiftRegion.closeAllChunkAppendBucketsWithCursor(stream, window)(consume)
+    running
+  }
+
+  private def runRiftCheckedChunkToken(): Long = {
+    val checksum = RiftRegion.streaming { stream ?=>
+      runRiftCheckedChunkTokenBody()
+    }
+    checksumSink = checksum
+    checksum
+  }
+
+  private def runRiftCheckedSafeZoneChunkToken(): Long = {
+    val checksum = RiftRegion.streamingSafeZone { stream ?=>
+      runRiftCheckedChunkTokenBody()
+    }
+    checksumSink = checksum
+    checksum
+  }
+
+  private def runSafeZone(): Long = {
+    val cfg = CheckedAppendWindowConfig
+    val totals = new Array[Long](cfg.keySpace)
+    var first: SafeZoneBucket = null
+    var last: SafeZoneBucket = null
+    var current: SafeZoneBucket = null
+    var checksum = 0L
+
+    def closeBucket(bucket: SafeZoneBucket): Unit = {
+      var record = bucket.head
+      while (record != null) {
+        val nextTotal =
+          (totals(record.key) + record.total) & 0xffffffffL
+        totals(record.key) = nextTotal
+        checksum =
+          fold(checksum, record.key, record.value, nextTotal, bucket.startSeconds)
+        record = record.next
+      }
+      bucket.head = null
+      bucket.tail = null
+      bucket.next = null
+      SafeZone.close(bucket.zone)
+    }
+
+    def closeExpired(cutoffSeconds: Long): Unit =
+      while (
+        first != null &&
+        first.startSeconds + cfg.eventsPerBucket.toLong <= cutoffSeconds
+      ) {
+        val bucket = first
+        first = bucket.next
+        if (first == null) last = null
+        if (current eq bucket) current = null
+        closeBucket(bucket)
+      }
+
+    def bucketFor(startSeconds: Long): SafeZoneBucket =
+      if (current != null && current.startSeconds == startSeconds) current
+      else {
+        closeExpired(closeCutoff(startSeconds))
+        val bucket = new SafeZoneBucket(SafeZone.open(), startSeconds, null)
+        if (first == null) {
+          first = bucket
+          last = bucket
+        } else {
+          last.next = bucket
+          last = bucket
+        }
+        current = bucket
+        bucket
+      }
+
+    var i = 0
+    try {
+      while (i < cfg.events) {
+        val seed = mix(i * 1103515245 + 12345)
+        val key = seed % cfg.keySpace
+        val value = (mix(seed + 17) & 0xffff) + 1
+        val startSeconds = bucketStart(i)
+        val bucket = bucketFor(startSeconds)
+        val record =
+          SafeZoneAllocator.allocate(
+            bucket.zone,
+            new SafeZoneRecord(key, value, value.toLong, null)
+          )
+        record.value += seed & 3
+        record.total += record.value.toLong
+        if (bucket.head == null) {
+          bucket.head = record
+          bucket.tail = record
+        } else {
+          bucket.tail.next = record
+          bucket.tail = record
+        }
+        if (i % cfg.sampleEvery == 0)
+          checksum = fold(
+            checksum,
+            record.key,
+            record.value,
+            record.total,
+            bucket.startSeconds
+          )
+        i += 1
+      }
+
+      closeExpired(Long.MaxValue)
+    } finally {
+      while (first != null) {
+        val bucket = first
+        first = bucket.next
+        closeBucket(bucket)
+      }
+      last = null
+      current = null
+    }
+
+    checksumSink = checksum
+    checksum
+  }
+
   def runRiftTrusted(kind: Int): Long = {
     val cfg = CheckedAppendWindowConfig
     val totals = new Array[Long](cfg.keySpace)
@@ -775,15 +1285,54 @@ object CheckedAppendWindowMatrixHelpers {
     checksum
   }
 
-  private def runMode(mode: String): Long =
+  private def canonicalMode(mode: String): String =
     mode match {
+      case "heap-immix" => "heap"
+      case "heap-immix-chunk" => "heap-chunk"
+      case "rift-checked-rift" =>
+        // Canonical checked Rift comparison means the reusable cursor API in
+        // this focused matrix; the older `rift-checked` name remains the
+        // manual checked control.
+        "rift-checked-api-cursor"
+      case "rift-checked-safezone-improved-32k" =>
+        "rift-checked-safezone-32k"
+      case "rift-checked-safezone-rootless-32k" =>
+        "rift-checked-rootfree-safezone-hp"
+      case "safezone-rootless-32k" => "unsafezone-hp"
+      case other                  => other
+    }
+
+  private def usesRiftRuntime(mode: String): Boolean =
+    canonicalMode(mode) match {
+      case "rift-checked" | "rift-checked-api" |
+          "rift-checked-api-cursor" |
+          "rift-checked-page-token" |
+          "rift-checked-chunk-token" |
+          "rift-checked-api-prepend-cursor" | "rift-trusted-hp" |
+          "rift-trusted-streaming" =>
+        true
+      case _ => false
+    }
+
+  private def runMode(mode: String): Long =
+    canonicalMode(mode) match {
       case "heap"                   => runHeap()
       case "heap-prepend"           => runHeap(prepend = true)
+      case "heap-chunk"             => runHeapChunk()
       case "rift-checked"           => runRiftChecked()
       case "rift-checked-api"       => runRiftCheckedApi()
       case "rift-checked-api-cursor" => runRiftCheckedApiCursor()
+      case "rift-checked-page-token" => runRiftCheckedPageToken()
+      case "rift-checked-chunk-token" => runRiftCheckedChunkToken()
+      case "rift-checked-safezone-32k" | "rift-checked-rootfree-safezone-hp" =>
+        runRiftCheckedSafeZoneApiCursor()
+      case "rift-checked-safezone-page-token" =>
+        runRiftCheckedSafeZonePageToken()
+      case "rift-checked-safezone-chunk-token" =>
+        runRiftCheckedSafeZoneChunkToken()
       case "rift-checked-api-prepend-cursor" =>
         runRiftCheckedApiCursor(prepend = true)
+      case "safezone-improved-32k" | "unsafezone-hp" => runSafeZone()
       case "rift-trusted-hp"        => runRiftTrusted(RiftRegion.HPZone)
       case "rift-trusted-streaming" => runRiftTrusted(RiftRegion.Streaming)
       case other =>
@@ -793,13 +1342,20 @@ object CheckedAppendWindowMatrixHelpers {
     }
 
   def validateMode(mode: String): Unit =
-    runModeName(mode)
+    runModeName(canonicalMode(mode))
 
   private def runModeName(mode: String): String =
     mode match {
-      case "heap" | "heap-prepend" | "rift-checked" | "rift-trusted-hp" |
+      case "heap" | "heap-prepend" | "heap-chunk" | "rift-checked" | "rift-trusted-hp" |
           "rift-trusted-streaming" | "rift-checked-api" |
-          "rift-checked-api-cursor" | "rift-checked-api-prepend-cursor" =>
+          "rift-checked-api-cursor" | "rift-checked-page-token" |
+          "rift-checked-chunk-token" |
+          "rift-checked-api-prepend-cursor" |
+          "rift-checked-safezone-32k" |
+          "rift-checked-rootfree-safezone-hp" |
+          "rift-checked-safezone-page-token" |
+          "rift-checked-safezone-chunk-token" | "safezone-improved-32k" |
+          "unsafezone-hp" =>
         mode
       case other =>
         throw new IllegalArgumentException(
@@ -809,14 +1365,16 @@ object CheckedAppendWindowMatrixHelpers {
 
   def runBenchmark(mode: String): Unit = {
     val cfg = CheckedAppendWindowConfig
-    val usesRift = mode != "heap" && mode != "heap-prepend"
+    val internalMode = canonicalMode(mode)
+    val usesRift = usesRiftRuntime(mode)
     val prependMode =
-      mode == "heap-prepend" || mode == "rift-checked-api-prepend-cursor"
+      internalMode == "heap-prepend" ||
+        internalMode == "rift-checked-api-prepend-cursor"
     val expectedChecksum = runHeap(prepend = prependMode)
 
     var warmup = 0
     while (warmup < cfg.warmupRuns) {
-      val checksum = runMode(mode)
+      val checksum = runMode(internalMode)
       if (checksum != expectedChecksum)
         throw new IllegalStateException(
           s"warmup checksum mismatch mode=$mode expected=$expectedChecksum actual=$checksum"
@@ -842,7 +1400,7 @@ object CheckedAppendWindowMatrixHelpers {
     while (run < cfg.benchmarkRuns) {
       val startRuntime = RuntimeSample.capture(usesRift)
       val start = System.nanoTime()
-      val checksum = runMode(mode)
+      val checksum = runMode(internalMode)
       val end = System.nanoTime()
       val endRuntime = RuntimeSample.capture(usesRift)
       val runtime = RuntimeSample.since(startRuntime, endRuntime)
@@ -898,16 +1456,19 @@ object CheckedAppendWindowMatrixHelpers {
   def printConfig(mode: String): Unit = {
     val cfg = CheckedAppendWindowConfig
     println(
-      s"CONFIG mode=$mode runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} window_buckets=${cfg.windowBuckets} key_space=${cfg.keySpace} sample_every=${cfg.sampleEvery}"
+      s"CONFIG mode=$mode backend_mode=${canonicalMode(mode)} runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} window_buckets=${cfg.windowBuckets} key_space=${cfg.keySpace} sample_every=${cfg.sampleEvery} chunk_size=${cfg.chunkSize}"
     )
   }
+
+  def requiresRiftRuntime(mode: String): Boolean =
+    usesRiftRuntime(mode)
 }
 
 @main def CheckedAppendWindowMatrix(mode: String = "heap"): Unit = {
   CheckedAppendWindowMatrixHelpers.validateMode(mode)
   CheckedAppendWindowMatrixHelpers.printConfig(mode)
 
-  val usesRift = mode != "heap" && mode != "heap-prepend"
+  val usesRift = CheckedAppendWindowMatrixHelpers.requiresRiftRuntime(mode)
   if (usesRift) RiftRegion.init(0)
   try {
     CheckedAppendWindowMatrixHelpers.runBenchmark(mode)

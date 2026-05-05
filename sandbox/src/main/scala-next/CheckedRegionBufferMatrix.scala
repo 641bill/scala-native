@@ -163,7 +163,7 @@ object CheckedRegionBufferMatrixHelpers {
     else (sorted(sorted.length / 2 - 1) + sorted(sorted.length / 2)) / 2L
   }
 
-  def runHeap(): Long = {
+  def runHeapBuffer(): Long = {
     val cfg = CheckedRegionBufferConfig
     val totals = new Array[Long](cfg.keySpace)
     var checksum = 0L
@@ -195,7 +195,39 @@ object CheckedRegionBufferMatrixHelpers {
     checksum
   }
 
-  def runRiftChecked(): Long = {
+  def runHeapArray(): Long = {
+    val cfg = CheckedRegionBufferConfig
+    val totals = new Array[Long](cfg.keySpace)
+    var checksum = 0L
+    var epoch = 0
+    while (epoch < cfg.epochs) {
+      val records = new Array[HeapRecord](cfg.recordsPerEpoch)
+      var i = 0
+      while (i < cfg.recordsPerEpoch) {
+        val seed = mix(epoch * 1000003 + i * 131)
+        val key = seed % cfg.keySpace
+        val value = (mix(seed + 19) & 0xffff) + 1
+        records(i) = new HeapRecord(key, value)
+        i += 1
+      }
+
+      i = 0
+      while (i < records.length) {
+        val record = records(i)
+        val next = (totals(record.key) + record.value.toLong) & 0xffffffffL
+        totals(record.key) = next
+        checksum =
+          (checksum * 1099511628211L) ^ record.key.toLong ^ next
+        i += 1
+      }
+      epoch += 1
+    }
+
+    checksumSink = checksum
+    checksum
+  }
+
+  def runRiftCheckedBuffer(): Long = {
     val cfg = CheckedRegionBufferConfig
     val totals = new Array[Long](cfg.keySpace)
     val checksum = RiftRegion.streaming { stream ?=>
@@ -239,32 +271,131 @@ object CheckedRegionBufferMatrixHelpers {
     checksum
   }
 
+  def runRiftCheckedArray(): Long = {
+    val cfg = CheckedRegionBufferConfig
+    val totals = new Array[Long](cfg.keySpace)
+    val checksum = RiftRegion.streaming { stream ?=>
+      var running = 0L
+      var epoch = 0
+      while (epoch < cfg.epochs) {
+        RiftRegion.reset { region ?=>
+          final class Record(val key: Int, val value: Int)
+
+          val records: Array[Record^{region}]^{region} =
+            RiftRegion.alloc(new Array[Record^{region}](cfg.recordsPerEpoch))
+          var i = 0
+          while (i < cfg.recordsPerEpoch) {
+            val seed = mix(epoch * 1000003 + i * 131)
+            val key = seed % cfg.keySpace
+            val value = (mix(seed + 19) & 0xffff) + 1
+            val record: Record^{region} =
+              RiftRegion.alloc(new Record(key, value))
+            records(i) = record
+            i += 1
+          }
+
+          i = 0
+          while (i < records.length) {
+            val record = records(i)
+            val next =
+              (totals(record.key) + record.value.toLong) & 0xffffffffL
+            totals(record.key) = next
+            running =
+              (running * 1099511628211L) ^ record.key.toLong ^ next
+            i += 1
+          }
+        }
+        epoch += 1
+      }
+      running
+    }
+
+    checksumSink = checksum
+    checksum
+  }
+
+  def runRiftCheckedObjectBuffer(): Long = {
+    val cfg = CheckedRegionBufferConfig
+    val totals = new Array[Long](cfg.keySpace)
+    val checksum = RiftRegion.streaming { stream ?=>
+      var running = 0L
+      var epoch = 0
+      while (epoch < cfg.epochs) {
+        RiftRegion.reset { region ?=>
+          final class Record(val key: Int, val value: Int)
+
+          val buffer =
+            RiftRegion.objectBuffer[Record](cfg.recordsPerEpoch)
+          var i = 0
+          while (i < cfg.recordsPerEpoch) {
+            val seed = mix(epoch * 1000003 + i * 131)
+            val key = seed % cfg.keySpace
+            val value = (mix(seed + 19) & 0xffff) + 1
+            val record: Record^{region} =
+              RiftRegion.alloc(new Record(key, value))
+            region.append(buffer, record)
+            i += 1
+          }
+
+          i = 0
+          while (i < region.length(buffer)) {
+            val record = region.get(buffer, i)
+            val next =
+              (totals(record.key) + record.value.toLong) & 0xffffffffL
+            totals(record.key) = next
+            running =
+              (running * 1099511628211L) ^ record.key.toLong ^ next
+            i += 1
+          }
+        }
+        epoch += 1
+      }
+      running
+    }
+
+    checksumSink = checksum
+    checksum
+  }
+
+  private def canonicalMode(mode: String): String =
+    mode match {
+      case "heap" | "heap-buffer" => "heap-buffer"
+      case "heap-array"           => "heap-array"
+      case "rift-checked" | "rift-checked-buffer" =>
+        "rift-checked-buffer"
+      case "rift-checked-object-buffer" =>
+        "rift-checked-object-buffer"
+      case "rift-checked-array" => "rift-checked-array"
+      case other =>
+        throw new IllegalArgumentException(
+          s"unknown checked-buffer mode '$other'; expected heap-buffer, heap-array, rift-checked-buffer, rift-checked-object-buffer, or rift-checked-array"
+        )
+    }
+
   private def runMode(mode: String): Long =
     mode match {
-      case "heap"         => runHeap()
-      case "rift-checked" => runRiftChecked()
+      case "heap-buffer"          => runHeapBuffer()
+      case "heap-array"           => runHeapArray()
+      case "rift-checked-buffer"  => runRiftCheckedBuffer()
+      case "rift-checked-object-buffer" =>
+        runRiftCheckedObjectBuffer()
+      case "rift-checked-array"   => runRiftCheckedArray()
       case other =>
         throw new IllegalArgumentException(
-          s"unknown checked-buffer mode '$other'; expected heap or rift-checked"
+          s"unknown checked-buffer mode '$other'"
         )
     }
 
-  def validateMode(mode: String): Unit =
-    runModeName(mode)
+  def validateMode(mode: String): Unit = {
+    canonicalMode(mode)
+    ()
+  }
 
-  private def runModeName(mode: String): String =
-    mode match {
-      case "heap" | "rift-checked" => mode
-      case other =>
-        throw new IllegalArgumentException(
-          s"unknown checked-buffer mode '$other'; expected heap or rift-checked"
-        )
-    }
-
-  def runBenchmark(mode: String): Unit = {
+  def runBenchmark(modeArg: String): Unit = {
+    val mode = canonicalMode(modeArg)
     val cfg = CheckedRegionBufferConfig
-    val usesRift = mode == "rift-checked"
-    val expectedChecksum = runHeap()
+    val usesRift = mode.startsWith("rift-checked")
+    val expectedChecksum = runHeapBuffer()
 
     var warmup = 0
     while (warmup < cfg.warmupRuns) {
@@ -347,7 +478,8 @@ object CheckedRegionBufferMatrixHelpers {
     )
   }
 
-  def printConfig(mode: String): Unit = {
+  def printConfig(modeArg: String): Unit = {
+    val mode = canonicalMode(modeArg)
     val cfg = CheckedRegionBufferConfig
     println(
       s"CONFIG mode=$mode runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} epochs=${cfg.epochs} records_per_epoch=${cfg.recordsPerEpoch} key_space=${cfg.keySpace} initial_capacity=${cfg.initialCapacity}"
@@ -356,13 +488,24 @@ object CheckedRegionBufferMatrixHelpers {
 }
 
 @main def CheckedRegionBufferMatrix(mode: String = "heap"): Unit = {
-  CheckedRegionBufferMatrixHelpers.validateMode(mode)
-  CheckedRegionBufferMatrixHelpers.printConfig(mode)
+  val canonicalMode =
+    try {
+      CheckedRegionBufferMatrixHelpers.validateMode(mode)
+      mode
+    } catch {
+      case error: IllegalArgumentException =>
+        throw error
+    }
+  CheckedRegionBufferMatrixHelpers.printConfig(canonicalMode)
 
-  val usesRift = mode == "rift-checked"
+  val usesRift =
+    mode == "rift-checked" ||
+      mode == "rift-checked-buffer" ||
+      mode == "rift-checked-object-buffer" ||
+      mode == "rift-checked-array"
   if (usesRift) RiftRegion.init(0)
   try {
-    CheckedRegionBufferMatrixHelpers.runBenchmark(mode)
+    CheckedRegionBufferMatrixHelpers.runBenchmark(canonicalMode)
   } finally {
     if (usesRift) RiftRegion.shutdown()
   }

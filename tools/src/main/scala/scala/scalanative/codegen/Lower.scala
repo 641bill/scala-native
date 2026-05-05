@@ -1391,7 +1391,16 @@ private[scalanative] object Lower {
         op: nir.Op.Classalloc
     )(implicit srcPosition: nir.SourcePosition, scopeId: nir.ScopeId): Unit = {
       val nir.Op.Classalloc(ClassRef(cls), v) = op: @unchecked
-      val zone = v.map(genVal(buf, _))
+      val zone = v.map { rawZone =>
+        val safeZoneLocal = fresh()
+        // Zoned allocation is implemented by SafeZone.allocImpl. A checked
+        // region may have a narrower static type such as Rift StreamingRegion,
+        // whose trait method table does not carry inherited SafeZone methods.
+        // Retag the same object as SafeZone so method lookup uses the owner
+        // trait that defines allocImpl.
+        buf += nir.Inst.Let(safeZoneLocal, nir.Op.Copy(rawZone), unwind)
+        genVal(buf, nir.Val.Local(safeZoneLocal, SafeZone))
+      }
 
       val size = meta.layout(cls).size
       assert(size == size.toInt)

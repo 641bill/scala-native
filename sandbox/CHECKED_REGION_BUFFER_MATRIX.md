@@ -1,7 +1,7 @@
 # Checked RegionBuffer Matrix
 
-Status: focused checked-API methodology harness with validated smoke and one
-default local median.
+Status: focused checked-API methodology harness with validated smoke, default
+local median, and a 2026-05-05 buffer-vs-array decomposition.
 
 The harness is implemented in
 `sandbox/src/main/scala-next/CheckedRegionBufferMatrix.scala` and run with
@@ -41,8 +41,11 @@ Defaults:
 
 Modes:
 
-- `heap`
-- `rift-checked`
+- `heap` / `heap-buffer`
+- `heap-array`
+- `rift-checked` / `rift-checked-buffer`
+- `rift-checked-object-buffer`
+- `rift-checked-array`
 
 ## Commands
 
@@ -68,6 +71,20 @@ Default local median:
 ```sh
 cd /Users/siyaoliu/rift/scala-native-rift
 CHECKED_BUFFER_BUILD=0 CHECKED_BUFFER_OUTPUT_DIR=/tmp/checked-region-buffer-default \
+  zsh sandbox/run_checked_region_buffer_matrix.sh
+```
+
+Buffer/array decomposition:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+CHECKED_BUFFER_BUILD=0 \
+CHECKED_BUFFER_EPOCHS=10 \
+CHECKED_BUFFER_RECORDS_PER_EPOCH=100000 \
+CHECKED_BUFFER_BENCHMARK_RUNS=3 \
+CHECKED_BUFFER_WARMUPS=1 \
+CHECKED_BUFFER_MODES="heap-buffer heap-array rift-checked-buffer rift-checked-object-buffer rift-checked-array" \
+CHECKED_BUFFER_OUTPUT_DIR=/Users/siyaoliu/rift/cache/checked-region-buffer-objectbuffer-default-2026-05-05 \
   zsh sandbox/run_checked_region_buffer_matrix.sh
 ```
 
@@ -146,3 +163,67 @@ Caveats:
 - It compares heap allocation against checked streaming/reset regions only; it
   does not include SafeZone, improved SafeZone, or Commix.
 - It is not a replacement for a future `RiftVector`/parallel-collections API.
+
+## Buffer/Array Decomposition, 2026-05-05
+
+This follow-up was run after `ObjectAllocationLoweringMatrix` showed that raw
+checked allocation is fast in a retained-region-array shape. The goal is to
+separate growable `RegionBuffer` overhead from allocation/reclaim cost.
+
+The matrix now includes exact-array controls:
+
+- `heap-array`: same heap record objects, retained in an exact heap array;
+- `rift-checked-array`: same checked region record objects, retained in a
+  region-owned exact array, `Array[Record^{region}]^{region}`;
+- `rift-checked-object-buffer`: same checked records retained in the existing
+  fixed-capacity checked `ObjectBuffer`;
+- existing `heap-buffer` and `rift-checked-buffer` remain growable-buffer
+  controls.
+
+Smoke command:
+
+```sh
+CHECKED_BUFFER_EPOCHS=2 \
+CHECKED_BUFFER_RECORDS_PER_EPOCH=1000 \
+CHECKED_BUFFER_BENCHMARK_RUNS=1 \
+CHECKED_BUFFER_WARMUPS=0 \
+CHECKED_BUFFER_MODES="heap-buffer heap-array rift-checked-buffer rift-checked-object-buffer rift-checked-array" \
+CHECKED_BUFFER_OUTPUT_DIR=/Users/siyaoliu/rift/cache/checked-region-buffer-objectbuffer-smoke-2026-05-05 \
+  zsh sandbox/run_checked_region_buffer_matrix.sh
+```
+
+Result: all five modes matched checksum.
+
+Default 10 x 100k rows, initial capacity `16`, 3 measured runs:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens/closes/resets | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|
+| `heap-buffer` | 34.097 | 8.493 | 0.000 | 0 | 0 / 0 / 0 | 22167552 |
+| `heap-array` | 21.089 | 3.267 | 0.000 | 0 | 0 / 0 / 0 | 22429696 |
+| `rift-checked-buffer` | 29.968 | 0.000 | 0.428 | 1000140 | 1 / 1 / 10 | 25542656 |
+| `rift-checked-object-buffer` | 25.788 | 0.000 | 0.148 | 1000010 | 1 / 1 / 10 | 24379392 |
+| `rift-checked-array` | 18.574 | 0.000 | 0.137 | 1000010 | 1 / 1 / 10 | 24379392 |
+
+Pre-sized buffer control, initial capacity `100000`, 3 measured runs:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Opens/closes/resets | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|
+| `heap-buffer` | 24.922 | 3.373 | 0.000 | 0 | 0 / 0 / 0 | 22396928 |
+| `heap-array` | 21.230 | 3.386 | 0.000 | 0 | 0 / 0 / 0 | 22429696 |
+| `rift-checked-buffer` | 25.980 | 0.000 | 0.174 | 1000010 | 1 / 1 / 10 | 24608768 |
+| `rift-checked-object-buffer` | 25.408 | 0.000 | 0.136 | 1000010 | 1 / 1 / 10 | 24592384 |
+| `rift-checked-array` | 18.466 | 0.000 | 0.107 | 1000010 | 1 / 1 / 10 | 24592384 |
+
+Interpretation:
+
+- Exact arrays are much faster than growable buffers for both heap and checked
+  Rift, so the next checked-container target is not raw region allocation.
+- Fixed-capacity `ObjectBuffer` removes the grow/copy overhead but still trails
+  exact arrays: `25.788 ms` versus `18.574 ms` in the default row.
+- Pre-sizing `RegionBuffer` now lands near `ObjectBuffer` (`25.980 ms` versus
+  `25.408 ms`), so the remaining gap to `rift-checked-array` (`18.466 ms`) is
+  generic buffer access/layout/dispatch overhead rather than growth alone.
+- Application operators with known batch sizes should prefer operator-owned
+  array/chunk fast paths. Existing `ObjectBuffer` is the bounded ergonomic
+  fallback; `RegionBuffer` remains the growable fallback unless a focused
+  layout/access patch narrows this gap.

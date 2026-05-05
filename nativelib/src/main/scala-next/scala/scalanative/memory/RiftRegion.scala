@@ -7,6 +7,7 @@ import scala.scalanative.runtime.{
   RawPtr,
   RawSize,
   RiftAllocator,
+  SafeZoneAllocator,
   fromRawPtr,
   toRawSize
 }
@@ -69,8 +70,19 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   final val Scoped: Int = RiftAllocator.Scoped
   final val Streaming: Int = RiftAllocator.Streaming
 
-  sealed trait ScopedRegion extends RiftRegion
-  sealed trait StreamingRegion extends RiftRegion
+  sealed trait ScopedRegion extends RiftRegion {
+    private[scalanative] override def allocImpl(
+        cls: RawPtr,
+        size: RawSize
+    ): RawPtr
+  }
+
+  sealed trait StreamingRegion extends RiftRegion {
+    private[scalanative] override def allocImpl(
+        cls: RawPtr,
+        size: RawSize
+    ): RawPtr
+  }
 
   /** Heap control metadata for a child streaming lifetime.
    *
@@ -146,6 +158,9 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     private[memory] var appendHead: Object = null
     private[memory] var appendTail: Object = null
     private[memory] var appendLength: Int = 0
+    private[memory] var chunkHead: Object = null
+    private[memory] var chunkTail: Object = null
+    private[memory] var chunkLength: Int = 0
     private[memory] var ownedRankKeyHeadPlusOne: Int = 0
     private[memory] var ownedLongRankSlotHeadPlusOne: Int = 0
     private[memory] var ownedTableRankSlotHeadPlusOne: Int = 0
@@ -189,6 +204,22 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     private[memory] var appendNext: StreamAppendNode = null
   }
 
+  /** Base node for checked region-owned linked lists. */
+  abstract class RegionListNode {
+    private[memory] var regionListNext: Object = null
+  }
+
+  /** Checked region-owned singly linked list.
+   *
+   *  The list header and nodes live in the same region. This is a reusable
+   *  topology primitive for linked object graphs whose whole structure dies at
+   *  a scoped region boundary, such as ListOfLists-style workloads.
+   */
+  final class RegionList[T <: RegionListNode] private[memory] (
+      private[memory] var headNode: Object,
+      private[memory] var length0: Int
+  )
+
   /** Checked append/fold stream-window primitive.
    *
    *  This is the reusable version of the cheap child-bucket append pattern:
@@ -203,6 +234,80 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     private[memory] var totalLength: Int = 0
     private[memory] val cursor: StreamAppendCursor[T] =
       new StreamAppendCursor[T](null)
+  }
+
+  /** Checked page/token append-window primitive.
+   *
+   *  This is the lower-overhead sibling of `StreamAppendWindow` for parser and
+   *  tokenization workloads. The operator owns the current bucket cache and
+   *  child-region lookup, so hot-path append does not need to re-check a bucket
+   *  token that user code can no longer pass around directly.
+   */
+  final class StreamPageTokenAppendWindow[T <: StreamAppendNode] private[memory] (
+      private[memory] val append: StreamAppendWindow[T]
+  ) {
+    private[memory] var currentBucket: StreamBucket = null
+  }
+
+  /** Checked map/filter page-token operator.
+   *
+   *  This is the public reusable name for the fastest checked SELECT-shaped
+   *  path: user records and projected outputs live in page/bucket child
+   *  regions, while the operator owns current-bucket caching and bulk cursor
+   *  close. It is intentionally a thin wrapper over `StreamPageTokenAppendWindow`
+   *  so benchmark code does not depend on the lower-level append primitive.
+   */
+  final class PageTokenMapFilter[T <: StreamAppendNode] private[memory] (
+      private[memory] val pageToken: StreamPageTokenAppendWindow[T]
+  )
+
+  /** One region-owned fixed chunk for checked chunk append windows. */
+  final class StreamChunk private[memory] (
+      private[memory] val items: Array[Object]
+  ) {
+    private[memory] var used: Int = 0
+    private[memory] var next: StreamChunk = null
+  }
+
+  /** Close-time cursor over fixed chunks in one stream bucket. */
+  final class StreamChunkCursor[T <: Object] private[memory] (
+      private[memory] var currentChunk: StreamChunk,
+      private[memory] var currentIndex: Int
+  ) {
+    def hasNext: Boolean =
+      currentChunk != null
+
+    def next(): T = {
+      if (currentChunk == null)
+        throw new NoSuchElementException("empty StreamChunkCursor")
+      val chunk = currentChunk
+      val value = chunk.items(currentIndex).asInstanceOf[T]
+      chunk.items(currentIndex) = null
+      currentIndex += 1
+      if (currentIndex >= chunk.used) {
+        currentChunk = chunk.next
+        chunk.next = null
+        currentIndex = 0
+      }
+      value
+    }
+  }
+
+  /** Checked fixed-chunk append-window primitive.
+   *
+   *  This is the array/chunk sibling of `StreamPageTokenAppendWindow`. It is
+   *  intended for page, batch, and window workloads where the operator owns the
+   *  lifetime boundary and can append records into region-owned object-array
+   *  chunks instead of linking every record through an `appendNext` field.
+   */
+  final class StreamChunkAppendWindow[T <: Object] private[memory] (
+      private[memory] val buckets: StreamBucketArena,
+      private[memory] val chunkSize: Int
+  ) {
+    private[memory] var totalLength: Int = 0
+    private[memory] var currentBucket: StreamBucket = null
+    private[memory] val cursor: StreamChunkCursor[T] =
+      new StreamChunkCursor[T](null, 0)
   }
 
   /** Checked two-sided append/join stream-window primitive.
@@ -234,6 +339,19 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       private[memory] var size: Int,
       private[memory] var deleted: Int
   )
+
+  /** Checked epoch-local fold/count/sum operator.
+   *
+   *  Event records live in the current child bucket, while aggregate metadata
+   *  stays in parent-owned primitive arrays. Closing an epoch drains child
+   *  records and clears the whole aggregate table, avoiding per-entry
+   *  contribution removal when the static lifetime is one complete epoch.
+   */
+  final class EpochFold[T <: StreamAppendNode] private[memory] (
+      private[memory] val fold: StreamWindowFold[T]
+  ) {
+    private[memory] var currentBucket: StreamBucket = null
+  }
 
   /** Close-time cursor over records linked in one append-window bucket.
    *
@@ -2686,6 +2804,22 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     finally region.close()
   }
 
+  /** Runs `body` with a checked streaming region backed by SafeZone internals.
+   *
+   *  This is an experimental benchmark-only backend probe. It preserves the
+   *  checked Rift source-level API while delegating object allocation and close
+   *  to SafeZone. Raw byte allocation and reset are intentionally unsupported
+   *  in this v1 backend.
+   */
+  final def streamingSafeZone[T](body: (StreamingRegion^) ?=> T)(using
+      canReturn: CanReturnFromRegion[T]
+  ): T = {
+    val region: StreamingRegion^ =
+      openSafeZoneImpl(Streaming).asInstanceOf[StreamingRegion]
+    try body(using region)
+    finally region.close()
+  }
+
   /** Runs one streaming epoch and resets the region after `body`.
    *
    *  The result type may not retain values allocated in the epoch. This is the
@@ -2711,7 +2845,12 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   def childStreaming(using
       parent: StreamingRegion^
   ): StreamingRegion^{parent} =
-    openImpl(Streaming).asInstanceOf[StreamingRegion]
+    parent match {
+      case _: SafeZoneBackedRiftRegion =>
+        openSafeZoneImpl(Streaming).asInstanceOf[StreamingRegion]
+      case _ =>
+        openImpl(Streaming).asInstanceOf[StreamingRegion]
+    }
 
   /** Opens a reusable checked child-window lifetime.
    *
@@ -2740,6 +2879,51 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     new StreamAppendWindow[T](
       streamBucketArena(bucketSeconds).asInstanceOf[StreamBucketArena]
     ).asInstanceOf[StreamAppendWindow[T]^{parent}]
+
+  /** Opens a checked page/token append window.
+   *
+   *  Call `pageTokenAppendRegionFor` when entering a page/bucket, allocate
+   *  records in the returned child region, then call `appendPageToken`.
+   */
+  def streamPageTokenAppendWindow[T <: StreamAppendNode](
+      bucketSeconds: Long
+  )(using parent: StreamingRegion^): StreamPageTokenAppendWindow[T]^{parent} =
+    new StreamPageTokenAppendWindow[T](
+      streamAppendWindow[T](bucketSeconds)
+        .asInstanceOf[StreamAppendWindow[T]]
+    ).asInstanceOf[StreamPageTokenAppendWindow[T]^{parent}]
+
+  /** Opens a checked page-token map/filter operator.
+   *
+   *  This is the reusable operator-owned API for SELECT/filter/project-style
+   *  stream rows. It keeps the low-level page-token append window available as
+   *  a control, but new application code should prefer this named operator when
+   *  the lifetime shape is "records in a page/window, outputs drained at close".
+   */
+  def pageTokenMapFilter[T <: StreamAppendNode](
+      bucketSeconds: Long
+  )(using parent: StreamingRegion^): PageTokenMapFilter[T]^{parent} =
+    new PageTokenMapFilter[T](
+      streamPageTokenAppendWindow[T](bucketSeconds)
+        .asInstanceOf[StreamPageTokenAppendWindow[T]]
+    ).asInstanceOf[PageTokenMapFilter[T]^{parent}]
+
+  /** Opens a checked fixed-chunk append window.
+   *
+   *  Call `chunkAppendRegionFor` when entering a bucket, allocate records in
+   *  the returned child region, then append them with `appendChunkToken`.
+   */
+  def streamChunkAppendWindow[T <: Object](
+      bucketSeconds: Long,
+      chunkSize: Int
+  )(using parent: StreamingRegion^): StreamChunkAppendWindow[T]^{parent} = {
+    if (chunkSize <= 0)
+      throw new IllegalArgumentException("chunkSize must be positive")
+    new StreamChunkAppendWindow[T](
+      streamBucketArena(bucketSeconds).asInstanceOf[StreamBucketArena],
+      chunkSize
+    ).asInstanceOf[StreamChunkAppendWindow[T]^{parent}]
+  }
 
   /** Opens a parent-captured two-sided append/join window primitive. */
   def streamJoinWindow[T <: StreamAppendNode](
@@ -2790,6 +2974,22 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       0
     ).asInstanceOf[StreamWindowFold[T]^{parent}]
   }
+
+  /** Opens an epoch-local fold/count/sum operator. */
+  def epochFold[T <: StreamAppendNode](
+      bucketSeconds: Long,
+      initialKeyCapacity: Int
+  )(using parent: StreamingRegion^): EpochFold[T]^{parent} =
+    new EpochFold[T](
+      streamWindowFold[T](bucketSeconds, initialKeyCapacity)
+        .asInstanceOf[StreamWindowFold[T]]
+    ).asInstanceOf[EpochFold[T]^{parent}]
+
+  /** Allocates an empty checked linked list in `region`. */
+  def regionList[T <: RegionListNode]()(using
+      region: RiftRegion^
+  ): RegionList[T]^{region} =
+    alloc(new RegionList[T](null, 0))
 
   /** Tags a region for opt-in benchmark diagnostics.
    *
@@ -2909,6 +3109,38 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       bucket
     }
   }
+
+  private def streamBucketForOwnedAppend(
+      parent: StreamingRegion^,
+      arena: StreamBucketArena^{parent},
+      timestampSeconds: Long
+  ): StreamBucket^{parent} = {
+    val startSeconds =
+      Math.floorDiv(timestampSeconds, arena.bucketSeconds) * arena.bucketSeconds
+    val current = arena.current
+    if (current != null && current.startSeconds == startSeconds)
+      current.asInstanceOf[StreamBucket^{parent}]
+    else {
+      val child = childBucket(using parent)
+      val arenaBucket: StreamBucket =
+        new StreamBucket(child, startSeconds).asInstanceOf[StreamBucket]
+      if (arena.first == null) {
+        arena.first = arenaBucket
+        arena.last = arenaBucket
+      } else {
+        arena.last.next = arenaBucket
+        arena.last = arenaBucket
+      }
+      arena.current = arenaBucket
+      arenaBucket.asInstanceOf[StreamBucket^{parent}]
+    }
+  }
+
+  private def streamBucketRegionTrusted(
+      parent: StreamingRegion^,
+      bucket: StreamBucket^{parent}
+  ): StreamingRegion^{parent} =
+    bucket.child.region.asInstanceOf[StreamingRegion]
 
   /** Returns true if `closeStreamBucketsBefore` would close at least one bucket. */
   def hasStreamBucketsBefore(
@@ -3035,6 +3267,18 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       timestampSeconds
     )(onOpen)
 
+  /** Returns the child region for the epoch containing `timestampSeconds`. */
+  def epochFoldRegionFor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: EpochFold[T]^{parent},
+      timestampSeconds: Long
+  ): StreamingRegion^{parent} = {
+    val rawFold = fold.fold.asInstanceOf[StreamWindowFold[T]^{parent}]
+    val bucket = streamWindowFoldBucketFor(parent, rawFold, timestampSeconds)
+    fold.currentBucket = bucket.asInstanceOf[StreamBucket]
+    streamBucketRegionTrusted(parent, bucket)
+  }
+
   private def checkJoinWindowKey[T <: StreamAppendNode](
       join: StreamJoinWindow[T],
       key: Int
@@ -3122,6 +3366,25 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
   }
 
+  private def clearFoldTable[T <: StreamAppendNode](
+      fold: StreamWindowFold[T]
+  ): Unit = {
+    val states = fold.states
+    val sums = fold.sums
+    val counts = fold.counts
+    var index = 0
+    while (index < states.length) {
+      if (states(index) != FoldEmpty) {
+        states(index) = FoldEmpty
+        sums(index) = 0L
+        counts(index) = 0
+      }
+      index += 1
+    }
+    fold.size = 0
+    fold.deleted = 0
+  }
+
   private def ensureFoldCapacity[T <: StreamAppendNode](
       parent: StreamingRegion^,
       fold: StreamWindowFold[T]
@@ -3178,6 +3441,26 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     window.totalLength += 1
   }
 
+  private def appendWindowOwnedOpen[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamAppendWindow[T]^{parent},
+      bucket: StreamBucket^{parent},
+      value: T^{parent}
+  ): Unit = {
+    value.appendNext = null
+    if (bucket.appendHead == null) {
+      bucket.appendHead = value.asInstanceOf[Object]
+      bucket.appendTail = value.asInstanceOf[Object]
+    } else {
+      bucket.appendTail
+        .asInstanceOf[StreamAppendNode]
+        .appendNext = value.asInstanceOf[StreamAppendNode]
+      bucket.appendTail = value.asInstanceOf[Object]
+    }
+    bucket.appendLength += 1
+    window.totalLength += 1
+  }
+
   /** Appends `value` to the linked list owned by `bucket`.
    *
    *  The value should be allocated in `bucket`'s child region and then widened
@@ -3196,6 +3479,152 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       bucket,
       value
     )
+  }
+
+  /** Returns the child region for the bucket containing `timestampSeconds`.
+   *
+   *  This operator-owned path first closes expired buckets, then caches the
+   *  active bucket internally. Callers allocate one or more records in the
+   *  returned region and append them with `appendPageToken`.
+   */
+  def pageTokenAppendRegionFor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamPageTokenAppendWindow[T]^{parent},
+      timestampSeconds: Long,
+      cutoffSeconds: Long
+  )(onBucket: (
+      StreamBucket^{parent},
+      StreamAppendCursor[T]^{parent}
+  ) => Unit): StreamingRegion^{parent} = {
+    closePageTokenAppendBucketsBeforeWithCursor(
+      parent,
+      window,
+      cutoffSeconds
+    )(onBucket)
+    val append = window.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
+    val bucket = streamBucketForOwnedAppend(
+      parent,
+      append.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      timestampSeconds
+    )
+    window.currentBucket = bucket.asInstanceOf[StreamBucket]
+    streamBucketRegionTrusted(parent, bucket)
+  }
+
+  /** Returns the child region for the current map/filter page bucket. */
+  def pageTokenMapFilterRegionFor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      operator: PageTokenMapFilter[T]^{parent},
+      timestampSeconds: Long,
+      cutoffSeconds: Long
+  )(onBucket: (
+      StreamBucket^{parent},
+      StreamAppendCursor[T]^{parent}
+  ) => Unit): StreamingRegion^{parent} =
+    pageTokenAppendRegionFor(
+      parent,
+      operator.pageToken.asInstanceOf[StreamPageTokenAppendWindow[T]^{parent}],
+      timestampSeconds,
+      cutoffSeconds
+    )(onBucket)
+
+  /** Appends a record to the page/token window's current bucket.
+   *
+   *  The current bucket is selected by `pageTokenAppendRegionFor`. This hot path
+   *  deliberately skips the defensive child-open check used by public
+   *  bucket-token APIs.
+   */
+  def appendPageToken[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamPageTokenAppendWindow[T]^{parent},
+      value: T^{parent}
+  ): Unit = {
+    val append = window.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
+    val bucket = window.currentBucket.asInstanceOf[StreamBucket^{parent}]
+    appendWindowOwnedOpen(parent, append, bucket, value)
+  }
+
+  /** Emits one projected record into the current map/filter page bucket. */
+  def emitPageTokenMapFilter[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      operator: PageTokenMapFilter[T]^{parent},
+      value: T^{parent}
+  ): Unit = {
+    val window =
+      operator.pageToken.asInstanceOf[StreamPageTokenAppendWindow[T]^{parent}]
+    val append = window.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
+    val bucket = window.currentBucket.asInstanceOf[StreamBucket^{parent}]
+    appendWindowOwnedOpen(parent, append, bucket, value)
+  }
+
+  /** Returns the child region for a fixed-chunk append bucket.
+   *
+   *  This has the same operator-owned lifetime shape as page/token append, but
+   *  close drains region-owned object-array chunks instead of per-record links.
+   */
+  def chunkAppendRegionFor[T <: Object](
+      parent: StreamingRegion^,
+      window: StreamChunkAppendWindow[T]^{parent},
+      timestampSeconds: Long,
+      cutoffSeconds: Long
+  )(onBucket: (
+      StreamBucket^{parent},
+      StreamChunkCursor[T]^{parent}
+  ) => Unit): StreamingRegion^{parent} = {
+    closeChunkAppendBucketsBeforeWithCursor(
+      parent,
+      window,
+      cutoffSeconds
+    )(onBucket)
+    val bucket = streamBucketForOwnedAppend(
+      parent,
+      window.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      timestampSeconds
+    )
+    window.currentBucket = bucket.asInstanceOf[StreamBucket]
+    streamBucketRegionTrusted(parent, bucket)
+  }
+
+  private def newStreamChunk(
+      region: StreamingRegion^,
+      chunkSize: Int
+  ): StreamChunk^{region} = {
+    val items =
+      RiftRegion.alloc(new Array[Object](chunkSize))(using region)
+        .asInstanceOf[Array[Object]]
+    RiftRegion.alloc(new StreamChunk(items))(using region)
+  }
+
+  /** Appends a record to the current fixed-chunk bucket.
+   *
+   *  `chunkAppendRegionFor` selects and proves the current bucket. This hot
+   *  path avoids per-record bucket-open checks and per-record linked-list
+   *  pointer maintenance.
+   */
+  def appendChunkToken[T <: Object](
+      parent: StreamingRegion^,
+      window: StreamChunkAppendWindow[T]^{parent},
+      value: T^{parent}
+  ): Unit = {
+    val bucket = window.currentBucket.asInstanceOf[StreamBucket^{parent}]
+    var tail = bucket.chunkTail.asInstanceOf[StreamChunk]
+    if (tail == null || tail.used >= window.chunkSize) {
+      val region = streamBucketRegionTrusted(parent, bucket)
+      val chunk =
+        newStreamChunk(region, window.chunkSize).asInstanceOf[StreamChunk]
+      if (bucket.chunkHead == null) {
+        bucket.chunkHead = chunk
+        bucket.chunkTail = chunk
+      } else {
+        tail.next = chunk
+        bucket.chunkTail = chunk
+      }
+      tail = chunk
+    }
+    tail.items(tail.used) = value.asInstanceOf[Object]
+    tail.used += 1
+    bucket.chunkLength += 1
+    window.totalLength += 1
   }
 
   /** Appends a fold record and adds `delta` to the live aggregate for `key`. */
@@ -3217,6 +3646,27 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     appendWindowUnchecked(
       parent,
       fold.append.asInstanceOf[StreamAppendWindow[T]^{parent}],
+      bucket,
+      value
+    )
+    next
+  }
+
+  /** Adds one record to the current epoch and updates its aggregate. */
+  def putEpochFold[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: EpochFold[T]^{parent},
+      key: Int,
+      delta: Long,
+      value: T^{parent}
+  ): Long = {
+    val rawFold = fold.fold.asInstanceOf[StreamWindowFold[T]]
+    val next = addFoldContribution(parent, rawFold, key, delta)
+    val typedFold = fold.fold.asInstanceOf[StreamWindowFold[T]^{parent}]
+    val bucket = fold.currentBucket.asInstanceOf[StreamBucket^{parent}]
+    appendWindowOwnedOpen(
+      parent,
+      typedFold.append.asInstanceOf[StreamAppendWindow[T]^{parent}],
       bucket,
       value
     )
@@ -3286,6 +3736,70 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       fold: StreamWindowFold[T]^{parent}
   ): Int =
     fold.size
+
+  /** Returns true if the epoch fold currently has a live aggregate for `key`. */
+  def containsEpochFoldKey[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: EpochFold[T]^{parent},
+      key: Int
+  ): Boolean =
+    containsFoldKey(
+      parent,
+      fold.fold.asInstanceOf[StreamWindowFold[T]^{parent}],
+      key
+    )
+
+  /** Returns the live epoch aggregate sum for `key`, or zero if absent. */
+  def epochFoldValue[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: EpochFold[T]^{parent},
+      key: Int
+  ): Long =
+    foldValue(
+      parent,
+      fold.fold.asInstanceOf[StreamWindowFold[T]^{parent}],
+      key
+    )
+
+  /** Returns the live epoch contribution count for `key`, or zero if absent. */
+  def epochFoldCount[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: EpochFold[T]^{parent},
+      key: Int
+  ): Int =
+    foldCount(
+      parent,
+      fold.fold.asInstanceOf[StreamWindowFold[T]^{parent}],
+      key
+    )
+
+  /** Returns the number of keys with at least one live epoch contribution. */
+  def epochFoldKeyCount[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: EpochFold[T]^{parent}
+  ): Int =
+    foldKeyCount(
+      parent,
+      fold.fold.asInstanceOf[StreamWindowFold[T]^{parent}]
+    )
+
+  /** Iterates live epoch aggregate entries without per-key lookup. */
+  def foreachEpochFoldEntry[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: EpochFold[T]^{parent}
+  )(onEntry: (Int, Long, Int) => Unit): Unit = {
+    val rawFold = fold.fold.asInstanceOf[StreamWindowFold[T]]
+    val states = rawFold.states
+    val keys = rawFold.keys
+    val sums = rawFold.sums
+    val counts = rawFold.counts
+    var index = 0
+    while (index < states.length) {
+      if (states(index) == FoldUsed)
+        onEntry(keys(index), sums(index), counts(index))
+      index += 1
+    }
+  }
 
   /** Appends a left-side join record and returns the new live left count. */
   def putJoinLeftInBucket[T <: StreamAppendNode](
@@ -3503,6 +4017,38 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   ): Int =
     window.totalLength
 
+  /** Prepends `value` to a checked region-owned linked list. */
+  def prependRegionList[T <: RegionListNode](
+      region: RiftRegion^,
+      list: RegionList[T]^{region},
+      value: T^{region}
+  ): Unit = {
+    value.regionListNext = list.headNode
+    list.headNode = value.asInstanceOf[Object]
+    list.length0 += 1
+  }
+
+  /** Returns the current head of a checked region-owned linked list. */
+  def regionListHead[T <: RegionListNode](
+      region: RiftRegion^,
+      list: RegionList[T]^{region}
+  ): T^{region} =
+    list.headNode.asInstanceOf[T^{region}]
+
+  /** Returns the next node in a checked region-owned linked list. */
+  def regionListNext[T <: RegionListNode](
+      region: RiftRegion^,
+      value: T^{region}
+  ): T^{region} =
+    value.regionListNext.asInstanceOf[T^{region}]
+
+  /** Returns the number of nodes in a checked region-owned linked list. */
+  def regionListLength[T <: RegionListNode](
+      region: RiftRegion^,
+      list: RegionList[T]^{region}
+  ): Int =
+    list.length0
+
   /** Returns the total number of live records in a join window. */
   def joinWindowLength[T <: StreamAppendNode](
       parent: StreamingRegion^,
@@ -3530,6 +4076,21 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       bucket: StreamBucket^{parent}
   ): Int =
     bucket.appendLength
+
+  /** Returns the total number of live records in a fixed-chunk append window. */
+  def chunkAppendWindowLength[T <: Object](
+      parent: StreamingRegion^,
+      window: StreamChunkAppendWindow[T]^{parent}
+  ): Int =
+    window.totalLength
+
+  /** Returns the number of chunk-appended records currently in `bucket`. */
+  def chunkAppendWindowBucketLength[T <: Object](
+      parent: StreamingRegion^,
+      window: StreamChunkAppendWindow[T]^{parent},
+      bucket: StreamBucket^{parent}
+  ): Int =
+    bucket.chunkLength
 
   private def consumeAppendWindowBucket[T <: StreamAppendNode](
       parent: StreamingRegion^,
@@ -3574,6 +4135,31 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     onBucket(bucket, cursor)
     while (cursor.hasNext) cursor.next()
     cursor.current = null
+  }
+
+  private def consumeChunkAppendBucketWithCursor[T <: Object](
+      parent: StreamingRegion^,
+      window: StreamChunkAppendWindow[T]^{parent},
+      bucket: StreamBucket^{parent},
+      onBucket: (
+        StreamBucket^{parent},
+        StreamChunkCursor[T]^{parent}
+      ) => Unit
+  ): Unit = {
+    val head = bucket.chunkHead.asInstanceOf[StreamChunk]
+    val removed = bucket.chunkLength
+    bucket.chunkHead = null
+    bucket.chunkTail = null
+    bucket.chunkLength = 0
+    window.totalLength -= removed
+
+    val cursor = window.cursor.asInstanceOf[StreamChunkCursor[T]^{parent}]
+    cursor.currentChunk = head
+    cursor.currentIndex = 0
+    onBucket(bucket, cursor)
+    while (cursor.hasNext) cursor.next()
+    cursor.currentChunk = null
+    cursor.currentIndex = 0
   }
 
   /** Returns true if closing before `cutoffSeconds` would close a bucket. */
@@ -3627,6 +4213,42 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     ) { bucket =>
       consumeAppendWindowBucketWithCursor(parent, window, bucket, onBucket)
     }
+
+  /** Closes page/token append buckets fully before `cutoffSeconds`. */
+  def closePageTokenAppendBucketsBeforeWithCursor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamPageTokenAppendWindow[T]^{parent},
+      cutoffSeconds: Long
+  )(onBucket: (
+      StreamBucket^{parent},
+      StreamAppendCursor[T]^{parent}
+  ) => Unit): Unit = {
+    val append = window.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
+    closeStreamBucketsBefore(
+      parent,
+      append.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      cutoffSeconds
+    ) { bucket =>
+      if (window.currentBucket.asInstanceOf[AnyRef] eq bucket.asInstanceOf[AnyRef])
+        window.currentBucket = null
+      consumeAppendWindowBucketWithCursor(parent, append, bucket, onBucket)
+    }
+  }
+
+  /** Closes map/filter page buckets fully before `cutoffSeconds`. */
+  def closePageTokenMapFilterBucketsBeforeWithCursor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      operator: PageTokenMapFilter[T]^{parent},
+      cutoffSeconds: Long
+  )(onBucket: (
+      StreamBucket^{parent},
+      StreamAppendCursor[T]^{parent}
+  ) => Unit): Unit =
+    closePageTokenAppendBucketsBeforeWithCursor(
+      parent,
+      operator.pageToken.asInstanceOf[StreamPageTokenAppendWindow[T]^{parent}],
+      cutoffSeconds
+    )(onBucket)
 
   /** Closes join-window buckets fully before `cutoffSeconds`. */
   def closeJoinWindowBucketsBeforeWithCursor[T <: StreamAppendNode](
@@ -3685,6 +4307,73 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       consumeAppendWindowBucketWithCursor(parent, window, bucket, onBucket)
     }
 
+  /** Closes every page/token append bucket. */
+  def closeAllPageTokenAppendBucketsWithCursor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamPageTokenAppendWindow[T]^{parent}
+  )(onBucket: (
+      StreamBucket^{parent},
+      StreamAppendCursor[T]^{parent}
+  ) => Unit): Unit = {
+    val append = window.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
+    window.currentBucket = null
+    closeAllStreamBuckets(
+      parent,
+      append.buckets.asInstanceOf[StreamBucketArena^{parent}]
+    ) { bucket =>
+      consumeAppendWindowBucketWithCursor(parent, append, bucket, onBucket)
+    }
+  }
+
+  /** Closes every map/filter page bucket. */
+  def closeAllPageTokenMapFilterBucketsWithCursor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      operator: PageTokenMapFilter[T]^{parent}
+  )(onBucket: (
+      StreamBucket^{parent},
+      StreamAppendCursor[T]^{parent}
+  ) => Unit): Unit =
+    closeAllPageTokenAppendBucketsWithCursor(
+      parent,
+      operator.pageToken.asInstanceOf[StreamPageTokenAppendWindow[T]^{parent}]
+    )(onBucket)
+
+  /** Closes fixed-chunk append buckets fully before `cutoffSeconds`. */
+  def closeChunkAppendBucketsBeforeWithCursor[T <: Object](
+      parent: StreamingRegion^,
+      window: StreamChunkAppendWindow[T]^{parent},
+      cutoffSeconds: Long
+  )(onBucket: (
+      StreamBucket^{parent},
+      StreamChunkCursor[T]^{parent}
+  ) => Unit): Unit =
+    closeStreamBucketsBefore(
+      parent,
+      window.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      cutoffSeconds
+    ) { bucket =>
+      if (window.currentBucket.asInstanceOf[AnyRef] eq bucket.asInstanceOf[AnyRef])
+        window.currentBucket = null
+      consumeChunkAppendBucketWithCursor(parent, window, bucket, onBucket)
+    }
+
+  /** Closes every fixed-chunk append bucket. */
+  def closeAllChunkAppendBucketsWithCursor[T <: Object](
+      parent: StreamingRegion^,
+      window: StreamChunkAppendWindow[T]^{parent}
+  )(onBucket: (
+      StreamBucket^{parent},
+      StreamChunkCursor[T]^{parent}
+  ) => Unit): Unit = {
+    window.currentBucket = null
+    closeAllStreamBuckets(
+      parent,
+      window.buckets.asInstanceOf[StreamBucketArena^{parent}]
+    ) { bucket =>
+      consumeChunkAppendBucketWithCursor(parent, window, bucket, onBucket)
+    }
+  }
+
   /** Closes every join-window bucket and drains each bucket through a cursor. */
   def closeAllJoinWindowBucketsWithCursor[T <: StreamAppendNode](
       parent: StreamingRegion^,
@@ -3710,6 +4399,51 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       parent,
       fold.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
     )(onBucket)
+
+  /** Closes the current epoch bucket and clears all fold metadata. */
+  def closeEpochFoldCurrentBucketAndClear[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: EpochFold[T]^{parent}
+  )(onBucket: (
+      StreamBucket^{parent},
+      StreamAppendCursor[T]^{parent}
+  ) => Unit): Unit = {
+    val rawFold = fold.fold.asInstanceOf[StreamWindowFold[T]]
+    val bucket = fold.currentBucket
+    if (bucket != null) {
+      fold.currentBucket = null
+      clearFoldTable(rawFold)
+      closeStreamBucketsBefore(
+        parent,
+        rawFold.append.buckets.asInstanceOf[StreamBucketArena^{parent}],
+        bucket.startSeconds + rawFold.append.buckets.bucketSeconds
+      ) { closed =>
+        consumeAppendWindowBucketWithCursor(
+          parent,
+          rawFold.append.asInstanceOf[StreamAppendWindow[T]^{parent}],
+          closed,
+          onBucket
+        )
+      }
+    }
+  }
+
+  /** Closes every epoch bucket and clears all fold metadata. */
+  def closeAllEpochFoldBucketsAndClear[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      fold: EpochFold[T]^{parent}
+  )(onBucket: (
+      StreamBucket^{parent},
+      StreamAppendCursor[T]^{parent}
+  ) => Unit): Unit = {
+    val rawFold = fold.fold.asInstanceOf[StreamWindowFold[T]]
+    fold.currentBucket = null
+    clearFoldTable(rawFold)
+    closeAllAppendWindowBucketsWithCursor(
+      parent,
+      rawFold.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
+    )(onBucket)
+  }
 
   /** Closes a child window after caller-owned parent metadata is unlinked.
    *
@@ -5713,6 +6447,16 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
   }
 
+  private def openSafeZoneImpl(kind: Int): RiftRegion = {
+    val handle = SafeZoneAllocator.Impl.open()
+    if (handle == null)
+      throw new OutOfMemoryError("failed to open SafeZone-backed Rift region")
+    kind match {
+      case Streaming => new MemorySafeZoneBackedStreamingRiftRegion(handle)
+      case _         => new MemorySafeZoneBackedRiftRegion(handle)
+    }
+  }
+
   private class MemoryRiftRegion(
       private[scalanative] override val handle: RawPtr)
       extends RiftRegion {
@@ -5732,7 +6476,6 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       )
     }
 
-    @noinline
     private[scalanative] override def allocImpl(
         cls: RawPtr,
         size: RawSize
@@ -5776,4 +6519,67 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   private final class MemoryStreamingRiftRegion(handle: RawPtr)
       extends MemoryRiftRegion(handle)
       with StreamingRegion
+
+  private class MemorySafeZoneBackedRiftRegion(
+      private[scalanative] override val handle: RawPtr)
+      extends RiftRegion
+      with SafeZoneBackedRiftRegion {
+    private var flagIsOpen = true
+    private var heapRoots: List[RiftRegion.HeapRoot[AnyRef]] = Nil
+
+    override def isOpen: Boolean = flagIsOpen
+
+    override def checkOpen(): Unit =
+      if (!flagIsOpen)
+        throw new IllegalStateException(
+          "SafeZone-backed Rift region is already closed."
+        )
+
+    override def alloc(size: CSize, align: CSize): Ptr[Byte] = {
+      checkOpen()
+      throw new UnsupportedOperationException(
+        "SafeZone-backed checked Rift regions do not support raw allocation"
+      )
+    }
+
+    private[scalanative] override def allocImpl(
+        cls: RawPtr,
+        size: RawSize
+    ): RawPtr = {
+      checkOpen()
+      SafeZoneAllocator.Impl.alloc(handle, cls, size)
+    }
+
+    private[memory] override def retainHeapRoot[T <: AnyRef](
+        value: T
+    ): RiftRegion.HeapRoot[T] = {
+      checkOpen()
+      val root = new RiftRegion.HeapRoot(value)
+      heapRoots = root.asInstanceOf[RiftRegion.HeapRoot[AnyRef]] :: heapRoots
+      root
+    }
+
+    private[memory] override def setDiagnosticFamily(family: Int): Unit =
+      checkOpen()
+
+    override def reset(): Unit = {
+      checkOpen()
+      throw new UnsupportedOperationException(
+        "SafeZone-backed checked Rift regions do not support reset"
+      )
+    }
+
+    override def close(): Unit = {
+      checkOpen()
+      flagIsOpen = false
+      heapRoots = Nil
+      SafeZoneAllocator.Impl.close(handle)
+    }
+  }
+
+  private final class MemorySafeZoneBackedStreamingRiftRegion(handle: RawPtr)
+      extends MemorySafeZoneBackedRiftRegion(handle)
+      with StreamingRegion
+
+  private sealed trait SafeZoneBackedRiftRegion extends RiftRegion
 }

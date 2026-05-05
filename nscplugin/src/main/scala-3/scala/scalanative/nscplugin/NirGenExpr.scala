@@ -141,6 +141,7 @@ trait NirGenExpr(using Context) {
       (
           name == "objectBuffer" ||
           name == "regionBuffer" ||
+          name == "regionList" ||
           name == "regionPriorityQueue" ||
           name == "regionIndexedPriorityQueue" ||
           name == "regionIndexedPriorityQueueLexicographic" ||
@@ -152,7 +153,10 @@ trait NirGenExpr(using Context) {
           name == "streamWindowLongIndexedRankLexicographic" ||
           name == "streamWindowTableRank" ||
           name == "streamWindowTableRankLexicographic" ||
-          name == "streamAppendWindow"
+          name == "streamAppendWindow" ||
+          name == "pageTokenMapFilter" ||
+          name == "streamChunkAppendWindow" ||
+          name == "epochFold"
       ) &&
         isRiftRegionCompanionOwner(sym)
     }
@@ -163,7 +167,8 @@ trait NirGenExpr(using Context) {
       (
         name == "append" ||
           name == "appendToObjectBuffer" ||
-          name == "appendToRegionBuffer"
+          name == "appendToRegionBuffer" ||
+          name == "prependRegionList"
       ) &&
         isRiftRegionCompanionOwner(sym)
     }
@@ -204,12 +209,16 @@ trait NirGenExpr(using Context) {
       val name = sym.name.toString
       (
         name == "appendWindow" ||
+          name == "appendPageToken" ||
+          name == "emitPageTokenMapFilter" ||
+          name == "appendChunkToken" ||
           name == "prependWindow" ||
           name == "putJoinLeftInBucket" ||
           name == "putJoinRightInBucket" ||
           name == "putJoinLeftInBucketAndCounts" ||
           name == "putJoinRightInBucketAndCounts" ||
           name == "putFoldInBucket" ||
+          name == "putEpochFold" ||
           name == "putJoinOutputInBucket"
       ) &&
         isRiftRegionCompanionOwner(sym)

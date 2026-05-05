@@ -21,7 +21,7 @@ stream medians are in `evidence/HEADLINE_UNSAFEZONE_STREAMS_2026_05_01.md`.
 Use it to decide whether SafeZone internals are a better runtime substrate
 after root bookkeeping is removed; do not treat it as a safe user-facing mode.
 
-Post-UnsafeZone cost and Rift fast-allocation update:
+Post-UnsafeZone cost, Rift fast-allocation, and checked SafeZone-backed update:
 `evidence/SAFEZONE_COST_MATRIX.md` records the first SafeZone cost
 decomposition, and `evidence/COMMON_CRAWL_LIKE_MATRIX.md` now records the
 follow-up after removing default per-allocation global allocated-byte atomics
@@ -29,10 +29,22 @@ from the Rift fast path. That follow-up changes the Common Crawl-like q1/q2
 ordering: Rift HP/Streaming now beat heap, improved SafeZone-32k, and
 UnsafeZone-HP on the generated 1M q1/q2 rows. Precise active allocated-byte
 counters remain available with `RIFT_PRECISE_ALLOC_STATS=1`, but should be
-treated as diagnostic instrumentation, not headline timing mode.
-`evidence/SAFEZONE_HP_BACKEND_PROTOTYPE.md` still captures the intended
-checked SafeZone-family direction; no checked SafeZone-HP backend code exists
-yet.
+treated as diagnostic instrumentation, not headline timing mode. The first
+checked SafeZone-backed backend is now implemented and recorded in
+`evidence/CHECKED_SAFEZONE_BACKEND_MATRIX.md`: it passes the focused
+append-window backend gate, but the generic Common Crawl-like q1/q2 checked
+path only improves current checked by `4.9-5.7%` at 1M and misses the
+application gate. The follow-up `StreamPageTokenAppendWindow` removes
+operator-owned hot-path checks and is recorded in
+`evidence/CHECKED_PAGE_TOKEN_APPEND_MATRIX.md`; it clears the focused gate and
+the generated Common Crawl-shaped q1/q2 gate.
+
+Allocation-lowering update: GH Archive now shows why this split matters.
+Region reclaim/open cost is small, but ordinary object construction, checked
+`allocImpl` lowering, append/cursor work, and query traversal can still make
+uncapped `heap-immix` faster when it grows to GB-scale RSS and rarely collects.
+`evidence/OBJECT_ALLOCATION_LOWERING_MATRIX.md` now isolates object
+construction from operator/query CPU before more application tuning.
 
 ## Purpose
 
@@ -87,6 +99,9 @@ live window payload still dominate.
 | Checked AppendWindow manual child-bucket | 1M events | checked `32.261 ms` | heap `35.513 ms` | Cheap checked operator win | New focused matrix |
 | Reusable `StreamAppendWindow` per-entry API | 1M events | cached checked-api `39.372 ms` | same-run heap `38.559 ms` | Near miss / per-entry callback overhead | Focused matrix; keep as control |
 | Reusable `StreamAppendWindow` cursor API | 1M events | cursor `34.708 ms`; cursor-reuse confirmation `35.527 ms` | same-run heap `35.705 ms`; confirmation heap `37.494 ms` | Cheap checked operator win | Focused gate passed; cursor-object reuse is neutral/noisy |
+| Checked SafeZone-backed AppendWindow backend | 1M events | SafeZone-backed checked `29.444 ms` | heap `35.511 ms`; current checked cursor `30.922 ms` | Backend-assisted checked operator win | Focused gate passed; application gate still open |
+| Checked page/token append operator | 1M events | `rift-checked-page-token` `27.141 ms`; SafeZone-backed page-token `26.191 ms` | heap `35.652 ms`; current checked `30.819 ms` | Cheap checked operator win | Focused gate passed; generated Common Crawl-shaped q1/q2 gate passed |
+| Object allocation lowering | ordinary object construction only | 10M checked SafeZone-backed `143.319 ms`; checked Rift `165.774 ms`; trusted HP `199.627 ms` | 10M heap `271.121 ms`, GC median `105.807 ms`, RSS `971 MB` | Allocation/reclaim win at scale; generic checked buffer overhead isolated | 2026-05-05 retained-region-array rows |
 | Reusable `StreamAppendWindow` prepend cursor API | 1M events | prepend cursor `34.662 ms` | same-run heap-prepend `36.836 ms` | Cheap checked operator win, not better than append cursor | Focused control; do not move to DEBS yet |
 | Reusable `StreamWindowFold` additive API | 1M events | checked `118.726 ms` | heap `103.244 ms` | Checked aggregate-table overhead | Focused gate failed; lower RSS and zero measured GC, but block application integration |
 | NEXMark-lite Q1 conversion | 1M events | checked `374.767 ms`; Streaming `371.404 ms` | heap `384.595 ms` | Region-friendly stream map win | Local methodology benchmark, not exact Beam NEXMark |
@@ -105,10 +120,14 @@ live window payload still dominate.
 | UnsafeZone-HP stream follow-up | 1M generated/profile stream rows | NEXMark q3 checked `292.371 ms`, q8 checked `450.904 ms`; Common Crawl q1 HPZone `4322.349 ms` | unsafezone-hp q0/q1/q4/q5/q8/q11 often near-best; heap Common Crawl q1 `4743.205 ms`; improved SafeZone Common Crawl q1 `4028.067 ms` | UnsafeZone-HP is often best SafeZone-family stream row, but current Rift still rarely beats improved SafeZone by a case-study margin | Clean UnsafeZone stream sweep |
 | Common Crawl WET-shaped tokenization | 1M generated pages / 137M token records | trusted HPZone `4386.590 ms`; checked `5088.712 ms` in RSS-complete rerun | heap `5466.535 ms` / RSS rerun `5670.270 ms`; improved SafeZone-32k `4608.641 ms` / RSS rerun `4644.747 ms` | Trusted GC-heavy stream-object win; checked beats heap but misses improved-SafeZone/trusted gate | Generated input; checked q1/q2 follow-up recorded |
 | Common Crawl WET-shaped q2 domain window | 1M generated pages / 137M token records | trusted Streaming `4164.288 ms`; checked `5061.479 ms` in RSS-complete rerun | heap `5267.784 ms` / RSS rerun `5342.373 ms`; improved SafeZone-32k `4425.273 ms` / RSS rerun `4444.954 ms` | Trusted GC-heavy stream/window win; checked beats heap modestly but misses improved-SafeZone/trusted gate | Generated input; checked q1/q2 follow-up recorded |
+| Common Crawl checked SafeZone-backed q1/q2 | 1M generated pages / 137M token records | q1 checked SafeZone-backed `4512.743 ms`; q2 `4431.865 ms` | q1 current checked `4744.872 ms`; q2 current checked `4698.903 ms` | Backend helps checked path but misses application gate | Focused backend follow-up, not final application claim |
+| Common Crawl checked page/token q1/q2 | 1M generated pages / 137M token records | q1 checked page-token `3956.366 ms`, SafeZone-backed page-token `3728.286 ms`; q2 checked page-token `4039.855 ms`, SafeZone-backed page-token `3816.247 ms` | q1 heap `5412.618 ms`, current checked `4855.133 ms`; q2 heap `5252.803 ms`, current checked `4820.611 ms` | First checked Common Crawl-shaped application gate pass | Generated stressor evidence; real-input proof still open |
 | Common Crawl WET-shaped q3 parser scratch | 1M generated pages / 137M token records | Streaming `11206.504 ms`, HPZone `11233.751 ms` | heap `10330.962 ms` with `859.220 ms` GC | Negative scratch-shape control where heap wins elapsed despite GC | Generated input; checked modes absent |
 | Common Crawl WET small-bucket control | 100k pages / 13.7M records | Streaming `419.779 ms` | heap `386.807 ms`; improved SafeZone `381.109 ms` | Heap/SafeZone recover with tighter lifetimes | Generated input; not a case-study row |
 | Common Crawl real WET tokenization | 10k requested pages / 349709 token records | Streaming `15.651 ms` | heap `12.079 ms`; improved SafeZone `16.093 ms` | Real preloaded WET is CPU/live-input-bound, not GC-bound | Real preloaded input; no parser/decompression timing |
 | Common Crawl real WET tokenization larger shard row | 50k requested, 21425 actual pages / 752797 token records | HPZone `32.809 ms`, Streaming `33.103 ms` | heap `26.452 ms`; improved SafeZone `30.730 ms` | Heap wins; median timed GC zero | Real preloaded input; actual page count below request |
+| Common Crawl real WAT link metadata | 50k requested pages / 1006742 page-link records | SafeZone-backed page-token `31.792 ms` q4, `33.937 ms` q5 | q4 heap `33.646 ms`; q5 heap `35.066 ms`; improved-32k q4 `39.551 ms`, q5 `39.579 ms` | Real link-object path works and checked SafeZone-backed wins modestly, but heap timed GC is zero | Real preloaded WAT input; ceiling/control row |
+| GH Archive real JSON fields | 8-hour oracle, 1M events / 13M event-field records | Streaming rerun `340.820 ms`; SafeZone-backed page-token `348.817 ms` | heap `293.204 ms`, max GC `135.368 ms`, 1/3 runs with GC; improved-32k `374.923 ms` | Heap wins uncapped median by growing to ~1.7 GiB; 1G heap-cap diagnostic makes checked SafeZone-backed faster than heap | Memory-budget/tail-latency candidate, not uncapped throughput win |
 | Wikimedia generated clickstream | 1M events / 2M records | HPZone `147.163 ms`, Streaming `148.364 ms` | heap `159.746 ms`; improved SafeZone `147.936 ms` | Promising Q2 row but not a 10% win over improved SafeZone | Generated TSV-shaped input only |
 | Wikimedia generated clickstream scale check | 10M events / 20M records | HPZone `1462.015 ms`, Streaming `1464.663 ms` | heap `1459.438 ms`; improved SafeZone `1473.088 ms` | Lower GC but elapsed near-tie | Single run only |
 | Wikimedia real enwiki clickstream | 1M events / 2M records | Streaming `157.449 ms` | heap `126.800 ms`; improved SafeZone `149.062 ms` | Heap wins; median timed GC zero, with one heap collection outlier | Real preloaded TSV input |
@@ -310,6 +329,15 @@ The strongest local categories are:
   outlier, but collection was not frequent enough to affect the median. These
   rows are useful ceiling results: preloading real input can make RSS large
   while leaving little median collection-time headroom for regions to recover.
+- GH Archive is the current exception worth keeping in the ladder, but its
+  claim is narrower after the multi-hour oracle rerun. At 1M real events,
+  uncapped heap wins q1/q2 median elapsed while collecting in only one timed
+  run per query and growing to about `1.7 GiB` RSS. Under a `1G` heap cap, q1
+  heap slows to `395.295 ms` with `92.347 ms` median GC, so the checked
+  SafeZone-backed q1 row at `348.817 ms` becomes faster. The trusted Streaming
+  rerun is `340.820 ms`, but it is still slower than uncapped heap median.
+  Treat this as
+  memory-budget/tail-latency evidence, not a general throughput win.
 - NEXMark Beam-default Q0/Q1/Q2/Q3/Q5/Q8/Q9 are useful profile rows. Q3 is the
   best checked row (`295.166 ms` versus heap `315.715 ms` and improved
   SafeZone `302.668 ms`); Q8 is a checked near-tie with improved SafeZone; Q11

@@ -81,6 +81,12 @@ object DataflowRegionMatrixHelpers {
       val next: JoinedRecord
   )
 
+  private final class CheckedSelectedNode(
+      val docId: Int,
+      val key: Int,
+      val score: Long
+  ) extends RiftRegion.StreamAppendNode
+
   final case class RuntimeSample(
       gcCollections: Long,
       gcNanos: Long,
@@ -581,6 +587,93 @@ object DataflowRegionMatrixHelpers {
     total
   }
 
+  private def runCheckedSelectPageTokenBody()(using
+      stream: RiftRegion.StreamingRegion^
+  ): Long = {
+    val cfg = DataflowRegionConfig
+    val window =
+      RiftRegion.pageTokenMapFilter[CheckedSelectedNode](1L)
+    var total = 0L
+
+    def consume(
+        bucket: RiftRegion.StreamBucket^{stream},
+        cursor: RiftRegion.StreamAppendCursor[CheckedSelectedNode]^{stream}
+    ): Unit =
+      while (cursor.hasNext) {
+        val out: CheckedSelectedNode^{stream} = cursor.next()
+        total += out.score ^ out.docId.toLong ^ out.key.toLong
+      }
+
+    var epoch = 0
+    while (epoch < cfg.epochs) {
+      val region =
+        RiftRegion.pageTokenMapFilterRegionFor(
+          stream,
+          window,
+          epoch.toLong,
+          epoch.toLong
+        )(consume)
+      final class CheckedDocument(
+          val docId: Int,
+          val key: Int,
+          val authorKey: Int,
+          val value: Int,
+          val next: CheckedDocument^{stream}
+      )
+
+      var docs: CheckedDocument^{stream} = null
+      var i = 0
+      while (i < cfg.docsPerEpoch) {
+        val seed = mix(epoch * 1000003 + i)
+        val key = seed % cfg.keySpace
+        val author = mix(seed + 17) % cfg.authorKeySpace
+        val value = mix(seed + 31) & 0xffff
+        val docId = epoch * cfg.docsPerEpoch + i
+        docs =
+          RiftRegion.alloc(new CheckedDocument(docId, key, author, value, docs))(
+            using region
+          )
+        i += 1
+      }
+
+      var cursor = docs
+      while (cursor != null) {
+        if ((cursor.value % cfg.selectModulo) == 0) {
+          val score =
+            cursor.value.toLong * 31L + cursor.key.toLong + cursor.authorKey
+          val selected: CheckedSelectedNode^{stream} =
+            RiftRegion.alloc(
+              new CheckedSelectedNode(cursor.docId, cursor.key, score)
+            )(using region)
+          RiftRegion.emitPageTokenMapFilter(stream, window, selected)
+        }
+        cursor = cursor.next
+      }
+      epoch += 1
+    }
+
+    RiftRegion.closeAllPageTokenMapFilterBucketsWithCursor(stream, window)(
+      consume
+    )
+    total
+  }
+
+  def runCheckedSelectPageToken(): Long = {
+    val total = RiftRegion.streaming { stream ?=>
+      runCheckedSelectPageTokenBody()
+    }
+    checksumSink = total
+    total
+  }
+
+  def runCheckedSafeZoneSelectPageToken(): Long = {
+    val total = RiftRegion.streamingSafeZone { stream ?=>
+      runCheckedSelectPageTokenBody()
+    }
+    checksumSink = total
+    total
+  }
+
   def runCheckedAggregate(): Long = {
     val cfg = DataflowRegionConfig
     val tableSize = nextPowerOfTwo(cfg.keySpace * 2)
@@ -660,6 +753,56 @@ object DataflowRegionMatrixHelpers {
             i += 1
           }
           epochTotal
+        }
+        epoch += 1
+      }
+      total
+    }
+
+    checksumSink = total
+    total
+  }
+
+  def runCheckedAggregateEpochFold(): Long = {
+    val cfg = DataflowRegionConfig
+    val total = RiftRegion.streaming { stream ?=>
+      final class CheckedAggregateEvent(
+          val docId: Int,
+          val key: Int,
+          val value: Int
+      ) extends RiftRegion.StreamAppendNode
+
+      val fold =
+        RiftRegion.epochFold[CheckedAggregateEvent](1L, cfg.keySpace)
+      var total = 0L
+      var epoch = 0
+      while (epoch < cfg.epochs) {
+        val region =
+          RiftRegion.epochFoldRegionFor(stream, fold, epoch.toLong)
+
+        var i = 0
+        while (i < cfg.docsPerEpoch) {
+          val seed = mix(epoch * 1000003 + i)
+          val key = seed % cfg.keySpace
+          val value = mix(seed + 31) & 0xffff
+          val docId = epoch * cfg.docsPerEpoch + i
+          val event: CheckedAggregateEvent^{stream} =
+            RiftRegion.alloc(new CheckedAggregateEvent(docId, key, value))(
+              using region
+            )
+          RiftRegion.putEpochFold(stream, fold, key, value.toLong, event)
+          i += 1
+        }
+
+        var epochTotal = 0L
+        RiftRegion.foreachEpochFoldEntry(stream, fold) { (key, sum, count) =>
+          epochTotal += sum ^ (count.toLong << 17) ^ key.toLong
+        }
+        total += epochTotal
+
+        RiftRegion.closeEpochFoldCurrentBucketAndClear(stream, fold) {
+          (_, cursor) =>
+            while (cursor.hasNext) cursor.next()
         }
         epoch += 1
       }
@@ -914,6 +1057,21 @@ object DataflowRegionMatrixHelpers {
     total
   }
 
+  def canonicalMode(mode: String): String =
+    mode match {
+      case "gc-heap" => "heap"
+      case "region-scoped-rooted" | "region-scoped-rootless" => "safezone"
+      case "region-stream-rootless" => "rift-streaming"
+      case "checked-region-stream"  => "rift-checked"
+      case "checked-page-token" | "checked-page-token-stream" =>
+        "rift-checked-page-token"
+      case "checked-page-token-scoped" | "checked-region-scoped-page-token" =>
+        "rift-checked-safezone-page-token"
+      case "checked-epoch-fold" | "checked-region-stream-epoch-fold" =>
+        "rift-checked-epoch-fold"
+      case other => other
+    }
+
   private def expected(operator: String): Long =
     operator match {
       case "select"    => runSelect("heap")
@@ -925,25 +1083,33 @@ object DataflowRegionMatrixHelpers {
         )
     }
 
-  private def runOperator(operator: String, mode: String): Long =
+  private def runOperator(operator: String, mode: String): Long = {
+    val internalMode = canonicalMode(mode)
     operator match {
       case "select" =>
-        if (mode == "safezone") runSafeZoneSelect()
-        else if (mode == "rift-checked") runCheckedSelect()
-        else runSelect(mode)
+        if (internalMode == "safezone") runSafeZoneSelect()
+        else if (internalMode == "rift-checked") runCheckedSelect()
+        else if (internalMode == "rift-checked-page-token")
+          runCheckedSelectPageToken()
+        else if (internalMode == "rift-checked-safezone-page-token")
+          runCheckedSafeZoneSelectPageToken()
+        else runSelect(internalMode)
       case "aggregate" =>
-        if (mode == "safezone") runSafeZoneAggregate()
-        else if (mode == "rift-checked") runCheckedAggregate()
-        else runAggregate(mode)
+        if (internalMode == "safezone") runSafeZoneAggregate()
+        else if (internalMode == "rift-checked") runCheckedAggregate()
+        else if (internalMode == "rift-checked-epoch-fold")
+          runCheckedAggregateEpochFold()
+        else runAggregate(internalMode)
       case "join" =>
-        if (mode == "safezone") runSafeZoneJoin()
-        else if (mode == "rift-checked") runCheckedJoin()
-        else runJoin(mode)
+        if (internalMode == "safezone") runSafeZoneJoin()
+        else if (internalMode == "rift-checked") runCheckedJoin()
+        else runJoin(internalMode)
       case other =>
         throw new IllegalArgumentException(
           s"unknown dataflow operator '$other'; expected select, aggregate, join, or all"
         )
     }
+  }
 
   private def medianDouble(values: Array[Double]): Double = {
     val sorted = values.clone()
@@ -961,8 +1127,12 @@ object DataflowRegionMatrixHelpers {
 
   def runBenchmark(mode: String, operator: String): Unit = {
     val cfg = DataflowRegionConfig
+    val internalMode = canonicalMode(mode)
     val usesRift =
-      mode == "rift-hp" || mode == "rift-streaming" || mode == "rift-checked"
+      internalMode == "rift-hp" || internalMode == "rift-streaming" ||
+        internalMode == "rift-checked" ||
+        internalMode == "rift-checked-page-token" ||
+        internalMode == "rift-checked-epoch-fold"
     val expectedChecksum = expected(operator)
 
     var warmup = 0
@@ -1051,19 +1221,29 @@ object DataflowRegionMatrixHelpers {
     val rootsMode = sys.env.getOrElse("SAFEZONE_ROOTS_MODE", "0")
     val pageSize = sys.env.getOrElse("SAFEZONE_PAGE_SIZE", "default")
     println(
-      s"CONFIG mode=$mode operator=$operator runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} epochs=${cfg.epochs} docs_per_epoch=${cfg.docsPerEpoch} authors_per_epoch=${cfg.authorsPerEpoch} key_space=${cfg.keySpace} author_key_space=${cfg.authorKeySpace} select_modulo=${cfg.selectModulo} safezone_roots_mode=$rootsMode safezone_page_size=$pageSize"
+      s"CONFIG mode=$mode backend_mode=${canonicalMode(mode)} operator=$operator runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} epochs=${cfg.epochs} docs_per_epoch=${cfg.docsPerEpoch} authors_per_epoch=${cfg.authorsPerEpoch} key_space=${cfg.keySpace} author_key_space=${cfg.authorKeySpace} select_modulo=${cfg.selectModulo} safezone_roots_mode=$rootsMode safezone_page_size=$pageSize"
     )
   }
 
   def validateMode(mode: String): Unit =
-    mode match {
+    canonicalMode(mode) match {
       case "heap" | "safezone" | "rift-hp" | "rift-streaming" |
-          "rift-checked" =>
+          "rift-checked" | "rift-checked-page-token" |
+          "rift-checked-safezone-page-token" | "rift-checked-epoch-fold" =>
         ()
       case other =>
         throw new IllegalArgumentException(
-          s"unknown dataflow mode '$other'; expected heap, safezone, rift-hp, rift-streaming, or rift-checked"
+          s"unknown dataflow mode '$other'; expected heap, safezone, rift-hp, rift-streaming, rift-checked, rift-checked-page-token, rift-checked-safezone-page-token, or rift-checked-epoch-fold"
         )
+    }
+
+  def supportsOperator(mode: String, operator: String): Boolean =
+    canonicalMode(mode) match {
+      case "rift-checked-page-token" | "rift-checked-safezone-page-token" =>
+        operator == "select"
+      case "rift-checked-epoch-fold" =>
+        operator == "aggregate"
+      case _ => true
     }
 }
 
@@ -1074,16 +1254,29 @@ object DataflowRegionMatrixHelpers {
   DataflowRegionMatrixHelpers.validateMode(mode)
   DataflowRegionMatrixHelpers.printConfig(mode, operator)
 
+  val internalMode = DataflowRegionMatrixHelpers.canonicalMode(mode)
   val usesRift =
-    mode == "rift-hp" || mode == "rift-streaming" || mode == "rift-checked"
+    internalMode == "rift-hp" || internalMode == "rift-streaming" ||
+      internalMode == "rift-checked" ||
+      internalMode == "rift-checked-page-token" ||
+      internalMode == "rift-checked-epoch-fold"
   if (usesRift) RiftRegion.init(0)
   try {
     operator match {
       case "all" =>
-        DataflowRegionMatrixHelpers.runBenchmark(mode, "select")
-        DataflowRegionMatrixHelpers.runBenchmark(mode, "aggregate")
-        DataflowRegionMatrixHelpers.runBenchmark(mode, "join")
+        val operators = Array("select", "aggregate", "join")
+        var i = 0
+        while (i < operators.length) {
+          val op = operators(i)
+          if (DataflowRegionMatrixHelpers.supportsOperator(mode, op))
+            DataflowRegionMatrixHelpers.runBenchmark(mode, op)
+          i += 1
+        }
       case "select" | "aggregate" | "join" =>
+        if (!DataflowRegionMatrixHelpers.supportsOperator(mode, operator))
+          throw new IllegalArgumentException(
+            s"dataflow mode '$mode' does not support operator '$operator'"
+          )
         DataflowRegionMatrixHelpers.runBenchmark(mode, operator)
       case other =>
         throw new IllegalArgumentException(

@@ -38,6 +38,7 @@ object CommonCrawlWetConfig {
   val domainSpace: Int = envInt("COMMON_CRAWL_WET_DOMAIN_SPACE", 16384)
   val linesPerPage: Int = envInt("COMMON_CRAWL_WET_LINES_PER_PAGE", 8)
   val tokensPerLine: Int = envInt("COMMON_CRAWL_WET_TOKENS_PER_LINE", 16)
+  val watLinksPerPage: Int = envInt("COMMON_CRAWL_WAT_LINKS_PER_PAGE", 64)
   val sampleEvery: Int = envInt("COMMON_CRAWL_WET_SAMPLE_EVERY", 4096)
   val warmupRuns: Int = envNonNegativeInt("COMMON_CRAWL_WET_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("COMMON_CRAWL_WET_BENCHMARK_RUNS", 3)
@@ -128,7 +129,10 @@ object CommonCrawlWetMatrixHelpers {
       val lineOffsets: Array[Int],
       val lineHashes: Array[Long],
       val tokenCounts: Array[Int],
-      val tokenHashSeeds: Array[Long]
+      val tokenHashSeeds: Array[Long],
+      val linkOffsets: Array[Int],
+      val linkHashes: Array[Long],
+      val linkDomains: Array[Int]
   ) {
     def domainAt(page: Int): Int =
       if (domains == null) domainFor(page) else domains(page)
@@ -149,6 +153,16 @@ object CommonCrawlWetMatrixHelpers {
       if (tokenHashSeeds == null) tokenHash(page, line, token)
       else tokenHashSeeds(lineOffsets(page) + line) ^
         (token.toLong * 1099511628211L)
+
+    def linkCountAt(page: Int): Int =
+      if (linkOffsets == null) 0 else linkOffsets(page + 1) - linkOffsets(page)
+
+    def linkHashAt(page: Int, link: Int): Long =
+      if (linkHashes == null) 0L else linkHashes(linkOffsets(page) + link)
+
+    def linkDomainAt(page: Int, link: Int): Int =
+      if (linkDomains == null) domainAt(page)
+      else linkDomains(linkOffsets(page) + link)
   }
 
   private lazy val inputData: InputData = loadInput()
@@ -307,31 +321,65 @@ object CommonCrawlWetMatrixHelpers {
         null,
         null,
         null,
+        null,
+        null,
+        null,
         null
       )
 
+    val isWatInput =
+      cfg.inputPath.endsWith(".wat") || cfg.inputPath.contains(".wat.")
     val domains = scala.collection.mutable.ArrayBuffer.empty[Int]
     val lineOffsets = scala.collection.mutable.ArrayBuffer.empty[Int]
     val lineHashes = scala.collection.mutable.ArrayBuffer.empty[Long]
     val tokenCounts = scala.collection.mutable.ArrayBuffer.empty[Int]
     val tokenHashSeeds = scala.collection.mutable.ArrayBuffer.empty[Long]
+    val linkOffsets = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val linkHashes = scala.collection.mutable.ArrayBuffer.empty[Long]
+    val linkDomains = scala.collection.mutable.ArrayBuffer.empty[Int]
     lineOffsets += 0
+    linkOffsets += 0
 
     var currentDomain = 0
     var sawTarget = false
     var inContent = false
     var currentLines = 0
+    var currentLinks = 0
 
     def flushPage(): Unit =
-      if (sawTarget && currentLines > 0 && domains.length < cfg.pages) {
+      if (
+        sawTarget && (currentLines > 0 || currentLinks > 0) &&
+        domains.length < cfg.pages
+      ) {
         domains += currentDomain
         lineOffsets += lineHashes.length
+        linkOffsets += linkHashes.length
       }
 
     def resetRecord(): Unit = {
       sawTarget = false
       inContent = false
       currentLines = 0
+      currentLinks = 0
+    }
+
+    def appendWatLinks(line: String): Unit = {
+      val marker = "\"url\":\""
+      var from = 0
+      while (currentLinks < cfg.watLinksPerPage) {
+        val markerIndex = line.indexOf(marker, from)
+        if (markerIndex < 0) return
+        val start = markerIndex + marker.length
+        val end = line.indexOf('"', start)
+        if (end < 0) return
+        val url = line.substring(start, end)
+        val hash = BenchmarkInputSupport.stableHash(url)
+        linkHashes += hash.toLong
+        linkDomains +=
+          BenchmarkInputSupport.positiveModulo(hash, cfg.domainSpace)
+        currentLinks += 1
+        from = end + 1
+      }
     }
 
     val reader = BenchmarkInputSupport.openText(cfg.inputPath)
@@ -354,6 +402,8 @@ object CommonCrawlWetMatrixHelpers {
             inContent = true
           }
         } else if (currentLines < cfg.linesPerPage && line.nonEmpty) {
+          if (isWatInput)
+            appendWatLinks(line)
           lineHashes += BenchmarkInputSupport.stableHash(line).toLong
           tokenCounts += BenchmarkInputSupport.tokenCount(
             line,
@@ -376,14 +426,20 @@ object CommonCrawlWetMatrixHelpers {
         s"Common Crawl WET input '${cfg.inputPath}' did not contain any usable conversion records"
       )
 
+    val inputLabel =
+      if (isWatInput) "real-wat-preloaded" else "real-wet-preloaded"
+
     new InputData(
-      "real-wet-preloaded",
+      inputLabel,
       domains.length,
       domains.toArray,
       lineOffsets.toArray,
       lineHashes.toArray,
       tokenCounts.toArray,
-      tokenHashSeeds.toArray
+      tokenHashSeeds.toArray,
+      linkOffsets.toArray,
+      linkHashes.toArray,
+      linkDomains.toArray
     )
   }
 
@@ -433,10 +489,39 @@ object CommonCrawlWetMatrixHelpers {
       bucket.tail = record
     }
 
-  def validateMode(mode: String): Unit =
+  private def canonicalMode(mode: String): String =
     mode match {
+      case "heap-immix" => "heap"
+      case "safezone-current" | "safezone-improved" |
+          "safezone-improved-32k" | "safezone-chunk-roots" |
+          "safezone-chunk" | "safezone-rootless-32k" |
+          "unsafezone-hp" =>
+        "safezone"
+      case "rift-trusted-hp"                 => "rift-hp"
+      case "rift-trusted-streaming"          => "rift-streaming"
+      case "rift-checked-rift"               => "rift-checked"
+      case "rift-checked-safezone-improved-32k" =>
+        "rift-checked-safezone-32k"
+      case "rift-checked-safezone-rootless-32k" =>
+        "rift-checked-rootfree-safezone-hp"
+      case other => other
+    }
+
+  private def usesRiftRuntime(mode: String): Boolean =
+    canonicalMode(mode) match {
+      case "rift-hp" | "rift-streaming" | "rift-checked" |
+          "rift-checked-page-token" =>
+        true
+      case _ => false
+    }
+
+  def validateMode(mode: String): Unit =
+    canonicalMode(mode) match {
       case "heap" | "safezone" | "rift-hp" | "rift-streaming" |
-          "rift-checked" =>
+          "rift-checked" | "rift-checked-page-token" |
+          "rift-checked-safezone-32k" |
+          "rift-checked-safezone-page-token" |
+          "rift-checked-rootfree-safezone-hp" =>
         ()
       case other =>
         throw new IllegalArgumentException(
@@ -447,7 +532,8 @@ object CommonCrawlWetMatrixHelpers {
   def validateQuery(query: String): Unit =
     query match {
       case "q0-parse" | "q1-tokenize" | "q2-domain-window" |
-          "q3-parser-scratch" =>
+          "q3-parser-scratch" | "q4-wat-links" |
+          "q5-wat-link-domain-window" =>
         ()
       case other =>
         throw new IllegalArgumentException(
@@ -458,6 +544,12 @@ object CommonCrawlWetMatrixHelpers {
   private def tokenQuery(query: String): Boolean =
     query == "q1-tokenize" || query == "q2-domain-window" ||
       query == "q3-parser-scratch"
+
+  private def linkQuery(query: String): Boolean =
+    query == "q4-wat-links" || query == "q5-wat-link-domain-window"
+
+  private def domainWindowQuery(query: String): Boolean =
+    query == "q2-domain-window" || query == "q5-wat-link-domain-window"
 
   private def scratchQuery(query: String): Boolean =
     query == "q3-parser-scratch"
@@ -502,7 +594,7 @@ object CommonCrawlWetMatrixHelpers {
     }
 
     def closeRecords(bucket: HeapBucket): Unit =
-      if (query == "q2-domain-window") {
+      if (domainWindowQuery(query)) {
         val counts = new Array[Int](cfg.domainSpace)
         var record = bucket.head
         while (record != null) {
@@ -564,33 +656,60 @@ object CommonCrawlWetMatrixHelpers {
       val domain = input.domainAt(page)
       val bucket = bucketFor(bucketStart(page))
       emit(bucket, new HeapRecord(1, page, domain, 0, input.lineHashAt(page, 0), null))
-      var line = 0
-      val lines = input.lineCountAt(page)
-      while (line < lines) {
-        val lh = input.lineHashAt(page, line)
-        emit(bucket, new HeapRecord(2, page, domain, line, lh, null))
-        if (tokenQuery(query)) {
-          var token = 0
-          val tokens = input.tokenCountAt(page, line)
-          while (token < tokens) {
-            emit(
-              bucket,
-              new HeapRecord(
-                3,
-                page,
-                domain,
-                token,
-                input.tokenHashAt(page, line, token),
-                null
-              )
+      var observed = 0
+      if (linkQuery(query)) {
+        val links = input.linkCountAt(page)
+        while (observed < links) {
+          emit(
+            bucket,
+            new HeapRecord(
+              5,
+              page,
+              input.linkDomainAt(page, observed),
+              observed,
+              input.linkHashAt(page, observed),
+              null
             )
-            token += 1
-          }
+          )
+          observed += 1
         }
-        line += 1
+      } else {
+        val lines = input.lineCountAt(page)
+        while (observed < lines) {
+          val lh = input.lineHashAt(page, observed)
+          emit(bucket, new HeapRecord(2, page, domain, observed, lh, null))
+          if (tokenQuery(query)) {
+            var token = 0
+            val tokens = input.tokenCountAt(page, observed)
+            while (token < tokens) {
+              emit(
+                bucket,
+                new HeapRecord(
+                  3,
+                  page,
+                  domain,
+                  token,
+                  input.tokenHashAt(page, observed, token),
+                  null
+                )
+              )
+              token += 1
+            }
+          }
+          observed += 1
+        }
       }
       if (page % cfg.sampleEvery == 0)
-        checksum = fold(checksum, 9, page, domain, line, input.lineHashAt(page, if (line == 0) 0 else line - 1), bucket.startPage)
+        checksum = fold(
+          checksum,
+          9,
+          page,
+          domain,
+          observed,
+          if (linkQuery(query) && observed > 0) input.linkHashAt(page, 0)
+          else input.lineHashAt(page, if (observed == 0) 0 else observed - 1),
+          bucket.startPage
+        )
       page += 1
     }
 
@@ -640,7 +759,7 @@ object CommonCrawlWetMatrixHelpers {
     }
 
     def closeRecords(bucket: SafeBucket): Unit =
-      if (query == "q2-domain-window") {
+      if (domainWindowQuery(query)) {
         val counts = new Array[Int](cfg.domainSpace)
         var record = bucket.head
         while (record != null) {
@@ -714,43 +833,75 @@ object CommonCrawlWetMatrixHelpers {
             .allocate(zone, new SafeRecord(1, page, domain, 0, input.lineHashAt(page, 0), null))
             .asInstanceOf[SafeRecord]
         )
-        var line = 0
-        val lines = input.lineCountAt(page)
-        while (line < lines) {
-          val lh = input.lineHashAt(page, line)
-          emit(
-            bucket,
-            SafeZoneAllocator
-              .allocate(zone, new SafeRecord(2, page, domain, line, lh, null))
-              .asInstanceOf[SafeRecord]
-          )
-          if (tokenQuery(query)) {
-            var token = 0
-            val tokens = input.tokenCountAt(page, line)
-            while (token < tokens) {
-              emit(
-                bucket,
-                SafeZoneAllocator
-                  .allocate(
-                    zone,
-                    new SafeRecord(
-                      3,
-                      page,
-                      domain,
-                      token,
-                      input.tokenHashAt(page, line, token),
-                      null
-                    )
+        var observed = 0
+        if (linkQuery(query)) {
+          val links = input.linkCountAt(page)
+          while (observed < links) {
+            emit(
+              bucket,
+              SafeZoneAllocator
+                .allocate(
+                  zone,
+                  new SafeRecord(
+                    5,
+                    page,
+                    input.linkDomainAt(page, observed),
+                    observed,
+                    input.linkHashAt(page, observed),
+                    null
                   )
-                  .asInstanceOf[SafeRecord]
-              )
-              token += 1
-            }
+                )
+                .asInstanceOf[SafeRecord]
+            )
+            observed += 1
           }
-          line += 1
+        } else {
+          val lines = input.lineCountAt(page)
+          while (observed < lines) {
+            val lh = input.lineHashAt(page, observed)
+            emit(
+              bucket,
+              SafeZoneAllocator
+                .allocate(zone, new SafeRecord(2, page, domain, observed, lh, null))
+                .asInstanceOf[SafeRecord]
+            )
+            if (tokenQuery(query)) {
+              var token = 0
+              val tokens = input.tokenCountAt(page, observed)
+              while (token < tokens) {
+                emit(
+                  bucket,
+                  SafeZoneAllocator
+                    .allocate(
+                      zone,
+                      new SafeRecord(
+                        3,
+                        page,
+                        domain,
+                        token,
+                        input.tokenHashAt(page, observed, token),
+                        null
+                      )
+                    )
+                    .asInstanceOf[SafeRecord]
+                )
+                token += 1
+              }
+            }
+            observed += 1
+          }
         }
         if (page % cfg.sampleEvery == 0)
-          checksum = fold(checksum, 9, page, domain, line, input.lineHashAt(page, if (line == 0) 0 else line - 1), bucket.startPage)
+          checksum = fold(
+            checksum,
+            9,
+            page,
+            domain,
+            observed,
+            if (linkQuery(query) && observed > 0) input.linkHashAt(page, 0)
+            else input.lineHashAt(page, if (observed == 0) 0 else observed - 1),
+            bucket.startPage
+          )
         page += 1
       }
       closeExpired(Long.MaxValue)
@@ -807,7 +958,7 @@ object CommonCrawlWetMatrixHelpers {
     }
 
     def closeRecords(bucket: TrustedBucket): Unit =
-      if (query == "q2-domain-window") {
+      if (domainWindowQuery(query)) {
         val counts = new Array[Int](cfg.domainSpace)
         var record = bucket.head
         while (record != null) {
@@ -879,38 +1030,67 @@ object CommonCrawlWetMatrixHelpers {
           bucket,
           region.alloc(new TrustedRecord(1, page, domain, 0, input.lineHashAt(page, 0), null))
         )
-        var line = 0
-        val lines = input.lineCountAt(page)
-        while (line < lines) {
-          val lh = input.lineHashAt(page, line)
-          emit(
-            bucket,
-            region.alloc(new TrustedRecord(2, page, domain, line, lh, null))
-          )
-          if (tokenQuery(query)) {
-            var token = 0
-            val tokens = input.tokenCountAt(page, line)
-            while (token < tokens) {
-              emit(
-                bucket,
-                region.alloc(
-                  new TrustedRecord(
-                    3,
-                    page,
-                    domain,
-                    token,
-                    input.tokenHashAt(page, line, token),
-                    null
-                  )
+        var observed = 0
+        if (linkQuery(query)) {
+          val links = input.linkCountAt(page)
+          while (observed < links) {
+            emit(
+              bucket,
+              region.alloc(
+                new TrustedRecord(
+                  5,
+                  page,
+                  input.linkDomainAt(page, observed),
+                  observed,
+                  input.linkHashAt(page, observed),
+                  null
                 )
               )
-              token += 1
-            }
+            )
+            observed += 1
           }
-          line += 1
+        } else {
+          val lines = input.lineCountAt(page)
+          while (observed < lines) {
+            val lh = input.lineHashAt(page, observed)
+            emit(
+              bucket,
+              region.alloc(new TrustedRecord(2, page, domain, observed, lh, null))
+            )
+            if (tokenQuery(query)) {
+              var token = 0
+              val tokens = input.tokenCountAt(page, observed)
+              while (token < tokens) {
+                emit(
+                  bucket,
+                  region.alloc(
+                    new TrustedRecord(
+                      3,
+                      page,
+                      domain,
+                      token,
+                      input.tokenHashAt(page, observed, token),
+                      null
+                    )
+                  )
+                )
+                token += 1
+              }
+            }
+            observed += 1
+          }
         }
         if (page % cfg.sampleEvery == 0)
-          checksum = fold(checksum, 9, page, domain, line, input.lineHashAt(page, if (line == 0) 0 else line - 1), bucket.startPage)
+          checksum = fold(
+            checksum,
+            9,
+            page,
+            domain,
+            observed,
+            if (linkQuery(query) && observed > 0) input.linkHashAt(page, 0)
+            else input.lineHashAt(page, if (observed == 0) 0 else observed - 1),
+            bucket.startPage
+          )
         page += 1
       }
       closeExpired(Long.MaxValue)
@@ -927,8 +1107,9 @@ object CommonCrawlWetMatrixHelpers {
     RunOutcome(checksum, outputCount)
   }
 
-  def runRiftChecked(query: String): RunOutcome =
-    RiftRegion.streaming { stream ?=>
+  private def runRiftCheckedBody(query: String)(using
+      stream: RiftRegion.StreamingRegion^
+  ): RunOutcome = {
       val cfg = CommonCrawlWetConfig
       val input = inputData
 
@@ -984,7 +1165,7 @@ object CommonCrawlWetMatrixHelpers {
           bucket: RiftRegion.StreamBucket^{stream},
           cursor: RiftRegion.StreamAppendCursor[CheckedRecord]^{stream}
       ): Unit =
-        if (query == "q2-domain-window") {
+        if (domainWindowQuery(query)) {
           val counts = new Array[Int](cfg.domainSpace)
           while (cursor.hasNext) {
             val record: CheckedRecord^{stream} = cursor.next()
@@ -1038,36 +1219,54 @@ object CommonCrawlWetMatrixHelpers {
         if (scratchQuery(query)) consume(bucket, pageRecord)
         else RiftRegion.appendWindow(stream, window, bucket, pageRecord)
 
-        var line = 0
-        val lines = input.lineCountAt(page)
-        while (line < lines) {
-          val lh = input.lineHashAt(page, line)
-          val lineRecord: CheckedRecord^{stream} =
-            RiftRegion.alloc(new CheckedRecord(2, page, domain, line, lh))(
-              using bucketRegion
-            )
-          if (scratchQuery(query)) consume(bucket, lineRecord)
-          else RiftRegion.appendWindow(stream, window, bucket, lineRecord)
-          if (tokenQuery(query)) {
-            var token = 0
-            val tokens = input.tokenCountAt(page, line)
-            while (token < tokens) {
-              val tokenRecord: CheckedRecord^{stream} =
-                RiftRegion.alloc(
-                  new CheckedRecord(
-                    3,
-                    page,
-                    domain,
-                    token,
-                    input.tokenHashAt(page, line, token)
-                  )
-                )(using bucketRegion)
-              if (scratchQuery(query)) consume(bucket, tokenRecord)
-              else RiftRegion.appendWindow(stream, window, bucket, tokenRecord)
-              token += 1
-            }
+        var observed = 0
+        if (linkQuery(query)) {
+          val links = input.linkCountAt(page)
+          while (observed < links) {
+            val linkRecord: CheckedRecord^{stream} =
+              RiftRegion.alloc(
+                new CheckedRecord(
+                  5,
+                  page,
+                  input.linkDomainAt(page, observed),
+                  observed,
+                  input.linkHashAt(page, observed)
+                )
+              )(using bucketRegion)
+            RiftRegion.appendWindow(stream, window, bucket, linkRecord)
+            observed += 1
           }
-          line += 1
+        } else {
+          val lines = input.lineCountAt(page)
+          while (observed < lines) {
+            val lh = input.lineHashAt(page, observed)
+            val lineRecord: CheckedRecord^{stream} =
+              RiftRegion.alloc(new CheckedRecord(2, page, domain, observed, lh))(
+                using bucketRegion
+              )
+            if (scratchQuery(query)) consume(bucket, lineRecord)
+            else RiftRegion.appendWindow(stream, window, bucket, lineRecord)
+            if (tokenQuery(query)) {
+              var token = 0
+              val tokens = input.tokenCountAt(page, observed)
+              while (token < tokens) {
+                val tokenRecord: CheckedRecord^{stream} =
+                  RiftRegion.alloc(
+                    new CheckedRecord(
+                      3,
+                      page,
+                      domain,
+                      token,
+                      input.tokenHashAt(page, observed, token)
+                    )
+                  )(using bucketRegion)
+                if (scratchQuery(query)) consume(bucket, tokenRecord)
+                else RiftRegion.appendWindow(stream, window, bucket, tokenRecord)
+                token += 1
+              }
+            }
+            observed += 1
+          }
         }
         if (page % cfg.sampleEvery == 0)
           checksum = fold(
@@ -1075,8 +1274,9 @@ object CommonCrawlWetMatrixHelpers {
             9,
             page,
             domain,
-            line,
-            input.lineHashAt(page, if (line == 0) 0 else line - 1),
+            observed,
+            if (linkQuery(query) && observed > 0) input.linkHashAt(page, 0)
+            else input.lineHashAt(page, if (observed == 0) 0 else observed - 1),
             bucket.startSeconds
           )
         page += 1
@@ -1092,13 +1292,207 @@ object CommonCrawlWetMatrixHelpers {
       RunOutcome(checksum, outputCount)
     }
 
+  def runRiftChecked(query: String): RunOutcome =
+    RiftRegion.streaming { stream ?=>
+      runRiftCheckedBody(query)
+    }
+
+  def runRiftCheckedSafeZone(query: String): RunOutcome =
+    RiftRegion.streamingSafeZone { stream ?=>
+      runRiftCheckedBody(query)
+    }
+
+  private def runRiftCheckedPageTokenBody(query: String)(using
+      stream: RiftRegion.StreamingRegion^
+  ): RunOutcome = {
+      if (scratchQuery(query))
+        throw new IllegalArgumentException(
+          s"checked page-token mode does not support scratch query '$query'"
+        )
+
+      val cfg = CommonCrawlWetConfig
+      val input = inputData
+
+      final class CheckedRecord(
+          val kind: Int,
+          val pageId: Int,
+          val domain: Int,
+          val value: Int,
+          val hash: Long
+      ) extends RiftRegion.StreamAppendNode
+
+      val window =
+        RiftRegion.streamPageTokenAppendWindow[CheckedRecord](
+          cfg.pagesPerBucket.toLong
+        )
+      var checksum = 0L
+      var outputCount = 0L
+
+      def consumeDomainSummary(
+          bucket: RiftRegion.StreamBucket^{stream},
+          domain: Int,
+          count: Int
+      ): Unit = {
+        checksum = fold(
+          checksum,
+          4,
+          bucket.startSeconds.toInt,
+          domain,
+          count,
+          (domain.toLong << 32) ^ count.toLong,
+          bucket.startSeconds
+        )
+        outputCount += 1L
+      }
+
+      def closeRecords(
+          bucket: RiftRegion.StreamBucket^{stream},
+          cursor: RiftRegion.StreamAppendCursor[CheckedRecord]^{stream}
+      ): Unit =
+        if (domainWindowQuery(query)) {
+          val counts = new Array[Int](cfg.domainSpace)
+          while (cursor.hasNext) {
+            val record: CheckedRecord^{stream} = cursor.next()
+            counts(record.domain) += 1
+          }
+          var domain = 0
+          while (domain < counts.length) {
+            val count = counts(domain)
+            if (count != 0)
+              consumeDomainSummary(bucket, domain, count)
+            domain += 1
+          }
+        } else {
+          while (cursor.hasNext) {
+            val record: CheckedRecord^{stream} = cursor.next()
+            checksum = fold(
+              checksum,
+              record.kind,
+              record.pageId,
+              record.domain,
+              record.value,
+              record.hash,
+              bucket.startSeconds
+            )
+            outputCount += 1L
+          }
+        }
+
+      var currentStartPage = Long.MinValue
+      var currentRegion: RiftRegion.StreamingRegion^{stream} = null
+      var page = 0
+      while (page < input.pages) {
+        val domain = input.domainAt(page)
+        val startPage = bucketStart(page)
+        if (startPage != currentStartPage) {
+          currentStartPage = startPage
+          currentRegion =
+            RiftRegion.pageTokenAppendRegionFor(
+              stream,
+              window,
+              startPage,
+              closeCutoff(startPage)
+            )(closeRecords)
+        }
+
+        val pageRecord: CheckedRecord^{stream} =
+          RiftRegion.alloc(
+            new CheckedRecord(1, page, domain, 0, input.lineHashAt(page, 0))
+          )(using currentRegion)
+        RiftRegion.appendPageToken(stream, window, pageRecord)
+
+        var observed = 0
+        if (linkQuery(query)) {
+          val links = input.linkCountAt(page)
+          while (observed < links) {
+            val linkRecord: CheckedRecord^{stream} =
+              RiftRegion.alloc(
+                new CheckedRecord(
+                  5,
+                  page,
+                  input.linkDomainAt(page, observed),
+                  observed,
+                  input.linkHashAt(page, observed)
+                )
+              )(using currentRegion)
+            RiftRegion.appendPageToken(stream, window, linkRecord)
+            observed += 1
+          }
+        } else {
+          val lines = input.lineCountAt(page)
+          while (observed < lines) {
+            val lh = input.lineHashAt(page, observed)
+            val lineRecord: CheckedRecord^{stream} =
+              RiftRegion.alloc(new CheckedRecord(2, page, domain, observed, lh))(
+                using currentRegion
+              )
+            RiftRegion.appendPageToken(stream, window, lineRecord)
+            if (tokenQuery(query)) {
+              var token = 0
+              val tokens = input.tokenCountAt(page, observed)
+              while (token < tokens) {
+                val tokenRecord: CheckedRecord^{stream} =
+                  RiftRegion.alloc(
+                    new CheckedRecord(
+                      3,
+                      page,
+                      domain,
+                      token,
+                      input.tokenHashAt(page, observed, token)
+                    )
+                  )(using currentRegion)
+                RiftRegion.appendPageToken(stream, window, tokenRecord)
+                token += 1
+              }
+            }
+            observed += 1
+          }
+        }
+        if (page % cfg.sampleEvery == 0)
+          checksum = fold(
+            checksum,
+            9,
+            page,
+            domain,
+            observed,
+            if (linkQuery(query) && observed > 0) input.linkHashAt(page, 0)
+            else input.lineHashAt(page, if (observed == 0) 0 else observed - 1),
+            currentStartPage
+          )
+        page += 1
+      }
+
+      RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
+        closeRecords
+      )
+
+      checksumSink = checksum
+      outputSink = outputCount
+      RunOutcome(checksum, outputCount)
+    }
+
+  def runRiftCheckedPageToken(query: String): RunOutcome =
+    RiftRegion.streaming { stream ?=>
+      runRiftCheckedPageTokenBody(query)
+    }
+
+  def runRiftCheckedSafeZonePageToken(query: String): RunOutcome =
+    RiftRegion.streamingSafeZone { stream ?=>
+      runRiftCheckedPageTokenBody(query)
+    }
+
   private def runMode(mode: String, query: String): RunOutcome =
-    mode match {
-      case "heap"          => runHeap(query)
-      case "safezone"      => runSafeZone(query)
-      case "rift-hp"       => runRiftTrusted(query, RiftRegion.HPZone)
-      case "rift-streaming" => runRiftTrusted(query, RiftRegion.Streaming)
-      case "rift-checked"  => runRiftChecked(query)
+    canonicalMode(mode) match {
+      case "heap"                  => runHeap(query)
+      case "safezone"              => runSafeZone(query)
+      case "rift-hp"               => runRiftTrusted(query, RiftRegion.HPZone)
+      case "rift-streaming"        => runRiftTrusted(query, RiftRegion.Streaming)
+      case "rift-checked"          => runRiftChecked(query)
+      case "rift-checked-page-token" => runRiftCheckedPageToken(query)
+      case "rift-checked-safezone-32k" | "rift-checked-rootfree-safezone-hp" =>
+        runRiftCheckedSafeZone(query)
+      case "rift-checked-safezone-page-token" =>
+        runRiftCheckedSafeZonePageToken(query)
       case other =>
         throw new IllegalArgumentException(
           s"unknown Common Crawl WET mode '$other'"
@@ -1108,8 +1502,7 @@ object CommonCrawlWetMatrixHelpers {
   def runBenchmark(mode: String, query: String): Unit = {
     val cfg = CommonCrawlWetConfig
     val input = inputData
-    val usesRift =
-      mode == "rift-hp" || mode == "rift-streaming" || mode == "rift-checked"
+    val usesRift = usesRiftRuntime(mode)
     val expected = runHeap(query)
 
     var warmup = 0
@@ -1236,9 +1629,12 @@ object CommonCrawlWetMatrixHelpers {
     val cfg = CommonCrawlWetConfig
     val input = inputData
     println(
-      s"CONFIG mode=$mode query=$query pages=${input.pages} configured_pages=${cfg.pages} pages_per_bucket=${cfg.pagesPerBucket} live_buckets=${cfg.liveBuckets} domain_space=${cfg.domainSpace} lines_per_page=${cfg.linesPerPage} tokens_per_line=${cfg.tokensPerLine} sample_every=${cfg.sampleEvery} warmups=${cfg.warmupRuns} runs=${cfg.benchmarkRuns} input=${input.label} input_path=${cfg.inputPath}"
+      s"CONFIG mode=$mode backend_mode=${canonicalMode(mode)} query=$query pages=${input.pages} configured_pages=${cfg.pages} pages_per_bucket=${cfg.pagesPerBucket} live_buckets=${cfg.liveBuckets} domain_space=${cfg.domainSpace} lines_per_page=${cfg.linesPerPage} tokens_per_line=${cfg.tokensPerLine} sample_every=${cfg.sampleEvery} warmups=${cfg.warmupRuns} runs=${cfg.benchmarkRuns} input=${input.label} input_path=${cfg.inputPath}"
     )
   }
+
+  def requiresRiftRuntime(mode: String): Boolean =
+    usesRiftRuntime(mode)
 }
 
 @main def CommonCrawlWetMatrix(
@@ -1249,7 +1645,7 @@ object CommonCrawlWetMatrixHelpers {
   CommonCrawlWetMatrixHelpers.validateQuery(query)
   CommonCrawlWetMatrixHelpers.printConfig(mode, query)
 
-  val usesRift = mode == "rift-hp" || mode == "rift-streaming"
+  val usesRift = CommonCrawlWetMatrixHelpers.requiresRiftRuntime(mode)
   if (usesRift) RiftRegion.init(0)
   try {
     CommonCrawlWetMatrixHelpers.runBenchmark(mode, query)

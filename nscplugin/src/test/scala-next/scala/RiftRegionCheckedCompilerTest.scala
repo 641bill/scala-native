@@ -1677,6 +1677,146 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def streamPageTokenAppendWindowStoresChildBucketRecords(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    val window = RiftRegion.streamPageTokenAppendWindow[Event](10)
+      |    var total = 0
+      |    def consume(
+      |        bucket: RiftRegion.StreamBucket^{stream},
+      |        cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+      |    ): Unit =
+      |      while cursor.hasNext do
+      |        total += cursor.next().value + bucket.startSeconds.toInt
+      |    val region =
+      |      RiftRegion.pageTokenAppendRegionFor(stream, window, 7L, 0L)(consume)
+      |    val event: Event^{stream} =
+      |      RiftRegion.alloc(new Event(41))(using region)
+      |    RiftRegion.appendPageToken(stream, window, event)
+      |    RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
+      |      consume
+      |    )
+      |    total + 1
+      |  }
+      |""".stripMargin)
+
+  @Test def streamPageTokenAppendWindowRejectsDirectHeapRecord(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    val window = RiftRegion.streamPageTokenAppendWindow[Event](10)
+      |    val event: Event^{stream} = new Event(41)
+      |    RiftRegion.appendPageToken(stream, window, event)
+      |  }
+      |""".stripMargin,
+      "Rift checked object buffer cannot store an unrooted heap object"
+    )
+
+  @Test def pageTokenMapFilterStoresChildBucketRecords(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    val operator = RiftRegion.pageTokenMapFilter[Event](10)
+      |    var total = 0
+      |    def consume(
+      |        bucket: RiftRegion.StreamBucket^{stream},
+      |        cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+      |    ): Unit =
+      |      while cursor.hasNext do
+      |        total += cursor.next().value + bucket.startSeconds.toInt
+      |    val region =
+      |      RiftRegion.pageTokenMapFilterRegionFor(stream, operator, 7L, 0L)(
+      |        consume
+      |      )
+      |    val event: Event^{stream} =
+      |      RiftRegion.alloc(new Event(41))(using region)
+      |    RiftRegion.emitPageTokenMapFilter(stream, operator, event)
+      |    RiftRegion.closeAllPageTokenMapFilterBucketsWithCursor(stream, operator)(
+      |      consume
+      |    )
+      |    total + 1
+      |  }
+      |""".stripMargin)
+
+  @Test def pageTokenMapFilterRejectsDirectHeapRecord(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    val operator = RiftRegion.pageTokenMapFilter[Event](10)
+      |    val event: Event^{stream} = new Event(41)
+      |    RiftRegion.emitPageTokenMapFilter(stream, operator, event)
+      |  }
+      |""".stripMargin,
+      "Rift checked object buffer cannot store an unrooted heap object"
+    )
+
+  @Test def streamChunkAppendWindowStoresChildBucketRecords(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    val window = RiftRegion.streamChunkAppendWindow[Event](10, 4)
+      |    var total = 0
+      |    def consume(
+      |        bucket: RiftRegion.StreamBucket^{stream},
+      |        cursor: RiftRegion.StreamChunkCursor[Event]^{stream}
+      |    ): Unit =
+      |      while cursor.hasNext do
+      |        total += cursor.next().value + bucket.startSeconds.toInt
+      |    val region =
+      |      RiftRegion.chunkAppendRegionFor(stream, window, 7L, 0L)(consume)
+      |    val event: Event^{stream} =
+      |      RiftRegion.alloc(new Event(41))(using region)
+      |    RiftRegion.appendChunkToken(stream, window, event)
+      |    RiftRegion.closeAllChunkAppendBucketsWithCursor(stream, window)(
+      |      consume
+      |    )
+      |    total + 1
+      |  }
+      |""".stripMargin)
+
+  @Test def streamChunkAppendWindowRejectsDirectHeapRecord(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    val window = RiftRegion.streamChunkAppendWindow[Event](10, 4)
+      |    val event: Event^{stream} = new Event(41)
+      |    RiftRegion.appendChunkToken(stream, window, event)
+      |  }
+      |""".stripMargin,
+      "Rift checked object buffer cannot store an unrooted heap object"
+    )
+
   @Test def streamAppendWindowPrependsChildBucketRecords(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking
@@ -1849,6 +1989,50 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked object buffer cannot store an unrooted heap object"
     )
 
+  @Test def epochFoldStoresChildBucketRecords(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val key: Int, val delta: Long, val value: Int)
+      |    extends RiftRegion.StreamAppendNode
+      |
+      |def ok(): Long =
+      |  RiftRegion.streaming { stream ?=>
+      |    val fold = RiftRegion.epochFold[Event](10, 16)
+      |    val region = RiftRegion.epochFoldRegionFor(stream, fold, 7L)
+      |    val event: Event^{stream} =
+      |      RiftRegion.alloc(new Event(3, 41L, 5))(using region)
+      |    val total =
+      |      RiftRegion.putEpochFold(stream, fold, event.key, event.delta, event)
+      |    var closed = 0L
+      |    RiftRegion.closeEpochFoldCurrentBucketAndClear(stream, fold) {
+      |      (_, cursor) =>
+      |        while cursor.hasNext do
+      |          closed += cursor.next().value
+      |    }
+      |    total + closed + RiftRegion.epochFoldKeyCount(stream, fold)
+      |  }
+      |""".stripMargin)
+
+  @Test def epochFoldRejectsDirectHeapRecord(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val key: Int, val delta: Long)
+      |    extends RiftRegion.StreamAppendNode
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    val fold = RiftRegion.epochFold[Event](10, 16)
+      |    val event: Event^{stream} = new Event(3, 41L)
+      |    RiftRegion.putEpochFold(stream, fold, event.key, event.delta, event)
+      |  }
+      |""".stripMargin,
+      "Rift checked object buffer cannot store an unrooted heap object"
+    )
+
   @Test def checkedMutableLinkedListBuilderCompiles(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking
@@ -1865,6 +2049,40 @@ class RiftRegionCheckedCompilerTest {
       |    head.value + head.next.value
       |  }
       |""".stripMargin)
+
+  @Test def regionListBuilderCompiles(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    final class Node(val value: Int) extends RiftRegion.RegionListNode
+      |    val list = RiftRegion.regionList[Node]()
+      |    val first: Node^{region} = RiftRegion.alloc(new Node(1))
+      |    val second: Node^{region} = RiftRegion.alloc(new Node(2))
+      |    RiftRegion.prependRegionList(region, list, first)
+      |    RiftRegion.prependRegionList(region, list, second)
+      |    val head = RiftRegion.regionListHead(region, list)
+      |    head.value + RiftRegion.regionListNext(region, head).value
+      |  }
+      |""".stripMargin)
+
+  @Test def regionListRejectsDirectHeapRecord(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    final class Node(val value: Int) extends RiftRegion.RegionListNode
+      |    val list = RiftRegion.regionList[Node]()
+      |    val node: Node^{region} = new Node(1)
+      |    RiftRegion.prependRegionList(region, list, node)
+      |  }
+      |""".stripMargin,
+      "Rift checked object buffer cannot store an unrooted heap object"
+    )
 
   @Test def mutableRegionHeadCannotBeRetaggedFromHeapObject(): Unit =
     assertDoesNotCompileWith("""
