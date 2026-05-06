@@ -50,6 +50,19 @@ object GithubArchiveRegionConfig {
     if (inputPathsRaw.isEmpty) Array.empty
     else inputPathsRaw.split(",").map(_.trim).filter(_.nonEmpty)
   val inputPath: String = inputPaths.mkString(",")
+  val inputMode: String = {
+    val raw = BenchmarkInputSupport.envString("GITHUB_ARCHIVE_INPUT_MODE")
+    if (raw.isEmpty) "preloaded" else raw
+  }
+  val fileBackedInput: Boolean =
+    inputMode match {
+      case "preloaded"   => false
+      case "file-backed" => true
+      case other =>
+        throw new IllegalArgumentException(
+          s"unknown GITHUB_ARCHIVE_INPUT_MODE '$other'; expected preloaded or file-backed"
+        )
+    }
 }
 
 object GithubArchiveRegionMatrixHelpers {
@@ -146,6 +159,16 @@ object GithubArchiveRegionMatrixHelpers {
   }
 
   private lazy val inputData: InputData = loadInput()
+
+  private abstract class EventConsumer {
+    def apply(
+        eventIndex: Int,
+        repoBucket: Int,
+        eventType: Int,
+        fields: Int,
+        hash: Long
+    ): Unit
+  }
 
   private object RuntimeSample {
     val zero: RuntimeSample =
@@ -342,8 +365,93 @@ object GithubArchiveRegionMatrixHelpers {
     if (count == 0) 1 else count
   }
 
+  private def countFileBackedInputRows(): Int = {
+    val cfg = GithubArchiveRegionConfig
+    if (cfg.inputPath.isEmpty)
+      throw new IllegalArgumentException(
+        "GITHUB_ARCHIVE_INPUT_MODE=file-backed requires GITHUB_ARCHIVE_INPUT or GITHUB_ARCHIVE_INPUTS"
+      )
+
+    var count = 0
+    var pathIndex = 0
+    while (pathIndex < cfg.inputPaths.length && count < cfg.events) {
+      val reader = BenchmarkInputSupport.openText(cfg.inputPaths(pathIndex))
+      try {
+        var line = reader.readLine()
+        while (line != null && count < cfg.events) {
+          if (line.nonEmpty) count += 1
+          line = reader.readLine()
+        }
+      } finally {
+        reader.close()
+      }
+      pathIndex += 1
+    }
+    count
+  }
+
+  private def foreachFileBackedEvent(consumer: EventConsumer^): Int = {
+    val cfg = GithubArchiveRegionConfig
+    var index = 0
+    var pathIndex = 0
+    while (pathIndex < cfg.inputPaths.length && index < cfg.events) {
+      val reader = BenchmarkInputSupport.openText(cfg.inputPaths(pathIndex))
+      try {
+        var line = reader.readLine()
+        while (line != null && index < cfg.events) {
+          if (line.nonEmpty) {
+            val eventTypeText = stringFieldFrom(line, "type", 0)
+            val repoIndex = line.indexOf("\"repo\"")
+            val actorIndex = line.indexOf("\"actor\"")
+            val repoText = stringFieldFrom(line, "name", repoIndex)
+            val actorText = stringFieldFrom(line, "login", actorIndex)
+            val repoHash =
+              if (repoText.nonEmpty) BenchmarkInputSupport.stableHash(repoText)
+              else BenchmarkInputSupport.stableHash(line)
+            val actorHash =
+              if (actorText.nonEmpty) BenchmarkInputSupport.stableHash(actorText)
+              else 0
+            val repoBucket =
+              BenchmarkInputSupport.positiveModulo(repoHash, cfg.repoBuckets)
+            val eventType = eventTypeId(eventTypeText)
+            val fields = countJsonFields(line, cfg.fieldLimit)
+            val hash =
+              BenchmarkInputSupport.stableHash(line).toLong ^
+                (actorHash.toLong << 17) ^
+                (eventType.toLong * 1099511628211L)
+            consumer(index, repoBucket, eventType, fields, hash)
+            index += 1
+          }
+          line = reader.readLine()
+        }
+      } finally {
+        reader.close()
+      }
+      pathIndex += 1
+    }
+    index
+  }
+
   private def loadInput(): InputData = {
     val cfg = GithubArchiveRegionConfig
+    if (cfg.fileBackedInput) {
+      val rows = countFileBackedInputRows()
+      if (rows == 0)
+        throw new IllegalArgumentException(
+          s"GH Archive input '${cfg.inputPath}' did not contain usable rows"
+        )
+      return new InputData(
+        if (cfg.inputPaths.length == 1) "real-gharchive-file-backed"
+        else s"real-gharchive-file-backed-${cfg.inputPaths.length}files",
+        rows,
+        cfg.inputPaths.length,
+        null,
+        null,
+        null,
+        null
+      )
+    }
+
     if (cfg.inputPath.isEmpty)
       return new InputData(
         "generated-gharchive-shaped",
@@ -570,14 +678,15 @@ object GithubArchiveRegionMatrixHelpers {
         bucket
       }
 
-    var i = 0
-    while (i < input.events) {
+    def processEvent(
+        i: Int,
+        repo: Int,
+        eventType: Int,
+        fields: Int,
+        hash: Long
+    ): Unit = {
       val start = bucketStart(i)
       val bucket = bucketFor(start)
-      val repo = input.repoAt(i)
-      val eventType = input.eventTypeAt(i)
-      val fields = input.fieldCountAt(i)
-      val hash = input.hashAt(i, eventType)
       appendRecord(bucket, new HeapRecord(10, i, repo, eventType, fields, hash, null))
       if (fieldQuery(query)) {
         var field = 0
@@ -599,7 +708,29 @@ object GithubArchiveRegionMatrixHelpers {
       }
       if (i % cfg.sampleEvery == 0)
         checksum = fold(checksum, 99, i, repo, eventType, fields, hash, start)
-      i += 1
+    }
+
+    if (cfg.fileBackedInput) {
+      foreachFileBackedEvent(new EventConsumer {
+        def apply(
+            i: Int,
+            repo: Int,
+            eventType: Int,
+            fields: Int,
+            hash: Long
+        ): Unit =
+          processEvent(i, repo, eventType, fields, hash)
+      })
+    } else {
+      var i = 0
+      while (i < input.events) {
+        val repo = input.repoAt(i)
+        val eventType = input.eventTypeAt(i)
+        val fields = input.fieldCountAt(i)
+        val hash = input.hashAt(i, eventType)
+        processEvent(i, repo, eventType, fields, hash)
+        i += 1
+      }
     }
 
     closeExpired(Long.MaxValue)
@@ -610,6 +741,9 @@ object GithubArchiveRegionMatrixHelpers {
 
   private def runExpected(query: String): RunOutcome = {
     val cfg = GithubArchiveRegionConfig
+    if (cfg.fileBackedInput)
+      return runHeap(query)
+
     val input = inputData
     var checksum = 0L
     var outputCount = 0L
@@ -804,47 +938,70 @@ object GithubArchiveRegionMatrixHelpers {
         bucket
       }
 
-    var i = 0
-    try {
-      while (i < input.events) {
-        val start = bucketStart(i)
-        val bucket = bucketFor(start)
-        val repo = input.repoAt(i)
-        val eventType = input.eventTypeAt(i)
-        val fields = input.fieldCountAt(i)
-        val hash = input.hashAt(i, eventType)
-        appendRecord(
-          bucket,
-          SafeZoneAllocator
-            .allocate(bucket.zone, new SafeRecord(10, i, repo, eventType, fields, hash, null))
-            .asInstanceOf[SafeRecord]
-        )
-        if (fieldQuery(query)) {
-          var field = 0
-          while (field < fields) {
-            appendRecord(
-              bucket,
-              SafeZoneAllocator
-                .allocate(
-                  bucket.zone,
-                  new SafeRecord(
-                    20 + (field & 3),
-                    i,
-                    repo,
-                    eventType,
-                    field,
-                    hash ^ (field.toLong * 1315423911L),
-                    null
-                  )
+    def processEvent(
+        i: Int,
+        repo: Int,
+        eventType: Int,
+        fields: Int,
+        hash: Long
+    ): Unit = {
+      val start = bucketStart(i)
+      val bucket = bucketFor(start)
+      appendRecord(
+        bucket,
+        SafeZoneAllocator
+          .allocate(bucket.zone, new SafeRecord(10, i, repo, eventType, fields, hash, null))
+          .asInstanceOf[SafeRecord]
+      )
+      if (fieldQuery(query)) {
+        var field = 0
+        while (field < fields) {
+          appendRecord(
+            bucket,
+            SafeZoneAllocator
+              .allocate(
+                bucket.zone,
+                new SafeRecord(
+                  20 + (field & 3),
+                  i,
+                  repo,
+                  eventType,
+                  field,
+                  hash ^ (field.toLong * 1315423911L),
+                  null
                 )
-                .asInstanceOf[SafeRecord]
-            )
-            field += 1
-          }
+              )
+              .asInstanceOf[SafeRecord]
+          )
+          field += 1
         }
-        if (i % cfg.sampleEvery == 0)
-          checksum = fold(checksum, 99, i, repo, eventType, fields, hash, start)
-        i += 1
+      }
+      if (i % cfg.sampleEvery == 0)
+        checksum = fold(checksum, 99, i, repo, eventType, fields, hash, start)
+    }
+
+    try {
+      if (cfg.fileBackedInput) {
+        foreachFileBackedEvent(new EventConsumer {
+          def apply(
+              i: Int,
+              repo: Int,
+              eventType: Int,
+              fields: Int,
+              hash: Long
+          ): Unit =
+            processEvent(i, repo, eventType, fields, hash)
+        })
+      } else {
+        var i = 0
+        while (i < input.events) {
+          val repo = input.repoAt(i)
+          val eventType = input.eventTypeAt(i)
+          val fields = input.fieldCountAt(i)
+          val hash = input.hashAt(i, eventType)
+          processEvent(i, repo, eventType, fields, hash)
+          i += 1
+          }
       }
       closeExpired(Long.MaxValue)
     } finally {
@@ -949,43 +1106,66 @@ object GithubArchiveRegionMatrixHelpers {
         bucket
       }
 
-    var i = 0
-    try {
-      while (i < input.events) {
-        val start = bucketStart(i)
-        val bucket = bucketFor(start)
-        val region = bucket.region
-        val repo = input.repoAt(i)
-        val eventType = input.eventTypeAt(i)
-        val fields = input.fieldCountAt(i)
-        val hash = input.hashAt(i, eventType)
-        appendRecord(
-          bucket,
-          region.alloc(new TrustedRecord(10, i, repo, eventType, fields, hash, null))
-        )
-        if (fieldQuery(query)) {
-          var field = 0
-          while (field < fields) {
-            appendRecord(
-              bucket,
-              region.alloc(
-                new TrustedRecord(
-                  20 + (field & 3),
-                  i,
-                  repo,
-                  eventType,
-                  field,
-                  hash ^ (field.toLong * 1315423911L),
-                  null
-                )
+    def processEvent(
+        i: Int,
+        repo: Int,
+        eventType: Int,
+        fields: Int,
+        hash: Long
+    ): Unit = {
+      val start = bucketStart(i)
+      val bucket = bucketFor(start)
+      val region = bucket.region
+      appendRecord(
+        bucket,
+        region.alloc(new TrustedRecord(10, i, repo, eventType, fields, hash, null))
+      )
+      if (fieldQuery(query)) {
+        var field = 0
+        while (field < fields) {
+          appendRecord(
+            bucket,
+            region.alloc(
+              new TrustedRecord(
+                20 + (field & 3),
+                i,
+                repo,
+                eventType,
+                field,
+                hash ^ (field.toLong * 1315423911L),
+                null
               )
             )
-            field += 1
-          }
+          )
+          field += 1
         }
-        if (i % cfg.sampleEvery == 0)
-          checksum = fold(checksum, 99, i, repo, eventType, fields, hash, start)
-        i += 1
+      }
+      if (i % cfg.sampleEvery == 0)
+        checksum = fold(checksum, 99, i, repo, eventType, fields, hash, start)
+    }
+
+    try {
+      if (cfg.fileBackedInput) {
+        foreachFileBackedEvent(new EventConsumer {
+          def apply(
+              i: Int,
+              repo: Int,
+              eventType: Int,
+              fields: Int,
+              hash: Long
+          ): Unit =
+            processEvent(i, repo, eventType, fields, hash)
+        })
+      } else {
+        var i = 0
+        while (i < input.events) {
+          val repo = input.repoAt(i)
+          val eventType = input.eventTypeAt(i)
+          val fields = input.fieldCountAt(i)
+          val hash = input.hashAt(i, eventType)
+          processEvent(i, repo, eventType, fields, hash)
+          i += 1
+          }
       }
       closeExpired(Long.MaxValue)
     } finally {
@@ -1070,8 +1250,14 @@ object GithubArchiveRegionMatrixHelpers {
 
     var currentStartEvent = Long.MinValue
     var currentRegion: RiftRegion.StreamingRegion^{stream} = null
-    var i = 0
-    while (i < input.events) {
+
+    def processEvent(
+        i: Int,
+        repo: Int,
+        eventType: Int,
+        fields: Int,
+        hash: Long
+    ): Unit = {
       val start = bucketStart(i)
       if (start != currentStartEvent) {
         currentStartEvent = start
@@ -1083,10 +1269,6 @@ object GithubArchiveRegionMatrixHelpers {
             closeCutoff(start)
           )(closeRecords)
       }
-      val repo = input.repoAt(i)
-      val eventType = input.eventTypeAt(i)
-      val fields = input.fieldCountAt(i)
-      val hash = input.hashAt(i, eventType)
       val eventRecord: CheckedRecord^{stream} =
         RiftRegion.alloc(
           new CheckedRecord(10, i, repo, eventType, fields, hash)
@@ -1112,7 +1294,29 @@ object GithubArchiveRegionMatrixHelpers {
       }
       if (i % cfg.sampleEvery == 0)
         checksum = fold(checksum, 99, i, repo, eventType, fields, hash, start)
-      i += 1
+    }
+
+    if (cfg.fileBackedInput) {
+      foreachFileBackedEvent(new EventConsumer {
+        def apply(
+            i: Int,
+            repo: Int,
+            eventType: Int,
+            fields: Int,
+            hash: Long
+        ): Unit =
+          processEvent(i, repo, eventType, fields, hash)
+      })
+    } else {
+      var i = 0
+      while (i < input.events) {
+        val repo = input.repoAt(i)
+        val eventType = input.eventTypeAt(i)
+        val fields = input.fieldCountAt(i)
+        val hash = input.hashAt(i, eventType)
+        processEvent(i, repo, eventType, fields, hash)
+        i += 1
+      }
     }
 
     RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
@@ -1253,6 +1457,7 @@ object GithubArchiveRegionMatrixHelpers {
     println(
       f"RESULT name=github-archive-$query-$canonical " +
         f"query=$query mode=$canonical input=${input.label} " +
+        f"input_mode=${cfg.inputMode} " +
         f"loaded_events=${input.events}%d " +
         f"input_files=${input.inputFiles}%d " +
         f"median_ms=$medianElapsed%.3f " +
@@ -1279,7 +1484,8 @@ object GithubArchiveRegionMatrixHelpers {
         s"events_per_bucket=${cfg.eventsPerBucket} live_buckets=${cfg.liveBuckets} " +
         s"repo_buckets=${cfg.repoBuckets} field_limit=${cfg.fieldLimit} " +
         s"sample_every=${cfg.sampleEvery} warmups=${cfg.warmupRuns} " +
-        s"runs=${cfg.benchmarkRuns} input=${input.label} input_path=${cfg.inputPath}"
+        s"runs=${cfg.benchmarkRuns} input=${input.label} input_mode=${cfg.inputMode} " +
+        s"input_path=${cfg.inputPath}"
     )
   }
 

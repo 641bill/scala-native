@@ -1,11 +1,14 @@
 # GH Archive Region Matrix
 
 Date: 2026-05-03
+Last updated: 2026-05-06 22:50 CEST
 
-Status: first real NDJSON/log-event stream matrix added and smoke-tested.
-This is real preloaded input evidence using GH Archive hourly GitHub events,
-not a generated stream. The benchmark excludes network/decompression timing
-from the timed loop by preloading event metadata before warmups.
+Status: first real NDJSON/log-event stream matrix added, with both preloaded
+and first file-backed q1 rows. The preloaded rows time object allocation/query
+processing after extracting primitive metadata before warmups. The
+`GITHUB_ARCHIVE_INPUT_MODE=file-backed` rows reread and parse the gzip JSON
+lines inside every timed run, so parser/string/decompression allocation is
+included.
 
 ## Input
 
@@ -25,9 +28,12 @@ Local input:
 
 `/Users/siyaoliu/rift/cache/benchmark-data/gharchive/2026-04-01-0.json.gz`
 
-GH Archive publishes hourly gzip-compressed JSON-lines event files. The matrix
-extracts event type, repo, actor, field-count, and a stable line hash into
-primitive preloaded arrays, then times object allocation/query processing.
+GH Archive publishes hourly gzip-compressed JSON-lines event files. By default
+the matrix extracts event type, repo, actor, field-count, and a stable line
+hash into primitive preloaded arrays, then times object allocation/query
+processing. With `GITHUB_ARCHIVE_INPUT_MODE=file-backed`, the same logical
+query rereads the gzip file and parses the JSON line fields during every timed
+run.
 
 ## Queries
 
@@ -122,6 +128,34 @@ GITHUB_ARCHIVE_WARMUPS=1 \
 GITHUB_ARCHIVE_QUERIES="q1-fields" \
 GITHUB_ARCHIVE_MODES="rift-checked-safezone-page-token" \
 GITHUB_ARCHIVE_OUTPUT_DIR=/Users/siyaoliu/rift/cache/github-archive-fullhour-checked-safezone-fix-2026-05-03 \
+zsh sandbox/run_github_archive_region_matrix.sh
+```
+
+File-backed q1 smoke and 100k row:
+
+```sh
+GITHUB_ARCHIVE_BUILD=1 \
+GITHUB_ARCHIVE_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/gharchive/2026-04-01-0.json.gz \
+GITHUB_ARCHIVE_INPUT_MODE=file-backed \
+GITHUB_ARCHIVE_EVENTS=20000 \
+GITHUB_ARCHIVE_BENCHMARK_RUNS=1 \
+GITHUB_ARCHIVE_WARMUPS=0 \
+GITHUB_ARCHIVE_QUERIES="q1-fields" \
+GITHUB_ARCHIVE_MODES="heap-immix rift-checked-safezone-page-token" \
+GITHUB_ARCHIVE_OUTPUT_DIR=/Users/siyaoliu/rift/cache/github-archive-file-backed-smoke-2026-05-06 \
+zsh sandbox/run_github_archive_region_matrix.sh
+```
+
+```sh
+GITHUB_ARCHIVE_BUILD=0 \
+GITHUB_ARCHIVE_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/gharchive/2026-04-01-0.json.gz \
+GITHUB_ARCHIVE_INPUT_MODE=file-backed \
+GITHUB_ARCHIVE_EVENTS=100000 \
+GITHUB_ARCHIVE_BENCHMARK_RUNS=3 \
+GITHUB_ARCHIVE_WARMUPS=1 \
+GITHUB_ARCHIVE_QUERIES="q1-fields" \
+GITHUB_ARCHIVE_MODES="heap-immix safezone-improved-32k rift-trusted-streaming rift-checked-safezone-page-token" \
+GITHUB_ARCHIVE_OUTPUT_DIR=/Users/siyaoliu/rift/cache/github-archive-file-backed-100k-q1-rss-2026-05-06 \
 zsh sandbox/run_github_archive_region_matrix.sh
 ```
 
@@ -309,6 +343,26 @@ Interpretation: with an unconstrained heap, the all-eight-hour q1 row is a
 high-RSS heap-throughput win, not a Rift throughput win. It is still useful
 because it shows how Immix can avoid collection by retaining a multi-GB heap.
 
+## File-Backed q1 Result
+
+The first file-backed run includes gzip read/decompression and JSON string
+field extraction in every timed run. It uses one real GH Archive hourly file,
+100k events, and materializes 1.3M event/field records. All checksums matched.
+
+| Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes | Output count |
+|---|---:|---:|---:|---:|---:|---:|
+| `heap-immix` | `3999.933` | `158.149` | `160.001` | 3 | `1218805760` | `1300000` |
+| `safezone-improved-32k` | `3924.979` | `107.125` | `111.397` | 3 | `674807808` | `1300000` |
+| `rift-trusted-streaming` | `3908.972` | `73.055` | `73.953` | 3 | `495943680` | `1300000` |
+| `rift-checked-safezone-page-token` | `3937.394` | `106.248` | `106.904` | 3 | `674791424` | `1300000` |
+
+Interpretation: file-backed q1 is a real-data RSS win and modest throughput
+win for region modes, but not yet a decisive checked case study. The parser and
+string-extraction work still allocate on the heap, so checked scoped
+page-token removes event/field record tracing but not all file-backed GC.
+Trusted streaming has the best first row because it combines region event
+records with lower region/backend overhead.
+
 ## Current Decision
 
 GH Archive remains in the real-input ladder, but its role is narrower than the
@@ -323,8 +377,8 @@ first 100k row suggested:
 
 Next useful GH Archive work:
 
-1. Add a file-backed timed variant to include parse/string allocation, because
-   the current rows preload primitive metadata before timing.
+1. Add q2 file-backed rows and heap caps for q1/q2 so parser-heavy GC and
+   memory-budget effects are separated.
 2. Add a larger multi-hour/day run only if the machine can tolerate multi-GB
    heap RSS, and report heap cap/RSS explicitly.
 3. Add latency/tail metrics or per-run elapsed tables, since median elapsed
