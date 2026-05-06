@@ -1,7 +1,7 @@
 # GH Archive Region Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-06 23:08 CEST
+Last updated: 2026-05-06 23:24 CEST
 
 Status: first real NDJSON/log-event stream matrix added, with both preloaded
 and first file-backed q1 rows. The preloaded rows time object allocation/query
@@ -159,6 +159,22 @@ GITHUB_ARCHIVE_QUERIES="q2-repo-window" \
 GITHUB_ARCHIVE_MODES="heap-immix safezone-improved-32k rift-trusted-streaming rift-checked-safezone-page-token" \
 GITHUB_ARCHIVE_HEAP_CAPS="uncapped 2G 1400M 1G" \
 GITHUB_ARCHIVE_OUTPUT_DIR=/Users/siyaoliu/rift/cache/github-archive-file-backed-100k-q2-caps-2026-05-06 \
+zsh sandbox/run_github_archive_region_matrix.sh
+```
+
+File-backed q1 heap-cap row:
+
+```sh
+GITHUB_ARCHIVE_BUILD=0 \
+GITHUB_ARCHIVE_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/gharchive/2026-04-01-0.json.gz \
+GITHUB_ARCHIVE_INPUT_MODE=file-backed \
+GITHUB_ARCHIVE_EVENTS=100000 \
+GITHUB_ARCHIVE_BENCHMARK_RUNS=3 \
+GITHUB_ARCHIVE_WARMUPS=1 \
+GITHUB_ARCHIVE_QUERIES="q1-fields" \
+GITHUB_ARCHIVE_MODES="heap-immix safezone-improved-32k rift-trusted-streaming rift-checked-safezone-page-token" \
+GITHUB_ARCHIVE_HEAP_CAPS="uncapped 2G 1400M 1G" \
+GITHUB_ARCHIVE_OUTPUT_DIR=/Users/siyaoliu/rift/cache/github-archive-file-backed-100k-q1-caps-2026-05-06 \
 zsh sandbox/run_github_archive_region_matrix.sh
 ```
 
@@ -379,6 +395,25 @@ page-token removes event/field record tracing but not all file-backed GC.
 Trusted streaming has the best first row because it combines region event
 records with lower region/backend overhead.
 
+Heap-cap rerun:
+
+| Mode | Heap cap | Status | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes |
+|---|---|---|---:|---:|---:|---:|---:|
+| `heap-immix` | uncapped | ok | `4014.909` | `157.495` | `162.940` | 3 | `1218822144` |
+| `heap-immix` | `2G` | ok | `4005.975` | `149.868` | `151.631` | 3 | `1168179200` |
+| `heap-immix` | `1400M` | ok | `4093.234` | `166.523` | `201.304` | 3 | `1168162816` |
+| `heap-immix` | `1G` | failed: signal 11 | n/a | n/a | n/a | n/a | `1076805632` |
+| `safezone-improved-32k` | uncapped | ok | `4000.812` | `105.804` | `116.457` | 3 | `673808384` |
+| `rift-trusted-streaming` | uncapped | ok | `3995.238` | `82.368` | `85.641` | 3 | `673611776` |
+| `rift-checked-safezone-page-token` | uncapped | ok | `4023.883` | `113.334` | `115.980` | 3 | `674742272` |
+
+Interpretation: file-backed q1 is mostly an RSS/fixed-memory win. Trusted
+Streaming is slightly faster than uncapped heap and uses much less RSS, but
+checked SafeZone-backed page-token is a near tie/slight elapsed loss while
+cutting RSS by about `45%`. The heap `1G` cap fails, and the `1400M` cap shows
+a larger max-GC tail (`201.304 ms`). Parser/string allocation still causes
+timed GC in every successful row.
+
 ## File-Backed q2 Result
 
 The first file-backed q2 run uses the same 100k real events and 1.3M
@@ -426,9 +461,9 @@ first 100k row suggested:
 
 Next useful GH Archive work:
 
-1. Add q1 file-backed heap caps so parser-heavy GC and memory-budget effects
-   are separated on the best field-record shape.
-2. Add a larger multi-hour/day run only if the machine can tolerate multi-GB
+1. Add a larger multi-hour/day file-backed run only if the machine can tolerate multi-GB
    heap RSS, and report heap cap/RSS explicitly.
+2. Add parser/string allocation attribution or a parser-scratch prototype,
+   because current file-backed rows still allocate parser strings on the heap.
 3. Add latency/tail metrics or per-run elapsed tables, since median elapsed
    hides the GC outlier that regions remove.
