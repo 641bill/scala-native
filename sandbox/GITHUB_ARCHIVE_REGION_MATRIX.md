@@ -1,7 +1,7 @@
 # GH Archive Region Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-06 22:50 CEST
+Last updated: 2026-05-06 23:08 CEST
 
 Status: first real NDJSON/log-event stream matrix added, with both preloaded
 and first file-backed q1 rows. The preloaded rows time object allocation/query
@@ -143,6 +143,22 @@ GITHUB_ARCHIVE_WARMUPS=0 \
 GITHUB_ARCHIVE_QUERIES="q1-fields" \
 GITHUB_ARCHIVE_MODES="heap-immix rift-checked-safezone-page-token" \
 GITHUB_ARCHIVE_OUTPUT_DIR=/Users/siyaoliu/rift/cache/github-archive-file-backed-smoke-2026-05-06 \
+zsh sandbox/run_github_archive_region_matrix.sh
+```
+
+File-backed q2 heap-cap row:
+
+```sh
+GITHUB_ARCHIVE_BUILD=0 \
+GITHUB_ARCHIVE_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/gharchive/2026-04-01-0.json.gz \
+GITHUB_ARCHIVE_INPUT_MODE=file-backed \
+GITHUB_ARCHIVE_EVENTS=100000 \
+GITHUB_ARCHIVE_BENCHMARK_RUNS=3 \
+GITHUB_ARCHIVE_WARMUPS=1 \
+GITHUB_ARCHIVE_QUERIES="q2-repo-window" \
+GITHUB_ARCHIVE_MODES="heap-immix safezone-improved-32k rift-trusted-streaming rift-checked-safezone-page-token" \
+GITHUB_ARCHIVE_HEAP_CAPS="uncapped 2G 1400M 1G" \
+GITHUB_ARCHIVE_OUTPUT_DIR=/Users/siyaoliu/rift/cache/github-archive-file-backed-100k-q2-caps-2026-05-06 \
 zsh sandbox/run_github_archive_region_matrix.sh
 ```
 
@@ -363,6 +379,39 @@ page-token removes event/field record tracing but not all file-backed GC.
 Trusted streaming has the best first row because it combines region event
 records with lower region/backend overhead.
 
+## File-Backed q2 Result
+
+The first file-backed q2 run uses the same 100k real events and 1.3M
+event/field records, then aggregates by repo bucket on bucket close. All
+successful rows matched checksums and output count `15877`.
+
+| Mode | Heap cap | Status | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes |
+|---|---|---|---:|---:|---:|---:|---:|
+| `heap-immix` | uncapped | ok | `3995.632` | `158.277` | `161.727` | 3 | `1218428928` |
+| `heap-immix` | `2G` | ok | `4066.670` | `167.292` | `170.908` | 3 | `1218428928` |
+| `heap-immix` | `1400M` | ok | `3983.441` | `157.255` | `161.990` | 3 | `1218805760` |
+| `heap-immix` | `1G` | failed: signal 11 | n/a | n/a | n/a | n/a | `1077067776` |
+| `safezone-improved-32k` | uncapped | ok | `3934.094` | `105.445` | `107.688` | 3 | `672088064` |
+| `rift-trusted-streaming` | uncapped | ok | `3906.291` | `81.402` | `81.851` | 3 | `673644544` |
+| `rift-checked-safezone-page-token` | uncapped | ok | `3921.127` | `106.352` | `111.654` | 3 | `673824768` |
+
+Per-run tail notes:
+
+- uncapped heap: elapsed `3995.632`, `4012.669`, `3985.808 ms`; GC
+  `157.131`, `161.727`, `158.277 ms`.
+- trusted Streaming: elapsed `3907.191`, `3893.933`, `3906.291 ms`; GC
+  `63.343`, `81.402`, `81.851 ms`.
+- checked SafeZone-backed page-token: elapsed `3899.822`, `3921.127`,
+  `3932.747 ms`; GC `81.327`, `106.352`, `111.654 ms`.
+
+Interpretation: once parsing is timed, q2 is no longer simply
+aggregation-CPU-bound. Region rows modestly beat uncapped heap and cut RSS by
+about `45%`, but they do not eliminate GC because gzip/JSON/string parsing
+still allocates on the heap. The `1G` heap cap fails before a result row, so
+this is also fixed-memory evidence. The next question is whether q1 shows the
+same cap behavior under file-backed timing and whether parser/string allocation
+can be isolated or moved into reusable region scratch APIs.
+
 ## Current Decision
 
 GH Archive remains in the real-input ladder, but its role is narrower than the
@@ -377,8 +426,8 @@ first 100k row suggested:
 
 Next useful GH Archive work:
 
-1. Add q2 file-backed rows and heap caps for q1/q2 so parser-heavy GC and
-   memory-budget effects are separated.
+1. Add q1 file-backed heap caps so parser-heavy GC and memory-budget effects
+   are separated on the best field-record shape.
 2. Add a larger multi-hour/day run only if the machine can tolerate multi-GB
    heap RSS, and report heap cap/RSS explicitly.
 3. Add latency/tail metrics or per-run elapsed tables, since median elapsed
