@@ -637,7 +637,8 @@ Interpretation:
 - Region rows remove timed GC entirely. Heap collects in 2/3 timed runs for
   both q1 and q2.
 - This is a better GH Archive story than the legacy string-parser rows, but it
-  remains a modest real-input win rather than a huge Broom/Yak-style win.
+  remains a modest real-input win rather than a GC-heavy case study. Heap GC is
+  visible but small relative to total elapsed time.
 
 ## Current Decision
 
@@ -647,7 +648,8 @@ first generated/preloaded row suggested:
 - It is promising for memory-budget and GC-tail experiments.
 - With the legacy string parser it was mostly an RSS/fixed-memory row because
   parser allocation dominated. With the byte-slice parser, the 200k/two-hour
-  file-backed q1/q2 rows become modest real-input throughput/RSS/tail wins.
+  file-backed q1/q2 rows become modest real-input throughput/RSS/tail wins, not
+  GC-heavy rows.
 - q1 is the useful shape: many ordinary field/event records with bucket
   lifetimes.
 - q2 is no longer only a repo-aggregation CPU ceiling once parser allocation is
