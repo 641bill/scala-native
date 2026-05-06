@@ -8,7 +8,11 @@ output_dir=${RIOTBENCH_OUTPUT_DIR:-"/tmp/riotbench-region-matrix"}
 summary=${RIOTBENCH_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${RIOTBENCH_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${RIOTBENCH_MODES:-"heap safezone-current safezone-improved unsafezone-hp rift-hp rift-streaming"}})
+include_controls=${RIFT_BENCH_INCLUDE_CONTROLS:-${RIFT_EVAL_INCLUDE_CONTROLS:-0}}
+modes=(${(z)${RIOTBENCH_MODES:-"heap safezone-improved"}})
+if [[ -z "${RIOTBENCH_MODES:-}" && ( "${include_controls}" == "1" || "${include_controls}" == "true" || "${include_controls}" == "yes" ) ]]; then
+  modes+=(safezone-current unsafezone-hp rift-hp rift-streaming)
+fi
 queries=(${(z)${RIOTBENCH_QUERIES:-"q0-parse q1-clean-annotate q2-window-stats"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1

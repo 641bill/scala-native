@@ -93,6 +93,7 @@ trait NirGenExpr(using Context) {
     object AllocationZoneInstance extends Property.Key[nir.Val]
 
     private val riftRegionAllocatedSyms = mutable.Set.empty[Symbol]
+    private val riftRegionCapturedHeapSyms = mutable.Set.empty[Symbol]
 
     private def isCheckedRiftRegionType(tpe: Type): Boolean = {
       val checkedRegionNames = Set(
@@ -154,6 +155,9 @@ trait NirGenExpr(using Context) {
           name == "streamWindowTableRank" ||
           name == "streamWindowTableRankLexicographic" ||
           name == "streamAppendWindow" ||
+          name == "childStreaming" ||
+          name == "childWindow" ||
+          name == "childBucket" ||
           name == "pageTokenMapFilter" ||
           name == "epochBuffer" ||
           name == "transactionRegion" ||
@@ -255,6 +259,76 @@ trait NirGenExpr(using Context) {
         isRiftAllocationTree(tree) ||
         isKnownRiftRegionValue(tree)
 
+    private def typeMentionsRiftCapture(tpe: Type): Boolean = {
+      def mentions(show: String): Boolean =
+        show.contains("^{")
+      mentions(tpe.show) || mentions(tpe.widenDealias.show)
+    }
+
+    private def treeTypeMentionsRiftCapture(tree: Tree): Boolean =
+      typeMentionsRiftCapture(tree.tpe) ||
+        tree
+          .getAttachment(NonErasedType)
+          .exists(typeMentionsRiftCapture)
+
+    private def isRiftRegionCapturedHeapTree(tree: Tree): Boolean =
+      tree match {
+        case Apply(Select(New(_), nme.CONSTRUCTOR), args) =>
+          args.exists(treeCarriesRiftCapture)
+        case Apply(fun, args) if fun.symbol == defn.newArrayMethod =>
+          args.exists(treeCarriesRiftCapture)
+        case Apply(fun, args) =>
+          riftRegionCapturedHeapSyms.contains(fun.symbol)
+        case Closure(env, fun, _) =>
+          env.exists(treeCarriesRiftCapture) ||
+            treeCarriesRiftCapture(fun) ||
+            treeTypeMentionsRiftCapture(tree)
+        case TypeApply(Select(qualifier, nme.asInstanceOf_), _) =>
+          treeCarriesRiftCapture(qualifier)
+        case Typed(expr, _) =>
+          treeCarriesRiftCapture(expr)
+        case Inlined(_, _, expr) =>
+          treeCarriesRiftCapture(expr)
+        case Block(_, expr) =>
+          treeCarriesRiftCapture(expr)
+        case _ =>
+          riftRegionCapturedHeapSyms.contains(tree.symbol)
+      }
+
+    private def treeCarriesRiftCapture(tree: Tree): Boolean =
+      isRiftAllocationTree(tree) ||
+        isKnownRiftRegionValue(tree) ||
+        isRiftRegionCapturedHeapTree(tree)
+
+    private def isInsideRiftRegionImplementation: Boolean =
+      curClassSym.get.fullName.toString.startsWith(
+        "scala.scalanative.memory.RiftRegion"
+      )
+
+    private def isInsidePlatformLibraryImplementation: Boolean = {
+      val name = curClassSym.get.fullName.toString
+      (name.startsWith("java.") ||
+        name.startsWith("scala.") ||
+        name.startsWith("scala.scalanative.")) &&
+      !name.startsWith("scala.scalanative.memory.RiftRegion")
+    }
+
+    private def checkHeapDoesNotRetainRiftCapture(
+        target: Tree,
+        value: Tree
+    ): Unit =
+      if !isInsideRiftRegionImplementation &&
+        !isInsidePlatformLibraryImplementation &&
+        !curMethodSym.get.isClassConstructor &&
+        !isKnownRiftRegionValue(target) &&
+        !isRiftRegionCapturedHeapTree(target) &&
+        treeCarriesRiftCapture(value)
+      then
+        report.error(
+          "Rift checked heap state cannot retain a region-captured value.",
+          value.srcPos
+        )
+
     private def checkRiftConstructorArgs(args: List[Tree]): Unit =
       args.foreach { arg =>
         if !isAllowedRiftConstructorArg(arg) then
@@ -271,6 +345,8 @@ trait NirGenExpr(using Context) {
           "Rift checked region array store cannot store an unrooted heap object; use RiftRegion.root(value) for heap metadata.",
           value.srcPos
         )
+      else if !isKnownRiftRegionValue(array) && treeCarriesRiftCapture(value)
+      then riftRegionCapturedHeapSyms += array.symbol
 
     private def checkRiftObjectBufferAppend(value: Tree): Unit =
       if !isAllowedRiftConstructorArg(value)
@@ -290,6 +366,17 @@ trait NirGenExpr(using Context) {
         case TypeApply(fun, _) => calledSymbol(fun)
         case Select(_, _)      => tree.symbol
         case _                 => tree.symbol
+      }
+
+    private def isHeapSetterApply(tree: Tree): Boolean = {
+      val sym = calledSymbol(tree)
+      sym.name.toString.endsWith("_=")
+    }
+
+    private def isSuperSelect(tree: Tree): Boolean =
+      tree match {
+        case Select(Super(_, _), _) => true
+        case _                      => false
       }
 
     private def isRuntimeRiftAllocate(tree: Tree): Boolean =
@@ -318,6 +405,8 @@ trait NirGenExpr(using Context) {
           isRuntimeRiftAllocateInCheckedRegion(app) ||
             isRuntimeSafeZoneAllocateInCheckedRift(app) ||
             isRiftObjectBufferFactory(app)
+        case sel: Select =>
+          isRiftObjectBufferFactory(sel)
         case TypeApply(Select(qualifier, nme.asInstanceOf_), _) =>
           isRiftAllocationTree(qualifier)
         case Typed(expr, _)      => isRiftAllocationTree(expr)
@@ -330,7 +419,8 @@ trait NirGenExpr(using Context) {
       tree.symbol.is(ParamAccessor) && !tree.symbol.is(Mutable)
 
     private def isKnownRiftRegionValue(tree: Tree): Boolean =
-      tree match {
+      if isPrimitiveOrNull(tree) then false
+      else tree match {
         case Apply(select @ Select(qualifier, _), Nil)
             if isStableConstructorFieldSelect(select) =>
           isKnownRiftRegionValue(qualifier)
@@ -371,6 +461,17 @@ trait NirGenExpr(using Context) {
         case _ if sym == defnNir.UnsafePackage_extern =>
           fail(s"extern can be used only from non-inlined extern methods")
 
+        case _
+            if isHeapSetterApply(app) && args.nonEmpty &&
+              !isSuperSelect(fun) =>
+          if isStableStaticHeapReference(qualifier) then
+            checkHeapDoesNotRetainRiftCapture(qualifier, args.last)
+          genApplyMethod(
+            sym,
+            statically = sym.isClassConstructor,
+            qualifier,
+            args
+          )
         case _ if isRiftObjectBufferAppend(app) =>
           checkRiftObjectBufferAppend(args.last)
           genApplyMethod(
@@ -458,6 +559,8 @@ trait NirGenExpr(using Context) {
         case DesugaredSelect(qualp, _) =>
           def rhs = genExpr(rhsp)
           val sym = lhsp.symbol
+          if sym.isStaticMember || isStableStaticHeapReference(qualp) then
+            checkHeapDoesNotRetainRiftCapture(qualp, rhsp)
           val name = genFieldName(sym)
           if (sym.isExtern) {
             // Ignore intrinsic call to extern in class constructor
@@ -483,6 +586,9 @@ trait NirGenExpr(using Context) {
             isSafeRiftMutableVarValue(rhsp)
           if safeRiftMutableRegionValue then riftRegionAllocatedSyms += id.symbol
           else riftRegionAllocatedSyms -= id.symbol
+          if treeCarriesRiftCapture(rhsp) && !safeRiftMutableRegionValue then
+            riftRegionCapturedHeapSyms += id.symbol
+          else riftRegionCapturedHeapSyms -= id.symbol
           val rhs = genExpr(rhsp)
           val slot = curMethodEnv.resolve(id.symbol)
           buf.varstore(slot, rhs, unwind)
@@ -1330,6 +1436,8 @@ trait NirGenExpr(using Context) {
       val isMutable = curMethodInfo.mutableVars.contains(vd.symbol)
       val isRiftRegionValue =
         isRiftAllocationTree(vd.rhs) || isKnownRiftRegionValue(vd.rhs)
+      val isRiftRegionCapturedHeapValue =
+        treeCarriesRiftCapture(vd.rhs) && !isRiftRegionValue
       val isSafeRiftMutableRegionValue =
         isMutable &&
           isSafeRiftMutableVarValue(vd.rhs)
@@ -1357,10 +1465,16 @@ trait NirGenExpr(using Context) {
         checkExplicitReturnTypeAnnotation(vd, "extern field")
       if (isMutable)
         if isSafeRiftMutableRegionValue then riftRegionAllocatedSyms += vd.symbol
+        else riftRegionAllocatedSyms -= vd.symbol
+        if isRiftRegionCapturedHeapValue then
+          riftRegionCapturedHeapSyms += vd.symbol
+        else riftRegionCapturedHeapSyms -= vd.symbol
         val slot = curMethodEnv.resolve(vd.symbol)
         buf.varstore(slot, rhs, unwind)
       else
         if isRiftRegionValue then riftRegionAllocatedSyms += vd.symbol
+        if isRiftRegionCapturedHeapValue then
+          riftRegionCapturedHeapSyms += vd.symbol
         curMethodEnv.enter(vd.symbol, rhs)
         nir.Val.Unit
     }

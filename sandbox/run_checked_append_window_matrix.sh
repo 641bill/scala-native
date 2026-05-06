@@ -8,7 +8,11 @@ output_dir=${CHECKED_APPEND_OUTPUT_DIR:-"/tmp/checked-append-window"}
 summary=${CHECKED_APPEND_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${CHECKED_APPEND_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${CHECKED_APPEND_MODES:-"heap-immix heap-prepend heap-epoch heap-immix-chunk rift-checked rift-checked-api rift-checked-rift rift-checked-page-token rift-checked-epoch-buffer rift-checked-chunk-token rift-checked-safezone-page-token rift-checked-safezone-epoch-buffer rift-checked-safezone-chunk-token rift-checked-api-prepend-cursor rift-trusted-hp rift-trusted-streaming"}})
+include_controls=${RIFT_BENCH_INCLUDE_CONTROLS:-${RIFT_EVAL_INCLUDE_CONTROLS:-0}}
+modes=(${(z)${CHECKED_APPEND_MODES:-"heap-immix rift-checked-page-token rift-checked-safezone-page-token"}})
+if [[ -z "${CHECKED_APPEND_MODES:-}" && ( "${include_controls}" == "1" || "${include_controls}" == "true" || "${include_controls}" == "yes" ) ]]; then
+  modes+=(heap-prepend heap-epoch heap-immix-chunk rift-checked rift-checked-api rift-checked-rift rift-checked-epoch-buffer rift-checked-chunk-token rift-checked-safezone-epoch-buffer rift-checked-safezone-chunk-token rift-checked-api-prepend-cursor rift-trusted-hp rift-trusted-streaming)
+fi
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"

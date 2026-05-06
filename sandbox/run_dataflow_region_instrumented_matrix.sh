@@ -9,6 +9,11 @@ summary=${DATAFLOW_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${DATAFLOW_BUILD:-1}
 operator=${DATAFLOW_OPERATOR:-all}
 platform=$(uname -s)
+include_controls=${RIFT_BENCH_INCLUDE_CONTROLS:-${RIFT_EVAL_INCLUDE_CONTROLS:-0}}
+modes=(${(z)${DATAFLOW_MODES:-"heap improved-safezone rift-checked"}})
+if [[ -z "${DATAFLOW_MODES:-}" && ( "${include_controls}" == "1" || "${include_controls}" == "true" || "${include_controls}" == "yes" ) ]]; then
+  modes+=(current-safezone unsafezone-hp rift-hp rift-streaming)
+fi
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"
@@ -108,13 +113,35 @@ run_mode() {
 
 write_summary_header
 
-run_mode "heap" "heap" "0"
-run_mode "current-safezone" "safezone" "0"
-run_mode "improved-safezone" "safezone" "1"
-run_mode "unsafezone-hp" "safezone" "3" "32768"
-run_mode "rift-hp" "rift-hp" "0"
-run_mode "rift-streaming" "rift-streaming" "0"
-run_mode "rift-checked" "rift-checked" "0"
+for selected_mode in "${modes[@]}"; do
+  case "${selected_mode}" in
+    heap)
+      run_mode "heap" "heap" "0"
+      ;;
+    current-safezone)
+      run_mode "current-safezone" "safezone" "0"
+      ;;
+    improved-safezone)
+      run_mode "improved-safezone" "safezone" "1"
+      ;;
+    unsafezone-hp)
+      run_mode "unsafezone-hp" "safezone" "3" "32768"
+      ;;
+    rift-hp)
+      run_mode "rift-hp" "rift-hp" "0"
+      ;;
+    rift-streaming)
+      run_mode "rift-streaming" "rift-streaming" "0"
+      ;;
+    rift-checked)
+      run_mode "rift-checked" "rift-checked" "0"
+      ;;
+    *)
+      echo "unknown DATAFLOW_MODES entry: ${selected_mode}" >&2
+      exit 1
+      ;;
+  esac
+done
 
 echo
 echo "Dataflow instrumented matrix complete"

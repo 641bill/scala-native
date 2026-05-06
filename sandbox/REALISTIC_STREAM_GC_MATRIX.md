@@ -1,6 +1,7 @@
 # Realistic Stream GC Matrix
 
 Date: 2026-05-03
+Last updated: 2026-05-06 00:55 CEST
 
 Status: benchmark ladder for realistic and real-input GC-heavy stream
 evidence. This file distinguishes generated stressors, methodology generators,
@@ -11,12 +12,12 @@ for why some real datasets are parked instead of tuned.
 
 | Workload | Input type | Current signal | Decision |
 |---|---|---|---|
-| Common Crawl WET-shaped q1/q2 | generated WET-shaped pages/lines/tokens | Strong GC pressure; `heap-immix` spends about `1.55-1.59 s` in GC at 1M; trusted Rift wins elapsed. | Keep as memory-pressure detector, not real-data proof. |
+| Common Crawl WET-shaped q1/q2 | generated WET-shaped pages/lines/tokens | Strong GC pressure; latest heap spends `1517.640 ms` GC on q1 and `1526.751 ms` GC on q2 at 1M; checked page-token rows now win elapsed. | Keep as memory-pressure detector, not real-data proof. |
 | Common Crawl real WET/WAT q1/q2/q4/q5 | real preloaded WET/WAT shards | Page-token modes match output. SafeZone-backed page-token is fastest on the current WET shard and on real WAT q4/q5, but heap median/max timed GC remains zero on the measured shards. | Park current shards as ceiling/control evidence; try larger/multiple shards or a different real log/NDJSON workload. |
-| NEXMark Q3/Q8/Q9/Q11 | official-style generated auction profile | Best recognized stream-methodology checked rows are Q3/Q8, but margins are modest. | Keep as methodology/regression evidence. |
+| NEXMark Q3/Q8/Q9/Q11 | official-style generated auction profile | Latest Beam-default sweep has checked Rift fastest on q3/q8/q9/q11, with q9 the strongest row (`708.391 ms` vs heap `779.032 ms`). Margins remain mostly modest. | Keep as methodology/regression evidence. |
 | DSPBench | external benchmark family | Not ported yet; broad stream applications with memory-occupation characterization. | Next new benchmark family to triage. |
 | RIoTBench | generated local probe so far; real input desired | Current generated rows are not strong enough. | Revisit only with provenance-clean real IoT-style input. |
-| GH Archive NDJSON/log-event stream | real preloaded hourly GitHub events | q1 showed a 100k real-input win when heap collected; the cleaner 8-hour 1M oracle run has heap winning median elapsed with one `135 ms` GC outlier and about `1.7 GiB` RSS. A 1G heap-budget q1 diagnostic makes checked SafeZone-backed page-token faster than heap. | Keep as memory-budget/tail-latency candidate; not yet an unconstrained throughput case study. |
+| GH Archive NDJSON/log-event stream | generated/real-shaped local GitHub-event rows plus earlier real preloaded hourly events | Latest generated GH-shaped 1M rows favor trusted Rift/page-token over heap; earlier real preloaded 8-hour q1 remains a memory-budget/tail-latency candidate rather than an unconstrained throughput case study. | Keep as memory-budget/tail-latency candidate and prioritize file-backed/real-input reruns. |
 | Other NDJSON/log-event streams | real public logs desired | GH Archive is implemented; other public logs not yet tried. | Still high-priority if they produce larger object churn or force steadier GC without multi-GB heap growth. |
 | Wikimedia / Linear Road real inputs | real preloaded inputs | Mostly heap-fastest or median-GC-zero. | Regression/ceiling controls. |
 | Yahoo-style ad stream | generated/preloaded local probe | Near-tie; cuts GC but no decisive elapsed win. | Regression/control unless real input or new operator changes allocation shape. |

@@ -120,6 +120,158 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def remlStylePolymorphicLocalConsumerCompiles(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def consume[A](value: A)(use: A => Int): Int =
+      |  use(value)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val box: Box^{region} = RiftRegion.alloc(new Box(40))
+      |    consume[Box^{region}](box)(_.value + 2)
+      |  }
+      |""".stripMargin)
+
+  @Test def remlStylePolymorphicIdentityCannotReturnRegionValue(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def id[A](value: A): A = value
+      |
+      |def bad(): AnyRef =
+      |  RiftRegion.scoped { region ?=>
+      |    val box: Box^{region} = RiftRegion.alloc(new Box(1))
+      |    id[Box^{region}](box)
+      |  }
+      |""".stripMargin,
+      "Capability `region` outlives its scope"
+    )
+
+  @Test def remlStylePolymorphicHeapCellCannotRetainRegionValue(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Cell[A](val value: A)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val box: Box^{region} = RiftRegion.alloc(new Box(1))
+      |    Holder.retained = new Cell[Box^{region}](box)
+      |  }
+      |""".stripMargin,
+      "Rift checked heap state cannot retain a region-captured value"
+    )
+
+  @Test def remlStylePolymorphicHeapCellCanStayLocal(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Cell[A](val value: A)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val box: Box^{region} = RiftRegion.alloc(new Box(40))
+      |    val cell = new Cell[Box^{region}](box)
+      |    cell.value.value + 2
+      |  }
+      |""".stripMargin)
+
+  @Test def remlStylePolymorphicHeapCellWidenedToAnyRefCannotEscape(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Cell[A](val value: A)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val box: Box^{region} = RiftRegion.alloc(new Box(1))
+      |    val cell: AnyRef = new Cell[Box^{region}](box)
+      |    Holder.retained = cell
+      |  }
+      |""".stripMargin,
+      "Rift checked heap state cannot retain a region-captured value"
+    )
+
+  @Test def remlStyleHeapArrayOfRegionCapturedTypeCannotEscape(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val box: Box^{region} = RiftRegion.alloc(new Box(1))
+      |    val values = new Array[Box^{region}](1)
+      |    values(0) = box
+      |    Holder.retained = values
+      |  }
+      |""".stripMargin,
+      "Rift checked heap state cannot retain a region-captured value"
+    )
+
+  @Test def remlStyleEscapingClosureCannotHideGenericRegionValue(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Cell[A](val value: A)
+      |
+      |object Holder:
+      |  var retained: () => AnyRef = null
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val box: Box^{region} = RiftRegion.alloc(new Box(1))
+      |    Holder.retained = () => new Cell[Box^{region}](box)
+      |  }
+      |""".stripMargin,
+      "Rift checked heap state cannot retain a region-captured value"
+    )
+
+  @Test def remlStylePolymorphicRegionObjectCannotStoreUnrootedHeapValue(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Cell[A](val value: A^)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val metadata = new Metadata(41)
+      |    val cell: Cell[Metadata]^{region} =
+      |      RiftRegion.alloc(new Cell[Metadata](metadata))
+      |    cell.value.value + 1
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
   @Test def scopedValueCannotEscapeByReturn(): Unit =
     assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking

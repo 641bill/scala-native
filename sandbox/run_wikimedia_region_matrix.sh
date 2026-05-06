@@ -8,7 +8,11 @@ output_dir=${WIKIMEDIA_OUTPUT_DIR:-"/tmp/wikimedia-region-matrix"}
 summary=${WIKIMEDIA_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${WIKIMEDIA_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${WIKIMEDIA_MODES:-"heap safezone-current safezone-improved unsafezone-hp rift-hp rift-streaming"}})
+include_controls=${RIFT_BENCH_INCLUDE_CONTROLS:-${RIFT_EVAL_INCLUDE_CONTROLS:-0}}
+modes=(${(z)${WIKIMEDIA_MODES:-"heap safezone-improved"}})
+if [[ -z "${WIKIMEDIA_MODES:-}" && ( "${include_controls}" == "1" || "${include_controls}" == "true" || "${include_controls}" == "yes" ) ]]; then
+  modes+=(safezone-current unsafezone-hp rift-hp rift-streaming)
+fi
 queries=(${(z)${WIKIMEDIA_QUERIES:-"q0-pageviews q1-counts q2-clickstream"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1

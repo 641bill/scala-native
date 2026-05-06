@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 JAVA_HOME="$(cs java-home --jvm temurin:17)"
 PATH="$JAVA_HOME/bin:$PATH"
 RUNS="${GCBENCH_BENCHMARK_RUNS:-5}"
+include_controls=${RIFT_BENCH_INCLUDE_CONTROLS:-${RIFT_EVAL_INCLUDE_CONTROLS:-0}}
 
 run_case() {
   local label="$1"
@@ -54,8 +55,31 @@ echo "GCBENCH_BENCHMARK_RUNS=$RUNS"
 echo "SAFEZONE_PAGE_SIZE=${SAFEZONE_PAGE_SIZE:-default}"
 echo "SAFEZONE_BATCH_SIZE=${SAFEZONE_BATCH_SIZE:-default}"
 
-run_case "Immix heap baseline" "heap"
-run_case "Current SafeZone baseline" "safezone" "0"
-run_case "Improved SafeZone baseline" "safezone" "1"
-run_case "UnsafeZone-HP baseline" "safezone" "3" "32768"
-run_case "Rift HPZone" "rift-hp"
+modes=(${(z)${GCBENCH_MODES:-"heap improved-safezone"}})
+if [[ -z "${GCBENCH_MODES:-}" && ( "$include_controls" == "1" || "$include_controls" == "true" || "$include_controls" == "yes" ) ]]; then
+  modes+=(current-safezone unsafezone-hp rift-hp)
+fi
+
+for selected_mode in "${modes[@]}"; do
+  case "$selected_mode" in
+    heap)
+      run_case "Immix heap baseline" "heap"
+      ;;
+    current-safezone)
+      run_case "Current SafeZone baseline" "safezone" "0"
+      ;;
+    improved-safezone)
+      run_case "Improved SafeZone baseline" "safezone" "1"
+      ;;
+    unsafezone-hp)
+      run_case "UnsafeZone-HP baseline" "safezone" "3" "32768"
+      ;;
+    rift-hp)
+      run_case "Rift HPZone" "rift-hp"
+      ;;
+    *)
+      echo "unknown GCBENCH_MODES entry: $selected_mode" >&2
+      exit 1
+      ;;
+  esac
+done

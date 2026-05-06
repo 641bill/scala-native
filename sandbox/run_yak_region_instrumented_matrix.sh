@@ -9,7 +9,11 @@ summary=${YAK_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${YAK_BUILD:-1}
 workload=${YAK_WORKLOAD:-all}
 platform=$(uname -s)
-modes=(${(z)${YAK_MODES:-"heap improved-safezone unsafezone-hp rift-hp rift-streaming yak-runtime heap-promotion yak-runtime-promotion"}})
+include_controls=${RIFT_BENCH_INCLUDE_CONTROLS:-${RIFT_EVAL_INCLUDE_CONTROLS:-0}}
+modes=(${(z)${YAK_MODES:-"heap improved-safezone yak-runtime"}})
+if [[ -z "${YAK_MODES:-}" && ( "${include_controls}" == "1" || "${include_controls}" == "true" || "${include_controls}" == "yes" ) ]]; then
+  modes+=(current-safezone unsafezone-hp rift-hp rift-streaming heap-promotion yak-runtime-promotion)
+fi
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"

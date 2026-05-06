@@ -8,7 +8,11 @@ output_dir=${STANCU_OUTPUT_DIR:-"/tmp/stancu-region-instrumented"}
 summary=${STANCU_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${STANCU_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${STANCU_MODES:-"heap improved-safezone unsafezone-hp rift-hp rift-streaming"}})
+include_controls=${RIFT_BENCH_INCLUDE_CONTROLS:-${RIFT_EVAL_INCLUDE_CONTROLS:-0}}
+modes=(${(z)${STANCU_MODES:-"heap improved-safezone"}})
+if [[ -z "${STANCU_MODES:-}" && ( "${include_controls}" == "1" || "${include_controls}" == "true" || "${include_controls}" == "yes" ) ]]; then
+  modes+=(current-safezone unsafezone-hp rift-hp rift-streaming)
+fi
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"

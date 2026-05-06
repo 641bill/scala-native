@@ -8,7 +8,11 @@ output_dir=${GITHUB_ARCHIVE_OUTPUT_DIR:-"/tmp/github-archive-region-matrix"}
 summary=${GITHUB_ARCHIVE_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${GITHUB_ARCHIVE_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${GITHUB_ARCHIVE_MODES:-"heap-immix safezone-improved-32k safezone-rootless-32k rift-trusted-hp rift-trusted-streaming rift-checked-page-token rift-checked-safezone-page-token"}})
+include_controls=${RIFT_BENCH_INCLUDE_CONTROLS:-${RIFT_EVAL_INCLUDE_CONTROLS:-0}}
+modes=(${(z)${GITHUB_ARCHIVE_MODES:-"heap-immix safezone-improved-32k rift-checked-page-token rift-checked-safezone-page-token"}})
+if [[ -z "${GITHUB_ARCHIVE_MODES:-}" && ( "${include_controls}" == "1" || "${include_controls}" == "true" || "${include_controls}" == "yes" ) ]]; then
+  modes+=(safezone-rootless-32k rift-trusted-hp rift-trusted-streaming)
+fi
 queries=(${(z)${GITHUB_ARCHIVE_QUERIES:-"q0-events q1-fields q2-repo-window"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1

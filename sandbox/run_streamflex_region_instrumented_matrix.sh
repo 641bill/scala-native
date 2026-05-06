@@ -9,7 +9,11 @@ summary=${STREAMFLEX_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${STREAMFLEX_BUILD:-1}
 workload=${STREAMFLEX_WORKLOAD:-all}
 platform=$(uname -s)
-modes=(${(z)${STREAMFLEX_MODES:-"heap improved-safezone unsafezone-hp rift-hp rift-streaming rift-checked-epoch-buffer rift-checked-safezone-epoch-buffer rift-checked-transaction-region rift-checked-safezone-transaction-region"}})
+include_controls=${RIFT_BENCH_INCLUDE_CONTROLS:-${RIFT_EVAL_INCLUDE_CONTROLS:-0}}
+modes=(${(z)${STREAMFLEX_MODES:-"heap improved-safezone rift-checked-safezone-transaction-region"}})
+if [[ -z "${STREAMFLEX_MODES:-}" && ( "${include_controls}" == "1" || "${include_controls}" == "true" || "${include_controls}" == "yes" ) ]]; then
+  modes+=(current-safezone unsafezone-hp rift-hp rift-streaming rift-checked-epoch-buffer rift-checked-safezone-epoch-buffer rift-checked-transaction-region)
+fi
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"

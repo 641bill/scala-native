@@ -1,17 +1,16 @@
 # Scala Native Win Envelope
 
 Date: 2026-05-01
+Last updated: 2026-05-06 00:55 CEST
 
 Status: Phase 6/7 evidence synthesis. This note classifies where Rift currently
 wins against Scala Native Immix, where it only reduces memory pressure, and
 where checked container overhead still dominates.
 
-Latest clean-sweep update: `evidence/HEADLINE_STREAMS_2026_05_01.md`,
-`evidence/HEADLINE_DEBS_1M_2026_05_01.md`,
-`evidence/HEADLINE_UNSAFEZONE_CORE_PRIOR_2026_05_01.md`, and
-`evidence/HEADLINE_UNSAFEZONE_STREAMS_2026_05_01.md`, and
-`evidence/HEADLINE_UNSAFEZONE_DEBS_1M_2026_05_01.md` supersede older generated
-stream, DEBS, core-runtime, and prior-work rows where they overlap.
+Latest staged-sweep update: `evidence/COMPREHENSIVE_SWEEP_2026_05_06.md`
+supersedes older prior-work, checked-operator, SafeZone-cost, and
+stream/application rows where it overlaps. Core runtime/topology long rows
+still come from the earlier clean core sweeps unless explicitly rerun.
 
 UnsafeZone-HP checkpoint: `evidence/UNSAFEZONE_HP_BASELINE_MATRIX.md` adds a
 benchmark-only SafeZone no-root control (`SAFEZONE_ROOTS_MODE=3`,
@@ -45,6 +44,17 @@ Region reclaim/open cost is small, but ordinary object construction, checked
 uncapped `heap-immix` faster when it grows to GB-scale RSS and rarely collects.
 `evidence/OBJECT_ALLOCATION_LOWERING_MATRIX.md` now isolates object
 construction from operator/query CPU before more application tuning.
+
+2026-05-06 sweep update: the strongest current checked win is generated
+Common Crawl WET-shaped q1/q2 with the page-token operator. q1 heap is
+`5350.531 ms` with `1517.640 ms` GC; checked SafeZone-backed page-token is
+`3696.284 ms` and checked Rift page-token is `3905.285 ms`. q2 heap is
+`5183.656 ms` with `1526.751 ms` GC; checked SafeZone-backed page-token is
+`3732.171 ms` and checked Rift page-token is `3972.493 ms`. NEXMark
+Beam-default is broadly favorable to checked Rift but mostly modest.
+StreamFlex scoped checked `TransactionRegion` is now the best checked
+StreamFlex row at `39.019 ms`, while trusted Rift remains faster around
+`36.4 ms`.
 
 ## Purpose
 

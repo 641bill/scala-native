@@ -10,6 +10,7 @@ export JAVA_HOME="$(cs java-home --jvm temurin:17)"
 export PATH="$JAVA_HOME/bin:$PATH"
 
 runs=${LISTBENCH_BENCHMARK_RUNS:-5}
+include_controls=${RIFT_BENCH_INCLUDE_CONTROLS:-${RIFT_EVAL_INCLUDE_CONTROLS:-0}}
 
 run_mode() {
   local label="$1"
@@ -30,8 +31,31 @@ run_mode() {
 
 cd "${repo_dir}"
 
-run_mode "Immix" "heap"
-run_mode "Current SafeZone" "safezone" "0"
-run_mode "Improved SafeZone" "safezone" "1"
-run_mode "UnsafeZone-HP" "safezone" "3" "32768"
-run_mode "Rift HPZone" "rift-hp"
+modes=(${(z)${LISTBENCH_FLAT_MODES:-"heap improved-safezone"}})
+if [[ -z "${LISTBENCH_FLAT_MODES:-}" && ( "${include_controls}" == "1" || "${include_controls}" == "true" || "${include_controls}" == "yes" ) ]]; then
+  modes+=(current-safezone unsafezone-hp rift-hp)
+fi
+
+for selected_mode in "${modes[@]}"; do
+  case "${selected_mode}" in
+    heap)
+      run_mode "Immix" "heap"
+      ;;
+    current-safezone)
+      run_mode "Current SafeZone" "safezone" "0"
+      ;;
+    improved-safezone)
+      run_mode "Improved SafeZone" "safezone" "1"
+      ;;
+    unsafezone-hp)
+      run_mode "UnsafeZone-HP" "safezone" "3" "32768"
+      ;;
+    rift-hp)
+      run_mode "Rift HPZone" "rift-hp"
+      ;;
+    *)
+      echo "unknown LISTBENCH_FLAT_MODES entry: ${selected_mode}" >&2
+      exit 1
+      ;;
+  esac
+done

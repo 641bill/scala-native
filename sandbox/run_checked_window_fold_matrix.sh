@@ -8,7 +8,11 @@ output_dir=${CHECKED_FOLD_OUTPUT_DIR:-"/tmp/checked-window-fold"}
 summary=${CHECKED_FOLD_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${CHECKED_FOLD_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${CHECKED_FOLD_MODES:-"heap rift-checked rift-trusted-hp rift-trusted-streaming"}})
+include_controls=${RIFT_BENCH_INCLUDE_CONTROLS:-${RIFT_EVAL_INCLUDE_CONTROLS:-0}}
+modes=(${(z)${CHECKED_FOLD_MODES:-"heap rift-checked"}})
+if [[ -z "${CHECKED_FOLD_MODES:-}" && ( "${include_controls}" == "1" || "${include_controls}" == "true" || "${include_controls}" == "yes" ) ]]; then
+  modes+=(rift-trusted-hp rift-trusted-streaming)
+fi
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"

@@ -8,7 +8,11 @@ output_dir=${COMMON_CRAWL_WET_OUTPUT_DIR:-"/tmp/common-crawl-wet-matrix"}
 summary=${COMMON_CRAWL_WET_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${COMMON_CRAWL_WET_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${COMMON_CRAWL_WET_MODES:-"heap-immix safezone-current safezone-improved safezone-improved-32k safezone-chunk-roots safezone-rootless-32k rift-trusted-hp rift-trusted-streaming"}})
+include_controls=${RIFT_BENCH_INCLUDE_CONTROLS:-${RIFT_EVAL_INCLUDE_CONTROLS:-0}}
+modes=(${(z)${COMMON_CRAWL_WET_MODES:-"heap-immix safezone-improved-32k rift-checked-safezone-improved-32k"}})
+if [[ -z "${COMMON_CRAWL_WET_MODES:-}" && ( "${include_controls}" == "1" || "${include_controls}" == "true" || "${include_controls}" == "yes" ) ]]; then
+  modes+=(safezone-current safezone-improved safezone-chunk-roots safezone-rootless-32k rift-trusted-hp rift-trusted-streaming)
+fi
 queries=(${(z)${COMMON_CRAWL_WET_QUERIES:-"q0-parse q1-tokenize q2-domain-window q3-parser-scratch"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1

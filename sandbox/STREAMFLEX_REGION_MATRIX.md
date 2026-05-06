@@ -1,6 +1,6 @@
 # StreamFlex Region Matrix
 
-Last updated: 2026-05-05 23:47:54 CEST
+Last updated: 2026-05-06 00:55 CEST
 
 Status: StreamFlex-style methodology reproduction harness with validated local
 smoke, default median, and allocation-pressure median runs.
@@ -86,6 +86,12 @@ STREAMFLEX_OUTPUT_DIR=/tmp/streamflex-region-instrumented \
 Compile, smoke, default local medians, and one allocation-pressure latency run
 have been recorded. These are local StreamFlex-style methodology numbers, not
 an exact StreamFlex/Ovm artifact reproduction.
+
+Latest staged headline sweep: `evidence/COMPREHENSIVE_SWEEP_2026_05_06.md`.
+At the latest throughput scale, trusted Rift HP/Streaming are still fastest
+around `36.4 ms`; scoped checked `TransactionRegion` is the best checked row
+at `39.019 ms`, faster than heap `42.860 ms` and improved SafeZone
+`41.327 ms`.
 
 Validation commands run on 2026-04-25:
 

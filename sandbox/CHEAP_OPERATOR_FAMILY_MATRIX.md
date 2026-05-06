@@ -1,7 +1,7 @@
 # Cheap Operator Family Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-05 23:47:54 CEST
+Last updated: 2026-05-06 00:55 CEST
 
 Status: focused checkpoint. The first staged smoke rows have been followed by
 targeted 1M-shape 3-run medians for Dataflow SELECT, Dataflow AGGREGATE, and
@@ -11,8 +11,9 @@ API, but its first Dataflow AGGREGATE row fails the speed gate and is recorded
 as a negative/gated operator result. `EpochBuffer` has now been added as a
 reusable batch/epoch append-drain API and passes its first focused 1M gate. This
 has now been followed by `TransactionRegion`, a multi-list transaction/batch
-API for pipelines that would otherwise stack several epoch buffers. This is
-still not the full comprehensive headline sweep.
+API for pipelines that would otherwise stack several epoch buffers. Latest
+staged headline results are summarized in
+`evidence/COMPREHENSIVE_SWEEP_2026_05_06.md`.
 
 ## Purpose
 
@@ -33,10 +34,10 @@ Reusable API status:
 | API | Status | Evidence |
 |---|---|---|
 | `PageTokenMapFilter[T]` | Implemented and validated | Thin reusable API over the fast page-token child-bucket path. Dataflow SELECT now uses this named operator. |
-| `EpochFold[T]` | Implemented but gated/negative | Correct and tested, but the first real aggregate row is `91.938 ms`, far slower than the older checked aggregate path. Do not use as headline evidence yet. |
+| `EpochFold[T]` | Implemented but gated/negative | Correct and tested, but the latest true aggregate row is `92.923 ms`, far slower than the exact-array checked aggregate path. Do not use as headline evidence yet. |
 | `RegionList[T]` | Implemented and validated | ListOfLists checked builder now uses the reusable region-list API and improves to `5927.385 ms` median. |
 | `EpochBuffer[T]` | Implemented and focused-positive | Batch/epoch append-drain API. At 1M, `rift-checked-epoch-buffer` is `26.673 ms` and SafeZone-backed checked is `25.448 ms` versus `heap-epoch` `27.164 ms` with `5.707 ms` GC. |
-| `TransactionRegion` + `TransactionList[T]` | Implemented and partially validated | Multi-list batch API. In StreamFlex 200k throughput, scoped checked `TransactionRegion` is `41.375 ms`, slightly faster than heap `41.995 ms` and improved SafeZone `41.871 ms`; Rift-native checked transaction improves over stacked EpochBuffer but remains slower than heap. |
+| `TransactionRegion` + `TransactionList[T]` | Implemented and partially validated | Multi-list batch API. In the latest StreamFlex throughput sweep, scoped checked `TransactionRegion` is `39.019 ms`, faster than heap `42.860 ms` and improved SafeZone `41.327 ms`; Rift-native checked transaction improves over stacked EpochBuffer but remains slower than heap. |
 
 The implementation goal is not to rename public APIs. It is to report the
 system in terms of descriptive memory modes while keeping raw benchmark labels

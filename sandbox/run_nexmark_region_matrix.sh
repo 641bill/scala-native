@@ -8,7 +8,11 @@ output_dir=${NEXMARK_OUTPUT_DIR:-"/tmp/nexmark-region-matrix"}
 summary=${NEXMARK_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${NEXMARK_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${NEXMARK_MODES:-"heap safezone-current safezone-improved unsafezone-hp rift-checked rift-hp rift-streaming"}})
+include_controls=${RIFT_BENCH_INCLUDE_CONTROLS:-${RIFT_EVAL_INCLUDE_CONTROLS:-0}}
+modes=(${(z)${NEXMARK_MODES:-"heap safezone-improved rift-checked"}})
+if [[ -z "${NEXMARK_MODES:-}" && ( "${include_controls}" == "1" || "${include_controls}" == "true" || "${include_controls}" == "yes" ) ]]; then
+  modes+=(safezone-current unsafezone-hp rift-hp rift-streaming)
+fi
 queries=(${(z)${NEXMARK_QUERIES:-"q0 q1 q2 q3 q4 q5 q8 q9 q11"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1

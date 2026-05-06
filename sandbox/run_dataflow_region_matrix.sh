@@ -10,7 +10,11 @@ export JAVA_HOME="$(cs java-home --jvm temurin:17)"
 export PATH="$JAVA_HOME/bin:$PATH"
 
 operator=${DATAFLOW_OPERATOR:-all}
-modes=(${(z)${DATAFLOW_MODES:-"heap improved-safezone unsafezone-hp rift-hp rift-streaming rift-checked checked-page-token checked-page-token-scoped checked-epoch-fold"}})
+include_controls=${RIFT_BENCH_INCLUDE_CONTROLS:-${RIFT_EVAL_INCLUDE_CONTROLS:-0}}
+modes=(${(z)${DATAFLOW_MODES:-"heap improved-safezone rift-checked checked-page-token checked-page-token-scoped"}})
+if [[ -z "${DATAFLOW_MODES:-}" && ( "${include_controls}" == "1" || "${include_controls}" == "true" || "${include_controls}" == "yes" ) ]]; then
+  modes+=(current-safezone unsafezone-hp rift-hp rift-streaming checked-epoch-fold)
+fi
 
 run_mode() {
   local label="$1"

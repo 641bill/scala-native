@@ -8,7 +8,11 @@ output_dir=${OBJECT_ALLOC_OUTPUT_DIR:-"/tmp/object-allocation-lowering"}
 summary=${OBJECT_ALLOC_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${OBJECT_ALLOC_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${OBJECT_ALLOC_MODES:-"heap-immix rift-trusted-hp rift-trusted-streaming rift-checked-rift rift-checked-safezone-improved-32k"}})
+include_controls=${RIFT_BENCH_INCLUDE_CONTROLS:-${RIFT_EVAL_INCLUDE_CONTROLS:-0}}
+modes=(${(z)${OBJECT_ALLOC_MODES:-"heap-immix rift-checked-rift rift-checked-safezone-improved-32k"}})
+if [[ -z "${OBJECT_ALLOC_MODES:-}" && ( "${include_controls}" == "1" || "${include_controls}" == "true" || "${include_controls}" == "yes" ) ]]; then
+  modes+=(rift-trusted-hp rift-trusted-streaming)
+fi
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"

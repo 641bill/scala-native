@@ -8,7 +8,11 @@ output_dir=${LINEAR_ROAD_OUTPUT_DIR:-"/tmp/linear-road-region-matrix"}
 summary=${LINEAR_ROAD_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${LINEAR_ROAD_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${LINEAR_ROAD_MODES:-"heap safezone-current safezone-improved unsafezone-hp rift-hp rift-streaming"}})
+include_controls=${RIFT_BENCH_INCLUDE_CONTROLS:-${RIFT_EVAL_INCLUDE_CONTROLS:-0}}
+modes=(${(z)${LINEAR_ROAD_MODES:-"heap safezone-improved"}})
+if [[ -z "${LINEAR_ROAD_MODES:-}" && ( "${include_controls}" == "1" || "${include_controls}" == "true" || "${include_controls}" == "yes" ) ]]; then
+  modes+=(safezone-current unsafezone-hp rift-hp rift-streaming)
+fi
 queries=(${(z)${LINEAR_ROAD_QUERIES:-"q0-reports q1-tolls q2-accidents"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
