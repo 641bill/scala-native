@@ -1,7 +1,7 @@
 # Realistic Stream GC Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-07 00:16 CEST
+Last updated: 2026-05-07 01:23 CEST
 
 Status: benchmark ladder for realistic and real-input GC-heavy stream
 evidence. This file distinguishes generated stressors, methodology generators,
@@ -17,6 +17,7 @@ for why some real datasets are parked instead of tuned.
 | NEXMark Q3/Q8/Q9/Q11 | official-style generated auction profile | Latest Beam-default sweep has checked Rift fastest on q3/q8/q9/q11, with q9 the strongest row (`708.391 ms` vs heap `779.032 ms`). Margins remain mostly modest. | Keep as methodology/regression evidence. |
 | DSPBench | external benchmark family | Not ported yet; broad stream applications with memory-occupation characterization. | Next new benchmark family to triage. |
 | RIoTBench | generated local probe so far; real input desired | Current generated rows are not strong enough. | Revisit only with provenance-clean real IoT-style input. |
+| LogHub / LogPAI BGL | real file-backed system log | New matrix loads the real BGL log (`4747963` lines). At 1M, heap GC is material enough to appear in every run (`99-157 ms`) but still a small share of roughly `5.6 s` elapsed. Region rows remove timed GC and produce modest throughput/RSS/fixed-memory wins. Full-file q2 single-run heap spends `595.599 ms` in GC inside `32.161 s`; checked scoped page-token is faster and lower-RSS than heap, but the win is not large enough for a flagship GC-heavy case. | Keep as real-input modest-win/control evidence. Do not overclaim as the missing GC-heavy stream case; move to DSPBench/real RIoTBench/other logs next. |
 | GH Archive NDJSON/log-event stream | generated/real-shaped local GitHub-event rows plus real file-backed hourly events | The legacy string-parser file-backed rows showed timed heap GC in every run and large RSS reductions from regions, but parser/string allocation dominated elapsed. The new byte-slice parser-scratch path cuts 100k elapsed/RSS sharply and makes the two-hour 200k q1/q2 rows modest real-input throughput/RSS/tail wins: heap uses about `290 MB` RSS and collects in 2/3 runs, while region rows use about `211 MB` RSS and report zero timed GC. Heap GC is still only about `58-62 ms` inside `3.8 s` total elapsed, so this is not the missing GC-heavy case study. | Keep as the strongest current real-input modest-win candidate, not GC-heavy proof. Next target is scaling byte-slice file-backed rows and generalizing byte-slice NDJSON/log extraction beyond GH-specific code. |
 | Other NDJSON/log-event streams | real public logs desired | GH Archive is implemented; other public logs not yet tried. | Still high-priority if they produce larger object churn or force steadier GC without multi-GB heap growth. |
 | Wikimedia / Linear Road real inputs | real preloaded inputs | Mostly heap-fastest or median-GC-zero. | Regression/ceiling controls. |
@@ -44,6 +45,7 @@ They mostly fail to create the same allocation regime:
 | GH Archive q1/q2 8-hour oracle | At 1M real events, q1/q2 allocate `13M` ordinary event/field records. Heap wins median elapsed when uncapped, but one run per query collects for about `135 ms` and RSS is around `1.7 GiB`. Under a 1G heap cap, q1 heap slows to `395.295 ms` with `92.347 ms` median GC, making the checked SafeZone-backed q1 row (`348.817 ms`, zero timed GC) faster. |
 | GH Archive q1/q2 file-backed, legacy string parser | At 100k-200k real events, parser/decompression is included and all successful modes report timed GC. Regions cut RSS by about `45-70%` depending on query/mode and modestly improve trusted Streaming elapsed, but checked scoped page-token is near-tied because parser/string allocation remains heap-managed. |
 | GH Archive q1/q2 file-backed, byte-slice parser | Byte-slice parsing reuses line buffers and extracts JSON fields from raw UTF-8 bytes. At 100k it turns the row into a near tie with lower RSS and removed GC outliers; at 200k/two-hour scale it gives modest region throughput wins and zero timed GC in region rows. It is still not GC-heavy because heap GC is a small share of elapsed time. |
+| LogHub BGL q1/q2 file-backed | The real BGL log creates many line/token objects and does trigger heap GC more steadily than GH Archive byte-slice rows. At 1M lines, heap GC is `99.271 ms` for q1 and `157.198 ms` for q2, but elapsed is still around `5.6 s`, so parser/line/token CPU dominates. Full-file q2 raises heap GC to `595.599 ms`, still under 2% of elapsed. |
 | Wikimedia TSV/clickstream | TSV parsing and primitive/group-count state dominate; event objects do not survive long enough or accumulate enough allocation pressure. |
 | Linear Road official slice | Durable vehicle/segment metadata is mostly primitive/heap control state; generated position reports are not enough to make GC the bottleneck. |
 | Yahoo/RIoT local probes | Generated records are too regular and the heap collector handles them cheaply; elapsed time is mostly query CPU. |
@@ -74,6 +76,17 @@ Input:
 
 Next attempts:
 
+Latest LogHub BGL control:
+
+| Query | Scale | Heap | Best region row | Heap GC | Output count | Decision |
+|---|---:|---:|---:|---:|---:|---|
+| q1-tokens | 100k real BGL lines / 1.25M line+token records | `642.431 ms`, RSS `148111360` | checked scoped page-token `620.531 ms`, RSS `135823360` | median `17.627 ms`, max `45.285 ms`, 2/3 runs | `1251309` | Real-input modest throughput/RSS win; not headline GC-heavy evidence. |
+| q2-window-counts | 100k real BGL lines / 1.25M line+token records | `647.981 ms`, RSS `148127744` | Streaming `616.252 ms`, RSS `135626752` | median `17.470 ms`, max `50.490 ms`, 2/3 runs | `13` | Real-input modest throughput/RSS win. |
+| q1-tokens | 1M real BGL lines / 13.4M line+token records | `5568.252 ms`, RSS `408420352` | Streaming `5491.033 ms`, RSS `357679104`; checked scoped page-token `5552.988 ms` | median `99.271 ms`, max `103.832 ms`, 3/3 runs | `13445386` | Region rows remove GC; trusted Streaming is modestly faster/lower-RSS, checked scoped page-token is near-tied but higher-RSS in this row. |
+| q2-window-counts | 1M real BGL lines / 13.4M line+token records | `5646.824 ms`, RSS `408879104` | improved SafeZone-32k `5509.481 ms`; checked scoped page-token `5636.357 ms` | median `157.198 ms`, max `164.560 ms`, 3/3 runs | `87` | Modest safe/scoped runtime win; checked row is near-tied. |
+| q1/q2 heap caps | 1M real BGL lines, heap-only | q1 `256M` cap `5807.256 ms`, q2 `256M` cap `5768.222 ms` | compare to uncapped region rows | q1/q2 median GC about `195-200 ms`, max `220-265 ms` | matching checksums | Fixed-memory/tail sensitivity exists, but not enough for flagship claim. |
+| q2-window-counts | full BGL file, `4747963` real lines / `66868883` line+token records | heap `32161.391 ms`, RSS `576012288` | Streaming `30899.595 ms`, checked scoped page-token `31165.087 ms`, improved SafeZone-32k `31459.104 ms` | `595.599 ms`, 7 collections | `562` | Full-file single-run scale probe: region rows are faster and remove GC, but heap GC remains under 2% of elapsed. |
+
 Latest GH Archive control:
 
 | Query | Scale | Heap | Best checked row | Heap GC | Output count | Decision |
@@ -94,26 +107,28 @@ Latest GH Archive control:
 
 Next attempts:
 
-1. GH Archive larger byte-slice file-backed q1/q2:
+1. DSPBench local-kernel subset:
+   - choose 2-3 kernels with high object churn and explicit windows/epochs;
+   - remove distributed runtime dependencies from headline memory rows;
+   - prefer kernels whose paper/source characterization suggests memory pressure.
+2. Real RIoTBench-style input:
+   - find provenance-clean CITY/FIT/sensor traces or official-style inputs;
+   - run parse/filter/window statistics before adding new operators.
+3. Another real log/NDJSON workload:
+   - use LogHub as the baseline log control;
+   - try HDFS, Thunderbird, Spark, or GDELT-like event files only if they
+     materialize more per-record objects or force steadier heap GC than BGL.
+4. GH Archive larger byte-slice file-backed q1/q2:
    - test whether multi-hour/day file-backed inputs amplify the fixed-memory result;
    - record per-run elapsed and GC so max-GC tails are visible;
    - explicitly label heap cap/RSS when using memory-budget controls.
-2. General NDJSON/log parser-scratch API:
+5. General NDJSON/log parser-scratch API:
    - factor the byte-slice JSON field extraction shape out of GH Archive;
    - apply it to another public NDJSON/log stream before claiming broad
      parser-scratch generality.
-3. Larger/multiple Common Crawl WET/WAT shards:
+6. Larger/multiple Common Crawl WET/WAT shards:
    - load enough pages/tokens to approach generated q1/q2 object counts;
    - record actual pages/tokens and shard provenance.
-4. More NDJSON/log-event streams:
-   - prefer public web/server/security logs with JSON or key-value records;
-   - first concrete candidates are GDELT event files, Apache/NASA-style web
-     logs, security/event JSON lines, and Stack Exchange-style dumps converted
-     to event streams;
-   - implement parse/project/window-count and token/field extraction variants.
-5. DSPBench local-kernel subset:
-   - choose 2-3 kernels with high object churn and clear windows/epochs;
-   - remove distributed runtime dependencies from headline memory rows.
 
 ## Concrete Benchmark Ladder
 
@@ -122,13 +137,14 @@ or allocation-pressure gate.
 
 | Step | Benchmark | Input | Required rows before scaling |
 |---:|---|---|---|
-| 1 | Common Crawl WET/WAT larger or multi-shard q1/q2/q4/q5 | real preloaded, then file-backed | actual pages/tokens/links; heap median/max GC; output checksum. |
-| 2 | GH Archive file-backed q1/q2 | real file-backed NDJSON | parser/string allocation included; per-run latency/tail GC. |
-| 3 | More NDJSON/log stream q0/q1/q2 | real public logs | parsed records, fields/tokens, window-count output. |
-| 4 | DSPBench triage | source workloads, local kernel only | select 2-3 kernels with object churn and epoch/window lifetimes. |
+| 1 | DSPBench triage | source workloads, local kernel only | select 2-3 kernels with object churn and epoch/window lifetimes. |
+| 2 | Real RIoTBench-style traces | real or provenance-clean sensor traces | parse/filter/window-stat rows with material heap GC gate. |
+| 3 | LogHub BGL q1/q2 | real file-backed system log | completed first 100k/1M/full-file controls; keep as modest-win baseline. |
+| 4 | More NDJSON/log stream q0/q1/q2 | real public logs | parsed records, fields/tokens, window-count output. |
 | 5 | GDELT/log-event real-data matrix | real event/log files | file-backed parse/project/window-count rows with actual loaded record count and heap max-GC. |
-| 6 | NEXMark Q3/Q8/Q9/Q11 | Beam-default generated profile | keep 1M/5-run methodology controls. |
-| 7 | RIoTBench real/provenance-clean input | real or clearly documented generator | only continue if heap GC is material at 1M. |
+| 6 | Common Crawl WET/WAT larger or multi-shard q1/q2/q4/q5 | real preloaded, then file-backed | actual pages/tokens/links; heap median/max GC; output checksum. |
+| 7 | GH Archive file-backed q1/q2 | real file-backed NDJSON | parser/string allocation included; per-run latency/tail GC. |
+| 8 | NEXMark Q3/Q8/Q9/Q11 | Beam-default generated profile | keep 1M/5-run methodology controls. |
 
 For every row record:
 
