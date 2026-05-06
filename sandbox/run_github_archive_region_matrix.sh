@@ -49,7 +49,7 @@ read_max_rss_bytes() {
 }
 
 write_summary_header() {
-  printf "query\tmode\theap_cap\tstatus\tinput\tinput_mode\tloaded_events\tinput_files\tmedian_ms\tmedian_gc_ms\tmax_gc_ms\truns_with_gc\tmax_gc_collections\tmedian_rift_op_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\toutput_count\tmax_rss_bytes\n" > "${summary}"
+  printf "query\tmode\theap_cap\tstatus\tinput\tinput_mode\tinput_parser\tloaded_events\tinput_files\tmedian_ms\tmedian_gc_ms\tmax_gc_ms\truns_with_gc\tmax_gc_collections\tmedian_rift_op_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\toutput_count\tmax_rss_bytes\n" > "${summary}"
 }
 
 write_result_row() {
@@ -73,13 +73,14 @@ write_result_row() {
     fi
   done
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "${query}" \
     "${mode}" \
     "${heap_cap}" \
     "${run_status}" \
     "${fields[input]-}" \
     "${fields[input_mode]-}" \
+    "${fields[input_parser]-}" \
     "${fields[loaded_events]-}" \
     "${fields[input_files]-}" \
     "${fields[median_ms]-}" \
@@ -104,11 +105,12 @@ write_failed_row() {
   local run_status="$4"
   local max_rss_bytes="$5"
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "${query}" \
     "${mode}" \
     "${heap_cap}" \
     "${run_status}" \
+    "" \
     "" \
     "" \
     "" \

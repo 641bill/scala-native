@@ -54,6 +54,18 @@ object GithubArchiveRegionConfig {
     val raw = BenchmarkInputSupport.envString("GITHUB_ARCHIVE_INPUT_MODE")
     if (raw.isEmpty) "preloaded" else raw
   }
+  val fileParser: String = {
+    val raw = BenchmarkInputSupport.envString("GITHUB_ARCHIVE_FILE_PARSER")
+    if (raw.isEmpty) "byte-slice"
+    else
+      raw match {
+        case "byte-slice" | "string" => raw
+        case other =>
+          throw new IllegalArgumentException(
+            s"unknown GITHUB_ARCHIVE_FILE_PARSER '$other'; expected byte-slice or string"
+          )
+      }
+  }
   val fileBackedInput: Boolean =
     inputMode match {
       case "preloaded"   => false
@@ -365,13 +377,138 @@ object GithubArchiveRegionMatrixHelpers {
     if (count == 0) 1 else count
   }
 
-  private def countFileBackedInputRows(): Int = {
-    val cfg = GithubArchiveRegionConfig
-    if (cfg.inputPath.isEmpty)
-      throw new IllegalArgumentException(
-        "GITHUB_ARCHIVE_INPUT_MODE=file-backed requires GITHUB_ARCHIVE_INPUT or GITHUB_ARCHIVE_INPUTS"
+  private val TypeMarker = "\"type\"".getBytes("US-ASCII")
+  private val RepoMarker = "\"repo\"".getBytes("US-ASCII")
+  private val ActorMarker = "\"actor\"".getBytes("US-ASCII")
+  private val NameMarker = "\"name\"".getBytes("US-ASCII")
+  private val LoginMarker = "\"login\"".getBytes("US-ASCII")
+
+  private def matches(bytes: Array[Byte], offset: Int, marker: Array[Byte]): Boolean = {
+    var i = 0
+    while (i < marker.length) {
+      if (bytes(offset + i) != marker(i)) return false
+      i += 1
+    }
+    true
+  }
+
+  private def findBytes(
+      bytes: Array[Byte],
+      length: Int,
+      marker: Array[Byte],
+      from: Int
+  ): Int = {
+    var i = math.max(0, from)
+    val last = length - marker.length
+    while (i <= last) {
+      if (bytes(i) == marker(0) && matches(bytes, i, marker)) return i
+      i += 1
+    }
+    -1
+  }
+
+  private def encodeBounds(start: Int, length: Int): Long =
+    (start.toLong << 32) | (length.toLong & 0xffffffffL)
+
+  private def boundsStart(bounds: Long): Int =
+    (bounds >>> 32).toInt
+
+  private def boundsLength(bounds: Long): Int =
+    bounds.toInt
+
+  private def jsonStringValueBounds(
+      bytes: Array[Byte],
+      length: Int,
+      marker: Array[Byte],
+      from: Int
+  ): Long = {
+    val start = findBytes(bytes, length, marker, from)
+    if (start < 0) -1L
+    else {
+      var colon = start + marker.length
+      while (colon < length && bytes(colon) != ':'.toByte) colon += 1
+      if (colon >= length) -1L
+      else {
+        var i = colon + 1
+        while (i < length && bytes(i) == ' '.toByte) i += 1
+        if (i >= length || bytes(i) != '"'.toByte) -1L
+        else {
+          i += 1
+          val begin = i
+          var escaped = false
+          while (i < length) {
+            val b = bytes(i)
+            if (escaped) escaped = false
+            else if (b == '\\'.toByte) escaped = true
+            else if (b == '"'.toByte) return encodeBounds(begin, i - begin)
+            i += 1
+          }
+          -1L
+        }
+      }
+    }
+  }
+
+  private def equalsAscii(
+      bytes: Array[Byte],
+      start: Int,
+      length: Int,
+      text: String
+  ): Boolean = {
+    if (length != text.length) return false
+    var i = 0
+    while (i < length) {
+      if ((bytes(start + i) & 0xff) != text.charAt(i).toInt) return false
+      i += 1
+    }
+    true
+  }
+
+  private def eventTypeId(bytes: Array[Byte], start: Int, length: Int): Int =
+    if (start < 0 || length <= 0) 0
+    else if (equalsAscii(bytes, start, length, "PushEvent")) 0
+    else if (equalsAscii(bytes, start, length, "PullRequestEvent")) 1
+    else if (equalsAscii(bytes, start, length, "IssuesEvent")) 2
+    else if (equalsAscii(bytes, start, length, "IssueCommentEvent")) 3
+    else if (equalsAscii(bytes, start, length, "WatchEvent")) 4
+    else if (equalsAscii(bytes, start, length, "ForkEvent")) 5
+    else if (equalsAscii(bytes, start, length, "CreateEvent")) 6
+    else if (equalsAscii(bytes, start, length, "DeleteEvent")) 7
+    else if (equalsAscii(bytes, start, length, "ReleaseEvent")) 8
+    else if (equalsAscii(bytes, start, length, "PublicEvent")) 9
+    else
+      BenchmarkInputSupport.positiveModulo(
+        BenchmarkInputSupport.stableHash(bytes, start, length),
+        16
       )
 
+  private def countJsonFields(bytes: Array[Byte], length: Int, limit: Int): Int = {
+    var count = 0
+    var i = 0
+    while (i + 2 < length && count < limit) {
+      if (bytes(i) == '"'.toByte && bytes(i + 1) != ':'.toByte) {
+        var j = i + 1
+        var escaped = false
+        var done = false
+        while (j < length && !done) {
+          val b = bytes(j)
+          if (escaped) escaped = false
+          else if (b == '\\'.toByte) escaped = true
+          else if (b == '"'.toByte) done = true
+          j += 1
+        }
+        var k = j
+        while (k < length && bytes(k) == ' '.toByte) k += 1
+        if (k < length && bytes(k) == ':'.toByte) count += 1
+        i = k
+      }
+      i += 1
+    }
+    if (count == 0) 1 else count
+  }
+
+  private def countFileBackedInputRowsString(): Int = {
+    val cfg = GithubArchiveRegionConfig
     var count = 0
     var pathIndex = 0
     while (pathIndex < cfg.inputPaths.length && count < cfg.events) {
@@ -390,7 +527,38 @@ object GithubArchiveRegionMatrixHelpers {
     count
   }
 
-  private def foreachFileBackedEvent(consumer: EventConsumer^): Int = {
+  private def countFileBackedInputRowsBytes(): Int = {
+    val cfg = GithubArchiveRegionConfig
+    var count = 0
+    var pathIndex = 0
+    while (pathIndex < cfg.inputPaths.length && count < cfg.events) {
+      val reader = BenchmarkInputSupport.openByteLines(cfg.inputPaths(pathIndex))
+      try {
+        var length = reader.readLine()
+        while (length >= 0 && count < cfg.events) {
+          if (length > 0) count += 1
+          length = reader.readLine()
+        }
+      } finally {
+        reader.close()
+      }
+      pathIndex += 1
+    }
+    count
+  }
+
+  private def countFileBackedInputRows(): Int = {
+    val cfg = GithubArchiveRegionConfig
+    if (cfg.inputPath.isEmpty)
+      throw new IllegalArgumentException(
+        "GITHUB_ARCHIVE_INPUT_MODE=file-backed requires GITHUB_ARCHIVE_INPUT or GITHUB_ARCHIVE_INPUTS"
+      )
+
+    if (cfg.fileParser == "string") countFileBackedInputRowsString()
+    else countFileBackedInputRowsBytes()
+  }
+
+  private def foreachFileBackedEventString(consumer: EventConsumer^): Int = {
     val cfg = GithubArchiveRegionConfig
     var index = 0
     var pathIndex = 0
@@ -432,6 +600,77 @@ object GithubArchiveRegionMatrixHelpers {
     index
   }
 
+  private def foreachFileBackedEventBytes(consumer: EventConsumer^): Int = {
+    val cfg = GithubArchiveRegionConfig
+    var index = 0
+    var pathIndex = 0
+    while (pathIndex < cfg.inputPaths.length && index < cfg.events) {
+      val reader = BenchmarkInputSupport.openByteLines(cfg.inputPaths(pathIndex))
+      try {
+        var length = reader.readLine()
+        while (length >= 0 && index < cfg.events) {
+          if (length > 0) {
+            val line = reader.bytes
+            val eventBounds =
+              jsonStringValueBounds(line, length, TypeMarker, 0)
+            val repoIndex = findBytes(line, length, RepoMarker, 0)
+            val actorIndex = findBytes(line, length, ActorMarker, 0)
+            val repoBounds =
+              jsonStringValueBounds(line, length, NameMarker, repoIndex)
+            val actorBounds =
+              jsonStringValueBounds(line, length, LoginMarker, actorIndex)
+
+            val lineHash = BenchmarkInputSupport.stableHash(line, 0, length)
+            val repoHash =
+              if (repoBounds >= 0L)
+                BenchmarkInputSupport.stableHash(
+                  line,
+                  boundsStart(repoBounds),
+                  boundsLength(repoBounds)
+                )
+              else lineHash
+            val actorHash =
+              if (actorBounds >= 0L)
+                BenchmarkInputSupport.stableHash(
+                  line,
+                  boundsStart(actorBounds),
+                  boundsLength(actorBounds)
+                )
+              else 0
+            val repoBucket =
+              BenchmarkInputSupport.positiveModulo(repoHash, cfg.repoBuckets)
+            val eventType =
+              if (eventBounds >= 0L)
+                eventTypeId(
+                  line,
+                  boundsStart(eventBounds),
+                  boundsLength(eventBounds)
+                )
+              else 0
+            val fields = countJsonFields(line, length, cfg.fieldLimit)
+            val hash =
+              lineHash.toLong ^
+                (actorHash.toLong << 17) ^
+                (eventType.toLong * 1099511628211L)
+            consumer(index, repoBucket, eventType, fields, hash)
+            index += 1
+          }
+          length = reader.readLine()
+        }
+      } finally {
+        reader.close()
+      }
+      pathIndex += 1
+    }
+    index
+  }
+
+  private def foreachFileBackedEvent(consumer: EventConsumer^): Int = {
+    val cfg = GithubArchiveRegionConfig
+    if (cfg.fileParser == "string") foreachFileBackedEventString(consumer)
+    else foreachFileBackedEventBytes(consumer)
+  }
+
   private def loadInput(): InputData = {
     val cfg = GithubArchiveRegionConfig
     if (cfg.fileBackedInput) {
@@ -440,9 +679,11 @@ object GithubArchiveRegionMatrixHelpers {
         throw new IllegalArgumentException(
           s"GH Archive input '${cfg.inputPath}' did not contain usable rows"
         )
+      val parserLabel =
+        if (cfg.fileParser == "byte-slice") "byte" else "string"
       return new InputData(
-        if (cfg.inputPaths.length == 1) "real-gharchive-file-backed"
-        else s"real-gharchive-file-backed-${cfg.inputPaths.length}files",
+        if (cfg.inputPaths.length == 1) s"real-gharchive-${parserLabel}-file-backed"
+        else s"real-gharchive-${parserLabel}-file-backed-${cfg.inputPaths.length}files",
         rows,
         cfg.inputPaths.length,
         null,
@@ -1458,6 +1699,7 @@ object GithubArchiveRegionMatrixHelpers {
       f"RESULT name=github-archive-$query-$canonical " +
         f"query=$query mode=$canonical input=${input.label} " +
         f"input_mode=${cfg.inputMode} " +
+        f"input_parser=${if (cfg.fileBackedInput) cfg.fileParser else "preloaded"} " +
         f"loaded_events=${input.events}%d " +
         f"input_files=${input.inputFiles}%d " +
         f"median_ms=$medianElapsed%.3f " +
@@ -1485,6 +1727,7 @@ object GithubArchiveRegionMatrixHelpers {
         s"repo_buckets=${cfg.repoBuckets} field_limit=${cfg.fieldLimit} " +
         s"sample_every=${cfg.sampleEvery} warmups=${cfg.warmupRuns} " +
         s"runs=${cfg.benchmarkRuns} input=${input.label} input_mode=${cfg.inputMode} " +
+        s"input_parser=${if (cfg.fileBackedInput) cfg.fileParser else "preloaded"} " +
         s"input_path=${cfg.inputPath}"
     )
   }

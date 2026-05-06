@@ -1,14 +1,16 @@
 # GH Archive Region Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-06 23:45 CEST
+Last updated: 2026-05-07 00:16 CEST
 
 Status: first real NDJSON/log-event stream matrix added, with both preloaded
-and first file-backed q1 rows. The preloaded rows time object allocation/query
-processing after extracting primitive metadata before warmups. The
-`GITHUB_ARCHIVE_INPUT_MODE=file-backed` rows reread and parse the gzip JSON
-lines inside every timed run, so parser/string/decompression allocation is
-included.
+and file-backed q1/q2 rows. The preloaded rows time object allocation/query
+processing after extracting primitive metadata before warmups.
+`GITHUB_ARCHIVE_INPUT_MODE=file-backed` rereads and parses gzip JSON lines
+inside every timed run. File-backed rows now support two parser paths:
+`GITHUB_ARCHIVE_FILE_PARSER=string` for the legacy `BufferedReader`/`String`
+path and `GITHUB_ARCHIVE_FILE_PARSER=byte-slice` for the current default
+reusable byte-line reader.
 
 ## Input
 
@@ -33,7 +35,9 @@ the matrix extracts event type, repo, actor, field-count, and a stable line
 hash into primitive preloaded arrays, then times object allocation/query
 processing. With `GITHUB_ARCHIVE_INPUT_MODE=file-backed`, the same logical
 query rereads the gzip file and parses the JSON line fields during every timed
-run.
+run. The default file-backed parser is now `byte-slice`, which reuses input
+buffers and extracts JSON string fields from raw UTF-8 bytes. The legacy
+`string` parser remains available as a control.
 
 ## Queries
 
@@ -159,6 +163,36 @@ GITHUB_ARCHIVE_QUERIES="q2-repo-window" \
 GITHUB_ARCHIVE_MODES="heap-immix safezone-improved-32k rift-trusted-streaming rift-checked-safezone-page-token" \
 GITHUB_ARCHIVE_HEAP_CAPS="uncapped 2G 1400M 1G" \
 GITHUB_ARCHIVE_OUTPUT_DIR=/Users/siyaoliu/rift/cache/github-archive-file-backed-100k-q2-caps-2026-05-06 \
+zsh sandbox/run_github_archive_region_matrix.sh
+```
+
+Byte-slice file-backed 100k and 2-hour rows:
+
+```sh
+GITHUB_ARCHIVE_BUILD=0 \
+GITHUB_ARCHIVE_INPUTS="/Users/siyaoliu/rift/cache/benchmark-data/gharchive/2026-04-01-0.json.gz" \
+GITHUB_ARCHIVE_INPUT_MODE=file-backed \
+GITHUB_ARCHIVE_FILE_PARSER=byte-slice \
+GITHUB_ARCHIVE_EVENTS=100000 \
+GITHUB_ARCHIVE_BENCHMARK_RUNS=3 \
+GITHUB_ARCHIVE_WARMUPS=1 \
+GITHUB_ARCHIVE_QUERIES="q1-fields q2-repo-window" \
+GITHUB_ARCHIVE_MODES="heap-immix rift-trusted-streaming rift-checked-safezone-page-token" \
+GITHUB_ARCHIVE_OUTPUT_DIR=/Users/siyaoliu/rift/cache/github-archive-byte-parser-100k-2026-05-07 \
+zsh sandbox/run_github_archive_region_matrix.sh
+```
+
+```sh
+GITHUB_ARCHIVE_BUILD=0 \
+GITHUB_ARCHIVE_INPUTS="/Users/siyaoliu/rift/cache/benchmark-data/gharchive/2026-04-01-0.json.gz,/Users/siyaoliu/rift/cache/benchmark-data/gharchive/2026-04-01-1.json.gz" \
+GITHUB_ARCHIVE_INPUT_MODE=file-backed \
+GITHUB_ARCHIVE_FILE_PARSER=byte-slice \
+GITHUB_ARCHIVE_EVENTS=200000 \
+GITHUB_ARCHIVE_BENCHMARK_RUNS=3 \
+GITHUB_ARCHIVE_WARMUPS=1 \
+GITHUB_ARCHIVE_QUERIES="q1-fields q2-repo-window" \
+GITHUB_ARCHIVE_MODES="heap-immix rift-trusted-streaming rift-checked-safezone-page-token" \
+GITHUB_ARCHIVE_OUTPUT_DIR=/Users/siyaoliu/rift/cache/github-archive-byte-parser-2h-200k-2026-05-07 \
 zsh sandbox/run_github_archive_region_matrix.sh
 ```
 
@@ -521,23 +555,109 @@ page-token allocator tweak. It should be a parser/string scratch path, such as
 a byte-slice or char-slice NDJSON reader that avoids per-field substring/string
 allocation, then a rerun of file-backed q1/q2.
 
+## Byte-Slice File-Backed Parser
+
+The parser-scratch prototype replaces the legacy `BufferedReader.readLine`
+and per-line `String` field extraction path with a reusable byte-line reader.
+It scans gzip/plain input into a reusable byte buffer, extracts the q1/q2 JSON
+fields from raw UTF-8 bytes, and hashes byte slices directly. This is intended
+as a general NDJSON/log-event parser-scratch shape: the same pattern should
+apply to GH Archive, JSON logs, security events, GDELT-like records, and other
+field-extraction stream workloads.
+
+Important checksum note: q1 byte-slice checksums are not expected to match the
+legacy string-parser q1 checksum because q1 now hashes raw UTF-8 byte slices
+instead of decoded UTF-16 `String` characters. Heap and region rows match
+within the same parser, which is the correctness criterion for these rows. q2
+checksums happen to match the string path for the measured files.
+
+### 20k Parser Control
+
+The 20k smoke compared byte-slice and string parser paths on the same hourly
+file. All heap/region rows matched checksum within each parser.
+
+| Parser | Query | Mode | Median ms | Median GC ms | RSS bytes | Output count |
+|---|---|---|---:|---:|---:|---:|
+| byte-slice | q1-fields | `heap-immix` | `385.247` | `0.000` | `30654464` | `260000` |
+| byte-slice | q1-fields | `rift-checked-safezone-page-token` | `379.485` | `0.000` | `37027840` | `260000` |
+| string | q1-fields | `heap-immix` | `784.301` | `17.557` | `257572864` | `260000` |
+| string | q1-fields | `rift-checked-safezone-page-token` | `770.319` | `11.507` | `269598720` | `260000` |
+| byte-slice | q2-repo-window | `heap-immix` | `393.716` | `0.000` | `30605312` | `3874` |
+| byte-slice | q2-repo-window | `rift-checked-safezone-page-token` | `382.408` | `0.000` | `37044224` | `3874` |
+| string | q2-repo-window | `heap-immix` | `777.890` | `17.464` | `257540096` | `3874` |
+| string | q2-repo-window | `rift-checked-safezone-page-token` | `780.185` | `11.050` | `269647872` | `3874` |
+
+Interpretation: byte-slice parsing roughly halves file-backed elapsed at 20k
+and removes the immediate parser-string GC/RSS cliff. This supports the
+earlier profile result: the string parser, not page-token allocation, was the
+dominant avoidable file-backed overhead.
+
+### 100k Byte-Slice Rows
+
+All rows loaded exactly `100000` events from one hourly file, materialized
+`1300000` q1/q2 event-field records, and matched checksum/output count within
+each query.
+
+| Query | Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes | Output count |
+|---|---|---:|---:|---:|---:|---:|---:|
+| q1-fields | `heap-immix` | `1957.637` | `0.000` | `53.889` | 1 | `152911872` | `1300000` |
+| q1-fields | `rift-trusted-streaming` | `1964.748` | `0.000` | `0.000` | 0 | `147243008` | `1300000` |
+| q1-fields | `rift-checked-safezone-page-token` | `1957.640` | `0.000` | `0.000` | 0 | `147406848` | `1300000` |
+| q2-repo-window | `heap-immix` | `1957.715` | `0.000` | `52.762` | 1 | `152911872` | `15877` |
+| q2-repo-window | `rift-trusted-streaming` | `1968.853` | `0.000` | `0.000` | 0 | `147292160` | `15877` |
+| q2-repo-window | `rift-checked-safezone-page-token` | `2005.000` | `0.000` | `0.000` | 0 | `147406848` | `15877` |
+
+Interpretation: compared with the earlier 100k string-parser file-backed rows
+around `4.0 s` and `1.2 GB` RSS, byte-slice parsing cuts elapsed and RSS
+sharply. It also lowers median heap GC to zero at 100k, so this scale becomes
+a near-tie/ceiling row rather than a strong region throughput win. Region rows
+still remove heap GC outliers and use slightly less RSS.
+
+### 200k Two-Hour Byte-Slice Rows
+
+All rows loaded exactly `200000` real events from two hourly files and matched
+checksum/output count.
+
+| Query | Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes | Output count |
+|---|---|---:|---:|---:|---:|---:|---:|
+| q1-fields | `heap-immix` | `3806.120` | `57.685` | `73.922` | 2 | `290177024` | `2600000` |
+| q1-fields | `rift-trusted-streaming` | `3626.219` | `0.000` | `0.000` | 0 | `211075072` | `2600000` |
+| q1-fields | `rift-checked-safezone-page-token` | `3629.193` | `0.000` | `0.000` | 0 | `211238912` | `2600000` |
+| q2-repo-window | `heap-immix` | `3756.950` | `61.625` | `67.231` | 2 | `290193408` | `31794` |
+| q2-repo-window | `rift-trusted-streaming` | `3645.458` | `0.000` | `0.000` | 0 | `211075072` | `31794` |
+| q2-repo-window | `rift-checked-safezone-page-token` | `3626.107` | `0.000` | `0.000` | 0 | `211222528` | `31794` |
+
+Interpretation:
+
+- Byte-slice parsing keeps the real file-backed workload realistic while
+  removing the avoidable `String` parser allocation cliff.
+- At 200k/two-hour scale, both trusted Streaming and checked scoped page-token
+  are modest throughput wins and clear RSS wins: heap uses about `290 MB`
+  while region rows use about `211 MB`.
+- Region rows remove timed GC entirely. Heap collects in 2/3 timed runs for
+  both q1 and q2.
+- This is a better GH Archive story than the legacy string-parser rows, but it
+  remains a modest real-input win rather than a huge Broom/Yak-style win.
+
 ## Current Decision
 
 GH Archive remains in the real-input ladder, but its role is narrower than the
-first 100k row suggested:
+first generated/preloaded row suggested:
 
 - It is promising for memory-budget and GC-tail experiments.
-- It is not yet an uncapped throughput case study, because heap can win median
-  elapsed by growing to a large heap and collecting rarely.
+- With the legacy string parser it was mostly an RSS/fixed-memory row because
+  parser allocation dominated. With the byte-slice parser, the 200k/two-hour
+  file-backed q1/q2 rows become modest real-input throughput/RSS/tail wins.
 - q1 is the useful shape: many ordinary field/event records with bucket
   lifetimes.
-- q2 is mostly a repo-aggregation CPU row.
+- q2 is no longer only a repo-aggregation CPU ceiling once parser allocation is
+  reduced; the byte-slice two-hour q2 row also favors regions modestly.
 
 Next useful GH Archive work:
 
-1. Add parser/string allocation attribution or a parser-scratch prototype,
-   because current file-backed rows still allocate parser strings on the heap.
-2. Add a larger multi-hour/day file-backed run only if the machine can tolerate
-   multi-GB heap RSS, and report heap cap/RSS explicitly.
+1. Scale byte-slice file-backed q1/q2 to more hours or 1M events if the
+   machine can tolerate the run, and report heap cap/RSS explicitly.
+2. Generalize the byte-slice parser-scratch path into a reusable NDJSON/log
+   extraction operator before adding GH-specific tuning.
 3. Add latency/tail metrics or per-run elapsed tables, since median elapsed
    hides the GC outlier that regions remove.
