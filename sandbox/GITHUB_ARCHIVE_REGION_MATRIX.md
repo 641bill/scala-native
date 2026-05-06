@@ -1,7 +1,7 @@
 # GH Archive Region Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-06 23:24 CEST
+Last updated: 2026-05-06 23:45 CEST
 
 Status: first real NDJSON/log-event stream matrix added, with both preloaded
 and first file-backed q1 rows. The preloaded rows time object allocation/query
@@ -447,6 +447,80 @@ this is also fixed-memory evidence. The next question is whether q1 shows the
 same cap behavior under file-backed timing and whether parser/string allocation
 can be isolated or moved into reusable region scratch APIs.
 
+## Two-Hour File-Backed Rows
+
+Command:
+
+```sh
+GITHUB_ARCHIVE_BUILD=0 \
+GITHUB_ARCHIVE_INPUTS="/Users/siyaoliu/rift/cache/benchmark-data/gharchive/2026-04-01-0.json.gz,/Users/siyaoliu/rift/cache/benchmark-data/gharchive/2026-04-01-1.json.gz" \
+GITHUB_ARCHIVE_INPUT_MODE=file-backed \
+GITHUB_ARCHIVE_EVENTS=200000 \
+GITHUB_ARCHIVE_BENCHMARK_RUNS=3 \
+GITHUB_ARCHIVE_WARMUPS=1 \
+GITHUB_ARCHIVE_QUERIES="q1-fields q2-repo-window" \
+GITHUB_ARCHIVE_MODES="heap-immix rift-trusted-streaming rift-checked-safezone-page-token" \
+GITHUB_ARCHIVE_OUTPUT_DIR=/Users/siyaoliu/rift/cache/github-archive-file-backed-2h-200k-2026-05-06 \
+zsh sandbox/run_github_archive_region_matrix.sh
+```
+
+All rows loaded exactly `200000` real GH Archive events from two hourly gzip
+JSON-line files and matched checksums/output counts.
+
+| Query | Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes | Output count |
+|---|---|---:|---:|---:|---:|---:|---:|
+| q1-fields | `heap-immix` | `7549.355` | `198.535` | `247.303` | 3 | `2432679936` | `2600000` |
+| q1-fields | `rift-trusted-streaming` | `7448.838` | `154.497` | `154.930` | 3 | `925466624` | `2600000` |
+| q1-fields | `rift-checked-safezone-page-token` | `7489.923` | `193.910` | `197.487` | 3 | `925614080` | `2600000` |
+| q2-repo-window | `heap-immix` | `7641.540` | `199.876` | `268.416` | 3 | `2431680512` | `31794` |
+| q2-repo-window | `rift-trusted-streaming` | `7442.005` | `138.692` | `143.186` | 3 | `724779008` | `31794` |
+| q2-repo-window | `rift-checked-safezone-page-token` | `7498.263` | `197.692` | `198.651` | 3 | `925630464` | `31794` |
+
+Interpretation:
+
+- Scaling file-backed GH Archive to two hours strengthens the RSS/fixed-memory
+  story: region rows use about `0.72-0.93 GB` RSS while heap uses about
+  `2.43 GB`.
+- Throughput is still modest: trusted Streaming is about `1.3%` faster on q1
+  and `2.6%` faster on q2; checked scoped page-token is only slightly faster
+  than heap.
+- Timed GC remains in all modes because file-backed parsing still constructs
+  heap strings/builders while reading gzip JSON lines. The region rows move
+  event/field records, not the current parser/string scratch path.
+
+## File-Backed q1 Profile
+
+Diagnostic profile, not headline timing:
+
+```sh
+GITHUB_ARCHIVE_INPUTS="/Users/siyaoliu/rift/cache/benchmark-data/gharchive/2026-04-01-0.json.gz,/Users/siyaoliu/rift/cache/benchmark-data/gharchive/2026-04-01-1.json.gz" \
+GITHUB_ARCHIVE_INPUT_MODE=file-backed \
+GITHUB_ARCHIVE_EVENTS=200000 \
+GITHUB_ARCHIVE_BENCHMARK_RUNS=3 \
+GITHUB_ARCHIVE_WARMUPS=1 \
+SAFEZONE_ROOTS_MODE=1 \
+SAFEZONE_PAGE_SIZE=32768 \
+/usr/bin/sample <running GithubArchiveRegionMatrix pid> 10 1 -file /Users/siyaoliu/rift/cache/profile-gharchive-q1-checked-2026-05-06/sample.txt
+```
+
+Profiled row:
+
+| Query | Mode | Median ms | GC ms | Max GC ms | RSS note |
+|---|---|---:|---:|---:|---|
+| q1-fields | `rift-checked-safezone-page-token` | `7393.602` | `192.570` | `193.221` | sampled diagnostic run |
+
+Top sampled symbols were dominated by parser/string/decompression work:
+`java.io.BufferedReader.readLine`, UTF-8 decoder loops,
+`java.lang.AbstractStringBuilder.append0`, `java.lang.String.charAt`,
+`BufferedReader.prepareRead`, `StringBuilder.append`,
+`GithubArchiveRegionMatrixHelpers.countJsonFields`, stable hashing, and zlib
+inflate. Allocator/GC symbols were visible but not the dominant stack.
+
+Interpretation: the next GH Archive optimization should not be another
+page-token allocator tweak. It should be a parser/string scratch path, such as
+a byte-slice or char-slice NDJSON reader that avoids per-field substring/string
+allocation, then a rerun of file-backed q1/q2.
+
 ## Current Decision
 
 GH Archive remains in the real-input ladder, but its role is narrower than the
@@ -461,9 +535,9 @@ first 100k row suggested:
 
 Next useful GH Archive work:
 
-1. Add a larger multi-hour/day file-backed run only if the machine can tolerate multi-GB
-   heap RSS, and report heap cap/RSS explicitly.
-2. Add parser/string allocation attribution or a parser-scratch prototype,
+1. Add parser/string allocation attribution or a parser-scratch prototype,
    because current file-backed rows still allocate parser strings on the heap.
+2. Add a larger multi-hour/day file-backed run only if the machine can tolerate
+   multi-GB heap RSS, and report heap cap/RSS explicitly.
 3. Add latency/tail metrics or per-run elapsed tables, since median elapsed
    hides the GC outlier that regions remove.
