@@ -3607,17 +3607,24 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     val startSeconds =
       Math.floorDiv(timestampSeconds, arena.bucketSeconds) * arena.bucketSeconds
     val current = window.currentBucket
-    val needsClose = hasStreamBucketsBefore(parent, arena, cutoffSeconds)
+    val currentIsOnlyLiveBucket =
+      current != null &&
+        (window.append.buckets.first.asInstanceOf[AnyRef] eq current
+          .asInstanceOf[AnyRef])
+    val currentCanStayOpen =
+      currentIsOnlyLiveBucket &&
+        current.startSeconds + arena.bucketSeconds > cutoffSeconds
     if (
       current != null &&
       current.startSeconds == startSeconds &&
-      !needsClose
+      currentCanStayOpen
     )
       streamBucketRegionTrusted(
         parent,
         current.asInstanceOf[StreamBucket^{parent}]
       )
     else {
+      val needsClose = hasStreamBucketsBefore(parent, arena, cutoffSeconds)
       if (needsClose)
         closePageTokenAppendBucketsBeforeWithCursor(
           parent,
@@ -4379,6 +4386,21 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     cursor.current = null
   }
 
+  private def consumePageTokenAppendBucketNoDrain[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamPageTokenAppendWindow[T]^{parent},
+      bucket: StreamBucket^{parent},
+      onBucket: StreamBucket^{parent} => Unit
+  ): Unit = {
+    val append = window.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
+    val removed = bucket.appendLength
+    bucket.appendHead = null
+    bucket.appendTail = null
+    bucket.appendLength = 0
+    append.totalLength -= removed
+    onBucket(bucket)
+  }
+
   private def consumeChunkAppendBucketWithCursor[T <: Object](
       parent: StreamingRegion^,
       window: StreamChunkAppendWindow[T]^{parent},
@@ -4477,6 +4499,31 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
   }
 
+  /** Closes page/token append buckets before `cutoffSeconds` without draining
+   *  records.
+   *
+   *  This is an operator-owned fast path for append-only or aggregate-on-append
+   *  workloads. Parent head/tail references are cleared before `onBucket` runs,
+   *  and the child bucket closes immediately after the callback. Generic
+   *  append-window APIs keep cursor/entry drains for defensive cleanup.
+   */
+  def closePageTokenAppendBucketsBeforeNoDrain[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamPageTokenAppendWindow[T]^{parent},
+      cutoffSeconds: Long
+  )(onBucket: StreamBucket^{parent} => Unit): Unit = {
+    val append = window.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
+    closeStreamBucketsBefore(
+      parent,
+      append.buckets.asInstanceOf[StreamBucketArena^{parent}],
+      cutoffSeconds
+    ) { bucket =>
+      if (window.currentBucket.asInstanceOf[AnyRef] eq bucket.asInstanceOf[AnyRef])
+        window.currentBucket = null
+      consumePageTokenAppendBucketNoDrain(parent, window, bucket, onBucket)
+    }
+  }
+
   /** Closes map/filter page buckets fully before `cutoffSeconds`. */
   def closePageTokenMapFilterBucketsBeforeWithCursor[T <: StreamAppendNode](
       parent: StreamingRegion^,
@@ -4564,6 +4611,21 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       append.buckets.asInstanceOf[StreamBucketArena^{parent}]
     ) { bucket =>
       consumePageTokenAppendBucketWithFastCursor(parent, window, bucket, onBucket)
+    }
+  }
+
+  /** Closes every page/token append bucket without draining records. */
+  def closeAllPageTokenAppendBucketsNoDrain[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamPageTokenAppendWindow[T]^{parent}
+  )(onBucket: StreamBucket^{parent} => Unit): Unit = {
+    val append = window.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
+    window.currentBucket = null
+    closeAllStreamBuckets(
+      parent,
+      append.buckets.asInstanceOf[StreamBucketArena^{parent}]
+    ) { bucket =>
+      consumePageTokenAppendBucketNoDrain(parent, window, bucket, onBucket)
     }
   }
 

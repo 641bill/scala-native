@@ -1531,6 +1531,45 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def streamPageTokenAppendWindowNoDrainClosesZeroAndFinalBuckets()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val window = RiftRegion.streamPageTokenAppendWindow[Event](10)
+        var sum = 0
+
+        def recordBucket(bucket: RiftRegion.StreamBucket^{stream}): Unit =
+          sum += bucket.startSeconds.toInt + 16
+
+        val emptyRegion =
+          RiftRegion.pageTokenAppendRegionFor(stream, window, 7L, Long.MinValue) {
+            (_, _) => ()
+          }
+        java.lang.System.identityHashCode(emptyRegion)
+
+        val nextRegion =
+          RiftRegion.pageTokenAppendRegionFor(stream, window, 17L, Long.MinValue) {
+            (_, _) => ()
+          }
+        val event: Event^{stream} =
+          RiftRegion.alloc(new Event(32))(using nextRegion)
+        RiftRegion.appendPageToken(stream, window, event)
+
+        RiftRegion.closeAllPageTokenAppendBucketsNoDrain(stream, window)(
+          recordBucket
+        )
+        sum
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def pageTokenMapFilterAllocatesAndDrainsRecords(): Unit = {
     RiftRegion.init(1)
     try {
