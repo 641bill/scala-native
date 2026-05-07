@@ -7,6 +7,7 @@ repo_dir=${script_dir:h}
 parent_dir=${repo_dir:h}
 default_spike_input="${parent_dir}/cache/benchmark-data/dspbench/source/dspbench-threads/data/sensors.dat"
 default_fraud_input="${parent_dir}/cache/benchmark-data/dspbench/source/dspbench-threads/data/credit-card.dat"
+default_log_input="${parent_dir}/cache/benchmark-data/dspbench/source/dspbench-spark/data/logprocessing/http-server.log"
 output_dir=${DSPBENCH_OUTPUT_DIR:-"/tmp/dspbench-region-matrix"}
 summary=${DSPBENCH_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${DSPBENCH_BUILD:-1}
@@ -198,6 +199,8 @@ run_case() {
   if [[ -z "${query_input}" ]]; then
     if [[ "${query}" == fraud-* && -e "${default_fraud_input}" ]]; then
       query_input="${default_fraud_input}"
+    elif [[ "${query}" == log-* && -e "${default_log_input}" ]]; then
+      query_input="${default_log_input}"
     elif [[ -e "${default_spike_input}" ]]; then
       query_input="${default_spike_input}"
     fi

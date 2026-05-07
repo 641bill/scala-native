@@ -44,6 +44,8 @@ object DSPBenchRegionConfig {
   val liveBuckets: Int = envInt("DSPBENCH_LIVE_BUCKETS", 4)
   val deviceBuckets: Int = envInt("DSPBENCH_DEVICE_BUCKETS", 4096)
   val fraudEntityBuckets: Int = envInt("DSPBENCH_FRAUD_ENTITY_BUCKETS", 32768)
+  val logStatusBuckets: Int = envInt("DSPBENCH_LOG_STATUS_BUCKETS", 1024)
+  val logMinuteBuckets: Int = envInt("DSPBENCH_LOG_MINUTE_BUCKETS", 1440)
   val movingAverageWindow: Int =
     envInt("DSPBENCH_MOVING_AVERAGE_WINDOW", 128)
   val spikeThresholdPermille: Int =
@@ -397,7 +399,9 @@ object DSPBenchRegionMatrixHelpers {
     query == "q2-spike-window"
 
   private def windowQuery(query: String): Boolean =
-    query == "q2-spike-window" || query == "fraud-q2-alert-window"
+    query == "q2-spike-window" ||
+      query == "fraud-q2-alert-window" ||
+      query == "log-q2-window"
 
   private def fraudQuery(query: String): Boolean =
     query == "fraud-q0-parse" ||
@@ -410,14 +414,30 @@ object DSPBenchRegionMatrixHelpers {
   private def fraudAlertQuery(query: String): Boolean =
     query == "fraud-q2-alert-window"
 
+  private def logQuery(query: String): Boolean =
+    query == "log-q0-parse" ||
+      query == "log-q1-status" ||
+      query == "log-q2-window"
+
+  private def logStatusQuery(query: String): Boolean =
+    query == "log-q1-status" || query == "log-q2-window"
+
+  private def logWindowQuery(query: String): Boolean =
+    query == "log-q2-window"
+
   private def windowRecordKind(query: String): Int =
-    if (fraudQuery(query)) 130 else 30
+    if (fraudQuery(query)) 130
+    else if (logQuery(query)) 230
+    else 30
 
   private def windowSummaryKind(query: String): Int =
-    if (fraudQuery(query)) 144 else 44
+    if (fraudQuery(query)) 144
+    else if (logQuery(query)) 244
+    else 44
 
   private def keyBucketCount(query: String): Int =
     if (fraudQuery(query)) DSPBenchRegionConfig.fraudEntityBuckets
+    else if (logQuery(query)) DSPBenchRegionConfig.logStatusBuckets
     else DSPBenchRegionConfig.deviceBuckets
 
   private def isSpike(valueScaled: Int, avgScaled: Int): Boolean = {
@@ -443,6 +463,9 @@ object DSPBenchRegionMatrixHelpers {
         if (fraudQuery(query)) {
           if (cfg.inputPaths.length == 1) "real-dspbench-fraud-file-backed"
           else s"real-dspbench-fraud-file-backed-${cfg.inputPaths.length}files"
+        } else if (logQuery(query)) {
+          if (cfg.inputPaths.length == 1) "real-dspbench-log-file-backed"
+          else s"real-dspbench-log-file-backed-${cfg.inputPaths.length}files"
         } else {
           if (cfg.inputPaths.length == 1) "real-dspbench-spike-file-backed"
           else s"real-dspbench-spike-file-backed-${cfg.inputPaths.length}files"
@@ -454,6 +477,7 @@ object DSPBenchRegionMatrixHelpers {
     } else {
       new InputData(
         if (fraudQuery(query)) "generated-dspbench-fraud-shaped"
+        else if (logQuery(query)) "generated-dspbench-log-shaped"
         else "generated-dspbench-spike-shaped",
         cfg.events,
         cfg.events,
@@ -513,6 +537,26 @@ object DSPBenchRegionMatrixHelpers {
       i += 1
     }
     if (seen) value * sign else Int.MinValue
+  }
+
+  private def parseIntUntil(
+      bytes: Array[Byte],
+      length: Int,
+      start: Int,
+      stop: Int
+  ): Int = {
+    var i = start
+    var value = 0
+    var seen = false
+    while (i < length && bytes(i).toInt != stop && !isWhitespace(bytes(i) & 0xff)) {
+      val ch = bytes(i) & 0xff
+      if (ch >= '0'.toInt && ch <= '9'.toInt) {
+        value = value * 10 + (ch - '0'.toInt)
+        seen = true
+      } else return Int.MinValue
+      i += 1
+    }
+    if (seen) value else Int.MinValue
   }
 
   private def parseScaledAt(
@@ -640,6 +684,70 @@ object DSPBenchRegionMatrixHelpers {
     (entity, state, recordHash)
   }
 
+  private def indexOf(
+      bytes: Array[Byte],
+      length: Int,
+      start: Int,
+      target: Int
+  ): Int = {
+    var i = start
+    while (i < length) {
+      if ((bytes(i) & 0xff) == target) return i
+      i += 1
+    }
+    -1
+  }
+
+  private def parseCommonLog(
+      bytes: Array[Byte],
+      length: Int
+  ): (Int, Int, Int, Int, Long) = {
+    val ipEnd = indexOf(bytes, length, 0, ' '.toInt)
+    if (ipEnd <= 0) return (-1, 0, 0, 0, 0L)
+
+    val openBracket = indexOf(bytes, length, ipEnd + 1, '['.toInt)
+    if (openBracket < 0) return (-1, 0, 0, 0, 0L)
+    val hourColon = indexOf(bytes, length, openBracket + 1, ':'.toInt)
+    if (hourColon < 0 || hourColon + 5 >= length) return (-1, 0, 0, 0, 0L)
+    val hour = parseIntUntil(bytes, length, hourColon + 1, ':'.toInt)
+    val minuteColon = indexOf(bytes, length, hourColon + 1, ':'.toInt)
+    if (hour == Int.MinValue || minuteColon < 0) return (-1, 0, 0, 0, 0L)
+    val minute = parseIntUntil(bytes, length, minuteColon + 1, ':'.toInt)
+    if (minute == Int.MinValue) return (-1, 0, 0, 0, 0L)
+
+    val quoteStart = indexOf(bytes, length, minuteColon + 1, '"'.toInt)
+    if (quoteStart < 0) return (-1, 0, 0, 0, 0L)
+    val quoteEnd = indexOf(bytes, length, quoteStart + 1, '"'.toInt)
+    if (quoteEnd < 0) return (-1, 0, 0, 0, 0L)
+
+    var statusStart = skipWhitespace(bytes, length, quoteEnd + 1)
+    val status = parseIntAt(bytes, length, statusStart)
+    if (status == Int.MinValue) return (-1, 0, 0, 0, 0L)
+    val bytesStart = skipWhitespace(bytes, length, skipToken(bytes, length, statusStart))
+    val byteSize =
+      if (bytesStart >= length) 0
+      else if (bytes(bytesStart).toInt == '-'.toInt) 0
+      else {
+        val parsed = parseIntAt(bytes, length, bytesStart)
+        if (parsed == Int.MinValue) 0 else parsed
+      }
+
+    val statusBucket =
+      BenchmarkInputSupport.positiveModulo(status, DSPBenchRegionConfig.logStatusBuckets)
+    val minuteBucket =
+      BenchmarkInputSupport.positiveModulo(hour * 60 + minute, DSPBenchRegionConfig.logMinuteBuckets)
+    val requestHash =
+      BenchmarkInputSupport.stableHash(bytes, quoteStart + 1, quoteEnd - quoteStart - 1)
+    val ipHash = BenchmarkInputSupport.stableHash(bytes, 0, ipEnd)
+    val recordHash = BenchmarkInputSupport.stableHash(bytes, 0, length).toLong ^
+      (ipHash.toLong * 1099511628211L) ^
+      (status.toLong * 1315423911L) ^
+      (minuteBucket.toLong << 19) ^
+      requestHash.toLong
+
+    (statusBucket, minuteBucket, byteSize, requestHash, recordHash)
+  }
+
   private def countFileBackedRows(query: String): Int = {
     val cfg = DSPBenchRegionConfig
     var count = 0
@@ -652,6 +760,10 @@ object DSPBenchRegionMatrixHelpers {
           if (length > 0) {
             val parsed =
               if (fraudQuery(query)) parseFraud(reader.bytes, length)
+              else if (logQuery(query)) {
+                val parsed = parseCommonLog(reader.bytes, length)
+                (parsed._1, parsed._2, parsed._5)
+              }
               else parseSensor(reader.bytes, length)
             if (parsed._1 >= 0) count += 1
           }
@@ -812,6 +924,106 @@ object DSPBenchRegionMatrixHelpers {
     if (DSPBenchRegionConfig.fileBackedInput) foreachFileBackedFraud(consumer)
     else foreachGeneratedFraud(consumer)
 
+  private abstract class LogConsumer {
+    def apply(
+        eventIndex: Int,
+        statusBucket: Int,
+        minuteBucket: Int,
+        byteSize: Int,
+        requestHash: Int,
+        hash: Long
+    ): Unit
+  }
+
+  private final class LogStatusState {
+    private val cfg = DSPBenchRegionConfig
+    private val counts = new Array[Int](cfg.logStatusBuckets)
+    private val bytes = new Array[Long](cfg.logStatusBuckets)
+    private val lastMinute = new Array[Int](cfg.logStatusBuckets)
+
+    def update(statusBucket: Int, minuteBucket: Int, byteSize: Int): (Int, Int) = {
+      counts(statusBucket) += 1
+      bytes(statusBucket) += byteSize.toLong
+      lastMinute(statusBucket) = minuteBucket
+      (counts(statusBucket), (bytes(statusBucket) & 0x7fffffffL).toInt)
+    }
+  }
+
+  private def generatedLogStatus(index: Int): Int = {
+    val selector = mix(index * 1103515245 + 17) % 100
+    if (selector < 78) 200
+    else if (selector < 85) 301
+    else if (selector < 94) 404
+    else if (selector < 98) 500
+    else 503
+  }
+
+  private def foreachGeneratedLog(consumer: LogConsumer^): Int = {
+    val cfg = DSPBenchRegionConfig
+    var i = 0
+    while (i < cfg.events) {
+      val status = generatedLogStatus(i)
+      val statusBucket =
+        BenchmarkInputSupport.positiveModulo(status, cfg.logStatusBuckets)
+      val minuteBucket =
+        BenchmarkInputSupport.positiveModulo(i / 60, cfg.logMinuteBuckets)
+      val byteSize = 64 + (mix(i * 1664525 + 1013904223) % 32768)
+      val requestHash = mix(i * 1009 + status * 37)
+      val hash = generatedHash(i, statusBucket, byteSize) ^
+        (minuteBucket.toLong << 23) ^
+        requestHash.toLong
+      consumer(i, statusBucket, minuteBucket, byteSize, requestHash, hash)
+      i += 1
+    }
+    cfg.events
+  }
+
+  private def foreachFileBackedLog(consumer: LogConsumer^): Int = {
+    val cfg = DSPBenchRegionConfig
+    var index = 0
+    while (index < cfg.events) {
+      var advanced = false
+      var pathIndex = 0
+      while (pathIndex < cfg.inputPaths.length && index < cfg.events) {
+        val reader = BenchmarkInputSupport.openByteLines(cfg.inputPaths(pathIndex))
+        try {
+          var length = reader.readLine()
+          while (length >= 0 && index < cfg.events) {
+            if (length > 0) {
+              val parsed = parseCommonLog(reader.bytes, length)
+              if (parsed._1 >= 0) {
+                consumer(
+                  index,
+                  parsed._1,
+                  parsed._2,
+                  parsed._3,
+                  parsed._4,
+                  parsed._5 ^ index.toLong
+                )
+                index += 1
+                advanced = true
+              }
+            }
+            length = reader.readLine()
+          }
+        } finally {
+          reader.close()
+        }
+        pathIndex += 1
+      }
+      if (!advanced) {
+        throw new IllegalStateException(
+          s"DSPBench input '${cfg.inputPath}' stopped before producing any usable replay records"
+        )
+      }
+    }
+    index
+  }
+
+  private def foreachLog(consumer: LogConsumer^): Int =
+    if (DSPBenchRegionConfig.fileBackedInput) foreachFileBackedLog(consumer)
+    else foreachGeneratedLog(consumer)
+
   private def appendRecord(bucket: HeapBucket, record: HeapRecord): Unit = {
     if (bucket.head == null) {
       bucket.head = record
@@ -848,6 +1060,7 @@ object DSPBenchRegionMatrixHelpers {
     val diag = new MemoryCostDiagnostics()
     val state = new MovingAverageState()
     val fraudState = new FraudPredictorState()
+    val logState = new LogStatusState()
     var first: HeapBucket = null
     var last: HeapBucket = null
     var current: HeapBucket = null
@@ -1022,10 +1235,65 @@ object DSPBenchRegionMatrixHelpers {
         checksum = fold(checksum, 199, i, entity, stateCode, 0, false, hash, start)
     }
 
+    def processLog(
+        i: Int,
+        statusBucket: Int,
+        minuteBucket: Int,
+        byteSize: Int,
+        requestHash: Int,
+        hash: Long
+    ): Unit = {
+      val start = bucketStart(i)
+      val bucket = bucketFor(start)
+      val error = statusBucket >= 400 && statusBucket < 600
+      appendHeap(bucket, 210, i, statusBucket, byteSize, minuteBucket, error, hash)
+      if (logStatusQuery(query)) {
+        val predictStarted = if (diagnostics) System.nanoTime() else 0L
+        val updated = logState.update(statusBucket, minuteBucket, byteSize)
+        if (diagnostics)
+          diag.predictNanos += System.nanoTime() - predictStarted
+        appendHeap(
+          bucket,
+          220,
+          i,
+          statusBucket,
+          updated._1,
+          updated._2,
+          error,
+          hash ^ requestHash.toLong ^ 220L
+        )
+        if (logWindowQuery(query))
+          appendHeap(
+            bucket,
+            230,
+            i,
+            statusBucket,
+            byteSize,
+            minuteBucket,
+            error,
+            hash ^ 230L
+          )
+      }
+      if (i % cfg.sampleEvery == 0)
+        checksum = fold(checksum, 299, i, statusBucket, byteSize, minuteBucket, error, hash, start)
+    }
+
     if (fraudQuery(query)) {
       foreachFraud(new FraudConsumer {
         def apply(i: Int, entity: Int, stateCode: Int, hash: Long): Unit =
           processFraud(i, entity, stateCode, hash)
+      })
+    } else if (logQuery(query)) {
+      foreachLog(new LogConsumer {
+        def apply(
+            i: Int,
+            statusBucket: Int,
+            minuteBucket: Int,
+            byteSize: Int,
+            requestHash: Int,
+            hash: Long
+        ): Unit =
+          processLog(i, statusBucket, minuteBucket, byteSize, requestHash, hash)
       })
     } else {
       foreachSensor(new SensorConsumer {
@@ -1051,6 +1319,7 @@ object DSPBenchRegionMatrixHelpers {
     val diag = new MemoryCostDiagnostics()
     val state = new MovingAverageState()
     val fraudState = new FraudPredictorState()
+    val logState = new LogStatusState()
     var first: SafeBucket = null
     var last: SafeBucket = null
     var current: SafeBucket = null
@@ -1246,11 +1515,66 @@ object DSPBenchRegionMatrixHelpers {
         checksum = fold(checksum, 199, i, entity, stateCode, 0, false, hash, start)
     }
 
+    def processLog(
+        i: Int,
+        statusBucket: Int,
+        minuteBucket: Int,
+        byteSize: Int,
+        requestHash: Int,
+        hash: Long
+    ): Unit = {
+      val start = bucketStart(i)
+      val bucket = bucketFor(start)
+      val error = statusBucket >= 400 && statusBucket < 600
+      appendSafe(bucket, 210, i, statusBucket, byteSize, minuteBucket, error, hash)
+      if (logStatusQuery(query)) {
+        val predictStarted = if (diagnostics) System.nanoTime() else 0L
+        val updated = logState.update(statusBucket, minuteBucket, byteSize)
+        if (diagnostics)
+          diag.predictNanos += System.nanoTime() - predictStarted
+        appendSafe(
+          bucket,
+          220,
+          i,
+          statusBucket,
+          updated._1,
+          updated._2,
+          error,
+          hash ^ requestHash.toLong ^ 220L
+        )
+        if (logWindowQuery(query))
+          appendSafe(
+            bucket,
+            230,
+            i,
+            statusBucket,
+            byteSize,
+            minuteBucket,
+            error,
+            hash ^ 230L
+          )
+      }
+      if (i % cfg.sampleEvery == 0)
+        checksum = fold(checksum, 299, i, statusBucket, byteSize, minuteBucket, error, hash, start)
+    }
+
     try {
       if (fraudQuery(query)) {
         foreachFraud(new FraudConsumer {
           def apply(i: Int, entity: Int, stateCode: Int, hash: Long): Unit =
             processFraud(i, entity, stateCode, hash)
+        })
+      } else if (logQuery(query)) {
+        foreachLog(new LogConsumer {
+          def apply(
+              i: Int,
+              statusBucket: Int,
+              minuteBucket: Int,
+              byteSize: Int,
+              requestHash: Int,
+              hash: Long
+          ): Unit =
+            processLog(i, statusBucket, minuteBucket, byteSize, requestHash, hash)
         })
       } else {
         foreachSensor(new SensorConsumer {
@@ -1284,6 +1608,7 @@ object DSPBenchRegionMatrixHelpers {
     val diag = new MemoryCostDiagnostics()
     val state = new MovingAverageState()
     val fraudState = new FraudPredictorState()
+    val logState = new LogStatusState()
     var first: TrustedBucket = null
     var last: TrustedBucket = null
     var current: TrustedBucket = null
@@ -1471,11 +1796,69 @@ object DSPBenchRegionMatrixHelpers {
         checksum = fold(checksum, 199, i, entity, stateCode, 0, false, hash, start)
     }
 
+    def processLog(
+        i: Int,
+        statusBucket: Int,
+        minuteBucket: Int,
+        byteSize: Int,
+        requestHash: Int,
+        hash: Long
+    ): Unit = {
+      val start = bucketStart(i)
+      val bucket = bucketFor(start)
+      val region = bucket.region
+      val error = statusBucket >= 400 && statusBucket < 600
+      appendTrusted(bucket, region, 210, i, statusBucket, byteSize, minuteBucket, error, hash)
+      if (logStatusQuery(query)) {
+        val predictStarted = if (diagnostics) System.nanoTime() else 0L
+        val updated = logState.update(statusBucket, minuteBucket, byteSize)
+        if (diagnostics)
+          diag.predictNanos += System.nanoTime() - predictStarted
+        appendTrusted(
+          bucket,
+          region,
+          220,
+          i,
+          statusBucket,
+          updated._1,
+          updated._2,
+          error,
+          hash ^ requestHash.toLong ^ 220L
+        )
+        if (logWindowQuery(query))
+          appendTrusted(
+            bucket,
+            region,
+            230,
+            i,
+            statusBucket,
+            byteSize,
+            minuteBucket,
+            error,
+            hash ^ 230L
+          )
+      }
+      if (i % cfg.sampleEvery == 0)
+        checksum = fold(checksum, 299, i, statusBucket, byteSize, minuteBucket, error, hash, start)
+    }
+
     try {
       if (fraudQuery(query)) {
         foreachFraud(new FraudConsumer {
           def apply(i: Int, entity: Int, stateCode: Int, hash: Long): Unit =
             processFraud(i, entity, stateCode, hash)
+        })
+      } else if (logQuery(query)) {
+        foreachLog(new LogConsumer {
+          def apply(
+              i: Int,
+              statusBucket: Int,
+              minuteBucket: Int,
+              byteSize: Int,
+              requestHash: Int,
+              hash: Long
+          ): Unit =
+            processLog(i, statusBucket, minuteBucket, byteSize, requestHash, hash)
         })
       } else {
         foreachSensor(new SensorConsumer {
@@ -1511,6 +1894,7 @@ object DSPBenchRegionMatrixHelpers {
     val cfg = DSPBenchRegionConfig
     val state = new MovingAverageState()
     val fraudState = new FraudPredictorState()
+    val logState = new LogStatusState()
     val diagnostics = cfg.diagnostics
     var bucketSwitchNanos = 0L
     var appendNanos = 0L
@@ -1722,10 +2106,69 @@ object DSPBenchRegionMatrixHelpers {
         checksum = fold(checksum, 199, i, entity, stateCode, 0, false, hash, start)
     }
 
+    def processLog(
+        i: Int,
+        statusBucket: Int,
+        minuteBucket: Int,
+        byteSize: Int,
+        requestHash: Int,
+        hash: Long
+    ): Unit = {
+      val start = bucketStart(i)
+      if (start != currentStartEvent) {
+        val bucketStarted = if (diagnostics) System.nanoTime() else 0L
+        currentStartEvent = start
+        currentRegion =
+          RiftRegion.pageTokenAppendOpenRegionFor(
+            stream,
+            window,
+            start,
+            closeCutoff(start)
+          )(closeRecords)
+        if (diagnostics) {
+          bucketSwitchNanos += System.nanoTime() - bucketStarted
+          bucketSwitches += 1L
+        }
+      }
+      val error = statusBucket >= 400 && statusBucket < 600
+      appendChecked(210, i, statusBucket, byteSize, minuteBucket, error, hash)
+      if (logStatusQuery(query)) {
+        val predictStarted = if (diagnostics) System.nanoTime() else 0L
+        val updated = logState.update(statusBucket, minuteBucket, byteSize)
+        if (diagnostics)
+          predictNanos += System.nanoTime() - predictStarted
+        appendChecked(
+          220,
+          i,
+          statusBucket,
+          updated._1,
+          updated._2,
+          error,
+          hash ^ requestHash.toLong ^ 220L
+        )
+        if (logWindowQuery(query))
+          appendChecked(230, i, statusBucket, byteSize, minuteBucket, error, hash ^ 230L)
+      }
+      if (i % cfg.sampleEvery == 0)
+        checksum = fold(checksum, 299, i, statusBucket, byteSize, minuteBucket, error, hash, start)
+    }
+
     if (fraudQuery(query)) {
       foreachFraud(new FraudConsumer {
         def apply(i: Int, entity: Int, stateCode: Int, hash: Long): Unit =
           processFraud(i, entity, stateCode, hash)
+      })
+    } else if (logQuery(query)) {
+      foreachLog(new LogConsumer {
+        def apply(
+            i: Int,
+            statusBucket: Int,
+            minuteBucket: Int,
+            byteSize: Int,
+            requestHash: Int,
+            hash: Long
+        ): Unit =
+          processLog(i, statusBucket, minuteBucket, byteSize, requestHash, hash)
       })
     } else {
       foreachSensor(new SensorConsumer {
@@ -1816,7 +2259,8 @@ object DSPBenchRegionMatrixHelpers {
     query match {
       case "q0-parse" | "q1-moving-average" | "q2-spike-window" |
           "fraud-q0-parse" | "fraud-q1-predict" |
-          "fraud-q2-alert-window" =>
+          "fraud-q2-alert-window" | "log-q0-parse" |
+          "log-q1-status" | "log-q2-window" =>
         ()
       case other =>
         throw new IllegalArgumentException(
@@ -1953,6 +2397,9 @@ object DSPBenchRegionMatrixHelpers {
         s"events=${input.requestedEvents} configured_events=${cfg.events} " +
         s"events_per_bucket=${cfg.eventsPerBucket} live_buckets=${cfg.liveBuckets} " +
         s"device_buckets=${cfg.deviceBuckets} " +
+        s"fraud_entity_buckets=${cfg.fraudEntityBuckets} " +
+        s"log_status_buckets=${cfg.logStatusBuckets} " +
+        s"log_minute_buckets=${cfg.logMinuteBuckets} " +
         s"moving_average_window=${cfg.movingAverageWindow} " +
         s"spike_threshold_permille=${cfg.spikeThresholdPermille} " +
         s"sample_every=${cfg.sampleEvery} warmups=${cfg.warmupRuns} " +

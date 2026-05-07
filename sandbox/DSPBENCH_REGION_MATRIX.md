@@ -1,13 +1,13 @@
 # DSPBench Region Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-07 18:53 CEST
+Last updated: 2026-05-07 22:34 CEST
 
-Status: implemented first two local DSPBench-family real-input candidates:
-Spike Detection and Fraud Detection. This is not an exact DSPBench artifact
-reproduction: the benchmark uses public DSPBench sample inputs, but runs local
-single-process Scala Native kernels so Storm/Spark/Flink/thread-engine overhead
-does not hide memory-management effects.
+Status: implemented three local DSPBench-family real-input candidates: Spike
+Detection, Fraud Detection, and Log Processing. This is not an exact DSPBench
+artifact reproduction: the benchmark uses public DSPBench sample inputs, but
+runs local single-process Scala Native kernels so Storm/Spark/Flink/thread-engine
+overhead does not hide memory-management effects.
 
 ## Spike Input And Queries
 
@@ -652,3 +652,81 @@ It keeps the real-input q2 row as a modest checked throughput/RSS win over heap,
 but trusted Streaming is still the fastest lower-bound row. Remaining overhead
 is not just reclaim or bucket opening; query replay, append/linking, cursor
 traversal, and object construction still dominate.
+
+## Log Processing Input And Queries
+
+Input source:
+`/Users/siyaoliu/rift/cache/benchmark-data/dspbench/source/dspbench-spark/data/logprocessing/http-server.log`
+
+The file has `55000` Apache/common-log lines. Runs larger than that replay the
+same real sample and report `input_replays`.
+
+The local port follows the DSPBench Spark Log Processing shape at the operator
+level: common-log parsing, status/volume-style durable primitive counters, and
+window summaries. It does not run Spark, watermarks, or the original
+multi-sink engine.
+
+| Query | Shape | Region lifetime |
+|---|---|---|
+| `log-q0-parse` | Parse each common-log line and allocate one ordinary log record. | Event buckets. |
+| `log-q1-status` | Allocate log and status/update records; update durable per-status primitive counters. | Event buckets; counters on heap/primitive arrays. |
+| `log-q2-window` | Allocate log, status/update, and window contribution records; summarize status counts by event bucket. | Event/window buckets; status counters on heap/primitive arrays. |
+
+Commands:
+
+```bash
+cd /Users/siyaoliu/rift/scala-native-rift
+DSPBENCH_BUILD=0 \
+DSPBENCH_EVENTS=1000000 \
+DSPBENCH_BENCHMARK_RUNS=3 \
+DSPBENCH_WARMUPS=1 \
+DSPBENCH_QUERIES="log-q0-parse log-q1-status log-q2-window" \
+DSPBENCH_MODES="heap-immix safezone-improved-32k rift-trusted-streaming rift-checked-safezone-page-token" \
+DSPBENCH_OUTPUT_DIR=/Users/siyaoliu/rift/cache/dspbench-log-1m-2026-05-07 \
+zsh sandbox/run_dspbench_region_matrix.sh
+```
+
+All smoke, 100k, and 1M rows matched checksum/output count across measured
+modes.
+
+## Log Processing 1M Median Rows
+
+Input replays: `19`.
+
+| Query | Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes | Output count |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `log-q0-parse` | `heap-immix` | `1462.188` | `23.052` | `23.520` | `3/3` | `147193856` | `1000000` |
+| `log-q0-parse` | `safezone-improved-32k` | `1447.147` | `8.134` | `8.519` | `3/3` | `152862720` | `1000000` |
+| `log-q0-parse` | `rift-trusted-streaming` | `1443.724` | `6.251` | `6.299` | `3/3` | `152928256` | `1000000` |
+| `log-q0-parse` | `rift-checked-safezone-page-token` | `1462.524` | `7.940` | `8.196` | `3/3` | `152109056` | `1000000` |
+| `log-q1-status` | `heap-immix` | `1669.816` | `40.058` | `57.330` | `3/3` | `206503936` | `2000000` |
+| `log-q1-status` | `safezone-improved-32k` | `1645.205` | `12.930` | `25.185` | `3/3` | `217694208` | `2000000` |
+| `log-q1-status` | `rift-trusted-streaming` | `1647.471` | `10.858` | `18.959` | `3/3` | `217776128` | `2000000` |
+| `log-q1-status` | `rift-checked-safezone-page-token` | `1654.431` | `13.004` | `21.816` | `3/3` | `216137728` | `2000000` |
+| `log-q2-window` | `heap-immix` | `1750.291` | `44.992` | `88.210` | `3/3` | `307773440` | `179` |
+| `log-q2-window` | `safezone-improved-32k` | `1768.410` | `20.289` | `23.385` | `3/3` | `324567040` | `179` |
+| `log-q2-window` | `rift-trusted-streaming` | `1737.469` | `15.311` | `16.228` | `3/3` | `324435968` | `179` |
+| `log-q2-window` | `rift-checked-safezone-page-token` | `1733.654` | `18.402` | `18.584` | `3/3` | `322027520` | `179` |
+
+## Log Processing Interpretation
+
+DSPBench Log Processing is a useful real-input stream row, but it still is not
+the missing GC-heavy flagship:
+
+- q0 parse is parser/replay dominated. Trusted Streaming is about `1.3%`
+  faster than heap, while checked scoped page-token is essentially tied.
+- q1 status counting is a modest SafeZone/trusted-region throughput win, but
+  checked scoped page-token remains between heap and the trusted/SafeZone rows.
+- q2 windowing is the best log row: checked scoped page-token is fastest in the
+  measured 1M matrix (`1733.654 ms` versus heap `1750.291 ms`) and reduces heap
+  median/max GC from `44.992/88.210 ms` to `18.402/18.584 ms`.
+- The q2 win is still modest. Heap GC is visible but only about `2.6%` of heap
+  elapsed, and region rows have higher RSS than heap at this scale because the
+  live bucket topology retains more region payload while parser/query CPU
+  dominates.
+
+Decision: keep Log Processing q2 as a real-input modest throughput/GC-tail
+control and as another page-token regression row. Do not tune it into a
+flagship case. The next real-input search should continue with a richer
+DSPBench or log/session/template workload that materializes more intermediate
+objects per record, or with a provenance-clean RIoTBench/Theodolite input.
