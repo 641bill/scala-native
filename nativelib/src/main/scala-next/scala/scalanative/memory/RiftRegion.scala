@@ -3616,6 +3616,24 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     window.totalLength += 1
   }
 
+  private def appendPageTokenOwnedOpen[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      bucket: StreamBucket^{parent},
+      value: T^{parent}
+  ): Unit = {
+    value.appendNext = null
+    if (bucket.appendHead == null) {
+      bucket.appendHead = value.asInstanceOf[Object]
+      bucket.appendTail = value.asInstanceOf[Object]
+    } else {
+      bucket.appendTail
+        .asInstanceOf[StreamAppendNode]
+        .appendNext = value.asInstanceOf[StreamAppendNode]
+      bucket.appendTail = value.asInstanceOf[Object]
+    }
+    bucket.appendLength += 1
+  }
+
   /** Appends `value` to the linked list owned by `bucket`.
    *
    *  The value should be allocated in `bucket`'s child region and then widened
@@ -3865,9 +3883,8 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       window: StreamPageTokenAppendWindow[T]^{parent},
       value: T^{parent}
   ): Unit = {
-    val append = window.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
     val bucket = window.currentBucket.asInstanceOf[StreamBucket^{parent}]
-    appendWindowOwnedOpen(parent, append, bucket, value)
+    appendPageTokenOwnedOpen(parent, bucket, value)
   }
 
   /** Appends a record and updates the current bucket's count/sum metadata. */
@@ -3889,9 +3906,8 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       )
     val pageToken =
       operator.pageToken.asInstanceOf[StreamPageTokenAppendWindow[T]^{parent}]
-    val append = pageToken.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
     val bucket = pageToken.currentBucket.asInstanceOf[StreamBucket^{parent}]
-    appendWindowOwnedOpen(parent, append, bucket, value)
+    appendPageTokenOwnedOpen(parent, bucket, value)
     val index = slot * operator.keySpace + key
     operator.counts(index) += 1
     operator.sums(index) += amount
@@ -3938,9 +3954,8 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   ): Unit = {
     val window =
       operator.pageToken.asInstanceOf[StreamPageTokenAppendWindow[T]^{parent}]
-    val append = window.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
     val bucket = window.currentBucket.asInstanceOf[StreamBucket^{parent}]
-    appendWindowOwnedOpen(parent, append, bucket, value)
+    appendPageTokenOwnedOpen(parent, bucket, value)
   }
 
   /** Returns the child region for a fixed-chunk append bucket.
@@ -4548,11 +4563,9 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   ): Unit = {
     val append = window.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
     val head = bucket.appendHead.asInstanceOf[StreamAppendNode]
-    val removed = bucket.appendLength
     bucket.appendHead = null
     bucket.appendTail = null
     bucket.appendLength = 0
-    append.totalLength -= removed
 
     val cursor = append.cursor.asInstanceOf[StreamAppendCursor[T]^{parent}]
     cursor.current = head
@@ -4570,12 +4583,9 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       bucket: StreamBucket^{parent},
       onBucket: StreamBucket^{parent} => Unit
   ): Unit = {
-    val append = window.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
-    val removed = bucket.appendLength
     bucket.appendHead = null
     bucket.appendTail = null
     bucket.appendLength = 0
-    append.totalLength -= removed
     onBucket(bucket)
   }
 

@@ -1,7 +1,7 @@
 # Checked Page-Token Cost Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-07 17:10 CEST
+Last updated: 2026-05-07 17:51 CEST
 
 Status: focused cost-decomposition matrix added and validated. This matrix is
 not a replacement for `CHECKED_PAGE_TOKEN_APPEND_MATRIX.md`; it splits the
@@ -205,6 +205,96 @@ Interpretation:
   but it does not justify broad application claims yet. The next application
   step should only use this shape where the query naturally updates aggregate
   metadata during append and can close buckets without per-record traversal.
+
+## Page-Token Live-Length Bookkeeping Removal
+
+Change:
+
+- Page-token, page-token map/filter, and page-token count-by-key appends now
+  use a page-token-owned helper that keeps per-bucket `appendLength` for
+  close/cursor logic but skips the underlying generic append-window
+  `totalLength` counter.
+- Page-token close paths no longer decrement that generic live-length counter.
+- Generic public `StreamAppendWindow` and `EpochBuffer` APIs still maintain
+  `appendWindowLength`/`epochBufferLength`; the optimization applies only to
+  operator-owned page-token paths, which expose no public live-length API.
+
+Validation:
+
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile` passed.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"` passed `120/120`.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"` passed `52/52`.
+- 20k smoke matched checksums for page-token and count-by-key mode groups.
+- A source-level `inline` version was tried and rejected by capture checking;
+  true allocation/append intrinsic work likely belongs in compiler/runtime
+  lowering rather than a public-source inline helper.
+
+1M commands:
+
+```sh
+CHECKED_PAGE_TOKEN_COST_BUILD=0 \
+CHECKED_PAGE_TOKEN_COST_EVENTS=1000000 \
+CHECKED_PAGE_TOKEN_COST_BENCHMARK_RUNS=3 \
+CHECKED_PAGE_TOKEN_COST_WARMUPS=1 \
+CHECKED_PAGE_TOKEN_COST_WORKLOADS="append-only append-drain append-aggregate" \
+CHECKED_PAGE_TOKEN_COST_MODES="heap-same-shape rift-checked-page-token rift-checked-safezone-page-token" \
+CHECKED_PAGE_TOKEN_COST_OUTPUT_DIR=/Users/siyaoliu/rift/cache/checked-page-token-no-length-1m-2026-05-07/page-token \
+zsh sandbox/run_checked_page_token_cost_matrix.sh
+```
+
+```sh
+CHECKED_PAGE_TOKEN_COST_BUILD=0 \
+CHECKED_PAGE_TOKEN_COST_EVENTS=1000000 \
+CHECKED_PAGE_TOKEN_COST_BENCHMARK_RUNS=3 \
+CHECKED_PAGE_TOKEN_COST_WARMUPS=1 \
+CHECKED_PAGE_TOKEN_COST_WORKLOADS="append-count-by-key" \
+CHECKED_PAGE_TOKEN_COST_MODES="heap-same-shape rift-checked-count-by-key rift-checked-safezone-count-by-key" \
+CHECKED_PAGE_TOKEN_COST_OUTPUT_DIR=/Users/siyaoliu/rift/cache/checked-page-token-no-length-1m-2026-05-07/count-by-key \
+zsh sandbox/run_checked_page_token_cost_matrix.sh
+```
+
+| Workload | Heap same-shape | Checked page-token | Checked scoped page-token |
+|---|---:|---:|---:|
+| `append-only` | `81.535` ms, GC `12.314`, RSS `122781696` | `79.586` ms, GC `0.000`, RSS `83361792` | `77.135` ms, GC `0.000`, RSS `83214336` |
+| `append-drain` | `90.374` ms, GC `11.944`, RSS `122781696` | `90.249` ms, GC `0.000`, RSS `83345408` | `88.840` ms, GC `0.000`, RSS `83230720` |
+| `append-aggregate` | `86.988` ms, GC `11.905`, RSS `75104256` | `88.164` ms, GC `0.000`, RSS `83345408` | `85.362` ms, GC `0.000`, RSS `83263488` |
+| `append-count-by-key` | `114.143` ms, GC `15.091`, RSS `146604032` | `104.813` ms, GC `0.000`, RSS `83410944` | `102.504` ms, GC `0.000`, RSS `83279872` |
+
+DSPBench Fraud q2 application control:
+
+```sh
+DSPBENCH_BUILD=1 \
+DSPBENCH_EVENTS=1000000 \
+DSPBENCH_BENCHMARK_RUNS=3 \
+DSPBENCH_WARMUPS=1 \
+DSPBENCH_QUERIES="fraud-q2-alert-window" \
+DSPBENCH_MODES="heap-immix rift-trusted-streaming rift-checked-page-token rift-checked-safezone-page-token" \
+DSPBENCH_OUTPUT_DIR=/Users/siyaoliu/rift/cache/dspbench-fraud-q2-page-token-no-length-1m-2026-05-07 \
+zsh sandbox/run_dspbench_region_matrix.sh
+```
+
+| Mode | Median elapsed | Median GC | RSS | Output count |
+|---|---:|---:|---:|---:|
+| `heap-immix` | `842.739` ms | `72.387` | `358252544` | `594182` |
+| `rift-trusted-streaming` | `832.012` ms | `11.175` | `282443776` | `594182` |
+| `rift-checked-page-token` | `854.207` ms | `12.948` | `278396928` | `594182` |
+| `rift-checked-safezone-page-token` | `843.380` ms | `15.245` | `278593536` | `594182` |
+
+Interpretation:
+
+- Removing page-token live-length bookkeeping is semantically justified by the
+  operator-owned API and keeps the focused count-by-key row positive: checked
+  scoped count-by-key is about `10.2%` faster than heap and cuts RSS by about
+  `43%`.
+- It is not a large standalone speedup, and it does not make DSPBench Fraud q2
+  a representative checked throughput win. In this clean application control,
+  checked scoped page-token is essentially tied with heap on elapsed while
+  cutting RSS by about `22%` and timed GC by about `57 ms`; trusted Streaming
+  remains fastest.
+- The next optimization should not keep shaving page-token close/open counters.
+  The remaining useful target is generated allocation lowering: remove the
+  `allocImpl`/`checkOpen` path from statically proven operator-owned checked
+  allocation, or profile a real row that shows a different dominant cost.
 
 ## Files
 

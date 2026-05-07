@@ -1,7 +1,7 @@
 # DSPBench Region Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-07 13:32 CEST
+Last updated: 2026-05-07 17:51 CEST
 
 Status: implemented first two local DSPBench-family real-input candidates:
 Spike Detection and Fraud Detection. This is not an exact DSPBench artifact
@@ -380,7 +380,7 @@ DSPBENCH_WARMUPS=0 \
 DSPBENCH_DIAG=1 \
 DSPBENCH_QUERIES="fraud-q2-alert-window" \
 DSPBENCH_MODES="heap-immix safezone-improved-32k rift-trusted-streaming rift-checked-page-token rift-checked-safezone-page-token" \
-DSPBENCH_OUTPUT_DIR=/Users/siyaoliu/rift/cache/dspbench-fraud-q2-memory-diag-2026-05-07 \
+DSPBENCH_OUTPUT_DIR=/Users/siyaoliu/rift/cache/dspbench-fraud-q2-diag2-2026-05-07 \
 zsh sandbox/run_dspbench_region_matrix.sh
 ```
 
@@ -389,13 +389,15 @@ each process prints a heap oracle diagnostic before the measured mode. The
 table below uses the mode-specific diagnostic line for each mode; for
 `heap-immix`, it uses the second heap diagnostic line from the heap process.
 
-| Mode | Diagnostic elapsed ms | RSS bytes | Append/alloc ms | Predictor ms | Close/traverse ms | Bucket switch/open ms | Final close ms |
+The latest diagnostic print includes `estimated_bucket_open_ms`, because
+`bucket_switch_ms` includes expired-bucket close work in page-token modes.
+
+| Mode | Diagnostic elapsed ms | RSS bytes | Append/alloc ms | Predictor ms | Close/traverse ms | Estimated bucket open ms | Final close ms |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `heap-immix` | `990.986` | `254459904` | `189.524` | `89.340` | `57.805` | `51.502` | `6.332` |
-| `safezone-improved-32k` | `939.680` | `282378240` | `134.630` | `86.942` | `56.061` | `50.796` | `6.169` |
-| `rift-trusted-streaming` | `949.862` | `282312704` | `135.167` | `92.138` | `56.469` | `50.460` | `6.369` |
-| `rift-checked-page-token` | `971.658` | `278315008` | `152.283` | `90.501` | `63.269` | `56.722` | `6.878` |
-| `rift-checked-safezone-page-token` | `973.804` | `278413312` | `150.169` | `93.130` | `63.247` | `57.182` | `6.996` |
+| `heap-immix` | `963.747` | `254459904` | `186.048` | `84.626` | `53.764` | `0.012` | `6.241` |
+| `rift-trusted-streaming` | `930.667` | `282296320` | `131.493` | `86.917` | `56.087` | `0.188` | `6.155` |
+| `rift-checked-page-token` | `963.104` | `278331392` | `150.361` | `89.099` | `64.032` | `0.299` | `6.876` |
+| `rift-checked-safezone-page-token` | `959.978` | `278413312` | `144.353` | `91.120` | `63.456` | `0.990` | `6.994` |
 
 Interpretation:
 
@@ -403,13 +405,16 @@ Interpretation:
   It includes object construction, region/heap allocation, and linking the
   record into the bucket/page-token structure.
 - In this diagnostic, region allocation+append is not slower than heap:
-  SafeZone and trusted Streaming are around `135 ms`, while heap is about
-  `190 ms`. Checked page-token is in between at about `150-152 ms`.
-- Checked page-token still loses clean elapsed because it pays extra common
-  operator overhead: close/cursor traversal and bucket switch/open work are
-  about `6-7 ms` higher than heap/SafeZone/trusted rows, and the total program
-  still includes parser/replay, predictor, checksum, and traversal CPU outside
-  the measured buckets.
+  trusted Streaming is `131.493 ms`, checked scoped page-token is
+  `144.353 ms`, and heap is `186.048 ms`.
+- Estimated bucket open/switch is below `1 ms`; it is not a remaining
+  optimization target on Fraud q2. Older raw `bucket_switch_ms` values were
+  misleading because they included expired-bucket close traversal.
+- Checked page-token still loses or only modestly wins clean elapsed because
+  it pays extra common operator overhead: close/cursor traversal is roughly
+  `7-10 ms` higher than heap/trusted same-shape traversal, and the total
+  program still includes parser/replay, predictor, checksum, and traversal CPU
+  outside the measured buckets.
 - The “faster = higher RSS” pattern is real in some clean rows. The fastest
   path can keep more memory resident because it avoids or delays work that
   trims/reclaims pages aggressively. Do not treat lower GC time as equivalent
@@ -449,14 +454,13 @@ All rows matched checksum `2645894572926148009` and output count `594182`.
 | `rift-checked-page-token` | `851.488` | `11.244` | `11.265` | `2/3` | `278413312` | `0.522` | `4851373` |
 | `rift-checked-safezone-page-token` | `818.574` | `17.265` | `19.309` | `2/3` | `278544384` | `0.000` | `0` |
 
-Result: the checked SafeZone-backed page-token path is now the fastest clean
-Fraud q2 row in this same-run matrix. It is about `5.1%` faster than heap,
-about `6.3%` faster than improved SafeZone, and about `1.9%` faster than
-trusted Streaming, while cutting RSS from about `358 MB` to about `279 MB`.
-This promotes Fraud q2 from checked-overhead diagnostic to a modest checked
-real-input win. It is still not a flagship GC-heavy row because heap GC is
-about `9%` of elapsed in this run and parser/replay/predictor/checksum CPU
-remains a large share of total time.
+Result: the checked SafeZone-backed page-token path is the fastest row in this
+dirty fast-path direction check. It is about `5.1%` faster than heap, about
+`6.3%` faster than improved SafeZone, and about `1.9%` faster than trusted
+Streaming, while cutting RSS from about `358 MB` to about `279 MB`. Because
+the worktree was not yet checkpointed, do not use this as final headline
+evidence. It is still valuable because it showed that q2 could become a modest
+checked real-input win after operator-overhead reduction.
 
 Diagnostic-only rerun:
 
@@ -491,8 +495,8 @@ profile confirms it is still material on the next application row.
 ## Fraud Interpretation
 
 Fraud Detection is more promising than Spike for trusted region runtime
-evidence, and the 2026-05-07 page-token fast-path run makes q2 a modest
-checked real-input win:
+evidence, and the 2026-05-07 page-token fast-path work makes q2 the best
+checked real-input regression row:
 
 - At 1M, heap GC is visible and grows with richer query shape:
   q0 `9.997 ms`, q1 `43.801 ms`, q2 `69.686 ms`.
@@ -502,11 +506,83 @@ checked real-input win:
   RSS from `358252544` to `282460160` bytes and median GC from `69.686 ms` to
   `12.492 ms`.
 - Improved SafeZone also modestly beats heap on q1/q2 and cuts RSS on q2.
-- After the page-token fast path, checked scoped page-token is the fastest
-  same-run q2 row: `818.574 ms` versus heap `862.834 ms`, improved SafeZone
-  `873.859 ms`, and trusted Streaming `834.447 ms`.
+- The dirty page-token fast-path row made checked scoped page-token fastest:
+  `818.574 ms` versus heap `862.834 ms`, improved SafeZone `873.859 ms`, and
+  trusted Streaming `834.447 ms`.
+- The committed-code rerun is more conservative: trusted Streaming is fastest
+  at `788.040 ms`, checked scoped page-token is `810.770 ms`, and heap is
+  `820.945 ms`, with checked RSS about `279 MB` versus heap `358 MB`.
 
 Decision: keep Fraud q2 as the strongest current DSPBench real-input candidate
-and a modest checked win after operator-overhead reduction. Do not overclaim it
-as the missing GC-heavy flagship: the elapsed win is modest, the input is a
-local single-process methodology port, and heap GC is material but not dominant.
+and a modest checked/RSS win over heap after operator-overhead reduction. Do
+not overclaim it as the missing GC-heavy flagship: the clean elapsed win is
+modest, trusted Streaming is fastest, the input is a local single-process
+methodology port, and heap GC is material but not dominant.
+
+### Fraud q2 committed-code safe-fast-path rerun
+
+After adding the page-token no-drain close API and refining
+`pageTokenAppendRegionFor` to return the cached child region on same-bucket
+timestamps only when the current bucket is the only live bucket, q2 was rerun
+against the committed implementation:
+
+```bash
+DSPBENCH_BUILD=1 \
+DSPBENCH_EVENTS=1000000 \
+DSPBENCH_BENCHMARK_RUNS=3 \
+DSPBENCH_WARMUPS=1 \
+DSPBENCH_QUERIES="fraud-q2-alert-window" \
+DSPBENCH_MODES="heap-immix safezone-improved-32k rift-trusted-streaming rift-checked-page-token rift-checked-safezone-page-token" \
+DSPBENCH_OUTPUT_DIR="/Users/siyaoliu/rift/cache/perf-eval/2026-05-07-dspbench-fraud-q2-safe-fast-path" \
+zsh sandbox/run_dspbench_region_matrix.sh
+```
+
+All rows matched checksum/output count.
+
+| Mode | Median ms | Median GC ms | Max GC ms | RSS bytes |
+|---|---:|---:|---:|---:|
+| `heap-immix` | `820.945` | `75.928` | `100.789` | `358154240` |
+| `safezone-improved-32k` | `817.402` | `17.407` | `17.500` | `282427392` |
+| `rift-trusted-streaming` | `788.040` | `11.547` | `12.573` | `282443776` |
+| `rift-checked-page-token` | `814.763` | `11.224` | `11.779` | `278396928` |
+| `rift-checked-safezone-page-token` | `810.770` | `15.105` | `16.853` | `278593536` |
+
+Interpretation: trusted Streaming is fastest in this rerun. Checked scoped
+page-token remains a modest real-input win over heap and cuts RSS by about
+`80 MB`, but it is no longer the fastest row. This reinforces the next
+engineering target: the safe checked path needs lower common operator/query
+CPU to match the trusted lower bound consistently.
+
+### Fraud q2 page-token live-length bookkeeping rerun
+
+After removing page-token-owned generic live-length bookkeeping from the
+checked append helper, q2 was rerun as a focused application control:
+
+```bash
+DSPBENCH_BUILD=1 \
+DSPBENCH_EVENTS=1000000 \
+DSPBENCH_BENCHMARK_RUNS=3 \
+DSPBENCH_WARMUPS=1 \
+DSPBENCH_QUERIES="fraud-q2-alert-window" \
+DSPBENCH_MODES="heap-immix rift-trusted-streaming rift-checked-page-token rift-checked-safezone-page-token" \
+DSPBENCH_OUTPUT_DIR=/Users/siyaoliu/rift/cache/dspbench-fraud-q2-page-token-no-length-1m-2026-05-07 \
+zsh sandbox/run_dspbench_region_matrix.sh
+```
+
+All rows matched checksum `2645894572926148009` and output count `594182`.
+
+| Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes |
+|---|---:|---:|---:|---:|---:|
+| `heap-immix` | `842.739` | `72.387` | `77.539` | `3/3` | `358252544` |
+| `rift-trusted-streaming` | `832.012` | `11.175` | `11.705` | `2/3` | `282443776` |
+| `rift-checked-page-token` | `854.207` | `12.948` | `13.054` | `2/3` | `278396928` |
+| `rift-checked-safezone-page-token` | `843.380` | `15.245` | `16.612` | `2/3` | `278593536` |
+
+Interpretation: this removes one justified hot-path counter, but it does not
+produce a reliable application throughput improvement. Checked scoped
+page-token is essentially tied with heap while cutting RSS by about `22%` and
+timed GC by about `57 ms`; trusted Streaming remains fastest. Use this as a
+negative/no-large-speedup data point for page-token bookkeeping. The next
+checked optimization target should be generated allocation lowering
+(`allocImpl`/`checkOpen` under statically proven operator ownership), not more
+bucket-open/close bookkeeping.
