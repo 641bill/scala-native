@@ -518,7 +518,7 @@ object CommonCrawlWetMatrixHelpers {
   private def usesRiftRuntime(mode: String): Boolean =
     canonicalMode(mode) match {
       case "rift-hp" | "rift-streaming" | "rift-checked" |
-          "rift-checked-page-token" =>
+          "rift-checked-page-token" | "rift-checked-count-by-key" =>
         true
       case _ => false
     }
@@ -527,8 +527,10 @@ object CommonCrawlWetMatrixHelpers {
     canonicalMode(mode) match {
       case "heap" | "safezone" | "rift-hp" | "rift-streaming" |
           "rift-checked" | "rift-checked-page-token" |
+          "rift-checked-count-by-key" |
           "rift-checked-safezone-32k" |
           "rift-checked-safezone-page-token" |
+          "rift-checked-safezone-count-by-key" |
           "rift-checked-rootfree-safezone-hp" =>
         ()
       case other =>
@@ -1560,6 +1562,180 @@ object CommonCrawlWetMatrixHelpers {
       runRiftCheckedPageTokenBody(query)
     }
 
+  private def runRiftCheckedCountByKeyBody(query: String)(using
+      stream: RiftRegion.StreamingRegion^
+  ): RunOutcome = {
+    if (!domainWindowQuery(query))
+      throw new IllegalArgumentException(
+        s"checked count-by-key mode only supports domain-window queries, got '$query'"
+      )
+
+    val cfg = CommonCrawlWetConfig
+    val input = inputData
+
+    final class CheckedRecord(
+        val kind: Int,
+        val pageId: Int,
+        val domain: Int,
+        val value: Int,
+        val hash: Long
+    ) extends RiftRegion.StreamAppendNode
+
+    val operator =
+      RiftRegion.pageTokenCountByKey[CheckedRecord](
+        cfg.pagesPerBucket.toLong,
+        cfg.domainSpace,
+        cfg.liveBuckets
+      )
+    var checksum = 0L
+    var outputCount = 0L
+
+    def consumeDomainSummary(
+        bucket: RiftRegion.StreamBucket^{stream},
+        domain: Int,
+        count: Int,
+        sum: Long
+    ): Unit = {
+      checksum = fold(
+        checksum,
+        4,
+        bucket.startSeconds.toInt,
+        domain,
+        count,
+        (domain.toLong << 32) ^ count.toLong,
+        bucket.startSeconds
+      )
+      outputCount += 1L
+    }
+
+    var currentStartPage = Long.MinValue
+    var currentRegion: RiftRegion.StreamingRegion^{stream} = null
+    var page = 0
+    while (page < input.pages) {
+      val domain = input.domainAt(page)
+      val startPage = bucketStart(page)
+      if (startPage != currentStartPage) {
+        currentStartPage = startPage
+        currentRegion =
+          RiftRegion.pageTokenCountByKeyRegionFor(
+            stream,
+            operator,
+            startPage,
+            closeCutoff(startPage)
+          )(consumeDomainSummary)
+      }
+
+      val pageRecord: CheckedRecord^{stream} =
+        RiftRegion.alloc(
+          new CheckedRecord(1, page, domain, 0, input.lineHashAt(page, 0))
+        )(using currentRegion)
+      RiftRegion.appendPageTokenCountByKey(
+        stream,
+        operator,
+        pageRecord,
+        domain,
+        0L
+      )
+
+      var observed = 0
+      if (linkQuery(query)) {
+        val links = input.linkCountAt(page)
+        while (observed < links) {
+          val linkDomain = input.linkDomainAt(page, observed)
+          val linkRecord: CheckedRecord^{stream} =
+            RiftRegion.alloc(
+              new CheckedRecord(
+                5,
+                page,
+                linkDomain,
+                observed,
+                input.linkHashAt(page, observed)
+              )
+            )(using currentRegion)
+          RiftRegion.appendPageTokenCountByKey(
+            stream,
+            operator,
+            linkRecord,
+            linkDomain,
+            0L
+          )
+          observed += 1
+        }
+      } else {
+        val lines = input.lineCountAt(page)
+        while (observed < lines) {
+          val lh = input.lineHashAt(page, observed)
+          val lineRecord: CheckedRecord^{stream} =
+            RiftRegion.alloc(new CheckedRecord(2, page, domain, observed, lh))(
+              using currentRegion
+            )
+          RiftRegion.appendPageTokenCountByKey(
+            stream,
+            operator,
+            lineRecord,
+            domain,
+            0L
+          )
+          if (tokenQuery(query)) {
+            var token = 0
+            val tokens = input.tokenCountAt(page, observed)
+            while (token < tokens) {
+              val tokenRecord: CheckedRecord^{stream} =
+                RiftRegion.alloc(
+                  new CheckedRecord(
+                    3,
+                    page,
+                    domain,
+                    token,
+                    input.tokenHashAt(page, observed, token)
+                )
+              )(using currentRegion)
+              RiftRegion.appendPageTokenCountByKey(
+                stream,
+                operator,
+                tokenRecord,
+                domain,
+                0L
+              )
+              token += 1
+            }
+          }
+          observed += 1
+        }
+      }
+      if (page % cfg.sampleEvery == 0)
+        checksum = fold(
+          checksum,
+          9,
+          page,
+          domain,
+          observed,
+          if (linkQuery(query) && observed > 0) input.linkHashAt(page, 0)
+          else input.lineHashAt(page, if (observed == 0) 0 else observed - 1),
+          currentStartPage
+        )
+      page += 1
+    }
+
+    RiftRegion.closeAllPageTokenCountByKeyBuckets(stream, operator)(
+      consumeDomainSummary
+    )
+
+    checksumSink = checksum
+    outputSink = outputCount
+    RunOutcome(checksum, outputCount)
+  }
+
+  def runRiftCheckedCountByKey(query: String): RunOutcome =
+    RiftRegion.streaming { stream ?=>
+      runRiftCheckedCountByKeyBody(query)
+    }
+
+  def runRiftCheckedSafeZoneCountByKey(query: String): RunOutcome =
+    RiftRegion.streamingSafeZone { stream ?=>
+      runRiftCheckedCountByKeyBody(query)
+    }
+
   private def runMode(mode: String, query: String): RunOutcome =
     canonicalMode(mode) match {
       case "heap"                  => runHeap(query)
@@ -1568,10 +1744,13 @@ object CommonCrawlWetMatrixHelpers {
       case "rift-streaming"        => runRiftTrusted(query, RiftRegion.Streaming)
       case "rift-checked"          => runRiftChecked(query)
       case "rift-checked-page-token" => runRiftCheckedPageToken(query)
+      case "rift-checked-count-by-key" => runRiftCheckedCountByKey(query)
       case "rift-checked-safezone-32k" | "rift-checked-rootfree-safezone-hp" =>
         runRiftCheckedSafeZone(query)
       case "rift-checked-safezone-page-token" =>
         runRiftCheckedSafeZonePageToken(query)
+      case "rift-checked-safezone-count-by-key" =>
+        runRiftCheckedSafeZoneCountByKey(query)
       case other =>
         throw new IllegalArgumentException(
           s"unknown Common Crawl WET mode '$other'"

@@ -164,6 +164,9 @@ run_case() {
     rift-checked-page-token)
       binary_mode="rift-checked-page-token"
       ;;
+    rift-checked-count-by-key)
+      binary_mode="rift-checked-count-by-key"
+      ;;
     rift-checked-safezone-32k|rift-checked-safezone-improved-32k)
       binary_mode="rift-checked-safezone-32k"
       roots_mode="1"
@@ -171,6 +174,11 @@ run_case() {
       ;;
     rift-checked-safezone-page-token)
       binary_mode="rift-checked-safezone-page-token"
+      roots_mode="1"
+      page_size="32768"
+      ;;
+    rift-checked-safezone-count-by-key)
+      binary_mode="rift-checked-safezone-count-by-key"
       roots_mode="1"
       page_size="32768"
       ;;

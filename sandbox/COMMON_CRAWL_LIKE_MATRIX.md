@@ -7,6 +7,7 @@ checked page/token operator follow-up recorded and clears the generated
 application-shaped gate.
 
 Date: 2026-05-03
+Last updated: 2026-05-07 17:24 CEST
 
 ## Purpose
 
@@ -40,6 +41,9 @@ the reusable checked `StreamAppendWindow` cursor API. The newer
 `rift-checked-page-token` and `rift-checked-safezone-page-token` modes use
 `StreamPageTokenAppendWindow`, an operator-owned path that removes redundant
 per-record checks and child-region lookups.
+`rift-checked-count-by-key` and `rift-checked-safezone-count-by-key` are
+available as opt-in q2/q5-only controls using `PageTokenCountByKey`, which
+updates domain counts during append and closes buckets without record drain.
 
 ## Command
 
@@ -120,6 +124,102 @@ the static-safety overhead-removal story: when the operator owns the lifetime
 boundary, it can avoid redundant per-record dynamic checks without changing the
 logical program. Caveat: it remains generated WET-shaped stressor evidence, not
 real Common Crawl input proof.
+
+### Page-Token Diagnostic Follow-Up
+
+Diagnostic source:
+`/Users/siyaoliu/rift/cache/common-crawl-page-token-diag2-2026-05-07`.
+
+Command shape:
+
+```sh
+COMMON_CRAWL_WET_DIAG=1 \
+COMMON_CRAWL_WET_PAGES=1000000 \
+COMMON_CRAWL_WET_BENCHMARK_RUNS=1 \
+COMMON_CRAWL_WET_WARMUPS=0 \
+COMMON_CRAWL_WET_QUERIES="q1-tokenize q2-domain-window" \
+COMMON_CRAWL_WET_MODES="rift-checked-page-token rift-checked-safezone-page-token" \
+COMMON_CRAWL_WET_OUTPUT_DIR=/Users/siyaoliu/rift/cache/common-crawl-page-token-diag2-2026-05-07 \
+zsh sandbox/run_common_crawl_wet_matrix.sh
+```
+
+These are non-headline one-run diagnostic rows. `bucket_switch_ms` includes
+expired-bucket close because `pageTokenAppendRegionFor` closes old buckets
+synchronously. Use `estimated_bucket_open_ms` for the open/switch cost after
+subtracting expired close traversal.
+
+| Query | Mode | Elapsed ms | Appended/closed records | Estimated bucket open ms | Append ms | Close cursor ms | Aggregate ms | Interpretation |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| q1-tokenize | `rift-checked-page-token` | `4231.669` | `137000000` | `2.672` | `3444.176` | `757.595` | `0.000` | Open/switch is negligible; append and close traversal dominate. |
+| q1-tokenize | `rift-checked-safezone-page-token` | `3976.030` | `137000000` | `9.829` | `3177.917` | `760.700` | `0.000` | SafeZone-backed checked is faster mainly in append/allocation. |
+| q2-domain-window | `rift-checked-page-token` | `4356.286` | `137000000` | `2.914` | `3515.311` | `810.644` | `18.309` | Domain aggregation is small relative to append/traversal. |
+| q2-domain-window | `rift-checked-safezone-page-token` | `4055.473` | `137000000` | `9.363` | `3215.592` | `802.633` | `18.347` | Same conclusion as q1; backend affects append more than traversal. |
+
+Decision: do not spend the next patch on bucket opening. The realistic
+remaining levers are reducing per-record close traversal where query work can
+be completed on append, or making cursor/node traversal cheaper.
+
+### Count-By-Key Application Gate
+
+Detailed source:
+`/Users/siyaoliu/rift/cache/common-crawl-count-by-key-100k-2026-05-07`.
+
+Change:
+
+- Added q2/q5-only Common Crawl modes:
+  - `rift-checked-count-by-key`
+  - `rift-checked-safezone-count-by-key`
+- These modes still allocate ordinary page/line/token records in child bucket
+  regions, but update per-domain counts during append via
+  `PageTokenCountByKey`.
+- Bucket close emits domain summaries with no per-record drain.
+
+Smoke:
+
+```sh
+COMMON_CRAWL_WET_BUILD=1 \
+COMMON_CRAWL_WET_PAGES=20000 \
+COMMON_CRAWL_WET_BENCHMARK_RUNS=1 \
+COMMON_CRAWL_WET_WARMUPS=0 \
+COMMON_CRAWL_WET_QUERIES="q2-domain-window" \
+COMMON_CRAWL_WET_MODES="heap-immix rift-checked-page-token rift-checked-count-by-key rift-checked-safezone-page-token rift-checked-safezone-count-by-key" \
+COMMON_CRAWL_WET_OUTPUT_DIR=/Users/siyaoliu/rift/cache/common-crawl-count-by-key-smoke-2026-05-07 \
+zsh sandbox/run_common_crawl_wet_matrix.sh
+```
+
+100k median:
+
+```sh
+COMMON_CRAWL_WET_BUILD=0 \
+COMMON_CRAWL_WET_PAGES=100000 \
+COMMON_CRAWL_WET_BENCHMARK_RUNS=3 \
+COMMON_CRAWL_WET_WARMUPS=1 \
+COMMON_CRAWL_WET_QUERIES="q2-domain-window" \
+COMMON_CRAWL_WET_MODES="heap-immix rift-checked-page-token rift-checked-count-by-key rift-checked-safezone-page-token rift-checked-safezone-count-by-key" \
+COMMON_CRAWL_WET_OUTPUT_DIR=/Users/siyaoliu/rift/cache/common-crawl-count-by-key-100k-2026-05-07 \
+zsh sandbox/run_common_crawl_wet_matrix.sh
+```
+
+| Query | Mode | Median elapsed | Median GC | Output count | Interpretation |
+|---|---|---:|---:|---:|---|
+| q2-domain-window | `heap-immix` | `525.285` ms | `151.164` ms | `92994` | Heap spends material GC at 100k generated pages. |
+| q2-domain-window | `rift-checked-page-token` | `433.051` ms | `0.000` ms | `92994` | Existing page-token remains faster than count-by-key. |
+| q2-domain-window | `rift-checked-count-by-key` | `476.665` ms | `0.000` ms | `92994` | Correct, but slower than existing checked page-token. |
+| q2-domain-window | `rift-checked-safezone-page-token` | `406.413` ms | `0.000` ms | `92994` | Fastest checked row in this application-shaped q2 rerun. |
+| q2-domain-window | `rift-checked-safezone-count-by-key` | `450.289` ms | `0.000` ms | `92994` | Correct, but slower than checked SafeZone-backed page-token. |
+
+Decision:
+
+- Stop before 1M for this application path. The focused 1M
+  `PageTokenCountByKey` row is a modest win, but Common Crawl-shaped q2 does
+  not benefit at 100k: per-record count updates cost more than the close-time
+  traversal they remove.
+- Keep the mode as a negative/application-gated control. The existing
+  `StreamPageTokenAppendWindow` path remains the Common Crawl q2 application
+  row.
+- If this operator is tried again, use a workload where append-time aggregates
+  are semantically required or where close-time traversal is much more
+  expensive than one primitive count update per record.
 
 ## Real WAT Link-Metadata Control
 
