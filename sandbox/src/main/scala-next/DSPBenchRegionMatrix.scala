@@ -103,11 +103,16 @@ object DSPBenchRegionMatrixHelpers {
 
     def print(query: String, mode: String): Unit = {
       def ms(nanos: Long): Double = nanos / 1000000.0
+      val estimatedExpiredCloseNanos =
+        math.max(0L, closeCursorNanos - finalCloseNanos)
+      val estimatedBucketOpenNanos =
+        math.max(0L, bucketSwitchNanos - estimatedExpiredCloseNanos)
       println(
         f"DSPBENCH_DIAG query=$query mode=$mode " +
           s"bucket_switches=$bucketSwitches appended_records=$appendedRecords " +
           s"closed_records=$closedRecords close_buckets=$closeBuckets " +
           f"bucket_switch_ms=${ms(bucketSwitchNanos)}%.3f " +
+          f"estimated_bucket_open_ms=${ms(estimatedBucketOpenNanos)}%.3f " +
           f"append_ms=${ms(appendNanos)}%.3f " +
           f"predict_ms=${ms(predictNanos)}%.3f " +
           f"close_cursor_ms=${ms(closeCursorNanos)}%.3f " +
@@ -1738,11 +1743,16 @@ object DSPBenchRegionMatrixHelpers {
 
     if (diagnostics) {
       def ms(nanos: Long): Double = nanos / 1000000.0
+      val estimatedExpiredCloseNanos =
+        math.max(0L, closeCursorNanos - finalCloseNanos)
+      val estimatedBucketOpenNanos =
+        math.max(0L, bucketSwitchNanos - estimatedExpiredCloseNanos)
       println(
         f"DSPBENCH_DIAG query=$query mode=$modeLabel " +
           s"bucket_switches=$bucketSwitches appended_records=$appendedRecords " +
           s"closed_records=$closedRecords close_buckets=$closeBuckets " +
           f"bucket_switch_ms=${ms(bucketSwitchNanos)}%.3f " +
+          f"estimated_bucket_open_ms=${ms(estimatedBucketOpenNanos)}%.3f " +
           f"append_ms=${ms(appendNanos)}%.3f " +
           f"predict_ms=${ms(predictNanos)}%.3f " +
           f"close_cursor_ms=${ms(closeCursorNanos)}%.3f " +

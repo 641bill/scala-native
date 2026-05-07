@@ -32,6 +32,13 @@ object CommonCrawlWetConfig {
   private def envNonNegativeInt(name: String, default: Int): Int =
     sys.env.get(name).flatMap(parseNonNegativeInt).getOrElse(default)
 
+  private def envFlag(name: String): Boolean =
+    sys.env.get(name).exists { value =>
+      value == "1" ||
+      value.equalsIgnoreCase("true") ||
+      value.equalsIgnoreCase("yes")
+    }
+
   val pages: Int = envInt("COMMON_CRAWL_WET_PAGES", 100000)
   val pagesPerBucket: Int = envInt("COMMON_CRAWL_WET_PAGES_PER_BUCKET", 2500)
   val liveBuckets: Int = envInt("COMMON_CRAWL_WET_LIVE_BUCKETS", 4)
@@ -44,6 +51,7 @@ object CommonCrawlWetConfig {
   val benchmarkRuns: Int = envInt("COMMON_CRAWL_WET_BENCHMARK_RUNS", 3)
   val inputPath: String =
     BenchmarkInputSupport.envString("COMMON_CRAWL_WET_INPUT")
+  val diagnostics: Boolean = envFlag("COMMON_CRAWL_WET_DIAG")
 }
 
 object CommonCrawlWetMatrixHelpers {
@@ -1312,6 +1320,18 @@ object CommonCrawlWetMatrixHelpers {
 
       val cfg = CommonCrawlWetConfig
       val input = inputData
+      val diagnostics = cfg.diagnostics
+      var bucketSwitchNanos = 0L
+      var appendNanos = 0L
+      var closeCursorNanos = 0L
+      var domainAggregateNanos = 0L
+      var sampleChecksumNanos = 0L
+      var finalCloseNanos = 0L
+      var bucketSwitches = 0L
+      var appendedRecords = 0L
+      var closedRecords = 0L
+      var closeBuckets = 0L
+      var domainSummaries = 0L
 
       final class CheckedRecord(
           val kind: Int,
@@ -1348,23 +1368,36 @@ object CommonCrawlWetMatrixHelpers {
       def closeRecords(
           bucket: RiftRegion.StreamBucket^{stream},
           cursor: RiftRegion.StreamAppendCursor[CheckedRecord]^{stream}
-      ): Unit =
+      ): Unit = {
+        val closeStarted = if (diagnostics) System.nanoTime() else 0L
         if (domainWindowQuery(query)) {
           val counts = new Array[Int](cfg.domainSpace)
-          while (cursor.hasNext) {
-            val record: CheckedRecord^{stream} = cursor.next()
+          var current = cursor.nextOrNull()
+          while (current != null) {
+            val record: CheckedRecord^{stream} =
+              current.asInstanceOf[CheckedRecord^{stream}]
+            if (diagnostics) closedRecords += 1L
             counts(record.domain) += 1
+            current = cursor.nextOrNull()
           }
+          val aggregateStarted = if (diagnostics) System.nanoTime() else 0L
           var domain = 0
           while (domain < counts.length) {
             val count = counts(domain)
-            if (count != 0)
+            if (count != 0) {
               consumeDomainSummary(bucket, domain, count)
+              if (diagnostics) domainSummaries += 1L
+            }
             domain += 1
           }
+          if (diagnostics)
+            domainAggregateNanos += System.nanoTime() - aggregateStarted
         } else {
-          while (cursor.hasNext) {
-            val record: CheckedRecord^{stream} = cursor.next()
+          var current = cursor.nextOrNull()
+          while (current != null) {
+            val record: CheckedRecord^{stream} =
+              current.asInstanceOf[CheckedRecord^{stream}]
+            if (diagnostics) closedRecords += 1L
             checksum = fold(
               checksum,
               record.kind,
@@ -1375,8 +1408,14 @@ object CommonCrawlWetMatrixHelpers {
               bucket.startSeconds
             )
             outputCount += 1L
+            current = cursor.nextOrNull()
           }
         }
+        if (diagnostics) {
+          closeCursorNanos += System.nanoTime() - closeStarted
+          closeBuckets += 1L
+        }
+      }
 
       var currentStartPage = Long.MinValue
       var currentRegion: RiftRegion.StreamingRegion^{stream} = null
@@ -1385,6 +1424,7 @@ object CommonCrawlWetMatrixHelpers {
         val domain = input.domainAt(page)
         val startPage = bucketStart(page)
         if (startPage != currentStartPage) {
+          val bucketStarted = if (diagnostics) System.nanoTime() else 0L
           currentStartPage = startPage
           currentRegion =
             RiftRegion.pageTokenAppendRegionFor(
@@ -1393,13 +1433,19 @@ object CommonCrawlWetMatrixHelpers {
               startPage,
               closeCutoff(startPage)
             )(closeRecords)
+          if (diagnostics) {
+            bucketSwitchNanos += System.nanoTime() - bucketStarted
+            bucketSwitches += 1L
+          }
         }
 
+        val appendStarted = if (diagnostics) System.nanoTime() else 0L
         val pageRecord: CheckedRecord^{stream} =
           RiftRegion.alloc(
             new CheckedRecord(1, page, domain, 0, input.lineHashAt(page, 0))
           )(using currentRegion)
         RiftRegion.appendPageToken(stream, window, pageRecord)
+        if (diagnostics) appendedRecords += 1L
 
         var observed = 0
         if (linkQuery(query)) {
@@ -1416,6 +1462,7 @@ object CommonCrawlWetMatrixHelpers {
                 )
               )(using currentRegion)
             RiftRegion.appendPageToken(stream, window, linkRecord)
+            if (diagnostics) appendedRecords += 1L
             observed += 1
           }
         } else {
@@ -1427,6 +1474,7 @@ object CommonCrawlWetMatrixHelpers {
                 using currentRegion
               )
             RiftRegion.appendPageToken(stream, window, lineRecord)
+            if (diagnostics) appendedRecords += 1L
             if (tokenQuery(query)) {
               var token = 0
               val tokens = input.tokenCountAt(page, observed)
@@ -1442,13 +1490,17 @@ object CommonCrawlWetMatrixHelpers {
                     )
                   )(using currentRegion)
                 RiftRegion.appendPageToken(stream, window, tokenRecord)
+                if (diagnostics) appendedRecords += 1L
                 token += 1
               }
             }
             observed += 1
           }
         }
-        if (page % cfg.sampleEvery == 0)
+        if (diagnostics)
+          appendNanos += System.nanoTime() - appendStarted
+        if (page % cfg.sampleEvery == 0) {
+          val checksumStarted = if (diagnostics) System.nanoTime() else 0L
           checksum = fold(
             checksum,
             9,
@@ -1459,12 +1511,39 @@ object CommonCrawlWetMatrixHelpers {
             else input.lineHashAt(page, if (observed == 0) 0 else observed - 1),
             currentStartPage
           )
+          if (diagnostics)
+            sampleChecksumNanos += System.nanoTime() - checksumStarted
+        }
         page += 1
       }
 
+      val finalCloseStarted = if (diagnostics) System.nanoTime() else 0L
       RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
         closeRecords
       )
+      if (diagnostics)
+        finalCloseNanos += System.nanoTime() - finalCloseStarted
+
+      if (diagnostics) {
+        def ms(nanos: Long): Double = nanos / 1000000.0
+        val estimatedExpiredCloseNanos =
+          math.max(0L, closeCursorNanos - finalCloseNanos)
+        val estimatedBucketOpenNanos =
+          math.max(0L, bucketSwitchNanos - estimatedExpiredCloseNanos)
+        println(
+          f"COMMON_CRAWL_WET_DIAG query=$query " +
+            s"bucket_switches=$bucketSwitches appended_records=$appendedRecords " +
+            s"closed_records=$closedRecords close_buckets=$closeBuckets " +
+            s"domain_summaries=$domainSummaries " +
+            f"bucket_switch_ms=${ms(bucketSwitchNanos)}%.3f " +
+            f"estimated_bucket_open_ms=${ms(estimatedBucketOpenNanos)}%.3f " +
+            f"append_ms=${ms(appendNanos)}%.3f " +
+            f"close_cursor_ms=${ms(closeCursorNanos)}%.3f " +
+            f"domain_aggregate_ms=${ms(domainAggregateNanos)}%.3f " +
+            f"sample_checksum_ms=${ms(sampleChecksumNanos)}%.3f " +
+            f"final_close_ms=${ms(finalCloseNanos)}%.3f"
+        )
+      }
 
       checksumSink = checksum
       outputSink = outputCount
