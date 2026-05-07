@@ -59,6 +59,10 @@ object CheckedPageTokenCostMatrixHelpers {
   private val AppendOnly = "append-only"
   private val AppendDrain = "append-drain"
   private val AppendAggregate = "append-aggregate"
+  private val AppendCountByKey = "append-count-by-key"
+  private val CheckedCountByKey = "rift-checked-count-by-key"
+  private val CheckedSafeZoneCountByKey =
+    "rift-checked-safezone-count-by-key"
 
   private final class HeapRecord(
       val key: Int,
@@ -212,6 +216,18 @@ object CheckedPageTokenCostMatrixHelpers {
       count.toLong ^
       sum)
 
+  private def foldKeyAggregate(
+      checksum: Long,
+      bucketIndex: Int,
+      key: Int,
+      count: Int,
+      sum: Long
+  ): Long =
+    (((checksum ^ bucketIndex.toLong) * 1099511628211L) ^
+      key.toLong ^
+      count.toLong ^
+      sum)
+
   private def medianDouble(values: Array[Double]): Double = {
     val sorted = values.clone()
     scala.util.Sorting.quickSort(sorted)
@@ -244,7 +260,8 @@ object CheckedPageTokenCostMatrixHelpers {
 
   private def validateWorkload(workload: String): String =
     workload match {
-      case AppendOnly | AppendDrain | AppendAggregate => workload
+      case AppendOnly | AppendDrain | AppendAggregate | AppendCountByKey =>
+        workload
       case other =>
         throw new IllegalArgumentException(
           s"unknown checked-page-token cost workload '$other'"
@@ -262,8 +279,10 @@ object CheckedPageTokenCostMatrixHelpers {
 
   private def usesRiftRuntime(mode: String): Boolean =
     canonicalMode(mode) match {
-      case "rift-trusted-streaming" | "rift-checked-page-token" => true
-      case _                                                    => false
+      case "rift-trusted-streaming" | "rift-checked-page-token" |
+          CheckedCountByKey =>
+        true
+      case _ => false
     }
 
   private def updateAppendChecksum(
@@ -311,6 +330,24 @@ object CheckedPageTokenCostMatrixHelpers {
             foldAggregate(checksum, index, aggregateCounts(index), aggregateSums(index))
           aggregateCounts(index) = 0
           aggregateSums(index) = 0L
+        case AppendCountByKey =>
+          val counts = new Array[Int](cfg.keySpace)
+          val sums = new Array[Long](cfg.keySpace)
+          var record = bucket.head
+          while (record != null) {
+            counts(record.key) += 1
+            sums(record.key) +=
+              record.key.toLong + record.value.toLong + record.total
+            record = record.next
+          }
+          val index = bucketIndex(bucket.startSeconds)
+          var key = 0
+          while (key < cfg.keySpace) {
+            val count = counts(key)
+            if (count != 0)
+              checksum = foldKeyAggregate(checksum, index, key, count, sums(key))
+            key += 1
+          }
         case AppendOnly =>
           ()
       }
@@ -397,6 +434,8 @@ object CheckedPageTokenCostMatrixHelpers {
           aggregateCounts(index) += 1
           aggregateSums(index) +=
             record.key.toLong + record.value.toLong + record.total
+        case AppendCountByKey =>
+          ()
         case AppendDrain =>
           ()
       }
@@ -450,6 +489,24 @@ object CheckedPageTokenCostMatrixHelpers {
             foldAggregate(checksum, index, aggregateCounts(index), aggregateSums(index))
           aggregateCounts(index) = 0
           aggregateSums(index) = 0L
+        case AppendCountByKey =>
+          val counts = new Array[Int](cfg.keySpace)
+          val sums = new Array[Long](cfg.keySpace)
+          var record = bucket.head
+          while (record != null) {
+            counts(record.key) += 1
+            sums(record.key) +=
+              record.key.toLong + record.value.toLong + record.total
+            record = record.next
+          }
+          val index = bucketIndex(bucket.startSeconds)
+          var key = 0
+          while (key < cfg.keySpace) {
+            val count = counts(key)
+            if (count != 0)
+              checksum = foldKeyAggregate(checksum, index, key, count, sums(key))
+            key += 1
+          }
         case AppendOnly =>
           ()
       }
@@ -538,6 +595,8 @@ object CheckedPageTokenCostMatrixHelpers {
             aggregateCounts(index) += 1
             aggregateSums(index) +=
               record.key.toLong + record.value.toLong + record.total
+          case AppendCountByKey =>
+            ()
           case AppendDrain =>
             ()
         }
@@ -598,6 +657,24 @@ object CheckedPageTokenCostMatrixHelpers {
             foldAggregate(checksum, index, aggregateCounts(index), aggregateSums(index))
           aggregateCounts(index) = 0
           aggregateSums(index) = 0L
+        case AppendCountByKey =>
+          val counts = new Array[Int](cfg.keySpace)
+          val sums = new Array[Long](cfg.keySpace)
+          var record = bucket.head
+          while (record != null) {
+            counts(record.key) += 1
+            sums(record.key) +=
+              record.key.toLong + record.value.toLong + record.total
+            record = record.next
+          }
+          val index = bucketIndex(bucket.startSeconds)
+          var key = 0
+          while (key < cfg.keySpace) {
+            val count = counts(key)
+            if (count != 0)
+              checksum = foldKeyAggregate(checksum, index, key, count, sums(key))
+            key += 1
+          }
         case AppendOnly =>
           ()
       }
@@ -684,6 +761,8 @@ object CheckedPageTokenCostMatrixHelpers {
             aggregateCounts(index) += 1
             aggregateSums(index) +=
               record.key.toLong + record.value.toLong + record.total
+          case AppendCountByKey =>
+            ()
           case AppendDrain =>
             ()
         }
@@ -756,6 +835,25 @@ object CheckedPageTokenCostMatrixHelpers {
             foldAggregate(checksum, index, aggregateCounts(index), aggregateSums(index))
           aggregateCounts(index) = 0
           aggregateSums(index) = 0L
+        case AppendCountByKey =>
+          val counts = new Array[Int](cfg.keySpace)
+          val sums = new Array[Long](cfg.keySpace)
+          var current = cursor.nextOrNull()
+          while (current != null) {
+            val record = current.asInstanceOf[Record^{stream}]
+            counts(record.key) += 1
+            sums(record.key) +=
+              record.key.toLong + record.value.toLong + record.total
+            current = cursor.nextOrNull()
+          }
+          val index = bucketIndex(bucket.startSeconds)
+          var key = 0
+          while (key < cfg.keySpace) {
+            val count = counts(key)
+            if (count != 0)
+              checksum = foldKeyAggregate(checksum, index, key, count, sums(key))
+            key += 1
+          }
         case AppendOnly =>
           ()
       }
@@ -774,6 +872,10 @@ object CheckedPageTokenCostMatrixHelpers {
             foldAggregate(checksum, index, aggregateCounts(index), aggregateSums(index))
           aggregateCounts(index) = 0
           aggregateSums(index) = 0L
+        case AppendCountByKey =>
+          throw new IllegalStateException(
+            "append-count-by-key requires PageTokenCountByKey mode"
+          )
         case AppendOnly =>
           ()
         case AppendDrain =>
@@ -798,7 +900,7 @@ object CheckedPageTokenCostMatrixHelpers {
       if (startSeconds != currentStartSeconds) {
         val switchStart = if (diag.enabled) System.nanoTime() else 0L
         currentStartSeconds = startSeconds
-        if (workload == AppendDrain) {
+        if (workload == AppendDrain || workload == AppendCountByKey) {
           currentRegion =
             RiftRegion.pageTokenAppendRegionFor(
               stream,
@@ -851,6 +953,8 @@ object CheckedPageTokenCostMatrixHelpers {
           aggregateCounts(index) += 1
           aggregateSums(index) +=
             record.key.toLong + record.value.toLong + record.total
+        case AppendCountByKey =>
+          ()
         case AppendDrain =>
           ()
       }
@@ -860,7 +964,7 @@ object CheckedPageTokenCostMatrixHelpers {
     }
 
     val finalStart = if (diag.enabled) System.nanoTime() else 0L
-    if (workload == AppendDrain)
+    if (workload == AppendDrain || workload == AppendCountByKey)
       RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
         consume
       )
@@ -892,6 +996,104 @@ object CheckedPageTokenCostMatrixHelpers {
     checksum
   }
 
+  private def runCheckedCountByKeyBody(workload0: String, diag: Diagnostics)(
+      using stream: RiftRegion.StreamingRegion^
+  ): Long = {
+    val workload = validateWorkload(workload0)
+    if (workload != AppendCountByKey)
+      throw new IllegalArgumentException(
+        s"$workload requires append-count-by-key for PageTokenCountByKey"
+      )
+    val cfg = CheckedPageTokenCostConfig
+    final class Record(
+        val key: Int,
+        var value: Int,
+        var total: Long
+    ) extends RiftRegion.StreamAppendNode
+    val operator =
+      RiftRegion.pageTokenCountByKey[Record](
+        cfg.eventsPerBucket.toLong,
+        cfg.keySpace,
+        cfg.windowBuckets
+      )
+    var checksum = 0L
+
+    def consume(
+        bucket: RiftRegion.StreamBucket^{stream},
+        key: Int,
+        count: Int,
+        sum: Long
+    ): Unit =
+      checksum =
+        foldKeyAggregate(checksum, bucketIndex(bucket.startSeconds), key, count, sum)
+
+    var currentStartSeconds = Long.MinValue
+    var currentRegion: RiftRegion.StreamingRegion^{stream} = null
+    var i = 0
+    while (i < cfg.events) {
+      val seed = mix(i * 1103515245 + 12345)
+      val key = seed % cfg.keySpace
+      val value0 = (mix(seed + 17) & 0xffff) + 1
+      val startSeconds = bucketStart(i)
+      if (startSeconds != currentStartSeconds) {
+        val switchStart = if (diag.enabled) System.nanoTime() else 0L
+        currentStartSeconds = startSeconds
+        currentRegion =
+          RiftRegion.pageTokenCountByKeyRegionFor(
+            stream,
+            operator,
+            startSeconds,
+            closeCutoff(startSeconds)
+          )(consume)
+        if (diag.enabled)
+          diag.bucketOpenSwitchNanos += System.nanoTime() - switchStart
+      }
+
+      val allocStart = if (diag.enabled) System.nanoTime() else 0L
+      val record: Record^{stream} =
+        RiftRegion.alloc(new Record(key, value0, value0.toLong))(
+          using currentRegion
+        )
+      record.value += seed & 3
+      record.total += record.value.toLong
+      RiftRegion.appendPageTokenCountByKey(
+        stream,
+        operator,
+        record,
+        record.key,
+        record.key.toLong + record.value.toLong + record.total
+      )
+      if (diag.enabled)
+        diag.allocationAppendNanos += System.nanoTime() - allocStart
+      i += 1
+    }
+
+    val finalStart = if (diag.enabled) System.nanoTime() else 0L
+    RiftRegion.closeAllPageTokenCountByKeyBuckets(stream, operator)(consume)
+    if (diag.enabled)
+      diag.finalCloseNanos += System.nanoTime() - finalStart
+    checksum
+  }
+
+  private def runCheckedCountByKey(workload: String, diag: Diagnostics): Long = {
+    val checksum = RiftRegion.streaming { stream ?=>
+      runCheckedCountByKeyBody(workload, diag)
+    }
+    checksumSink = checksum
+    checksum
+  }
+
+  private def runCheckedSafeZoneCountByKey(
+      workload: String,
+      diag: Diagnostics
+  ): Long = {
+    val checksum = RiftRegion.streamingSafeZone { stream ?=>
+      runCheckedCountByKeyBody(workload, diag)
+    }
+    checksumSink = checksum
+    checksum
+  }
+
   private def runMode(mode: String, workload: String, diag: Diagnostics): Long =
     canonicalMode(mode) match {
       case "heap-same-shape"              => runHeap(workload, diag)
@@ -900,6 +1102,9 @@ object CheckedPageTokenCostMatrixHelpers {
       case "rift-checked-page-token"      => runCheckedPageToken(workload, diag)
       case "rift-checked-safezone-page-token" =>
         runCheckedSafeZonePageToken(workload, diag)
+      case CheckedCountByKey => runCheckedCountByKey(workload, diag)
+      case CheckedSafeZoneCountByKey =>
+        runCheckedSafeZoneCountByKey(workload, diag)
       case other =>
         throw new IllegalArgumentException(
           s"unknown checked-page-token cost mode '$other'"
@@ -915,7 +1120,8 @@ object CheckedPageTokenCostMatrixHelpers {
     mode match {
       case "heap-same-shape" | "safezone-improved-32k" |
           "rift-trusted-streaming" | "rift-checked-page-token" |
-          "rift-checked-safezone-page-token" =>
+          "rift-checked-safezone-page-token" | CheckedCountByKey |
+          CheckedSafeZoneCountByKey =>
         mode
       case other =>
         throw new IllegalArgumentException(

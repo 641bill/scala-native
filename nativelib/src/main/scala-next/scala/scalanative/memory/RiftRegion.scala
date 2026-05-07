@@ -261,6 +261,25 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       private[memory] val pageToken: StreamPageTokenAppendWindow[T]
   )
 
+  /** Checked page-token count/sum-by-key operator.
+   *
+   *  This is the reusable no-drain window-count shape: ordinary records still
+   *  live in child bucket regions, while parent-owned primitive metadata keeps
+   *  per-key counts/sums as records are appended. Closing a bucket can emit the
+   *  aggregate summary and close the child region without walking every record
+   *  again.
+   */
+  final class PageTokenCountByKey[T <: StreamAppendNode] private[memory] (
+      private[memory] val pageToken: StreamPageTokenAppendWindow[T],
+      private[memory] val keySpace: Int,
+      private[memory] val slotCount: Int,
+      private[memory] val bucketStarts: Array[Long],
+      private[memory] val counts: Array[Int],
+      private[memory] val sums: Array[Long]
+  ) {
+    private[memory] var currentSlot: Int = -1
+  }
+
   /** Checked epoch append/drain operator.
    *
    *  This is the reusable primitive for workloads whose natural lifetime is a
@@ -2963,6 +2982,36 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
         .asInstanceOf[StreamPageTokenAppendWindow[T]]
     ).asInstanceOf[PageTokenMapFilter[T]^{parent}]
 
+  /** Opens a checked page-token count/sum-by-key operator.
+   *
+   *  This is the reusable no-drain aggregate API for window-count and
+   *  window-sum rows. Ordinary records still live in child bucket regions, but
+   *  per-key aggregate metadata is updated during append and stored in
+   *  parent-owned primitive arrays.
+   */
+  def pageTokenCountByKey[T <: StreamAppendNode](
+      bucketSeconds: Long,
+      keySpace: Int,
+      liveBuckets: Int
+  )(using parent: StreamingRegion^): PageTokenCountByKey[T]^{parent} = {
+    if (keySpace <= 0)
+      throw new IllegalArgumentException("keySpace must be positive")
+    if (liveBuckets <= 0)
+      throw new IllegalArgumentException("liveBuckets must be positive")
+    val slotCount = liveBuckets + 1
+    val starts = new Array[Long](slotCount)
+    java.util.Arrays.fill(starts, Long.MinValue)
+    new PageTokenCountByKey[T](
+      streamPageTokenAppendWindow[T](bucketSeconds)
+        .asInstanceOf[StreamPageTokenAppendWindow[T]],
+      keySpace,
+      slotCount,
+      starts,
+      new Array[Int](slotCount * keySpace),
+      new Array[Long](slotCount * keySpace)
+    ).asInstanceOf[PageTokenCountByKey[T]^{parent}]
+  }
+
   /** Opens a checked epoch append/drain operator.
    *
    *  Call `epochBufferRegionFor` once per epoch, allocate records in the
@@ -3655,6 +3704,108 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       cutoffSeconds
     )(onBucket)
 
+  private def pageTokenCountByKeyStart[T <: StreamAppendNode](
+      operator: PageTokenCountByKey[T],
+      timestampSeconds: Long
+  ): Long = {
+    val pageToken = operator.pageToken.asInstanceOf[StreamPageTokenAppendWindow[T]]
+    val append = pageToken.append.asInstanceOf[StreamAppendWindow[T]]
+    val arena = append.buckets
+    Math.floorDiv(timestampSeconds, arena.bucketSeconds) * arena.bucketSeconds
+  }
+
+  private def pageTokenCountByKeySlot[T <: StreamAppendNode](
+      operator: PageTokenCountByKey[T],
+      startSeconds: Long
+  ): Int = {
+    val pageToken = operator.pageToken.asInstanceOf[StreamPageTokenAppendWindow[T]]
+    val append = pageToken.append.asInstanceOf[StreamAppendWindow[T]]
+    val arena = append.buckets
+    val slot =
+      Math.floorMod(
+        Math.floorDiv(startSeconds, arena.bucketSeconds),
+        operator.slotCount.toLong
+      ).toInt
+    val previous = operator.bucketStarts(slot)
+    if (previous == startSeconds)
+      slot
+    else if (previous == Long.MinValue) {
+      operator.bucketStarts(slot) = startSeconds
+      slot
+    } else
+      throw new IllegalStateException(
+        "PageTokenCountByKey slot collision; increase liveBuckets or close buckets sooner"
+      )
+  }
+
+  private def pageTokenCountByKeyExistingSlot[T <: StreamAppendNode](
+      operator: PageTokenCountByKey[T],
+      startSeconds: Long
+  ): Int = {
+    var i = 0
+    while (i < operator.slotCount) {
+      if (operator.bucketStarts(i) == startSeconds) return i
+      i += 1
+    }
+    -1
+  }
+
+  private def clearPageTokenCountByKeySlot[T <: StreamAppendNode](
+      operator: PageTokenCountByKey[T],
+      slot: Int
+  ): Unit = {
+    val base = slot * operator.keySpace
+    java.util.Arrays.fill(operator.counts, base, base + operator.keySpace, 0)
+    java.util.Arrays.fill(operator.sums, base, base + operator.keySpace, 0L)
+    operator.bucketStarts(slot) = Long.MinValue
+    if (operator.currentSlot == slot) operator.currentSlot = -1
+  }
+
+  private def emitPageTokenCountByKeyBucket[T <: StreamAppendNode](
+      operator: PageTokenCountByKey[T],
+      bucket: StreamBucket,
+      onSummary: (StreamBucket, Int, Int, Long) => Unit
+  ): Unit = {
+    val slot = pageTokenCountByKeyExistingSlot(operator, bucket.startSeconds)
+    if (slot >= 0) {
+      val base = slot * operator.keySpace
+      var key = 0
+      while (key < operator.keySpace) {
+        val count = operator.counts(base + key)
+        if (count != 0)
+          onSummary(bucket, key, count, operator.sums(base + key))
+        key += 1
+      }
+      clearPageTokenCountByKeySlot(operator, slot)
+    }
+  }
+
+  /** Returns the child region for the current page-token count/sum bucket. */
+  def pageTokenCountByKeyRegionFor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      operator: PageTokenCountByKey[T]^{parent},
+      timestampSeconds: Long,
+      cutoffSeconds: Long
+  )(onSummary: (StreamBucket^{parent}, Int, Int, Long) => Unit)
+      : StreamingRegion^{parent} = {
+    closePageTokenCountByKeyBucketsBefore(
+      parent,
+      operator,
+      cutoffSeconds
+    )(onSummary)
+    val startSeconds =
+      pageTokenCountByKeyStart(operator.asInstanceOf[PageTokenCountByKey[T]], timestampSeconds)
+    val slot =
+      pageTokenCountByKeySlot(operator.asInstanceOf[PageTokenCountByKey[T]], startSeconds)
+    operator.currentSlot = slot
+    pageTokenAppendRegionFor(
+      parent,
+      operator.pageToken.asInstanceOf[StreamPageTokenAppendWindow[T]^{parent}],
+      timestampSeconds,
+      Long.MinValue
+    ) { (_, _) => () }
+  }
+
   /** Returns the child region for the active epoch buffer.
    *
    *  The operator owns the bucket token, so callers cannot accidentally append
@@ -3717,6 +3868,33 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     val append = window.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
     val bucket = window.currentBucket.asInstanceOf[StreamBucket^{parent}]
     appendWindowOwnedOpen(parent, append, bucket, value)
+  }
+
+  /** Appends a record and updates the current bucket's count/sum metadata. */
+  def appendPageTokenCountByKey[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      operator: PageTokenCountByKey[T]^{parent},
+      value: T^{parent},
+      key: Int,
+      amount: Long
+  ): Unit = {
+    if (key < 0 || key >= operator.keySpace)
+      throw new IndexOutOfBoundsException(
+        s"key $key outside PageTokenCountByKey keySpace ${operator.keySpace}"
+      )
+    val slot = operator.currentSlot
+    if (slot < 0)
+      throw new IllegalStateException(
+        "PageTokenCountByKey has no active bucket; call pageTokenCountByKeyRegionFor first"
+      )
+    val pageToken =
+      operator.pageToken.asInstanceOf[StreamPageTokenAppendWindow[T]^{parent}]
+    val append = pageToken.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
+    val bucket = pageToken.currentBucket.asInstanceOf[StreamBucket^{parent}]
+    appendWindowOwnedOpen(parent, append, bucket, value)
+    val index = slot * operator.keySpace + key
+    operator.counts(index) += 1
+    operator.sums(index) += amount
   }
 
   /** Appends one record to the active epoch buffer. */
@@ -4539,6 +4717,24 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       cutoffSeconds
     )(onBucket)
 
+  /** Closes count/sum buckets before `cutoffSeconds` without record drain. */
+  def closePageTokenCountByKeyBucketsBefore[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      operator: PageTokenCountByKey[T]^{parent},
+      cutoffSeconds: Long
+  )(onSummary: (StreamBucket^{parent}, Int, Int, Long) => Unit): Unit =
+    closePageTokenAppendBucketsBeforeNoDrain(
+      parent,
+      operator.pageToken.asInstanceOf[StreamPageTokenAppendWindow[T]^{parent}],
+      cutoffSeconds
+    ) { bucket =>
+      emitPageTokenCountByKeyBucket(
+        operator.asInstanceOf[PageTokenCountByKey[T]],
+        bucket.asInstanceOf[StreamBucket],
+        onSummary.asInstanceOf[(StreamBucket, Int, Int, Long) => Unit]
+      )
+    }
+
   /** Closes join-window buckets fully before `cutoffSeconds`. */
   def closeJoinWindowBucketsBeforeWithCursor[T <: StreamAppendNode](
       parent: StreamingRegion^,
@@ -4641,6 +4837,22 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       parent,
       operator.pageToken.asInstanceOf[StreamPageTokenAppendWindow[T]^{parent}]
     )(onBucket)
+
+  /** Closes every count/sum bucket without record drain. */
+  def closeAllPageTokenCountByKeyBuckets[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      operator: PageTokenCountByKey[T]^{parent}
+  )(onSummary: (StreamBucket^{parent}, Int, Int, Long) => Unit): Unit =
+    closeAllPageTokenAppendBucketsNoDrain(
+      parent,
+      operator.pageToken.asInstanceOf[StreamPageTokenAppendWindow[T]^{parent}]
+    ) { bucket =>
+      emitPageTokenCountByKeyBucket(
+        operator.asInstanceOf[PageTokenCountByKey[T]],
+        bucket.asInstanceOf[StreamBucket],
+        onSummary.asInstanceOf[(StreamBucket, Int, Int, Long) => Unit]
+      )
+    }
 
   /** Closes the active epoch buffer and drains records through a cursor. */
   def closeEpochBufferWithCursor[T <: StreamAppendNode](

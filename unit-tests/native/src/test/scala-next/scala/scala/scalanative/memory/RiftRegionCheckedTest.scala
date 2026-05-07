@@ -1617,6 +1617,76 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def pageTokenCountByKeyAggregatesAndClosesNoDrain(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val key: Int, val value: Int)
+            extends RiftRegion.StreamAppendNode
+
+        val operator = RiftRegion.pageTokenCountByKey[Event](10, 8, 2)
+        var sum = 0L
+
+        def consume(
+            bucket: RiftRegion.StreamBucket^{stream},
+            key: Int,
+            count: Int,
+            valueSum: Long
+        ): Unit =
+          sum += bucket.startSeconds + key.toLong + count.toLong + valueSum
+
+        val firstRegion =
+          RiftRegion.pageTokenCountByKeyRegionFor(
+            stream,
+            operator,
+            7L,
+            Long.MinValue
+          )(consume)
+        val first: Event^{stream} =
+          RiftRegion.alloc(new Event(2, 10))(using firstRegion)
+        val second: Event^{stream} =
+          RiftRegion.alloc(new Event(2, 20))(using firstRegion)
+        RiftRegion.appendPageTokenCountByKey(
+          stream,
+          operator,
+          first,
+          first.key,
+          first.value.toLong
+        )
+        RiftRegion.appendPageTokenCountByKey(
+          stream,
+          operator,
+          second,
+          second.key,
+          second.value.toLong
+        )
+
+        val secondRegion =
+          RiftRegion.pageTokenCountByKeyRegionFor(stream, operator, 17L, 10L)(
+            consume
+          )
+        val third: Event^{stream} =
+          RiftRegion.alloc(new Event(1, 2))(using secondRegion)
+        RiftRegion.appendPageTokenCountByKey(
+          stream,
+          operator,
+          third,
+          third.key,
+          third.value.toLong
+        )
+
+        RiftRegion.closeAllPageTokenCountByKeyBuckets(stream, operator)(
+          consume
+        )
+        sum
+      }
+
+      assertEquals(48L, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def epochBufferAllocatesAndDrainsRecords(): Unit = {
     RiftRegion.init(1)
     try {

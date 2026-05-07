@@ -217,6 +217,7 @@ trait NirGenExpr(using Context) {
       (
         name == "appendWindow" ||
           name == "appendPageToken" ||
+          name == "appendPageTokenCountByKey" ||
           name == "emitPageTokenMapFilter" ||
           name == "appendEpochBuffer" ||
           name == "appendTransactionList" ||
@@ -359,6 +360,15 @@ trait NirGenExpr(using Context) {
     private def riftCheckedContainerValueArg(args: List[Tree]): Tree =
       if args.length >= 7 then args(args.length - 5)
       else args(args.length - 2)
+
+    private def riftStreamAppendValueArg(
+        app: Tree,
+        args: List[Tree]
+    ): Tree = {
+      val name = calledSymbol(app).name.toString
+      if name == "appendPageTokenCountByKey" then args(args.length - 3)
+      else args.last
+    }
 
     private def calledSymbol(tree: Tree): Symbol =
       tree match {
@@ -505,7 +515,7 @@ trait NirGenExpr(using Context) {
             args
           )
         case _ if isRiftStreamAppendWindowAppend(app) =>
-          checkRiftObjectBufferAppend(args.last)
+          checkRiftObjectBufferAppend(riftStreamAppendValueArg(app, args))
           genApplyMethod(
             sym,
             statically = sym.isClassConstructor,

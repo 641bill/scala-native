@@ -91,7 +91,7 @@ run_mode() {
   local page_size=""
 
   case "${mode}" in
-    safezone-improved-32k|rift-checked-safezone-page-token)
+    safezone-improved-32k|rift-checked-safezone-page-token|rift-checked-safezone-count-by-key)
       roots_mode="1"
       page_size="32768"
       ;;

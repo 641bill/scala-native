@@ -1923,6 +1923,72 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked object buffer cannot store an unrooted heap object"
     )
 
+  @Test def pageTokenCountByKeyStoresChildBucketRecords(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val key: Int, val value: Int)
+      |    extends RiftRegion.StreamAppendNode
+      |
+      |def ok(): Long =
+      |  RiftRegion.streaming { stream ?=>
+      |    val operator = RiftRegion.pageTokenCountByKey[Event](10, 8, 4)
+      |    var total = 0L
+      |    def consume(
+      |        bucket: RiftRegion.StreamBucket^{stream},
+      |        key: Int,
+      |        count: Int,
+      |        sum: Long
+      |    ): Unit =
+      |      total += bucket.startSeconds + key.toLong + count.toLong + sum
+      |    val region =
+      |      RiftRegion.pageTokenCountByKeyRegionFor(
+      |        stream,
+      |        operator,
+      |        7L,
+      |        0L
+      |      )(consume)
+      |    val event: Event^{stream} =
+      |      RiftRegion.alloc(new Event(2, 40))(using region)
+      |    RiftRegion.appendPageTokenCountByKey(
+      |      stream,
+      |      operator,
+      |      event,
+      |      event.key,
+      |      event.value.toLong
+      |    )
+      |    RiftRegion.closeAllPageTokenCountByKeyBuckets(stream, operator)(
+      |      consume
+      |    )
+      |    total
+      |  }
+      |""".stripMargin)
+
+  @Test def pageTokenCountByKeyRejectsDirectHeapRecord(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val key: Int, val value: Int)
+      |    extends RiftRegion.StreamAppendNode
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    val operator = RiftRegion.pageTokenCountByKey[Event](10, 8, 4)
+      |    val event: Event^{stream} = new Event(2, 40)
+      |    RiftRegion.appendPageTokenCountByKey(
+      |      stream,
+      |      operator,
+      |      event,
+      |      event.key,
+      |      event.value.toLong
+      |    )
+      |  }
+      |""".stripMargin,
+      "Rift checked object buffer cannot store an unrooted heap object"
+    )
+
   @Test def epochBufferStoresChildEpochRecords(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking
