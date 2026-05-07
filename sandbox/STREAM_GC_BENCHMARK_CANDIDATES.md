@@ -1,7 +1,7 @@
 # Stream GC Benchmark Candidates
 
 Date: 2026-05-01
-Last updated: 2026-05-07 01:23 CEST
+Last updated: 2026-05-07 12:24 CEST
 
 Status: benchmark-selection note for Phase 6. This is not a result pack.
 
@@ -60,7 +60,7 @@ Sources:
 
 | Rank | Candidate | Why it fits Rift | First action |
 |---:|---|---|---|
-| 1 | DSPBench local-kernel subset | Broadest stream-processing benchmark family found in this pass: finance, telecom, sensor, social, and other applications; paper explicitly characterizes workload and memory occupation. | Inspect `GMAP/DSPBench` or the paper app list, choose 2-3 object-heavy kernels, and port local heap/SafeZone/Rift kernels without Storm/Spark runtime. |
+| 1 | DSPBench local-kernel subset | Broadest stream-processing benchmark family found in this pass: finance, telecom, sensor, social, and other applications; paper explicitly characterizes workload and memory occupation. Spike is modest/control; Fraud q2 is trusted-positive but checked-gated. | Heap-cap follow-up is complete and did not create a fixed-memory checked win; profile checked Fraud q2, then move to real RIoTBench/Theodolite if no safe checked path emerges. |
 | 2 | Real RIoTBench-style input | Actual RIoTBench uses real IoT observation streams, unlike our current generated probe. | Find/download a public CITY/FIT-style dataset, wire `RIOTBENCH_INPUT`, and rerun q1/q2 before changing operators. |
 | 3 | More LogHub / real log variants | Real BGL has now been tried and gives modest throughput/RSS/tail evidence, not a huge-GC case. Other LogHub datasets may still differ if they force richer parsing/template/session objects. | Keep BGL as baseline; only try HDFS/Thunderbird/Spark if the query materializes more objects than the current line/token/window path. |
 | 4 | NEXMark Beam-default expansion | Auction streams have generated event objects, joins, windows, and output objects with explicit window/session lifetimes. Q3 is the best new checked row; Q0/Q11 are trusted wins; Q1/Q8 remain useful profile rows. | Keep as active profile/regression evidence; do not claim exact Beam runner evidence. |
@@ -91,8 +91,8 @@ ceiling/modest-win controls unless a future operator changes their allocation
 shape. Keep NEXMark Q3/Q8, Yahoo Q2, and RIoTBench q1 as stream-GC
 profile/regression controls, but make checked operator overhead reduction and
 DSPBench / real RIoTBench triage the next engineering focus. The next
-benchmark-search action should be DSPBench local-kernel triage, not another
-generic JVM suite.
+benchmark-search action should be checked Fraud q2 profiling or real
+RIoTBench/Theodolite, not another generic JVM suite.
 
 ## LogHub BGL Update
 

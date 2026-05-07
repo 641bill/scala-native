@@ -404,6 +404,22 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     def hasNext: Boolean =
       current != null
 
+    /** Returns the next record, or null when the cursor is exhausted.
+     *
+     *  This keeps close-time bucket drains on the single-call fast path while
+     *  preserving the defensive link clearing used by public cursor consumers.
+     */
+    def nextOrNull(): T | Null = {
+      val value0 = current
+      if (value0 == null) null
+      else {
+        val value = value0.asInstanceOf[T]
+        current = value.appendNext
+        value.appendNext = null
+        value
+      }
+    }
+
     def next(): T = {
       if (current == null)
         throw new NoSuchElementException("empty StreamAppendCursor")
@@ -3199,6 +3215,14 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   ): StreamBucket^{parent} = {
     val startSeconds =
       Math.floorDiv(timestampSeconds, arena.bucketSeconds) * arena.bucketSeconds
+    streamBucketForOwnedAppendStart(parent, arena, startSeconds)
+  }
+
+  private def streamBucketForOwnedAppendStart(
+      parent: StreamingRegion^,
+      arena: StreamBucketArena^{parent},
+      startSeconds: Long
+  ): StreamBucket^{parent} = {
     val current = arena.current
     if (current != null && current.startSeconds == startSeconds)
       current.asInstanceOf[StreamBucket^{parent}]
@@ -3578,19 +3602,33 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       StreamBucket^{parent},
       StreamAppendCursor[T]^{parent}
   ) => Unit): StreamingRegion^{parent} = {
-    closePageTokenAppendBucketsBeforeWithCursor(
-      parent,
-      window,
-      cutoffSeconds
-    )(onBucket)
     val append = window.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
-    val bucket = streamBucketForOwnedAppend(
-      parent,
-      append.buckets.asInstanceOf[StreamBucketArena^{parent}],
-      timestampSeconds
+    val arena = append.buckets.asInstanceOf[StreamBucketArena^{parent}]
+    val startSeconds =
+      Math.floorDiv(timestampSeconds, arena.bucketSeconds) * arena.bucketSeconds
+    val current = window.currentBucket
+    val needsClose = hasStreamBucketsBefore(parent, arena, cutoffSeconds)
+    if (
+      current != null &&
+      current.startSeconds == startSeconds &&
+      !needsClose
     )
-    window.currentBucket = bucket.asInstanceOf[StreamBucket]
-    streamBucketRegionTrusted(parent, bucket)
+      streamBucketRegionTrusted(
+        parent,
+        current.asInstanceOf[StreamBucket^{parent}]
+      )
+    else {
+      if (needsClose)
+        closePageTokenAppendBucketsBeforeWithCursor(
+          parent,
+          window,
+          cutoffSeconds
+        )(onBucket)
+
+      val bucket = streamBucketForOwnedAppendStart(parent, arena, startSeconds)
+      window.currentBucket = bucket.asInstanceOf[StreamBucket]
+      streamBucketRegionTrusted(parent, bucket)
+    }
   }
 
   /** Returns the child region for the current map/filter page bucket. */
@@ -4314,6 +4352,33 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     cursor.current = null
   }
 
+  private def consumePageTokenAppendBucketWithFastCursor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamPageTokenAppendWindow[T]^{parent},
+      bucket: StreamBucket^{parent},
+      onBucket: (
+        StreamBucket^{parent},
+        StreamAppendCursor[T]^{parent}
+      ) => Unit
+  ): Unit = {
+    val append = window.append.asInstanceOf[StreamAppendWindow[T]^{parent}]
+    val head = bucket.appendHead.asInstanceOf[StreamAppendNode]
+    val removed = bucket.appendLength
+    bucket.appendHead = null
+    bucket.appendTail = null
+    bucket.appendLength = 0
+    append.totalLength -= removed
+
+    val cursor = append.cursor.asInstanceOf[StreamAppendCursor[T]^{parent}]
+    cursor.current = head
+    onBucket(bucket, cursor)
+    // Page-token buckets are operator-owned: parent refs are cleared above,
+    // callbacks cannot retain bucket-local records, and the child region closes
+    // immediately after cleanup. Generic append-window APIs keep the defensive
+    // leftover drain; this fast path avoids close-only link traversal.
+    cursor.current = null
+  }
+
   private def consumeChunkAppendBucketWithCursor[T <: Object](
       parent: StreamingRegion^,
       window: StreamChunkAppendWindow[T]^{parent},
@@ -4408,7 +4473,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     ) { bucket =>
       if (window.currentBucket.asInstanceOf[AnyRef] eq bucket.asInstanceOf[AnyRef])
         window.currentBucket = null
-      consumeAppendWindowBucketWithCursor(parent, append, bucket, onBucket)
+      consumePageTokenAppendBucketWithFastCursor(parent, window, bucket, onBucket)
     }
   }
 
@@ -4498,7 +4563,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       parent,
       append.buckets.asInstanceOf[StreamBucketArena^{parent}]
     ) { bucket =>
-      consumeAppendWindowBucketWithCursor(parent, append, bucket, onBucket)
+      consumePageTokenAppendBucketWithFastCursor(parent, window, bucket, onBucket)
     }
   }
 

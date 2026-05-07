@@ -1,12 +1,13 @@
 # Checked Page/Token Append Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-05 13:43:52 CEST
+Last updated: 2026-05-07 13:51 CEST
 
 Status: focused checked page/token gate passed, generated Common Crawl-shaped
-q1/q2 application gate passed, and the follow-up fixed-chunk append control
-failed to beat page/token. This is generated stressor evidence, not real
-Common Crawl input evidence.
+q1/q2 application gate passed, the fixed-chunk append control failed to beat
+linked page-token, and the 2026-05-07 batch-close fast path improved the
+operator-owned page-token row again. This is generated stressor evidence, not
+real Common Crawl input evidence.
 
 ## What Changed
 
@@ -21,6 +22,10 @@ The owned append path removes these overheads from the focused hot path:
 - per-record `bucket.child.checkOpen()`;
 - per-record `streamBucketRegion(...)` lookup;
 - stale-current `isOpen` check in the operator-owned bucket fast path.
+- generic close-time leftover draining when the page-token operator owns the
+  bucket and the child region closes immediately after the callback;
+- repeated close/open work for monotonic timestamp streams when the current
+  bucket cannot expire.
 
 Public low-level append-window APIs remain defensive.
 
@@ -127,6 +132,120 @@ Fixed-chunk gate result: failed.
 - Do not move chunk-token into Common Crawl, GH Archive, or DEBS yet. Keep it
   as a control and revisit only if a workload needs variable-size page-local
   random access rather than sequential append/drain.
+
+## 2026-05-07 Batch-Close Fast-Path Follow-Up
+
+This follow-up optimized the existing linked page-token path rather than adding
+a benchmark-specific structure:
+
+- `StreamAppendCursor.nextOrNull()` gives close callbacks a single-call cursor
+  drain instead of `hasNext` plus `next`.
+- Page-token-owned close clears parent bucket `head`/`tail`/`length` first and
+  no longer performs a second defensive drain just to null unconsumed links.
+  Generic public append-window close still keeps the defensive drain.
+- `pageTokenAppendRegionFor` now has a monotonic current-bucket fast path: when
+  no bucket can expire and the timestamp stays in the current bucket, it returns
+  the cached child region without re-entering general close/open work.
+
+Validation:
+
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile` passed.
+- `RiftRegionCheckedCompilerTest` passed `118/118`.
+- `RiftRegionCheckedTest` passed `50/50`.
+- 20k smoke matched checksums across heap, linked page-token, SafeZone-backed
+  linked page-token, and chunk controls.
+
+Focused 1M command:
+
+```sh
+CHECKED_APPEND_BUILD=0 \
+CHECKED_APPEND_EVENTS=1000000 \
+CHECKED_APPEND_BENCHMARK_RUNS=5 \
+CHECKED_APPEND_WARMUPS=1 \
+CHECKED_APPEND_MODES="heap-immix rift-checked-page-token rift-checked-safezone-page-token rift-checked-chunk-token rift-checked-safezone-chunk-token" \
+CHECKED_APPEND_OUTPUT_DIR="/tmp/checked-append-page-token-fast-1m" \
+zsh sandbox/run_checked_append_window_matrix.sh
+```
+
+All rows matched checksum `-2507118467295660905`.
+
+| Mode | Median ms | GC ms | Rift op ms | Region objects | RSS bytes |
+|---|---:|---:|---:|---:|---:|
+| `heap-immix` | `36.920` | `10.995` | `0.000` | `0` | `75120640` |
+| `rift-checked-page-token` | `29.319` | `0.000` | `0.073` | `1000000` | `47579136` |
+| `rift-checked-safezone-page-token` | `27.549` | `0.000` | `0.000` | `0` | `47431680` |
+| `rift-checked-chunk-token` | `34.737` | `0.000` | `0.080` | `1031280` | `47579136` |
+| `rift-checked-safezone-chunk-token` | `32.294` | `0.000` | `0.000` | `0` | `47579136` |
+
+Result: the linked page-token path remains the right checked operator for
+append/window workloads. The chunk path is still correct but slower, so it
+should not be wired into DSPBench/Common Crawl yet.
+
+Generated Common Crawl-shaped 100k regression:
+
+```sh
+COMMON_CRAWL_WET_BUILD=1 \
+COMMON_CRAWL_WET_PAGES=100000 \
+COMMON_CRAWL_WET_BENCHMARK_RUNS=3 \
+COMMON_CRAWL_WET_WARMUPS=1 \
+COMMON_CRAWL_WET_QUERIES="q1-tokenize q2-domain-window" \
+COMMON_CRAWL_WET_MODES="heap-immix safezone-improved-32k rift-trusted-streaming rift-checked-page-token rift-checked-safezone-page-token" \
+COMMON_CRAWL_WET_OUTPUT_DIR="/tmp/common-crawl-page-token-fast-100k" \
+zsh sandbox/run_common_crawl_wet_matrix.sh
+```
+
+All q1/q2 rows matched checksum/output count.
+
+| Query | Mode | Median ms | GC ms | RSS bytes | Output count |
+|---|---|---:|---:|---:|---:|
+| q1 | `heap-immix` | `533.406` | `147.793` | `408600576` | `13700000` |
+| q1 | `safezone-improved-32k` | `448.479` | `0.000` | `356089856` | `13700000` |
+| q1 | `rift-trusted-streaming` | `433.955` | `0.000` | `355975168` | `13700000` |
+| q1 | `rift-checked-page-token` | `395.255` | `0.000` | `345096192` | `13700000` |
+| q1 | `rift-checked-safezone-page-token` | `370.758` | `0.000` | `345112576` | `13700000` |
+| q2 | `heap-immix` | `513.498` | `145.459` | `408600576` | `92994` |
+| q2 | `safezone-improved-32k` | `434.138` | `0.000` | `420511744` | `92994` |
+| q2 | `rift-trusted-streaming` | `423.630` | `0.000` | `420380672` | `92994` |
+| q2 | `rift-checked-page-token` | `404.521` | `0.000` | `409550848` | `92994` |
+| q2 | `rift-checked-safezone-page-token` | `377.482` | `0.000` | `409518080` | `92994` |
+
+Result: the fast path strengthens the generated application-shaped gate.
+SafeZone-backed checked page-token is now the fastest row on both q1 and q2 in
+this 100k regression, beating heap, improved SafeZone, trusted Streaming, and
+checked Rift page-token. It remains generated WET-shaped stressor evidence, not
+real Common Crawl proof.
+
+Post-fast-path selected 1M regression:
+
+```sh
+COMMON_CRAWL_WET_PAGES=1000000 \
+COMMON_CRAWL_WET_BENCHMARK_RUNS=3 \
+COMMON_CRAWL_WET_WARMUPS=1 \
+COMMON_CRAWL_WET_QUERIES="q1-tokenize q2-domain-window" \
+COMMON_CRAWL_WET_MODES="heap-immix safezone-improved-32k rift-trusted-streaming rift-checked-page-token rift-checked-safezone-page-token" \
+COMMON_CRAWL_WET_OUTPUT_DIR="cache/perf-eval/2026-05-07-post-fast-path-selected/summaries/common-crawl-page-token" \
+zsh sandbox/run_common_crawl_wet_matrix.sh
+```
+
+All q1/q2 rows matched checksum/output count.
+
+| Query | Mode | Median ms | GC ms | RSS bytes | Output count |
+|---|---|---:|---:|---:|---:|
+| q1 | `heap-immix` | `5618.631` | `1655.357` | `408600576` | `137000000` |
+| q1 | `safezone-improved-32k` | `4777.409` | `33.822` | `474693632` | `137000000` |
+| q1 | `rift-trusted-streaming` | `4492.936` | `20.357` | `474497024` | `137000000` |
+| q1 | `rift-checked-page-token` | `4069.265` | `20.486` | `463634432` | `137000000` |
+| q1 | `rift-checked-safezone-page-token` | `3840.668` | `30.767` | `463650816` | `137000000` |
+| q2 | `heap-immix` | `5303.179` | `1599.698` | `408600576` | `929230` |
+| q2 | `safezone-improved-32k` | `4436.680` | `32.029` | `474759168` | `929230` |
+| q2 | `rift-trusted-streaming` | `4205.312` | `18.431` | `474071040` | `929230` |
+| q2 | `rift-checked-page-token` | `4041.548` | `17.698` | `463650816` | `929230` |
+| q2 | `rift-checked-safezone-page-token` | `3839.158` | `36.024` | `463765504` | `929230` |
+
+Result: the 1M selected rerun confirms the 100k direction. Checked scoped
+page-token is fastest on both q1 and q2; checked Rift page-token also beats
+trusted Streaming. Heap still has lower RSS, so this remains an elapsed/GC
+win rather than an RSS win.
 
 ## Common Crawl-Shaped Application Gate
 

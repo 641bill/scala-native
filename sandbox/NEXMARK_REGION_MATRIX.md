@@ -1,6 +1,7 @@
 # NEXMark Region Matrix
 
 Date: 2026-05-01
+Last updated: 2026-05-07 13:51 CEST
 
 Status: first NEXMark-style methodology benchmark for the broader
 stream-processing win envelope. This is not an exact Apache Beam NEXMark
@@ -69,6 +70,35 @@ Default settings:
 The default runner query set is now
 `q0 q1 q2 q3 q4 q5 q8 q9 q11`. Historical tables below cover only
 `q0/q1/q2/q5/q8` unless explicitly stated otherwise.
+
+## 2026-05-07 Post-Fast-Path Selected Rows
+
+Source: `evidence/POST_FAST_PATH_SELECTED_SWEEP_2026_05_07.md`.
+
+Command shape:
+
+```sh
+NEXMARK_BEAM_DEFAULTS=1 \
+NEXMARK_EVENTS=1000000 \
+NEXMARK_BENCHMARK_RUNS=3 \
+NEXMARK_WARMUPS=1 \
+NEXMARK_QUERIES="q3 q8 q9 q11" \
+NEXMARK_MODES="heap safezone-improved rift-checked" \
+zsh sandbox/run_nexmark_region_matrix.sh
+```
+
+All rows matched checksum/output count.
+
+| Query | Heap ms / GC ms | Improved SafeZone ms / GC ms | Checked Rift ms / GC ms | Interpretation |
+|---|---:|---:|---:|---|
+| q3 | `305.799` / `26.411` | `300.271` / `11.704` | `285.356` / `9.958` | checked generated-methodology win |
+| q8 | `466.964` / `33.120` | `452.158` / `16.571` | `443.020` / `15.250` | checked modest win |
+| q9 | `798.672` / `84.697` | `744.343` / `33.977` | `724.479` / `29.070` | strongest selected NEXMark row |
+| q11 | `215.910` / `17.208` | `227.575` / `5.485` | `209.918` / `3.706` | checked wins elapsed and cuts GC |
+
+Interpretation: the selected Beam-default controls remain positive after the
+page-token fast-path checkpoint. These rows are generated methodology
+evidence; they are not exact Apache Beam runner evidence.
 
 Apache Beam compatibility source:
 

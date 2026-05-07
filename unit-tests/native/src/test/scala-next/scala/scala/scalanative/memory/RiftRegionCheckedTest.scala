@@ -1480,6 +1480,57 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def streamPageTokenAppendWindowClosesAfterPartialCursorConsumption()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val window = RiftRegion.streamPageTokenAppendWindow[Event](10)
+        var sum = 0
+
+        def consumeOne(
+            bucket: RiftRegion.StreamBucket^{stream},
+            cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+        ): Unit = {
+          val event = cursor.nextOrNull()
+          if (event != null)
+            sum += event.asInstanceOf[Event^{stream}].value +
+              bucket.startSeconds.toInt
+        }
+
+        val firstRegion =
+          RiftRegion.pageTokenAppendRegionFor(stream, window, 7L, Long.MinValue)(
+            consumeOne
+          )
+        val first: Event^{stream} =
+          RiftRegion.alloc(new Event(10))(using firstRegion)
+        val second: Event^{stream} =
+          RiftRegion.alloc(new Event(20))(using firstRegion)
+        RiftRegion.appendPageToken(stream, window, first)
+        RiftRegion.appendPageToken(stream, window, second)
+
+        val nextRegion =
+          RiftRegion.pageTokenAppendRegionFor(stream, window, 17L, 10L)(
+            consumeOne
+          )
+        val third: Event^{stream} =
+          RiftRegion.alloc(new Event(30))(using nextRegion)
+        RiftRegion.appendPageToken(stream, window, third)
+
+        RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
+          consumeOne
+        )
+        sum
+      }
+
+      assertEquals(50, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def pageTokenMapFilterAllocatesAndDrainsRecords(): Unit = {
     RiftRegion.init(1)
     try {
