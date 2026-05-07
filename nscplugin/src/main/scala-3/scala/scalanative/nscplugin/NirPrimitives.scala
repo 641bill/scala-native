@@ -98,8 +98,9 @@ object NirPrimitives {
 
   final val SAFEZONE_ALLOC = 1 + REFLECT_SELECTABLE_APPLYDYN
   final val RIFT_ALLOC = 1 + SAFEZONE_ALLOC
+  final val RIFT_OPEN_ALLOC = 1 + RIFT_ALLOC
 
-  final val USES_LINKTIME_INTRINSIC = 1 + RIFT_ALLOC
+  final val USES_LINKTIME_INTRINSIC = 1 + RIFT_OPEN_ALLOC
 
   final val LastNirPrimitiveCode = USES_LINKTIME_INTRINSIC
 
@@ -230,6 +231,7 @@ class NirPrimitives(using ctx: Context) extends DottyPrimitives(ctx) {
     )
     defnNir.RuntimeSafeZoneAllocator_allocate.foreach(addPrimitive(_, SAFEZONE_ALLOC))
     defnNir.RuntimeRiftAllocator_allocate.foreach(addPrimitive(_, RIFT_ALLOC))
+    defnNir.RuntimeRiftAllocator_allocateOpen.foreach(addPrimitive(_, RIFT_OPEN_ALLOC))
     defnNir.LinktimeIntrinsics.foreach(addPrimitive(_, USES_LINKTIME_INTRINSIC))
     primitives
   }

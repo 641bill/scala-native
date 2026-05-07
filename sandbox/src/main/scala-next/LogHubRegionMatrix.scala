@@ -1005,7 +1005,7 @@ object LogHubRegionMatrixHelpers {
       }
 
     var currentStartLine = Long.MinValue
-    var currentRegion: RiftRegion.StreamingRegion^{stream} = null
+    var currentRegion: RiftRegion.OpenStreamingRegion^{stream} = null
 
     def processLine(
         i: Int,
@@ -1018,7 +1018,7 @@ object LogHubRegionMatrixHelpers {
       if (start != currentStartLine) {
         currentStartLine = start
         currentRegion =
-          RiftRegion.pageTokenAppendRegionFor(
+          RiftRegion.pageTokenAppendOpenRegionFor(
             stream,
             window,
             start,
@@ -1026,7 +1026,7 @@ object LogHubRegionMatrixHelpers {
           )(closeRecords)
       }
       val lineRecord: CheckedRecord^{stream} =
-        RiftRegion.alloc(
+        RiftRegion.allocOpen(
           new CheckedRecord(10, i, component, severity, tokens, hash)
         )(using currentRegion)
       RiftRegion.appendPageToken(stream, window, lineRecord)
@@ -1034,7 +1034,7 @@ object LogHubRegionMatrixHelpers {
         var token = 0
         while (token < tokens) {
           val tokenRecord: CheckedRecord^{stream} =
-            RiftRegion.alloc(
+            RiftRegion.allocOpen(
               new CheckedRecord(
                 20 + (token & 3),
                 i,

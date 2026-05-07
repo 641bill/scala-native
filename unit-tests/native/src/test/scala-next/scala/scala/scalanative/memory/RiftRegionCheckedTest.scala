@@ -1460,17 +1460,22 @@ class RiftRegionCheckedTest {
         }
 
         val firstRegion =
-          RiftRegion.pageTokenAppendRegionFor(stream, window, 7L, Long.MinValue)(
-            consume
-          )
+          RiftRegion.pageTokenAppendOpenRegionFor(
+            stream,
+            window,
+            7L,
+            Long.MinValue
+          )(consume)
         val first: Event^{stream} =
-          RiftRegion.alloc(new Event(20))(using firstRegion)
+          RiftRegion.allocOpen(new Event(20))(using firstRegion)
         RiftRegion.appendPageToken(stream, window, first)
 
         val secondRegion =
-          RiftRegion.pageTokenAppendRegionFor(stream, window, 17L, 10L)(consume)
+          RiftRegion.pageTokenAppendOpenRegionFor(stream, window, 17L, 10L)(
+            consume
+          )
         val second: Event^{stream} =
-          RiftRegion.alloc(new Event(12))(using secondRegion)
+          RiftRegion.allocOpen(new Event(12))(using secondRegion)
         RiftRegion.appendPageToken(stream, window, second)
 
         RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(

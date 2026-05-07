@@ -890,7 +890,7 @@ object CheckedPageTokenCostMatrixHelpers {
     }
 
     var currentStartSeconds = Long.MinValue
-    var currentRegion: RiftRegion.StreamingRegion^{stream} = null
+    var currentRegion: RiftRegion.OpenStreamingRegion^{stream} = null
     var i = 0
     while (i < cfg.events) {
       val seed = mix(i * 1103515245 + 12345)
@@ -902,7 +902,7 @@ object CheckedPageTokenCostMatrixHelpers {
         currentStartSeconds = startSeconds
         if (workload == AppendDrain || workload == AppendCountByKey) {
           currentRegion =
-            RiftRegion.pageTokenAppendRegionFor(
+            RiftRegion.pageTokenAppendOpenRegionFor(
               stream,
               window,
               startSeconds,
@@ -915,7 +915,7 @@ object CheckedPageTokenCostMatrixHelpers {
             closeCutoff(startSeconds)
           )(consumeNoDrain)
           currentRegion =
-            RiftRegion.pageTokenAppendRegionFor(
+            RiftRegion.pageTokenAppendOpenRegionFor(
               stream,
               window,
               startSeconds,
@@ -928,7 +928,7 @@ object CheckedPageTokenCostMatrixHelpers {
 
       val allocStart = if (diag.enabled) System.nanoTime() else 0L
       val record: Record^{stream} =
-        RiftRegion.alloc(new Record(key, value0, value0.toLong))(
+        RiftRegion.allocOpen(new Record(key, value0, value0.toLong))(
           using currentRegion
         )
       record.value += seed & 3
@@ -1028,7 +1028,7 @@ object CheckedPageTokenCostMatrixHelpers {
         foldKeyAggregate(checksum, bucketIndex(bucket.startSeconds), key, count, sum)
 
     var currentStartSeconds = Long.MinValue
-    var currentRegion: RiftRegion.StreamingRegion^{stream} = null
+    var currentRegion: RiftRegion.OpenStreamingRegion^{stream} = null
     var i = 0
     while (i < cfg.events) {
       val seed = mix(i * 1103515245 + 12345)
@@ -1039,7 +1039,7 @@ object CheckedPageTokenCostMatrixHelpers {
         val switchStart = if (diag.enabled) System.nanoTime() else 0L
         currentStartSeconds = startSeconds
         currentRegion =
-          RiftRegion.pageTokenCountByKeyRegionFor(
+          RiftRegion.pageTokenCountByKeyOpenRegionFor(
             stream,
             operator,
             startSeconds,
@@ -1051,7 +1051,7 @@ object CheckedPageTokenCostMatrixHelpers {
 
       val allocStart = if (diag.enabled) System.nanoTime() else 0L
       val record: Record^{stream} =
-        RiftRegion.alloc(new Record(key, value0, value0.toLong))(
+        RiftRegion.allocOpen(new Record(key, value0, value0.toLong))(
           using currentRegion
         )
       record.value += seed & 3

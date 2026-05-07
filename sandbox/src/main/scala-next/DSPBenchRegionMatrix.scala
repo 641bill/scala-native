@@ -1606,7 +1606,7 @@ object DSPBenchRegionMatrixHelpers {
     }
 
     var currentStartEvent = Long.MinValue
-    var currentRegion: RiftRegion.StreamingRegion^{stream} = null
+    var currentRegion: RiftRegion.OpenStreamingRegion^{stream} = null
 
     def processSensor(
         i: Int,
@@ -1619,7 +1619,7 @@ object DSPBenchRegionMatrixHelpers {
         val bucketStarted = if (diagnostics) System.nanoTime() else 0L
         currentStartEvent = start
         currentRegion =
-          RiftRegion.pageTokenAppendRegionFor(
+          RiftRegion.pageTokenAppendOpenRegionFor(
             stream,
             window,
             start,
@@ -1631,21 +1631,21 @@ object DSPBenchRegionMatrixHelpers {
         }
       }
       val sensorRecord: CheckedRecord^{stream} =
-        RiftRegion.alloc(
+        RiftRegion.allocOpen(
           new CheckedRecord(10, i, device, valueScaled, 0, false, hash)
         )(using currentRegion)
       RiftRegion.appendPageToken(stream, window, sensorRecord)
       if (averageQuery(query)) {
         val avg = state.update(device, valueScaled)
         val avgRecord: CheckedRecord^{stream} =
-          RiftRegion.alloc(
+          RiftRegion.allocOpen(
             new CheckedRecord(20, i, device, valueScaled, avg, false, hash ^ 20L)
           )(using currentRegion)
         RiftRegion.appendPageToken(stream, window, avgRecord)
         if (candidateQuery(query)) {
           val spike = isSpike(valueScaled, avg)
           val candidate: CheckedRecord^{stream} =
-            RiftRegion.alloc(
+            RiftRegion.allocOpen(
               new CheckedRecord(30, i, device, valueScaled, avg, spike, hash ^ 30L)
             )(using currentRegion)
           RiftRegion.appendPageToken(stream, window, candidate)
@@ -1666,7 +1666,7 @@ object DSPBenchRegionMatrixHelpers {
     ): Unit = {
       val appendStarted = if (diagnostics) System.nanoTime() else 0L
       val record: CheckedRecord^{stream} =
-        RiftRegion.alloc(
+        RiftRegion.allocOpen(
           new CheckedRecord(kind, i, key, value, score, flag, hash)
         )(using currentRegion)
       RiftRegion.appendPageToken(stream, window, record)
@@ -1687,7 +1687,7 @@ object DSPBenchRegionMatrixHelpers {
         val bucketStarted = if (diagnostics) System.nanoTime() else 0L
         currentStartEvent = start
         currentRegion =
-          RiftRegion.pageTokenAppendRegionFor(
+          RiftRegion.pageTokenAppendOpenRegionFor(
             stream,
             window,
             start,

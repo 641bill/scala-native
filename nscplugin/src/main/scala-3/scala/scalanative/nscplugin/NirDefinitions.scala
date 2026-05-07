@@ -104,6 +104,7 @@ final class NirDefinitions()(using ctx: Context) {
   @tu lazy val RuntimeRiftAllocatorModuleRef = requiredModuleRef("scala.scalanative.runtime.RiftAllocator")
   @tu lazy val RuntimeRiftAllocatorModule = RuntimeRiftAllocatorModuleRef.symbol
   @tu lazy val RuntimeRiftAllocator_allocate = optional(RuntimeRiftAllocatorModule.requiredMethod("allocate"))
+  @tu lazy val RuntimeRiftAllocator_allocateOpen = optional(RuntimeRiftAllocatorModule.requiredMethod("allocateOpen"))
 
   // Runtime intriniscs
   @tu lazy val IntrinsicMarker = RuntimePackageClass.requiredMethod("intrinsic")

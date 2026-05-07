@@ -607,7 +607,7 @@ object DataflowRegionMatrixHelpers {
     var epoch = 0
     while (epoch < cfg.epochs) {
       val region =
-        RiftRegion.pageTokenMapFilterRegionFor(
+        RiftRegion.pageTokenMapFilterOpenRegionFor(
           stream,
           window,
           epoch.toLong,
@@ -630,7 +630,7 @@ object DataflowRegionMatrixHelpers {
         val value = mix(seed + 31) & 0xffff
         val docId = epoch * cfg.docsPerEpoch + i
         docs =
-          RiftRegion.alloc(new CheckedDocument(docId, key, author, value, docs))(
+          RiftRegion.allocOpen(new CheckedDocument(docId, key, author, value, docs))(
             using region
           )
         i += 1
@@ -642,7 +642,7 @@ object DataflowRegionMatrixHelpers {
           val score =
             cursor.value.toLong * 31L + cursor.key.toLong + cursor.authorKey
           val selected: CheckedSelectedNode^{stream} =
-            RiftRegion.alloc(
+            RiftRegion.allocOpen(
               new CheckedSelectedNode(cursor.docId, cursor.key, score)
             )(using region)
           RiftRegion.emitPageTokenMapFilter(stream, window, selected)

@@ -98,7 +98,8 @@ trait NirGenExpr(using Context) {
     private def isCheckedRiftRegionType(tpe: Type): Boolean = {
       val checkedRegionNames = Set(
         "scala.scalanative.memory.RiftRegion.ScopedRegion",
-        "scala.scalanative.memory.RiftRegion.StreamingRegion"
+        "scala.scalanative.memory.RiftRegion.StreamingRegion",
+        "scala.scalanative.memory.RiftRegion.OpenStreamingRegion"
       )
       val fullName = tpe.widenDealias.typeSymbol.fullName.toString
       checkedRegionNames.contains(fullName) ||
@@ -390,7 +391,8 @@ trait NirGenExpr(using Context) {
       }
 
     private def isRuntimeRiftAllocate(tree: Tree): Boolean =
-      defnNir.RuntimeRiftAllocator_allocate.exists(_ == calledSymbol(tree))
+      defnNir.RuntimeRiftAllocator_allocate.exists(_ == calledSymbol(tree)) ||
+        defnNir.RuntimeRiftAllocator_allocateOpen.exists(_ == calledSymbol(tree))
 
     private def isRuntimeRiftAllocateInCheckedRegion(tree: Tree): Boolean =
       tree match {
@@ -1564,6 +1566,7 @@ trait NirGenExpr(using Context) {
         case STACKALLOC                   => genStackalloc(app)
         case SAFEZONE_ALLOC               => genSafeZoneAlloc(app)
         case RIFT_ALLOC                   => genRiftAlloc(app)
+        case RIFT_OPEN_ALLOC              => genRiftAlloc(app)
         case CQUOTE                       => genCQuoteOp(app)
         case CLASS_FIELD_RAWPTR           => genClassFieldRawPtr(app)
         case SIZE_OF                      => genSizeOf(app)

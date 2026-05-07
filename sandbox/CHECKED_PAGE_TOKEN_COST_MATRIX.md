@@ -1,7 +1,7 @@
 # Checked Page-Token Cost Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-07 18:14 CEST
+Last updated: 2026-05-07 18:53 CEST
 
 Status: focused cost-decomposition matrix added and validated. This matrix is
 not a replacement for `CHECKED_PAGE_TOKEN_APPEND_MATRIX.md`; it splits the
@@ -345,6 +345,70 @@ Interpretation:
 - It does not change the larger conclusion that application rows still have a
   substantial shared traversal/query floor.
 
+## Open Allocation Lowering Probe
+
+Change:
+
+- Added `RiftRegion.OpenStreamingRegion` as an internal marker for
+  operator-owned checked child buckets that are known open by construction.
+- Added `RiftRegion.allocOpen(...)` and open-region page-token helpers for
+  append, map/filter, and count-by-key operators.
+- The Scala Native lowering now routes `Classalloc(OpenStreamingRegion)` to
+  `RiftRegion.allocUncheckedImpl(...)`, avoiding the generic checked
+  `allocImpl/checkOpen` path. Generic public checked allocation remains
+  defensive.
+- Linker reachability now marks `RiftRegion.allocUncheckedImpl` as reachable
+  for open-region class allocation; without that, the lowered dynamic method
+  pointer was null.
+
+Validation:
+
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"` passed `120/120`.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"` passed `52/52`.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile` passed after routing page-token application paths through open allocation.
+- 20k focused smoke matched checksums.
+
+Focused 1M commands:
+
+```sh
+CHECKED_PAGE_TOKEN_COST_BUILD=0 \
+CHECKED_PAGE_TOKEN_COST_EVENTS=1000000 \
+CHECKED_PAGE_TOKEN_COST_BENCHMARK_RUNS=3 \
+CHECKED_PAGE_TOKEN_COST_WARMUPS=1 \
+CHECKED_PAGE_TOKEN_COST_MODES="heap-same-shape safezone-improved-32k rift-trusted-streaming rift-checked-page-token rift-checked-safezone-page-token" \
+CHECKED_PAGE_TOKEN_COST_OUTPUT_DIR=/Users/siyaoliu/rift/cache/checked-page-token-openalloc-1m-default-2026-05-07 \
+zsh sandbox/run_checked_page_token_cost_matrix.sh
+
+CHECKED_PAGE_TOKEN_COST_BUILD=0 \
+CHECKED_PAGE_TOKEN_COST_EVENTS=1000000 \
+CHECKED_PAGE_TOKEN_COST_BENCHMARK_RUNS=3 \
+CHECKED_PAGE_TOKEN_COST_WARMUPS=1 \
+CHECKED_PAGE_TOKEN_COST_WORKLOADS="append-count-by-key" \
+CHECKED_PAGE_TOKEN_COST_MODES="heap-same-shape safezone-improved-32k rift-trusted-streaming rift-checked-page-token rift-checked-safezone-page-token rift-checked-count-by-key rift-checked-safezone-count-by-key" \
+CHECKED_PAGE_TOKEN_COST_OUTPUT_DIR=/Users/siyaoliu/rift/cache/checked-page-token-openalloc-1m-countbykey-2026-05-07 \
+zsh sandbox/run_checked_page_token_cost_matrix.sh
+```
+
+| Workload | Heap same-shape | Trusted Streaming | Checked page-token | Checked scoped page-token |
+|---|---:|---:|---:|---:|
+| `append-only` | `76.295` ms, GC `10.917`, RSS `122765312` | `89.424` ms | `76.032` ms, GC `0.000`, RSS `83329024` | `73.632` ms, GC `0.000`, RSS `83230720` |
+| `append-drain` | `85.873` ms, GC `11.282`, RSS `75087872` | `98.753` ms | `86.797` ms, GC `0.000`, RSS `83345408` | `83.177` ms, GC `0.000`, RSS `83230720` |
+| `append-aggregate` | `84.354` ms, GC `11.789`, RSS `75087872` | `96.409` ms | `84.184` ms, GC `0.000`, RSS `83345408` | `82.198` ms, GC `0.000`, RSS `83247104` |
+| `append-count-by-key` | `103.946` ms, GC `14.011`, RSS `146587648` | `109.371` ms | `99.678` ms, GC `1.745`, RSS `83394560` | `100.155` ms, GC `3.604`, RSS `83296256` |
+| `append-count-by-key`, count-by-key operator | n/a | n/a | `100.423` ms, GC `0.000`, RSS `83394560` | `95.946` ms, GC `0.000`, RSS `83296256` |
+
+Interpretation:
+
+- Open allocation is correct and removes a real redundant runtime check, but
+  it is a modest focused performance change rather than a broad breakthrough.
+- The clearest focused improvement is checked scoped count-by-key:
+  `95.946 ms` versus the previous `97.860 ms`, and about `7.7%` faster than
+  heap while cutting RSS by about `64 MB`.
+- Append-only/drain remain modest checked scoped wins over heap; aggregate is
+  still within noise of the prior owned-cursor row. This means page-token
+  overhead is now dominated more by object construction, append/linking,
+  traversal, and query CPU than by `checkOpen` alone.
+
 ## Files
 
 - Child matrix: `/Users/siyaoliu/rift/scala-native-rift/sandbox/src/main/scala-next/CheckedPageTokenCostMatrix.scala`
@@ -356,3 +420,5 @@ Interpretation:
   - `/Users/siyaoliu/rift/cache/checked-page-token-count-by-key-100k-2026-05-07/summary.tsv`
   - `/Users/siyaoliu/rift/cache/checked-page-token-count-by-key-1m-2026-05-07/summary.tsv`
   - `/Users/siyaoliu/rift/cache/checked-page-token-cost-nextowned-1m-2026-05-07/summary.tsv`
+  - `/Users/siyaoliu/rift/cache/checked-page-token-openalloc-1m-default-2026-05-07/summary.tsv`
+  - `/Users/siyaoliu/rift/cache/checked-page-token-openalloc-1m-countbykey-2026-05-07/summary.tsv`

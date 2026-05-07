@@ -804,7 +804,11 @@ private[linker] class Reach(
 
     case nir.Op.Classalloc(n, zoneHandle) =>
       classInfo(n).foreach(reachAllocation)
-      zoneHandle.foreach(reachVal)
+      zoneHandle.foreach { zone =>
+        reachVal(zone)
+        if (isRiftOpenStreamingRegion(zone.ty))
+          reachMethodTargets(RiftRegionType, riftRegionAllocUncheckedImplSig)
+      }
     case nir.Op.Fieldload(ty, v, n) =>
       reachType(ty)
       reachVal(v)
@@ -1154,6 +1158,23 @@ private[linker] class Reach(
       case _ => None
     }
   }
+
+  private val RiftRegionType =
+    nir.Type.Ref(nir.Global.Top("scala.scalanative.memory.RiftRegion"))
+  private val riftRegionAllocUncheckedImplSig =
+    nir.Sig.Method(
+      "allocUncheckedImpl",
+      Seq(nir.Type.Ptr, nir.Type.Size, nir.Type.Ptr)
+    )
+
+  private def isRiftOpenStreamingRegion(ty: nir.Type): Boolean =
+    ty match {
+      case nir.Type.Ref(name, _, _) =>
+        val id = name.id.toString
+        id == "scala.scalanative.memory.RiftRegion.OpenStreamingRegion" ||
+        id == "scala.scalanative.memory.RiftRegion$OpenStreamingRegion"
+      case _ => false
+    }
 
   private def fail(msg: => String): Nothing = {
     throw new LinkingException(msg)

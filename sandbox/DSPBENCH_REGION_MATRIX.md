@@ -1,7 +1,7 @@
 # DSPBench Region Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-07 18:14 CEST
+Last updated: 2026-05-07 18:53 CEST
 
 Status: implemented first two local DSPBench-family real-input candidates:
 Spike Detection and Fraud Detection. This is not an exact DSPBench artifact
@@ -618,3 +618,37 @@ real-input row while cutting RSS by about `80 MB` and median timed GC by about
 `56 ms`. Trusted Streaming remains the lower-bound winner, so this still argues
 for reducing checked operator/common traversal CPU rather than claiming the
 checked path has reached the runtime limit.
+
+### Fraud q2 open-allocation rerun
+
+After adding `RiftRegion.OpenStreamingRegion` plus `allocOpen(...)`, page-token
+application paths were routed through the operator-owned open-allocation helper.
+Generic public checked allocation remains defensive; this row tests only the
+statically owned page-token path.
+
+```bash
+DSPBENCH_EVENTS=1000000 \
+DSPBENCH_BENCHMARK_RUNS=3 \
+DSPBENCH_WARMUPS=1 \
+DSPBENCH_QUERIES="fraud-q2-alert-window" \
+DSPBENCH_MODES="heap-immix safezone-improved-32k rift-trusted-streaming rift-checked-page-token rift-checked-safezone-page-token" \
+DSPBENCH_OUTPUT_DIR=/Users/siyaoliu/rift/cache/dspbench-fraud-q2-openalloc-1m-2026-05-07 \
+zsh sandbox/run_dspbench_region_matrix.sh
+```
+
+All rows matched checksum `2645894572926148009` and output count `594182`.
+
+| Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes |
+|---|---:|---:|---:|---:|---:|
+| `heap-immix` | `806.697` | `69.624` | `76.965` | `3/3` | `358252544` |
+| `safezone-improved-32k` | `804.667` | `15.859` | `16.579` | `2/3` | `282427392` |
+| `rift-trusted-streaming` | `778.975` | `10.839` | `11.084` | `2/3` | `282443776` |
+| `rift-checked-page-token` | `803.278` | `11.443` | `13.246` | `2/3` | `278413312` |
+| `rift-checked-safezone-page-token` | `797.782` | `15.339` | `15.918` | `2/3` | `278511616` |
+
+Interpretation: open allocation is a small application-level improvement over
+the owned-cursor checkpoint (`800.369 ms` to `797.782 ms` for checked scoped).
+It keeps the real-input q2 row as a modest checked throughput/RSS win over heap,
+but trusted Streaming is still the fastest lower-bound row. Remaining overhead
+is not just reclaim or bucket opening; query replay, append/linking, cursor
+traversal, and object construction still dominate.

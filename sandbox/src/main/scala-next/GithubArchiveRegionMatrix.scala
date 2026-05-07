@@ -1490,7 +1490,7 @@ object GithubArchiveRegionMatrixHelpers {
       }
 
     var currentStartEvent = Long.MinValue
-    var currentRegion: RiftRegion.StreamingRegion^{stream} = null
+    var currentRegion: RiftRegion.OpenStreamingRegion^{stream} = null
 
     def processEvent(
         i: Int,
@@ -1503,7 +1503,7 @@ object GithubArchiveRegionMatrixHelpers {
       if (start != currentStartEvent) {
         currentStartEvent = start
         currentRegion =
-          RiftRegion.pageTokenAppendRegionFor(
+          RiftRegion.pageTokenAppendOpenRegionFor(
             stream,
             window,
             start,
@@ -1511,7 +1511,7 @@ object GithubArchiveRegionMatrixHelpers {
           )(closeRecords)
       }
       val eventRecord: CheckedRecord^{stream} =
-        RiftRegion.alloc(
+        RiftRegion.allocOpen(
           new CheckedRecord(10, i, repo, eventType, fields, hash)
         )(using currentRegion)
       RiftRegion.appendPageToken(stream, window, eventRecord)
@@ -1519,7 +1519,7 @@ object GithubArchiveRegionMatrixHelpers {
         var field = 0
         while (field < fields) {
           val fieldRecord: CheckedRecord^{stream} =
-            RiftRegion.alloc(
+            RiftRegion.allocOpen(
               new CheckedRecord(
                 20 + (field & 3),
                 i,

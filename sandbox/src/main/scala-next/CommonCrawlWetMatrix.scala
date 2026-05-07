@@ -1420,7 +1420,7 @@ object CommonCrawlWetMatrixHelpers {
       }
 
       var currentStartPage = Long.MinValue
-      var currentRegion: RiftRegion.StreamingRegion^{stream} = null
+      var currentRegion: RiftRegion.OpenStreamingRegion^{stream} = null
       var page = 0
       while (page < input.pages) {
         val domain = input.domainAt(page)
@@ -1429,7 +1429,7 @@ object CommonCrawlWetMatrixHelpers {
           val bucketStarted = if (diagnostics) System.nanoTime() else 0L
           currentStartPage = startPage
           currentRegion =
-            RiftRegion.pageTokenAppendRegionFor(
+            RiftRegion.pageTokenAppendOpenRegionFor(
               stream,
               window,
               startPage,
@@ -1443,7 +1443,7 @@ object CommonCrawlWetMatrixHelpers {
 
         val appendStarted = if (diagnostics) System.nanoTime() else 0L
         val pageRecord: CheckedRecord^{stream} =
-          RiftRegion.alloc(
+          RiftRegion.allocOpen(
             new CheckedRecord(1, page, domain, 0, input.lineHashAt(page, 0))
           )(using currentRegion)
         RiftRegion.appendPageToken(stream, window, pageRecord)
@@ -1454,7 +1454,7 @@ object CommonCrawlWetMatrixHelpers {
           val links = input.linkCountAt(page)
           while (observed < links) {
             val linkRecord: CheckedRecord^{stream} =
-              RiftRegion.alloc(
+              RiftRegion.allocOpen(
                 new CheckedRecord(
                   5,
                   page,
@@ -1472,7 +1472,7 @@ object CommonCrawlWetMatrixHelpers {
           while (observed < lines) {
             val lh = input.lineHashAt(page, observed)
             val lineRecord: CheckedRecord^{stream} =
-              RiftRegion.alloc(new CheckedRecord(2, page, domain, observed, lh))(
+              RiftRegion.allocOpen(new CheckedRecord(2, page, domain, observed, lh))(
                 using currentRegion
               )
             RiftRegion.appendPageToken(stream, window, lineRecord)
@@ -1482,7 +1482,7 @@ object CommonCrawlWetMatrixHelpers {
               val tokens = input.tokenCountAt(page, observed)
               while (token < tokens) {
                 val tokenRecord: CheckedRecord^{stream} =
-                  RiftRegion.alloc(
+                  RiftRegion.allocOpen(
                     new CheckedRecord(
                       3,
                       page,
@@ -1609,7 +1609,7 @@ object CommonCrawlWetMatrixHelpers {
     }
 
     var currentStartPage = Long.MinValue
-    var currentRegion: RiftRegion.StreamingRegion^{stream} = null
+    var currentRegion: RiftRegion.OpenStreamingRegion^{stream} = null
     var page = 0
     while (page < input.pages) {
       val domain = input.domainAt(page)
@@ -1617,7 +1617,7 @@ object CommonCrawlWetMatrixHelpers {
       if (startPage != currentStartPage) {
         currentStartPage = startPage
         currentRegion =
-          RiftRegion.pageTokenCountByKeyRegionFor(
+          RiftRegion.pageTokenCountByKeyOpenRegionFor(
             stream,
             operator,
             startPage,
@@ -1626,7 +1626,7 @@ object CommonCrawlWetMatrixHelpers {
       }
 
       val pageRecord: CheckedRecord^{stream} =
-        RiftRegion.alloc(
+        RiftRegion.allocOpen(
           new CheckedRecord(1, page, domain, 0, input.lineHashAt(page, 0))
         )(using currentRegion)
       RiftRegion.appendPageTokenCountByKey(
@@ -1643,7 +1643,7 @@ object CommonCrawlWetMatrixHelpers {
         while (observed < links) {
           val linkDomain = input.linkDomainAt(page, observed)
           val linkRecord: CheckedRecord^{stream} =
-            RiftRegion.alloc(
+            RiftRegion.allocOpen(
               new CheckedRecord(
                 5,
                 page,
@@ -1666,7 +1666,7 @@ object CommonCrawlWetMatrixHelpers {
         while (observed < lines) {
           val lh = input.lineHashAt(page, observed)
           val lineRecord: CheckedRecord^{stream} =
-            RiftRegion.alloc(new CheckedRecord(2, page, domain, observed, lh))(
+            RiftRegion.allocOpen(new CheckedRecord(2, page, domain, observed, lh))(
               using currentRegion
             )
           RiftRegion.appendPageTokenCountByKey(
@@ -1681,7 +1681,7 @@ object CommonCrawlWetMatrixHelpers {
             val tokens = input.tokenCountAt(page, observed)
             while (token < tokens) {
               val tokenRecord: CheckedRecord^{stream} =
-                RiftRegion.alloc(
+                RiftRegion.allocOpen(
                   new CheckedRecord(
                     3,
                     page,

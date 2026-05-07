@@ -1391,22 +1391,39 @@ private[scalanative] object Lower {
         op: nir.Op.Classalloc
     )(implicit srcPosition: nir.SourcePosition, scopeId: nir.ScopeId): Unit = {
       val nir.Op.Classalloc(ClassRef(cls), v) = op: @unchecked
-      val zone = v.map { rawZone =>
-        val safeZoneLocal = fresh()
-        // Zoned allocation is implemented by SafeZone.allocImpl. A checked
-        // region may have a narrower static type such as Rift StreamingRegion,
-        // whose trait method table does not carry inherited SafeZone methods.
-        // Retag the same object as SafeZone so method lookup uses the owner
-        // trait that defines allocImpl.
-        buf += nir.Inst.Let(safeZoneLocal, nir.Op.Copy(rawZone), unwind)
-        genVal(buf, nir.Val.Local(safeZoneLocal, SafeZone))
-      }
 
       val size = meta.layout(cls).size
       assert(size == size.toInt)
 
-      zone match {
-        case Some(zone) =>
+      v match {
+        case Some(rawZone) if isRiftOpenStreamingRegion(rawZone.ty) =>
+          val riftRegionLocal = fresh()
+          buf += nir.Inst.Let(riftRegionLocal, nir.Op.Copy(rawZone), unwind)
+          val zone = genVal(buf, nir.Val.Local(riftRegionLocal, RiftRegionType))
+          val allocUncheckedImplMethod = nir.Val.Local(fresh(), nir.Type.Ptr)
+          genMethodOp(
+            buf,
+            allocUncheckedImplMethod.id,
+            nir.Op.Method(zone, riftRegionAllocUncheckedImpl.sig)
+          )
+          buf.let(
+            n,
+            nir.Op.Call(
+              riftRegionAllocUncheckedImplSig,
+              allocUncheckedImplMethod,
+              Seq(zone, rtti(cls).const, nir.Val.Size(size.toInt))
+            ),
+            unwind
+          )
+        case Some(rawZone) =>
+          val safeZoneLocal = fresh()
+          // Zoned allocation is implemented by SafeZone.allocImpl. A checked
+          // region may have a narrower static type such as Rift StreamingRegion,
+          // whose trait method table does not carry inherited SafeZone methods.
+          // Retag the same object as SafeZone so method lookup uses the owner
+          // trait that defines allocImpl.
+          buf += nir.Inst.Let(safeZoneLocal, nir.Op.Copy(rawZone), unwind)
+          val zone = genVal(buf, nir.Val.Local(safeZoneLocal, SafeZone))
           val safeZoneAllocImplMethod = nir.Val.Local(fresh(), nir.Type.Ptr)
           genMethodOp(
             buf,
@@ -2097,11 +2114,33 @@ private[scalanative] object Lower {
 
   val SafeZone =
     nir.Type.Ref(nir.Global.Top("scala.scalanative.memory.SafeZone"))
+  val RiftRegionType =
+    nir.Type.Ref(nir.Global.Top("scala.scalanative.memory.RiftRegion"))
   val safeZoneAllocImplSig =
     nir.Type.Function(Seq(SafeZone, nir.Type.Ptr, nir.Type.Size), nir.Type.Ptr)
   val safeZoneAllocImpl = SafeZone.name.member(
     nir.Sig.Method("allocImpl", Seq(nir.Type.Ptr, nir.Type.Size, nir.Type.Ptr))
   )
+  val riftRegionAllocUncheckedImplSig =
+    nir.Type.Function(
+      Seq(RiftRegionType, nir.Type.Ptr, nir.Type.Size),
+      nir.Type.Ptr
+    )
+  val riftRegionAllocUncheckedImpl = RiftRegionType.name.member(
+    nir.Sig.Method(
+      "allocUncheckedImpl",
+      Seq(nir.Type.Ptr, nir.Type.Size, nir.Type.Ptr)
+    )
+  )
+
+  private def isRiftOpenStreamingRegion(ty: nir.Type): Boolean =
+    ty match {
+      case nir.Type.Ref(name, _, _) =>
+        val id = name.id.toString
+        id == "scala.scalanative.memory.RiftRegion.OpenStreamingRegion" ||
+        id == "scala.scalanative.memory.RiftRegion$OpenStreamingRegion"
+      case _ => false
+    }
 
   val dyndispatchName = extern("scalanative_dyndispatch")
   val dyndispatchSig =

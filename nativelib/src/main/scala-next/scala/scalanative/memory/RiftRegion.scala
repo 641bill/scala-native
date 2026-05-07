@@ -45,6 +45,11 @@ trait RiftRegion extends SafeZone {
       size: RawSize
   ): RawPtr
 
+  private[scalanative] def allocUncheckedImpl(
+      cls: RawPtr,
+      size: RawSize
+  ): RawPtr
+
   /** Low-level reset used by trusted HPZone/benchmark code.
    *
    *  Checked streaming code should prefer `RiftRegion.reset { ... }`, which
@@ -83,6 +88,15 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
         size: RawSize
     ): RawPtr
   }
+
+  /** Operator-owned open streaming allocation token.
+   *
+   *  This marker is only returned by APIs that control the bucket open/close
+   *  order themselves. Allocations through it use an unchecked allocation
+   *  lowering that skips the per-object open check; generic region allocation
+   *  remains defensive.
+   */
+  sealed trait OpenStreamingRegion extends StreamingRegion
 
   /** Heap control metadata for a child streaming lifetime.
    *
@@ -2984,6 +2998,19 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
         .asInstanceOf[StreamAppendWindow[T]]
     ).asInstanceOf[StreamPageTokenAppendWindow[T]^{parent}]
 
+  /** Allocates in an operator-owned open stream region.
+   *
+   *  This is intentionally narrower than `RiftRegion.alloc`: callers only get
+   *  an `OpenStreamingRegion` from operator-owned helpers such as
+   *  `pageTokenAppendOpenRegionFor`, and the low-level allocation path skips
+   *  the hot `checkOpen` call. Use ordinary `alloc` for generic or user-held
+   *  region handles.
+   */
+  inline def allocOpen[T <: AnyRef](inline obj: T)(using
+      region: OpenStreamingRegion^
+  ): T^{region} =
+    RiftAllocator.allocateOpen(region, obj)
+
   /** Opens a checked page-token map/filter operator.
    *
    *  This is the reusable operator-owned API for SELECT/filter/project-style
@@ -3722,6 +3749,29 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
   }
 
+  /** Returns an open child region for operator-owned page/token allocation.
+   *
+   *  This has the same bucket-selection semantics as `pageTokenAppendRegionFor`
+   *  but returns the narrower marker required by `allocOpen`. It should only be
+   *  used in the page-token append loop that immediately appends records to the
+   *  selected bucket.
+   */
+  def pageTokenAppendOpenRegionFor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamPageTokenAppendWindow[T]^{parent},
+      timestampSeconds: Long,
+      cutoffSeconds: Long
+  )(onBucket: (
+      StreamBucket^{parent},
+      StreamAppendCursor[T]^{parent}
+  ) => Unit): OpenStreamingRegion^{parent} =
+    pageTokenAppendRegionFor(
+      parent,
+      window,
+      timestampSeconds,
+      cutoffSeconds
+    )(onBucket).asInstanceOf[OpenStreamingRegion^{parent}]
+
   /** Returns the child region for the current map/filter page bucket. */
   def pageTokenMapFilterRegionFor[T <: StreamAppendNode](
       parent: StreamingRegion^,
@@ -3733,6 +3783,23 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       StreamAppendCursor[T]^{parent}
   ) => Unit): StreamingRegion^{parent} =
     pageTokenAppendRegionFor(
+      parent,
+      operator.pageToken.asInstanceOf[StreamPageTokenAppendWindow[T]^{parent}],
+      timestampSeconds,
+      cutoffSeconds
+    )(onBucket)
+
+  /** Returns an open child region for the current map/filter page bucket. */
+  def pageTokenMapFilterOpenRegionFor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      operator: PageTokenMapFilter[T]^{parent},
+      timestampSeconds: Long,
+      cutoffSeconds: Long
+  )(onBucket: (
+      StreamBucket^{parent},
+      StreamAppendCursor[T]^{parent}
+  ) => Unit): OpenStreamingRegion^{parent} =
+    pageTokenAppendOpenRegionFor(
       parent,
       operator.pageToken.asInstanceOf[StreamPageTokenAppendWindow[T]^{parent}],
       timestampSeconds,
@@ -3840,6 +3907,21 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       Long.MinValue
     ) { (_, _) => () }
   }
+
+  /** Returns an open child region for a page-token count/sum bucket. */
+  def pageTokenCountByKeyOpenRegionFor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      operator: PageTokenCountByKey[T]^{parent},
+      timestampSeconds: Long,
+      cutoffSeconds: Long
+  )(onSummary: (StreamBucket^{parent}, Int, Int, Long) => Unit)
+      : OpenStreamingRegion^{parent} =
+    pageTokenCountByKeyRegionFor(
+      parent,
+      operator,
+      timestampSeconds,
+      cutoffSeconds
+    )(onSummary).asInstanceOf[OpenStreamingRegion^{parent}]
 
   /** Returns the child region for the active epoch buffer.
    *
@@ -7093,6 +7175,12 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       RiftAllocator.Impl.alloc(handle, cls, size)
     }
 
+    private[scalanative] override def allocUncheckedImpl(
+        cls: RawPtr,
+        size: RawSize
+    ): RawPtr =
+      RiftAllocator.Impl.alloc(handle, cls, size)
+
     private[memory] override def retainHeapRoot[T <: AnyRef](
         value: T
     ): RiftRegion.HeapRoot[T] = {
@@ -7128,6 +7216,13 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   private final class MemoryStreamingRiftRegion(handle: RawPtr)
       extends MemoryRiftRegion(handle)
       with StreamingRegion
+      with OpenStreamingRegion {
+    private[scalanative] override def allocUncheckedImpl(
+        cls: RawPtr,
+        size: RawSize
+    ): RawPtr =
+      super.allocUncheckedImpl(cls, size)
+  }
 
   private class MemorySafeZoneBackedRiftRegion(
       private[scalanative] override val handle: RawPtr)
@@ -7159,6 +7254,12 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       SafeZoneAllocator.Impl.alloc(handle, cls, size)
     }
 
+    private[scalanative] override def allocUncheckedImpl(
+        cls: RawPtr,
+        size: RawSize
+    ): RawPtr =
+      SafeZoneAllocator.Impl.alloc(handle, cls, size)
+
     private[memory] override def retainHeapRoot[T <: AnyRef](
         value: T
     ): RiftRegion.HeapRoot[T] = {
@@ -7189,6 +7290,13 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   private final class MemorySafeZoneBackedStreamingRiftRegion(handle: RawPtr)
       extends MemorySafeZoneBackedRiftRegion(handle)
       with StreamingRegion
+      with OpenStreamingRegion {
+    private[scalanative] override def allocUncheckedImpl(
+        cls: RawPtr,
+        size: RawSize
+    ): RawPtr =
+      super.allocUncheckedImpl(cls, size)
+  }
 
   private sealed trait SafeZoneBackedRiftRegion extends RiftRegion
 }

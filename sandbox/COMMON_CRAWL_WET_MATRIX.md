@@ -1,6 +1,7 @@
 # Common Crawl WET Matrix
 
 Date: 2026-05-01
+Last updated: 2026-05-07 18:53 CEST
 
 Status: generated WET-shaped detector plus first real Common Crawl WET input
 wiring. Real WET input is currently preloaded before timing so parser and
@@ -284,6 +285,51 @@ Interpretation:
 - This is an important guardrail: Common Crawl tokenization should not become a
   benchmark-specific story where Rift wins only because heap is forced to hold
   data for too long.
+
+## Generated 1M Open-Allocation Rerun
+
+After `RiftRegion.OpenStreamingRegion` and `allocOpen(...)` were added, the
+generated WET-shaped page-token q1/q2 rows were rerun. These are generated
+memory-pressure rows, not real Common Crawl input proof.
+
+```bash
+COMMON_CRAWL_WET_PAGES=1000000 \
+COMMON_CRAWL_WET_BENCHMARK_RUNS=3 \
+COMMON_CRAWL_WET_WARMUPS=1 \
+COMMON_CRAWL_WET_QUERIES="q1-tokenize q2-domain-window" \
+COMMON_CRAWL_WET_MODES="heap-immix safezone-improved-32k rift-trusted-streaming rift-checked-page-token rift-checked-safezone-page-token" \
+COMMON_CRAWL_WET_OUTPUT_DIR=/Users/siyaoliu/rift/cache/common-crawl-shaped-openalloc-q1q2-1m-2026-05-07 \
+zsh sandbox/run_common_crawl_wet_matrix.sh
+```
+
+All rows matched checksums and output counts.
+
+| Query | Mode | Median ms | Median GC ms | Max GC ms | Region objects | Opens/closes | RSS bytes | Outputs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| q1-tokenize | `heap-immix` | `5577.965` | `1741.640` | `1762.099` | 0 | 0 / 0 | `408600576` | `137000000` |
+| q1-tokenize | `safezone-improved-32k` | `4595.446` | `30.964` | `32.672` | 0 | 0 / 0 | `474710016` | `137000000` |
+| q1-tokenize | `rift-trusted-streaming` | `4388.579` | `20.083` | `40.589` | `137000000` | 400 / 400 | `474529792` | `137000000` |
+| q1-tokenize | `rift-checked-page-token` | `3933.900` | `30.493` | `31.517` | `137000000` | 401 / 401 | `463667200` | `137000000` |
+| q1-tokenize | `rift-checked-safezone-page-token` | `3707.214` | `30.693` | `30.999` | 0 | 0 / 0 | `463732736` | `137000000` |
+| q2-domain-window | `heap-immix` | `5183.074` | `1565.074` | `1580.489` | 0 | 0 / 0 | `408600576` | `929230` |
+| q2-domain-window | `safezone-improved-32k` | `4410.391` | `30.747` | `31.227` | 0 | 0 / 0 | `474726400` | `929230` |
+| q2-domain-window | `rift-trusted-streaming` | `4244.603` | `19.966` | `20.498` | `137000000` | 400 / 400 | `474529792` | `929230` |
+| q2-domain-window | `rift-checked-page-token` | `4040.310` | `17.871` | `21.836` | `137000000` | 401 / 401 | `463667200` | `929230` |
+| q2-domain-window | `rift-checked-safezone-page-token` | `3902.795` | `27.027` | `31.039` | 0 | 0 / 0 | `463732736` | `929230` |
+
+Interpretation:
+
+- This remains the strongest generated object-pressure row: heap spends
+  `1.5-1.7 s` in timed GC, while checked page-token rows cut timed GC to about
+  `18-31 ms`.
+- Checked scoped page-token is fastest in both q1 and q2, beating heap by about
+  `29-34%` and improved SafeZone by about `11-19%` in this same-run matrix.
+- Open allocation did not dramatically change the row versus the previous
+  owned-cursor checkpoint; it is a correctness-preserving overhead removal
+  with modest focused benefit. The bigger win still comes from the
+  operator-owned page-token shape plus scoped backend.
+- RSS is higher than heap in this generated row, so report it as an uncapped
+  throughput/GC win, not an RSS win.
 
 ## Current Conclusion
 

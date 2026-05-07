@@ -1003,7 +1003,7 @@ object CheckedAppendWindowMatrixHelpers {
     }
 
     var currentStartSeconds = Long.MinValue
-    var currentRegion: RiftRegion.StreamingRegion^{stream} = null
+    var currentRegion: RiftRegion.OpenStreamingRegion^{stream} = null
     var i = 0
     while (i < cfg.events) {
       val seed = mix(i * 1103515245 + 12345)
@@ -1013,7 +1013,7 @@ object CheckedAppendWindowMatrixHelpers {
       if (startSeconds != currentStartSeconds) {
         currentStartSeconds = startSeconds
         currentRegion =
-          RiftRegion.pageTokenAppendRegionFor(
+          RiftRegion.pageTokenAppendOpenRegionFor(
             stream,
             window,
             startSeconds,
@@ -1021,7 +1021,7 @@ object CheckedAppendWindowMatrixHelpers {
           )(consume)
       }
       val record: Record^{stream} =
-        RiftRegion.alloc(new Record(key, value, value.toLong))(
+        RiftRegion.allocOpen(new Record(key, value, value.toLong))(
           using currentRegion
         )
       record.value += seed & 3

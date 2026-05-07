@@ -1850,9 +1850,9 @@ class RiftRegionCheckedCompilerTest {
       |        total += event.value + bucket.startSeconds.toInt
       |        current = cursor.nextOwnedOrNull()
       |    val region =
-      |      RiftRegion.pageTokenAppendRegionFor(stream, window, 7L, 0L)(consume)
+      |      RiftRegion.pageTokenAppendOpenRegionFor(stream, window, 7L, 0L)(consume)
       |    val event: Event^{stream} =
-      |      RiftRegion.alloc(new Event(41))(using region)
+      |      RiftRegion.allocOpen(new Event(41))(using region)
       |    RiftRegion.appendPageToken(stream, window, event)
       |    RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
       |      consume
