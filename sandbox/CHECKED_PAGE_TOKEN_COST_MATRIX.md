@@ -1,7 +1,7 @@
 # Checked Page-Token Cost Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-07 17:51 CEST
+Last updated: 2026-05-07 18:14 CEST
 
 Status: focused cost-decomposition matrix added and validated. This matrix is
 not a replacement for `CHECKED_PAGE_TOKEN_APPEND_MATRIX.md`; it splits the
@@ -296,6 +296,55 @@ Interpretation:
   `allocImpl`/`checkOpen` path from statically proven operator-owned checked
   allocation, or profile a real row that shows a different dominant cost.
 
+## Owned Cursor Link-Clearing Removal
+
+Change:
+
+- Added `StreamAppendCursor.nextOwnedOrNull()`.
+- Page-token-owned close callbacks in focused and application page-token rows
+  now use `nextOwnedOrNull()` instead of `nextOrNull()`.
+- `nextOwnedOrNull()` advances the cursor without clearing each consumed
+  record's `appendNext` link. This is only for operator-owned page-token close:
+  parent bucket refs are cleared before the callback, callback captures are
+  checked, and the child region closes immediately after cleanup.
+- Generic `next()` and `nextOrNull()` remain defensive and still clear links.
+
+Validation:
+
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile` passed.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"` passed `120/120`.
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"` passed `52/52`.
+- 20k smoke matched checksums across focused page-token workloads and modes.
+
+1M command:
+
+```sh
+CHECKED_PAGE_TOKEN_COST_BUILD=0 \
+CHECKED_PAGE_TOKEN_COST_EVENTS=1000000 \
+CHECKED_PAGE_TOKEN_COST_BENCHMARK_RUNS=3 \
+CHECKED_PAGE_TOKEN_COST_WARMUPS=1 \
+CHECKED_PAGE_TOKEN_COST_MODES="heap-same-shape rift-trusted-streaming rift-checked-page-token rift-checked-safezone-page-token" \
+CHECKED_PAGE_TOKEN_COST_OUTPUT_DIR=/Users/siyaoliu/rift/cache/checked-page-token-cost-nextowned-1m-2026-05-07 \
+zsh sandbox/run_checked_page_token_cost_matrix.sh
+```
+
+| Workload | Heap same-shape | Trusted Streaming | Checked page-token | Checked scoped page-token |
+|---|---:|---:|---:|---:|
+| `append-only` | `79.786` ms, GC `11.512`, RSS `122699776` | `90.743` ms | `76.808` ms, GC `0.000`, RSS `83361792` | `73.590` ms, GC `0.000`, RSS `83230720` |
+| `append-drain` | `87.198` ms, GC `11.807`, RSS `75104256` | `101.074` ms | `86.344` ms, GC `0.000`, RSS `83345408` | `83.997` ms, GC `0.000`, RSS `83247104` |
+| `append-aggregate` | `84.703` ms, GC `11.332`, RSS `122699776` | `99.366` ms | `84.421` ms, GC `0.000`, RSS `83345408` | `81.296` ms, GC `0.000`, RSS `83230720` |
+
+Interpretation:
+
+- Avoiding per-record link clearing in the operator-owned cursor is a real but
+  modest cleanup. Versus the previous no-length checkpoint, checked scoped
+  page-token improved by about `3.5-4.8 ms` across the three focused 1M rows.
+- This is the kind of runtime work static epochal safety should remove:
+  defensive link cleanup is unnecessary when the parent list is unlinked and
+  the whole child region is about to die.
+- It does not change the larger conclusion that application rows still have a
+  substantial shared traversal/query floor.
+
 ## Files
 
 - Child matrix: `/Users/siyaoliu/rift/scala-native-rift/sandbox/src/main/scala-next/CheckedPageTokenCostMatrix.scala`
@@ -306,3 +355,4 @@ Interpretation:
   - `/Users/siyaoliu/rift/cache/perf-eval/2026-05-07-page-token-cost-1m-diag/summary.tsv`
   - `/Users/siyaoliu/rift/cache/checked-page-token-count-by-key-100k-2026-05-07/summary.tsv`
   - `/Users/siyaoliu/rift/cache/checked-page-token-count-by-key-1m-2026-05-07/summary.tsv`
+  - `/Users/siyaoliu/rift/cache/checked-page-token-cost-nextowned-1m-2026-05-07/summary.tsv`

@@ -1548,7 +1548,7 @@ object DSPBenchRegionMatrixHelpers {
         val counts = new Array[Int](keyBucketCount(query))
         val spikes = new Array[Int](keyBucketCount(query))
         val targetKind = windowRecordKind(query)
-        var current = cursor.nextOrNull()
+        var current = cursor.nextOwnedOrNull()
         while (current != null) {
           val record: CheckedRecord^{stream} =
             current.asInstanceOf[CheckedRecord^{stream}]
@@ -1557,7 +1557,7 @@ object DSPBenchRegionMatrixHelpers {
             counts(record.device) += 1
             if (record.spike) spikes(record.device) += 1
           }
-          current = cursor.nextOrNull()
+          current = cursor.nextOwnedOrNull()
         }
         var device = 0
         while (device < counts.length) {
@@ -1579,7 +1579,7 @@ object DSPBenchRegionMatrixHelpers {
           device += 1
         }
       } else {
-        var current = cursor.nextOrNull()
+        var current = cursor.nextOwnedOrNull()
         while (current != null) {
           val record: CheckedRecord^{stream} =
             current.asInstanceOf[CheckedRecord^{stream}]
@@ -1596,7 +1596,7 @@ object DSPBenchRegionMatrixHelpers {
             bucket.startSeconds
           )
           outputCount += 1L
-          current = cursor.nextOrNull()
+          current = cursor.nextOwnedOrNull()
         }
       }
       if (diagnostics) {

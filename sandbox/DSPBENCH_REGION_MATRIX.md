@@ -1,7 +1,7 @@
 # DSPBench Region Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-07 17:51 CEST
+Last updated: 2026-05-07 18:14 CEST
 
 Status: implemented first two local DSPBench-family real-input candidates:
 Spike Detection and Fraud Detection. This is not an exact DSPBench artifact
@@ -586,3 +586,35 @@ negative/no-large-speedup data point for page-token bookkeeping. The next
 checked optimization target should be generated allocation lowering
 (`allocImpl`/`checkOpen` under statically proven operator ownership), not more
 bucket-open/close bookkeeping.
+
+### Fraud q2 owned cursor rerun
+
+After adding `StreamAppendCursor.nextOwnedOrNull()` and routing page-token
+close callbacks through it, q2 was rerun as another focused application
+control:
+
+```bash
+DSPBENCH_EVENTS=1000000 \
+DSPBENCH_BENCHMARK_RUNS=3 \
+DSPBENCH_WARMUPS=1 \
+DSPBENCH_QUERIES="fraud-q2-alert-window" \
+DSPBENCH_MODES="heap-immix rift-trusted-streaming rift-checked-page-token rift-checked-safezone-page-token" \
+DSPBENCH_OUTPUT_DIR=/Users/siyaoliu/rift/cache/dspbench-fraud-q2-nextowned-1m-2026-05-07 \
+zsh sandbox/run_dspbench_region_matrix.sh
+```
+
+All rows matched checksum `2645894572926148009` and output count `594182`.
+
+| Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes |
+|---|---:|---:|---:|---:|---:|
+| `heap-immix` | `807.974` | `71.317` | `75.874` | `3/3` | `358301696` |
+| `rift-trusted-streaming` | `785.682` | `12.139` | `12.305` | `2/3` | `282443776` |
+| `rift-checked-page-token` | `805.754` | `12.440` | `13.252` | `2/3` | `278413312` |
+| `rift-checked-safezone-page-token` | `800.369` | `15.726` | `16.501` | `2/3` | `278577152` |
+
+Interpretation: the owned cursor cleanup is a modest but useful checked
+improvement. Checked scoped page-token is now slightly faster than heap in this
+real-input row while cutting RSS by about `80 MB` and median timed GC by about
+`56 ms`. Trusted Streaming remains the lower-bound winner, so this still argues
+for reducing checked operator/common traversal CPU rather than claiming the
+checked path has reached the runtime limit.

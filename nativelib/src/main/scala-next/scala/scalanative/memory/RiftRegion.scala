@@ -439,6 +439,23 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       }
     }
 
+    /** Returns the next record without clearing its link field.
+     *
+     *  This is for operator-owned page-token close callbacks where parent
+     *  bucket references have already been cleared and the child region closes
+     *  immediately after the callback. Use `next`/`nextOrNull` for generic
+     *  public cursor drains that need defensive link clearing.
+     */
+    def nextOwnedOrNull(): T | Null = {
+      val value0 = current
+      if (value0 == null) null
+      else {
+        val value = value0.asInstanceOf[T]
+        current = value.appendNext
+        value
+      }
+    }
+
     def next(): T = {
       if (current == null)
         throw new NoSuchElementException("empty StreamAppendCursor")

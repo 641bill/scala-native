@@ -1844,8 +1844,11 @@ class RiftRegionCheckedCompilerTest {
       |        bucket: RiftRegion.StreamBucket^{stream},
       |        cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
       |    ): Unit =
-      |      while cursor.hasNext do
-      |        total += cursor.next().value + bucket.startSeconds.toInt
+      |      var current = cursor.nextOwnedOrNull()
+      |      while current != null do
+      |        val event = current.asInstanceOf[Event^{stream}]
+      |        total += event.value + bucket.startSeconds.toInt
+      |        current = cursor.nextOwnedOrNull()
       |    val region =
       |      RiftRegion.pageTokenAppendRegionFor(stream, window, 7L, 0L)(consume)
       |    val event: Event^{stream} =

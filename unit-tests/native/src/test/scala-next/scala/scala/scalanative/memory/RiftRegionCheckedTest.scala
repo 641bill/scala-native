@@ -1450,9 +1450,14 @@ class RiftRegionCheckedTest {
         def consume(
             bucket: RiftRegion.StreamBucket^{stream},
             cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
-        ): Unit =
-          while (cursor.hasNext)
-            sum += cursor.next().value + bucket.startSeconds.toInt
+        ): Unit = {
+          var current = cursor.nextOwnedOrNull()
+          while (current != null) {
+            val event = current.asInstanceOf[Event^{stream}]
+            sum += event.value + bucket.startSeconds.toInt
+            current = cursor.nextOwnedOrNull()
+          }
+        }
 
         val firstRegion =
           RiftRegion.pageTokenAppendRegionFor(stream, window, 7L, Long.MinValue)(

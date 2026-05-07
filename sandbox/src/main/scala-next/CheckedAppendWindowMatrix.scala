@@ -985,7 +985,7 @@ object CheckedAppendWindowMatrixHelpers {
         bucket: RiftRegion.StreamBucket^{stream},
         cursor: RiftRegion.StreamAppendCursor[Record]^{stream}
     ): Unit = {
-      var current = cursor.nextOrNull()
+      var current = cursor.nextOwnedOrNull()
       while (current != null) {
         val record: Record^{stream} = current.asInstanceOf[Record^{stream}]
         val nextTotal =
@@ -998,7 +998,7 @@ object CheckedAppendWindowMatrixHelpers {
           nextTotal,
           bucket.startSeconds
         )
-        current = cursor.nextOrNull()
+        current = cursor.nextOwnedOrNull()
       }
     }
 

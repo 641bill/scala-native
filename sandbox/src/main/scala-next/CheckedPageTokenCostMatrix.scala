@@ -817,7 +817,7 @@ object CheckedPageTokenCostMatrixHelpers {
       val start = if (diag.enabled) System.nanoTime() else 0L
       workload match {
         case AppendDrain =>
-          var current = cursor.nextOrNull()
+          var current = cursor.nextOwnedOrNull()
           while (current != null) {
             val record = current.asInstanceOf[Record^{stream}]
             checksum = fold(
@@ -827,7 +827,7 @@ object CheckedPageTokenCostMatrixHelpers {
               record.total,
               bucket.startSeconds
             )
-            current = cursor.nextOrNull()
+            current = cursor.nextOwnedOrNull()
           }
         case AppendAggregate =>
           val index = bucketIndex(bucket.startSeconds)
@@ -838,13 +838,13 @@ object CheckedPageTokenCostMatrixHelpers {
         case AppendCountByKey =>
           val counts = new Array[Int](cfg.keySpace)
           val sums = new Array[Long](cfg.keySpace)
-          var current = cursor.nextOrNull()
+          var current = cursor.nextOwnedOrNull()
           while (current != null) {
             val record = current.asInstanceOf[Record^{stream}]
             counts(record.key) += 1
             sums(record.key) +=
               record.key.toLong + record.value.toLong + record.total
-            current = cursor.nextOrNull()
+            current = cursor.nextOwnedOrNull()
           }
           val index = bucketIndex(bucket.startSeconds)
           var key = 0

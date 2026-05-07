@@ -7,7 +7,7 @@ checked page/token operator follow-up recorded and clears the generated
 application-shaped gate.
 
 Date: 2026-05-03
-Last updated: 2026-05-07 17:24 CEST
+Last updated: 2026-05-07 18:14 CEST
 
 ## Purpose
 
@@ -575,6 +575,69 @@ headline evidence.
 - RSS is still not a region-family win at 1M: heap RSS is lower than the
   SafeZone/Rift rows. Use this follow-up as correctness and checked-overhead
   evidence, not a checked application performance claim.
+
+## Checked Page-Token Owned Cursor Rerun
+
+After `StreamAppendCursor.nextOwnedOrNull()` was added for operator-owned
+page-token close callbacks, generated q1/q2 were rerun with the checked
+page-token modes. The change removes per-record link clearing during close
+when the parent bucket refs have already been cleared and the child region is
+about to close.
+
+100k command:
+
+```sh
+COMMON_CRAWL_WET_PAGES=100000 \
+COMMON_CRAWL_WET_BENCHMARK_RUNS=3 \
+COMMON_CRAWL_WET_WARMUPS=1 \
+COMMON_CRAWL_WET_QUERIES="q1-tokenize q2-domain-window" \
+COMMON_CRAWL_WET_MODES="heap-immix rift-checked-page-token rift-checked-safezone-page-token" \
+COMMON_CRAWL_WET_OUTPUT_DIR=/Users/siyaoliu/rift/cache/common-crawl-page-token-nextowned-100k-2026-05-07 \
+zsh sandbox/run_common_crawl_wet_matrix.sh
+```
+
+1M command:
+
+```sh
+COMMON_CRAWL_WET_BUILD=0 \
+COMMON_CRAWL_WET_PAGES=1000000 \
+COMMON_CRAWL_WET_BENCHMARK_RUNS=3 \
+COMMON_CRAWL_WET_WARMUPS=1 \
+COMMON_CRAWL_WET_QUERIES="q1-tokenize q2-domain-window" \
+COMMON_CRAWL_WET_MODES="heap-immix rift-checked-page-token rift-checked-safezone-page-token" \
+COMMON_CRAWL_WET_OUTPUT_DIR=/Users/siyaoliu/rift/cache/common-crawl-page-token-nextowned-1m-2026-05-07 \
+zsh sandbox/run_common_crawl_wet_matrix.sh
+```
+
+All rows matched checksums/output counts.
+
+| Scale | Query | Mode | Median ms | Median GC ms | RSS bytes | Output count |
+|---|---|---|---:|---:|---:|---:|
+| 100k | q1-tokenize | `heap-immix` | `545.252` | `156.148` | `408584192` | `13700000` |
+| 100k | q1-tokenize | `rift-checked-page-token` | `387.976` | `0.000` | `345079808` | `13700000` |
+| 100k | q1-tokenize | `rift-checked-safezone-page-token` | `363.216` | `0.000` | `345063424` | `13700000` |
+| 100k | q2-domain-window | `heap-immix` | `511.596` | `148.646` | `408584192` | `92994` |
+| 100k | q2-domain-window | `rift-checked-page-token` | `406.151` | `0.000` | `409387008` | `92994` |
+| 100k | q2-domain-window | `rift-checked-safezone-page-token` | `378.822` | `0.000` | `409370624` | `92994` |
+| 1M | q1-tokenize | `heap-immix` | `5392.344` | `1577.850` | `408584192` | `137000000` |
+| 1M | q1-tokenize | `rift-checked-page-token` | `3877.427` | `20.026` | `463634432` | `137000000` |
+| 1M | q1-tokenize | `rift-checked-safezone-page-token` | `3643.680` | `31.585` | `463716352` | `137000000` |
+| 1M | q2-domain-window | `heap-immix` | `5201.862` | `1579.132` | `408584192` | `929230` |
+| 1M | q2-domain-window | `rift-checked-page-token` | `4029.776` | `19.500` | `463634432` | `929230` |
+| 1M | q2-domain-window | `rift-checked-safezone-page-token` | `3790.138` | `31.517` | `463667200` | `929230` |
+
+Interpretation:
+
+- This is a validated checked application win on the generated stressor.
+  Checked scoped page-token improves q1 by about `32.4%` and q2 by about
+  `27.1%` versus heap at 1M, while cutting timed GC from about `1.58 s` to
+  about `32 ms`.
+- The change is not a new algorithm: heap and checked rows still materialize
+  and close the same page/line/token record shape. The runtime saving comes
+  from removing defensive link cleanup that static epochal ownership makes
+  unnecessary.
+- RSS remains a caveat at 1M: checked rows are faster but use about `55 MB`
+  more RSS than heap on this generated input.
 
 ## Next Similar Workloads
 

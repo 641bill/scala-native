@@ -1374,13 +1374,13 @@ object CommonCrawlWetMatrixHelpers {
         val closeStarted = if (diagnostics) System.nanoTime() else 0L
         if (domainWindowQuery(query)) {
           val counts = new Array[Int](cfg.domainSpace)
-          var current = cursor.nextOrNull()
+          var current = cursor.nextOwnedOrNull()
           while (current != null) {
             val record: CheckedRecord^{stream} =
               current.asInstanceOf[CheckedRecord^{stream}]
             if (diagnostics) closedRecords += 1L
             counts(record.domain) += 1
-            current = cursor.nextOrNull()
+            current = cursor.nextOwnedOrNull()
           }
           val aggregateStarted = if (diagnostics) System.nanoTime() else 0L
           var domain = 0
@@ -1395,7 +1395,7 @@ object CommonCrawlWetMatrixHelpers {
           if (diagnostics)
             domainAggregateNanos += System.nanoTime() - aggregateStarted
         } else {
-          var current = cursor.nextOrNull()
+          var current = cursor.nextOwnedOrNull()
           while (current != null) {
             val record: CheckedRecord^{stream} =
               current.asInstanceOf[CheckedRecord^{stream}]
@@ -1410,7 +1410,7 @@ object CommonCrawlWetMatrixHelpers {
               bucket.startSeconds
             )
             outputCount += 1L
-            current = cursor.nextOrNull()
+            current = cursor.nextOwnedOrNull()
           }
         }
         if (diagnostics) {
