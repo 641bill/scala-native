@@ -1,7 +1,7 @@
 # Scala Native Win Envelope
 
 Date: 2026-05-01
-Last updated: 2026-05-08 21:07 CEST
+Last updated: 2026-05-08 22:16 CEST
 
 Status: Phase 6/7 evidence synthesis. This note classifies where Rift currently
 wins against Scala Native Immix, where it only reduces memory pressure, and
@@ -11,6 +11,12 @@ Latest staged-sweep update: `evidence/COMPREHENSIVE_SWEEP_2026_05_06.md`
 supersedes older prior-work, checked-operator, SafeZone-cost, and
 stream/application rows where it overlaps. Core runtime/topology long rows
 still come from the earlier clean core sweeps unless explicitly rerun.
+
+Latest Stancu/SPECjbb port update:
+`evidence/SPECJBB2005_PORT_MATRIX.md` adds a clean-room Scala Native
+SPECjbb2005-workload port. It is not official SPEC output. At the 8-warehouse
+Stancu-style scale, `checked-epoch-scoped` is `108.649 ms` versus heap
+`129.674 ms` with `15.125 ms` timed GC.
 
 Latest post-fast-path selected update:
 `evidence/POST_FAST_PATH_SELECTED_SWEEP_2026_05_07.md` reruns selected rows
@@ -180,6 +186,7 @@ live window payload still dominate.
 | Yak grouped sort | 10 x 100k records | HPZone `227.393 ms` | heap `237.354 ms` | CPU/sort-bound, modest allocator win | Local methodology reproduction |
 | Yak real graph replay | 50M SNAP LiveJournal edges | API-backed direct epoch `checked-epoch-scoped` `1055.958 ms`, `checked-epoch-stream` `1101.001 ms`, RSS about `1.53 GB`; older topology rows: low-RSS epoch `1069.241/1113.261 ms`, region baselines `1256.538/1345.479 ms`; reusable `EpochBuffer` scoped `1361.752 ms`; whole-run checked scoped `1048.751 ms` but RSS `2977742848` | API-backed `gc-heap` `1604.811 ms`, GC `288.801 ms`, RSS `2759835648`; older topology heap `1618.105 ms`, GC `273.410 ms`, RSS `2761261056` | Strong real-input Yak-shaped region/RSS/GC win; checked direct epoch is now reusable API evidence; `EpochBuffer` remains a slower generic abstraction; not exact Yak/GraphChi | Local methodology reproduction over real edge list |
 | Stancu-style tx boundary | 1M transactions, 64/epoch | scoped direct checked epoch `160.198 ms`; direct checked epoch `174.137 ms` | heap `225.798 ms`; improved SafeZone `186.122 ms`; trusted Streaming `219.668 ms` | Direct checked epoch win; durable accounting arrays stay heap metadata | Local methodology reproduction, not exact Stancu/SPECjbb2005 |
+| SPECjbb2005-workload port | 8 warehouses x 100k transactions | checked epoch scoped `108.649 ms`; checked epoch stream `114.651 ms` | heap `129.674 ms`, GC `15.125 ms`; rooted scoped `122.022 ms` | Direct checked epoch win on Stancu-style warehouse range; transaction objects are region-freed | Clean-room Scala Native port, not official SPECjbb2005 |
 | Checked RegionBuffer | 1M records | checked `28.654 ms` | heap `33.825 ms` | Cheap checked container win | Focused checked API evidence |
 | Checked RegionPriorityQueue | 500k records | checked `28.621 ms` | heap `27.369 ms` | Checked-container overhead | Focused checked API evidence |
 | Checked IndexedPriorityQueue | 1M events | checked `103.052 ms` | heap `100.254 ms` | Checked-container overhead | Focused checked API evidence |

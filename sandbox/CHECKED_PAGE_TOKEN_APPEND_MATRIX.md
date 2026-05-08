@@ -1,13 +1,15 @@
 # Checked Page/Token Append Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-07 13:51 CEST
+Last updated: 2026-05-07 16:20 CEST
 
 Status: focused checked page/token gate passed, generated Common Crawl-shaped
 q1/q2 application gate passed, the fixed-chunk append control failed to beat
-linked page-token, and the 2026-05-07 batch-close fast path improved the
-operator-owned page-token row again. This is generated stressor evidence, not
-real Common Crawl input evidence.
+linked page-token, and the 2026-05-07 batch-close/current-bucket fast path is
+now rerun from a clean checkpoint. The new no-drain close API is safe as an
+operator-owned option, but the cost matrix shows it is not the main remaining
+bottleneck. This is generated stressor evidence, not real Common Crawl input
+evidence.
 
 ## What Changed
 
@@ -42,7 +44,8 @@ Results:
 
 - `sandbox3_next` compile passed.
 - checked compiler tests passed: `100/100` after adding chunk-token probes.
-- checked runtime tests passed: `44/44` after adding chunk-token drain tests.
+- checked runtime tests passed: `51/51` after adding page-token no-drain close
+  probes.
 
 New probes:
 
@@ -180,6 +183,40 @@ All rows matched checksum `-2507118467295660905`.
 Result: the linked page-token path remains the right checked operator for
 append/window workloads. The chunk path is still correct but slower, so it
 should not be wired into DSPBench/Common Crawl yet.
+
+Clean committed fast-path rerun:
+
+```sh
+CHECKED_APPEND_BUILD=1 \
+CHECKED_APPEND_EVENTS=1000000 \
+CHECKED_APPEND_BENCHMARK_RUNS=5 \
+CHECKED_APPEND_WARMUPS=1 \
+CHECKED_APPEND_MODES="heap-immix rift-checked-page-token rift-checked-safezone-page-token" \
+CHECKED_APPEND_OUTPUT_DIR="/Users/siyaoliu/rift/cache/perf-eval/2026-05-07-page-token-focused-post-nodrain" \
+zsh sandbox/run_checked_append_window_matrix.sh
+```
+
+All rows matched checksum.
+
+| Mode | Median ms | GC ms | Rift op ms | Region objects | RSS bytes |
+|---|---:|---:|---:|---:|---:|
+| `heap-immix` | `36.722` | `10.871` | `0.000` | `0` | `75120640` |
+| `rift-checked-page-token` | `28.397` | `0.000` | `0.066` | `1000000` | `47579136` |
+| `rift-checked-safezone-page-token` | `27.240` | `0.000` | `0.000` | `0` | `47448064` |
+
+This is the current focused safe-fast-path page-token gate. It confirms the
+headline page-token path did not regress.
+
+Focused cost-decomposition follow-up:
+
+`evidence/CHECKED_PAGE_TOKEN_COST_MATRIX.md` adds `append-only`,
+`append-drain`, and `append-aggregate` same-shape workloads. At 1M, the
+no-drain close API did not materially improve the cost rows:
+checked scoped page-token was `74.743 ms` on append-only, `81.628 ms` on
+append-drain, and `82.623 ms` on append-aggregate after the safe same-bucket
+fast-path rerun. Conclusion: no-drain close is safe and useful as an
+operator-owned option, but close traversal is not the main remaining
+bottleneck in this focused matrix.
 
 Generated Common Crawl-shaped 100k regression:
 

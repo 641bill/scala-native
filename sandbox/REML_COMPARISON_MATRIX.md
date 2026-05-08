@@ -1,6 +1,6 @@
 # ReML / MLKit Lineage Comparison Matrix
 
-Last updated: 2026-05-06 23:45 CEST
+Last updated: 2026-05-08 22:16 CEST
 
 Status: new Phase 6c evidence track. This file separates three evidence
 classes:
@@ -257,6 +257,51 @@ zsh sandbox/run_reml_region_matrix.sh
 
 All checksums matched. These are **Scala Native port medians**, not exact
 MLKit/ReML artifact reruns.
+
+## Paper-Style Combined Snapshot
+
+This table has the shape needed for the thesis comparison: the left side is
+the paper-reported ReML/MLKit table; the right side is the local Scala Native
+port row when one exists. It does not claim raw cross-language speed wins.
+`Local speedup` is `gc-heap / best checked local row`.
+
+| Program | Source/local status | Paper rg s | Paper r s | Paper MLton s | Paper rg RSS MB | Paper rg GC # | Local gc-heap ms | Best local checked mode | Best local checked ms | Local speedup | Local RSS ratio | Local GC change | Evidence class |
+|---|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---|---|
+| `DLX` | source candidate found; no SN port | 0.14 | 0.12 | 0.40 | 8 | 3 | -- | -- | -- | -- | -- | -- | paper-reported |
+| `b-hut` | source candidate found; Tier 2 planned | 0.67 | 0.63 | 0.14 | 5 | 471 | -- | -- | -- | -- | -- | -- | paper-reported |
+| `fft` | Tier 1 SN port | 0.64 | 0.51 | 0.26 | 69 | 10 | 0.823 | `checked-region-scoped` | 0.764 | 1.08x | 0.67x | `0.000 -> 0.000 ms` | SN port |
+| `fib37` | Tier 1 SN port; MLKit candidates are fib35 | 0.98 | 0.21 | 0.85 | 3 | 1 | 132.735 | `checked-region-stream` | 126.017 | 1.05x | 1.00x | `0.000 -> 0.000 ms` | SN port |
+| `kbc` | source/config still open | 0.21 | 0.19 | 0.07 | 10 | 10 | -- | -- | -- | -- | -- | -- | paper-reported |
+| `lexgen` | source/config still open | 0.74 | 0.62 | 0.43 | 15 | 109 | -- | -- | -- | -- | -- | -- | paper-reported |
+| `life` | Tier 1 SN port | 0.44 | 0.43 | 0.43 | 3 | 58 | 36.684 | `checked-region-scoped` | 35.563 | 1.03x | 1.00x | `0.000 -> 0.000 ms` | SN port |
+| `logic` | source candidate found; Tier 2 planned | 0.63 | 0.43 | 0.13 | 4 | 1843 | -- | -- | -- | -- | -- | -- | paper-reported |
+| `mandel` | Tier 1 SN port; config differs | 0.53 | 0.38 | 0.31 | 3 | 1 | 3.462 | `checked-region-stream` | 3.297 | 1.05x | 1.00x | `0.000 -> 0.000 ms` | SN port |
+| `mlyacc` | source/config still open | 0.36 | 0.30 | 0.33 | 18 | 29 | -- | -- | -- | -- | -- | -- | paper-reported |
+| `mpuz` | source candidate found; Tier 2 planned | 0.68 | 0.46 | 0.27 | 3 | 2 | -- | -- | -- | -- | -- | -- | paper-reported |
+| `msort-r` | Tier 1 SN port | 0.69 | 0.47 | 0.93 | 116 | 16 | 126.163 | `checked-region-stream` | 104.929 | 1.20x | 0.26x | `27.280 -> 6.005 ms` | SN port |
+| `msort` | Tier 1 SN port | 0.89 | 0.54 | 0.93 | 131 | 26 | 124.983 | `checked-region-stream` | 104.358 | 1.20x | 0.49x | `27.180 -> 6.063 ms` | SN port |
+| `nucleic` | source candidate found; Tier 2 planned | 0.34 | 0.33 | 0.17 | 5 | 645 | -- | -- | -- | -- | -- | -- | paper-reported |
+| `prof` | source candidate found; no SN port | 0.49 | 0.38 | 0.42 | 4 | 263 | -- | -- | -- | -- | -- | -- | paper-reported |
+| `ratio` | Tier 1 SN port | 1.71 | 1.33 | 0.48 | 16 | 14 | 51.302 | `checked-region-scoped` | 48.929 | 1.05x | 0.36x | `3.191 -> 0.000 ms` | SN port |
+| `ray` | source candidate found; Tier 2 planned | 0.69 | 0.64 | 0.25 | 14 | 12 | -- | -- | -- | -- | -- | -- | paper-reported |
+| `simple` | source candidate found; no SN port | 0.19 | 0.13 | 0.28 | 5 | 4 | -- | -- | -- | -- | -- | -- | paper-reported |
+| `tak` | Tier 1 SN port; config differs | 2.09 | 0.55 | 2.12 | 3 | 1 | 0.188 | `checked-region-stream` | 0.180 | 1.04x | 1.00x | `0.000 -> 0.000 ms` | SN port |
+| `tsp` | source candidate found; Tier 2 planned | 0.14 | 0.11 | 0.14 | 11 | 7 | -- | -- | -- | -- | -- | -- | paper-reported |
+| `vliw` | source/config still open | 0.78 | 0.56 | 0.30 | 14 | 15 | -- | -- | -- | -- | -- | -- | paper-reported |
+| `zebra` | source/config still open | 1.58 | 1.15 | 0.45 | 3 | 1066 | -- | -- | -- | -- | -- | -- | paper-reported |
+| `zern` | source candidate found; no SN port | 0.80 | 0.52 | 0.30 | 6 | 4503 | -- | -- | -- | -- | -- | -- | paper-reported |
+
+Interpretation:
+
+- The first local SN ports with meaningful memory behavior are `msort`,
+  `msort-r`, and `ratio`.
+- `msort` and `msort-r` give about `1.20x` checked speedup over local
+  `gc-heap`, materially lower RSS, and substantially lower timed GC.
+- `ratio` is a modest elapsed win but a strong RSS/GC row.
+- Compute-heavy rows (`fib37`, `tak`, `mandel`, `life`) should remain controls,
+  even when a checked mode is slightly faster.
+- Exact MLKit/ReML artifact reruns remain optional validation for this table,
+  not a prerequisite for reporting local Scala Native ratios.
 
 | Workload | Mode | Median ms | GC ms | Max GC ms | Runs with GC | RSS bytes | Rift objects |
 |---|---|---:|---:|---:|---:|---:|---:|
