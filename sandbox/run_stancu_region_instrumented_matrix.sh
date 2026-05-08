@@ -11,7 +11,7 @@ platform=$(uname -s)
 include_controls=${RIFT_BENCH_INCLUDE_CONTROLS:-${RIFT_EVAL_INCLUDE_CONTROLS:-0}}
 modes=(${(z)${STANCU_MODES:-"heap improved-safezone"}})
 if [[ -z "${STANCU_MODES:-}" && ( "${include_controls}" == "1" || "${include_controls}" == "true" || "${include_controls}" == "yes" ) ]]; then
-  modes+=(current-safezone unsafezone-hp rift-hp rift-streaming)
+  modes+=(current-safezone unsafezone-hp rift-hp rift-streaming rift-checked-direct-epoch rift-checked-safezone-direct-epoch)
 fi
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
@@ -133,6 +133,12 @@ for selected_mode in "${modes[@]}"; do
       ;;
     rift-streaming)
       run_mode "rift-streaming" "rift-streaming" "0"
+      ;;
+    rift-checked-direct-epoch)
+      run_mode "rift-checked-direct-epoch" "rift-checked-direct-epoch" "0"
+      ;;
+    rift-checked-safezone-direct-epoch)
+      run_mode "rift-checked-safezone-direct-epoch" "rift-checked-safezone-direct-epoch" "1" "32768"
       ;;
     *)
       echo "unknown STANCU_MODES entry: ${selected_mode}" >&2

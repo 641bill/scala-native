@@ -2938,6 +2938,29 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     finally region.reset()
   }
 
+  /** Runs one checked stream epoch with an operator-owned open region.
+   *
+   *  This is the direct API for batch/epoch lifetimes. It is intentionally
+   *  simpler than `EpochBuffer`: callers can build the epoch-local object
+   *  graph directly, consume it before the block returns, and then the runtime
+   *  closes/resets the epoch in bulk. The result type may not retain epoch
+   *  values.
+   */
+  final def epoch[T](
+      body: (OpenStreamingRegion^) ?=> T
+  )(using parent: StreamingRegion^, canReturn: CanReturnFromRegion[T]): T =
+    parent match {
+      case _: SafeZoneBackedRiftRegion =>
+        val child: OpenStreamingRegion^ =
+          openSafeZoneImpl(Streaming).asInstanceOf[OpenStreamingRegion]
+        try body(using child)
+        finally child.close()
+      case _ =>
+        reset { region ?=>
+          body(using region.asInstanceOf[OpenStreamingRegion])
+        }
+    }
+
   /** Opens a child streaming region whose handle is captured by `parent`.
    *
    *  This is the first checked multi-region building block for streaming
@@ -3949,6 +3972,21 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       }
     streamBucketRegionTrusted(parent, bucket)
   }
+
+  /** Returns the active child region for an epoch buffer on the checked
+   *  operator-owned allocation fast path.
+   *
+   *  This is the epoch sibling of `pageTokenAppendOpenRegionFor`: the operator
+   *  owns the bucket token, so checked benchmark/library code can allocate
+   *  records with `allocOpen` without paying the generic per-allocation
+   *  `checkOpen` branch. Public low-level region APIs remain defensive.
+   */
+  def epochBufferOpenRegionFor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      buffer: EpochBuffer[T]^{parent}
+  ): OpenStreamingRegion^{parent} =
+    epochBufferRegionFor(parent, buffer)
+      .asInstanceOf[OpenStreamingRegion^{parent}]
 
   /** Returns the active child region for a checked transaction.
    *

@@ -122,9 +122,9 @@ write_summary_header
 
 for selected_mode in "${modes[@]}"; do
   case "${selected_mode}" in
-    heap)
+    heap|gc-heap|heap-immix)
       if [[ "${workload}" != "promotion" ]]; then
-        run_mode "heap" "heap" "0"
+        run_mode "gc-heap" "heap" "0"
       fi
       ;;
     current-safezone)
@@ -132,24 +132,104 @@ for selected_mode in "${modes[@]}"; do
         run_mode "current-safezone" "safezone" "0"
       fi
       ;;
-    improved-safezone)
+    improved-safezone|safezone-improved|safezone-improved-32k|region-scoped-rooted)
       if [[ "${workload}" != "promotion" ]]; then
-        run_mode "improved-safezone" "safezone" "1"
+        run_mode "region-scoped-rooted" "safezone" "1" "${workload}" "32768"
       fi
       ;;
-    unsafezone-hp)
+    unsafezone-hp|safezone-rootless-32k|region-scoped-rootless)
       if [[ "${workload}" != "promotion" ]]; then
-        run_mode "unsafezone-hp" "safezone" "3" "${workload}" "32768"
+        run_mode "region-scoped-rootless" "safezone" "3" "${workload}" "32768"
       fi
       ;;
-    rift-hp)
+    rift-hp|rift-trusted-hp|region-hp-rootless)
       if [[ "${workload}" != "promotion" ]]; then
-        run_mode "rift-hp" "rift-hp" "0"
+        run_mode "region-hp-rootless" "rift-hp" "0"
       fi
       ;;
-    rift-streaming)
+    rift-streaming|rift-trusted-streaming|region-stream-rootless)
       if [[ "${workload}" != "promotion" ]]; then
-        run_mode "rift-streaming" "rift-streaming" "0"
+        run_mode "region-stream-rootless" "rift-streaming" "0"
+      fi
+      ;;
+    checked-region-stream|rift-checked-graphreal)
+      if [[ "${workload}" == "graphreal" ]]; then
+        run_mode "checked-region-stream" "checked-region-stream" "0"
+      else
+        echo "checked-region-stream is currently implemented only for YAK_WORKLOAD=graphreal" >&2
+        exit 1
+      fi
+      ;;
+    checked-region-scoped|rift-checked-safezone-graphreal)
+      if [[ "${workload}" == "graphreal" ]]; then
+        run_mode "checked-region-scoped" "checked-region-scoped" "1" "${workload}" "32768"
+      else
+        echo "checked-region-scoped is currently implemented only for YAK_WORKLOAD=graphreal" >&2
+        exit 1
+      fi
+      ;;
+    checked-page-token-stream)
+      if [[ "${workload}" == "graphreal" ]]; then
+        run_mode "checked-page-token-stream" "checked-page-token-stream" "0"
+      else
+        echo "checked-page-token-stream is currently implemented only for YAK_WORKLOAD=graphreal" >&2
+        exit 1
+      fi
+      ;;
+    checked-page-token-scoped)
+      if [[ "${workload}" == "graphreal" ]]; then
+        run_mode "checked-page-token-scoped" "checked-page-token-scoped" "1" "${workload}" "32768"
+      else
+        echo "checked-page-token-scoped is currently implemented only for YAK_WORKLOAD=graphreal" >&2
+        exit 1
+      fi
+      ;;
+    checked-whole-run-stream)
+      if [[ "${workload}" == "graphreal" ]]; then
+        run_mode "checked-whole-run-stream" "checked-whole-run-stream" "0"
+      else
+        echo "checked-whole-run-stream is currently implemented only for YAK_WORKLOAD=graphreal" >&2
+        exit 1
+      fi
+      ;;
+    checked-whole-run-scoped)
+      if [[ "${workload}" == "graphreal" ]]; then
+        run_mode "checked-whole-run-scoped" "checked-whole-run-scoped" "1" "${workload}" "32768"
+      else
+        echo "checked-whole-run-scoped is currently implemented only for YAK_WORKLOAD=graphreal" >&2
+        exit 1
+      fi
+      ;;
+    checked-epoch-stream)
+      if [[ "${workload}" != "all" && "${workload}" != "promotion" ]]; then
+        run_mode "checked-epoch-stream" "checked-epoch-stream" "0"
+      else
+        echo "checked-epoch-stream is currently implemented for wordcount, graphstep, sort, topword, graphchi, and graphreal" >&2
+        exit 1
+      fi
+      ;;
+    checked-epoch-scoped)
+      if [[ "${workload}" != "all" && "${workload}" != "promotion" ]]; then
+        run_mode "checked-epoch-scoped" "checked-epoch-scoped" "1" "${workload}" "32768"
+      else
+        echo "checked-epoch-scoped is currently implemented for wordcount, graphstep, sort, topword, graphchi, and graphreal" >&2
+        exit 1
+      fi
+      ;;
+    checked-epoch-buffer-stream)
+      if [[ "${workload}" == "graphreal" ]]; then
+        run_mode "checked-epoch-buffer-stream" "checked-epoch-buffer-stream" "0"
+      else
+        echo "checked-epoch-buffer-stream is currently implemented only for YAK_WORKLOAD=graphreal" >&2
+        exit 1
+      fi
+      ;;
+    checked-epoch-buffer-scoped)
+      if [[ "${workload}" == "graphreal" ]]; then
+        run_mode "checked-epoch-buffer-scoped" "checked-epoch-buffer-scoped" "1" "${workload}" "32768"
+      else
+        echo "checked-epoch-buffer-scoped is currently implemented only for YAK_WORKLOAD=graphreal" >&2
+        exit 1
       fi
       ;;
     yak-runtime)

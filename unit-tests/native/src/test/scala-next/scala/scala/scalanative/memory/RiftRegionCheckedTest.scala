@@ -1438,6 +1438,124 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def streamingEpochAllocatesAndResetsRecords(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int)
+
+        var sum = 0
+        var i = 0
+        while (i < 2) {
+          val epochSum = RiftRegion.epoch { epoch ?=>
+            val event: Event^{epoch} =
+              RiftRegion.allocOpen(new Event(20 + i))
+            event.value
+          }
+          sum += epochSum
+          i += 1
+        }
+        sum
+      }
+
+      assertEquals(41, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def safeZoneBackedEpochAllocatesAndClosesRecords(): Unit = {
+    val total = RiftRegion.streamingSafeZone { stream ?=>
+      final class Event(val value: Int)
+
+      var sum = 0
+      var i = 0
+      while (i < 2) {
+        val epochSum = RiftRegion.epoch { epoch ?=>
+          val event: Event^{epoch} =
+            RiftRegion.allocOpen(new Event(20 + i))
+          event.value
+        }
+        sum += epochSum
+        i += 1
+      }
+      sum
+    }
+
+    assertEquals(41, total)
+  }
+
+  @Test def streamingEpochAllocatesRegionOwnedArrays(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Cell(val value: Int)
+
+        var sum = 0
+        var epochIndex = 0
+        while (epochIndex < 2) {
+          sum += RiftRegion.epoch { epoch ?=>
+            val cells: Array[Cell^{epoch}]^{epoch} =
+              RiftRegion.allocOpen(new Array[Cell^{epoch}](3))
+            var i = 0
+            while (i < cells.length) {
+              cells(i) =
+                RiftRegion.allocOpen(new Cell(epochIndex * 10 + i))
+              i += 1
+            }
+
+            var local = 0
+            var j = 0
+            while (j < cells.length) {
+              local += cells(j).value
+              j += 1
+            }
+            local
+          }
+          epochIndex += 1
+        }
+        sum
+      }
+
+      assertEquals(36, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def safeZoneBackedEpochAllocatesRegionOwnedArrays(): Unit = {
+    val total = RiftRegion.streamingSafeZone { stream ?=>
+      final class Cell(val value: Int)
+
+      var sum = 0
+      var epochIndex = 0
+      while (epochIndex < 2) {
+        sum += RiftRegion.epoch { epoch ?=>
+          val cells: Array[Cell^{epoch}]^{epoch} =
+            RiftRegion.allocOpen(new Array[Cell^{epoch}](3))
+          var i = 0
+          while (i < cells.length) {
+            cells(i) =
+              RiftRegion.allocOpen(new Cell(epochIndex * 10 + i))
+            i += 1
+          }
+
+          var local = 0
+          var j = 0
+          while (j < cells.length) {
+            local += cells(j).value
+            j += 1
+          }
+          local
+        }
+        epochIndex += 1
+      }
+      sum
+    }
+
+    assertEquals(36, total)
+  }
+
   @Test def streamPageTokenAppendWindowAllocatesAndDrainsRecords(): Unit = {
     RiftRegion.init(1)
     try {
@@ -1731,6 +1849,47 @@ class RiftRegionCheckedTest {
         RiftRegion.appendEpochBuffer(stream, buffer, third)
         RiftRegion.closeAllEpochBufferBucketsWithCursor(stream, buffer)(consume)
 
+        sum
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def epochBufferOpenRegionAllocatesAndDrainsRecords(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val buffer = RiftRegion.epochBuffer[Event]()
+        var sum = 0
+
+        def consume(
+            bucket: RiftRegion.StreamBucket^{stream},
+            cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+        ): Unit = {
+          var current = cursor.nextOwnedOrNull()
+          while (current != null) {
+            val event = current.asInstanceOf[Event^{stream}]
+            sum += event.value + bucket.startSeconds.toInt
+            current = cursor.nextOwnedOrNull()
+          }
+        }
+
+        val region = RiftRegion.epochBufferOpenRegionFor(stream, buffer)
+        val first: Event^{stream} =
+          RiftRegion.allocOpen(new Event(30))(using region)
+        val second: Event^{stream} =
+          RiftRegion.allocOpen(new Event(12))(using region)
+        RiftRegion.appendEpochBuffer(stream, buffer, first)
+        RiftRegion.appendEpochBuffer(stream, buffer, second)
+        assertEquals(2, RiftRegion.epochBufferLength(stream, buffer))
+
+        RiftRegion.closeEpochBufferWithCursor(stream, buffer)(consume)
+        assertEquals(0, RiftRegion.epochBufferLength(stream, buffer))
         sum
       }
 

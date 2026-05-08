@@ -1,9 +1,10 @@
 # StreamFlex Region Matrix
 
-Last updated: 2026-05-06 00:55 CEST
+Last updated: 2026-05-08 20:58 CEST
 
 Status: StreamFlex-style methodology reproduction harness with validated local
-smoke, default median, and allocation-pressure median runs.
+smoke, default median, allocation-pressure median runs, checked
+TransactionRegion rows, and direct checked epoch rows.
 
 The harness is implemented in
 `sandbox/src/main/scala-next/StreamFlexRegionMatrix.scala` and run with
@@ -386,6 +387,131 @@ Interpretation:
   because it opens once and resets across events.
 - SafeZone removes almost all GC time but still has occasional latency misses
   in this run and is slower than Rift on the pressure throughput workload.
+
+## Direct Checked Epoch Follow-Up
+
+Date/time: 2026-05-08 20:58 CEST.
+
+This follow-up applies the reusable `RiftRegion.epoch { ... }` topology to the
+StreamFlex-shaped pipeline. It keeps the same logical four-stage program as
+heap/trusted Rift:
+
+- packet fragments are allocated first;
+- decoded records are derived by traversing packets;
+- classified records are derived by traversing decoded records;
+- alerts are derived and then traversed for the checksum.
+
+The difference from the older checked rows is topology. Stacked
+`EpochBuffer`s used four child regions per batch/event, and
+`TransactionRegion` used one child region with four framework-owned lists.
+The new direct checked epoch row uses one checked epoch block and ordinary
+region-owned linked Scala objects. That makes it the StreamFlex analogue of the
+direct epoch topology already used for Yak and Dataflow.
+
+Smoke command:
+
+```sh
+STREAMFLEX_EVENTS=20000 \
+STREAMFLEX_LATENCY_EVENTS=1000 \
+STREAMFLEX_BENCHMARK_RUNS=1 \
+STREAMFLEX_WARMUPS=0 \
+STREAMFLEX_MODES="heap rift-streaming rift-checked-direct-epoch rift-checked-safezone-direct-epoch rift-checked-transaction-region rift-checked-safezone-transaction-region" \
+STREAMFLEX_OUTPUT_DIR=/tmp/streamflex-direct-epoch-smoke-2026-05-08 \
+  zsh sandbox/run_streamflex_region_instrumented_matrix.sh
+```
+
+Default 200k throughput + 10k latency command:
+
+```sh
+STREAMFLEX_BUILD=0 \
+STREAMFLEX_WORKLOAD=all \
+STREAMFLEX_EVENTS=200000 \
+STREAMFLEX_LATENCY_EVENTS=10000 \
+STREAMFLEX_BENCHMARK_RUNS=3 \
+STREAMFLEX_WARMUPS=1 \
+STREAMFLEX_MODES="heap improved-safezone rift-streaming rift-checked-direct-epoch rift-checked-safezone-direct-epoch rift-checked-transaction-region rift-checked-safezone-transaction-region" \
+STREAMFLEX_OUTPUT_DIR=/Users/siyaoliu/rift/cache/streamflex-direct-epoch-200k-2026-05-08 \
+  zsh sandbox/run_streamflex_region_instrumented_matrix.sh
+```
+
+1M throughput command:
+
+```sh
+STREAMFLEX_BUILD=0 \
+STREAMFLEX_WORKLOAD=throughput \
+STREAMFLEX_EVENTS=1000000 \
+STREAMFLEX_BENCHMARK_RUNS=3 \
+STREAMFLEX_WARMUPS=1 \
+STREAMFLEX_MODES="heap improved-safezone rift-streaming rift-checked-direct-epoch rift-checked-safezone-direct-epoch rift-checked-transaction-region rift-checked-safezone-transaction-region" \
+STREAMFLEX_OUTPUT_DIR=/Users/siyaoliu/rift/cache/streamflex-direct-epoch-throughput-1m-2026-05-08 \
+  zsh sandbox/run_streamflex_region_instrumented_matrix.sh
+```
+
+20k smoke rows:
+
+| Workload | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Deadline misses | Peak RSS bytes | Checksum |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| throughput | heap | 4.181 | 0.790 | 0.000 | 0 |  | 8011776 | 334131456973800 |
+| throughput | Rift Streaming | 3.648 | 0.000 | 0.021 | 249937 |  | 8142848 | 334131456973800 |
+| throughput | checked direct epoch | 3.631 | 0.000 | 0.023 | 249937 |  | 8126464 | 334131456973800 |
+| throughput | scoped checked direct epoch | 3.353 | 0.000 | 0.000 | 0 |  | 8159232 | 334131456973800 |
+| throughput | checked TransactionRegion | 4.616 | 0.000 | 0.036 | 249937 |  | 8175616 | 334131456973800 |
+| throughput | scoped checked TransactionRegion | 4.155 | 0.000 | 0.000 | 0 |  | 8175616 | 334131456973800 |
+| latency | heap | 0.836 | 0.000 | 0.000 | 0 | 0 | 8011776 | 62885581450470 |
+| latency | Rift Streaming | 0.961 | 0.000 | 0.025 | 49910 | 0 | 8142848 | 62885581450470 |
+| latency | checked direct epoch | 1.137 | 0.000 | 0.028 | 49910 | 0 | 8126464 | 62885581450470 |
+| latency | scoped checked direct epoch | 1.897 | 0.000 | 0.000 | 0 | 1 | 8159232 | 62885581450470 |
+| latency | checked TransactionRegion | 1.553 | 0.000 | 0.085 | 49910 | 0 | 8175616 | 62885581450470 |
+| latency | scoped checked TransactionRegion | 1.368 | 0.000 | 0.000 | 0 | 0 | 8175616 | 62885581450470 |
+
+200k throughput and 10k latency rows:
+
+| Workload | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | p99 ns | p999 ns | Max ns | Deadline misses | Peak RSS bytes |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| throughput | heap | 46.737 | 9.294 | 0.000 | 0 |  |  |  |  | 8011776 |
+| throughput | improved SafeZone | 59.703 | 0.000 | 0.000 | 0 |  |  |  |  | 8110080 |
+| throughput | Rift Streaming | 47.897 | 0.000 | 0.174 | 2499843 |  |  |  |  | 8142848 |
+| throughput | checked direct epoch | 34.874 | 0.000 | 0.128 | 2499843 |  |  |  |  | 8142848 |
+| throughput | scoped checked direct epoch | 32.029 | 0.000 | 0.000 | 0 |  |  |  |  | 8126464 |
+| throughput | checked TransactionRegion | 45.923 | 0.000 | 0.195 | 2499843 |  |  |  |  | 8175616 |
+| throughput | scoped checked TransactionRegion | 41.173 | 0.000 | 0.000 | 0 |  |  |  |  | 8175616 |
+| latency | heap | 11.219 | 1.657 | 0.000 | 0 | 958 | 10875 | 387084 | 4 | 8011776 |
+| latency | improved SafeZone | 11.307 | 0.000 | 0.000 | 0 | 1209 | 5208 | 18125 | 0 | 8110080 |
+| latency | Rift Streaming | 9.901 | 0.000 | 0.240 | 499789 | 1000 | 1125 | 3500 | 0 | 8142848 |
+| latency | checked direct epoch | 10.692 | 0.000 | 0.244 | 499789 | 1125 | 8666 | 65625 | 0 | 8142848 |
+| latency | scoped checked direct epoch | 9.636 | 0.000 | 0.000 | 0 | 1042 | 7000 | 23000 | 0 | 8126464 |
+| latency | checked TransactionRegion | 17.040 | 0.314 | 0.896 | 499789 | 2584 | 18584 | 317042 | 2 | 8175616 |
+| latency | scoped checked TransactionRegion | 13.511 | 0.310 | 0.000 | 0 | 1459 | 3500 | 312750 | 1 | 8175616 |
+
+1M throughput rows:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Region opens/closes/resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---|---:|---:|
+| heap | 218.582 | 44.681 | 0.000 | 0 | 0 / 0 / 0 | 8011776 | 16677201917717579 |
+| improved SafeZone | 208.653 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 8142848 | 16677201917717579 |
+| Rift Streaming | 182.246 | 0.000 | 0.604 | 12500758 | 1 / 1 / 3906 | 8126464 | 16677201917717579 |
+| checked direct epoch | 185.550 | 0.000 | 0.636 | 12500758 | 1 / 1 / 3907 | 8126464 | 16677201917717579 |
+| scoped checked direct epoch | 163.339 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 8126464 | 16677201917717579 |
+| checked TransactionRegion | 226.059 | 0.000 | 1.001 | 12500758 | 3908 / 3908 / 0 | 8175616 | 16677201917717579 |
+| scoped checked TransactionRegion | 205.929 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 8159232 | 16677201917717579 |
+
+Interpretation:
+
+- Direct checked epoch supersedes `TransactionRegion` for this StreamFlex-shaped
+  throughput row. At 1M events, scoped direct epoch is `163.339 ms`, versus
+  heap `218.582 ms`, improved SafeZone `208.653 ms`, trusted Streaming
+  `182.246 ms`, and scoped checked TransactionRegion `205.929 ms`.
+- The Stream backend direct epoch is also competitive with trusted Streaming:
+  `185.550 ms` versus `182.246 ms`, with similar region object counts and
+  near-zero region-operation time.
+- Latency at 10k events also improves versus `TransactionRegion`: scoped
+  direct epoch is fastest in this same-run latency matrix (`9.636 ms`) with no
+  deadline misses, but this should be treated as methodology evidence rather
+  than exact StreamFlex/Ovm evidence.
+- The result reinforces the topology rule: when all temporary stage objects die
+  at the same batch/epoch boundary, a direct checked epoch block is the right
+  reusable API. `TransactionRegion` remains useful when code needs separate
+  typed append lists that cannot be consumed as direct linked objects.
 
 Caveats:
 

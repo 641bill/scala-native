@@ -335,6 +335,78 @@ object StancuRegionMatrixHelpers {
     checksum
   }
 
+  def runCheckedDirectEpochTransactions(safeZoneBackend: Boolean): Long = {
+    val cfg = StancuRegionConfig
+    val stock = initStock(cfg.products)
+    val revenue = new Array[Long](cfg.warehouses)
+    val customers = new Array[Long](cfg.warehouses)
+
+    def run()(using stream: RiftRegion.StreamingRegion^): Unit = {
+      var tx = 0
+      while (tx < cfg.transactions) {
+        val batchStart = tx
+        val batchEnd = math.min(cfg.transactions, tx + cfg.transactionsPerRegion)
+        RiftRegion.epoch { region ?=>
+          final class CheckedTxLine(
+              val product: Int,
+              val quantity: Int,
+              val priceCents: Int,
+              val next: CheckedTxLine^{region}
+          )
+
+          final class CheckedTxOrder(
+              val id: Int,
+              val warehouse: Int,
+              val customer: Int,
+              val totalCents: Long,
+              val lines: CheckedTxLine^{region}
+          )
+
+          var currentTx = batchStart
+          while (currentTx < batchEnd) {
+            val warehouse = mix(currentTx + 13) % cfg.warehouses
+            val customer = mix(currentTx + 101) & 0xffff
+            var lines: CheckedTxLine^{region} = null
+            var total = 0L
+            var item = 0
+            while (item < cfg.itemsPerTransaction) {
+              val seed = mix(currentTx * 104729 + item * 8191)
+              val product = seed % cfg.products
+              val quantity = (mix(seed + 19) & 3) + 1
+              val price = 100 + (mix(seed + 23) % 10000)
+              total += quantity.toLong * price.toLong
+              lines = RiftRegion.allocOpen(
+                new CheckedTxLine(product, quantity, price, lines)
+              )
+              item += 1
+            }
+
+            val order = RiftRegion.allocOpen(
+              new CheckedTxOrder(currentTx, warehouse, customer, total, lines)
+            )
+            var line = order.lines
+            while (line != null) {
+              stock(line.product) -= line.quantity
+              line = line.next
+            }
+            revenue(order.warehouse) += order.totalCents
+            customers(order.warehouse) ^=
+              order.customer.toLong + order.id.toLong
+            currentTx += 1
+          }
+        }
+        tx = batchEnd
+      }
+    }
+
+    if (safeZoneBackend) RiftRegion.streamingSafeZone { stream ?=> run() }
+    else RiftRegion.streaming { stream ?=> run() }
+
+    val checksum = checksumState(stock, revenue, customers)
+    checksumSink = checksum
+    checksum
+  }
+
   private def medianDouble(values: Array[Double]): Double = {
     val sorted = values.clone()
     scala.util.Sorting.quickSort(sorted)
@@ -351,6 +423,10 @@ object StancuRegionMatrixHelpers {
 
   private def runWorkload(mode: String): Long =
     if (mode == "safezone") runSafeZoneTransactions()
+    else if (mode == "rift-checked-direct-epoch")
+      runCheckedDirectEpochTransactions(safeZoneBackend = false)
+    else if (mode == "rift-checked-safezone-direct-epoch")
+      runCheckedDirectEpochTransactions(safeZoneBackend = true)
     else runHeapOrRiftTransactions(mode)
 
   private def logicalRegionObjects(): Long = {
@@ -371,7 +447,10 @@ object StancuRegionMatrixHelpers {
 
   def runBenchmark(mode: String): Unit = {
     val cfg = StancuRegionConfig
-    val usesRift = mode == "rift-hp" || mode == "rift-streaming"
+    val usesRift =
+      mode == "rift-hp" ||
+        mode == "rift-streaming" ||
+        mode == "rift-checked-direct-epoch"
     val expected = runWorkload("heap")
 
     var warmup = 0
@@ -459,10 +538,13 @@ object StancuRegionMatrixHelpers {
 
   def validateMode(mode: String): Unit =
     mode match {
-      case "heap" | "safezone" | "rift-hp" | "rift-streaming" => ()
+      case "heap" | "safezone" | "rift-hp" | "rift-streaming" |
+          "rift-checked-direct-epoch" |
+          "rift-checked-safezone-direct-epoch" =>
+        ()
       case other =>
         throw new IllegalArgumentException(
-          s"unknown Stancu mode '$other'; expected heap, safezone, rift-hp, or rift-streaming"
+          s"unknown Stancu mode '$other'; expected heap, safezone, rift-hp, rift-streaming, rift-checked-direct-epoch, or rift-checked-safezone-direct-epoch"
         )
     }
 }
@@ -471,7 +553,10 @@ object StancuRegionMatrixHelpers {
   StancuRegionMatrixHelpers.validateMode(mode)
   StancuRegionMatrixHelpers.printConfig(mode)
 
-  val usesRift = mode == "rift-hp" || mode == "rift-streaming"
+  val usesRift =
+    mode == "rift-hp" ||
+      mode == "rift-streaming" ||
+      mode == "rift-checked-direct-epoch"
   if (usesRift) RiftRegion.init(0)
   try {
     StancuRegionMatrixHelpers.runBenchmark(mode)

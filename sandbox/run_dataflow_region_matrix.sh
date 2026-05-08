@@ -11,9 +11,9 @@ export PATH="$JAVA_HOME/bin:$PATH"
 
 operator=${DATAFLOW_OPERATOR:-all}
 include_controls=${RIFT_BENCH_INCLUDE_CONTROLS:-${RIFT_EVAL_INCLUDE_CONTROLS:-0}}
-modes=(${(z)${DATAFLOW_MODES:-"heap improved-safezone rift-checked checked-page-token checked-page-token-scoped"}})
+modes=(${(z)${DATAFLOW_MODES:-"gc-heap region-scoped-rooted checked-region-stream checked-page-token checked-region-scoped-page-token checked-region-scoped-epoch"}})
 if [[ -z "${DATAFLOW_MODES:-}" && ( "${include_controls}" == "1" || "${include_controls}" == "true" || "${include_controls}" == "yes" ) ]]; then
-  modes+=(current-safezone unsafezone-hp rift-hp rift-streaming checked-epoch-fold)
+  modes+=(current-safezone unsafezone-hp rift-hp rift-streaming checked-epoch-fold checked-epoch-stream)
 fi
 
 run_mode() {
@@ -37,35 +37,41 @@ cd "${repo_dir}"
 
 for selected_mode in "${modes[@]}"; do
   case "${selected_mode}" in
-    heap)
+    heap|gc-heap|heap-immix)
       run_mode "Immix heap" "heap"
       ;;
-    current-safezone)
+    current-safezone|safezone-current)
       run_mode "Current SafeZone" "safezone" "0"
       ;;
-    improved-safezone)
+    improved-safezone|safezone-improved|safezone-improved-32k|region-scoped-rooted)
       run_mode "Improved SafeZone" "safezone" "1"
       ;;
-    unsafezone-hp)
+    unsafezone-hp|safezone-rootless-32k|region-scoped-rootless)
       run_mode "UnsafeZone-HP" "safezone" "3" "32768"
       ;;
-    rift-hp)
+    rift-hp|rift-trusted-hp|region-hp-rootless)
       run_mode "Rift HPZone" "rift-hp"
       ;;
-    rift-streaming)
+    rift-streaming|rift-trusted-streaming|region-stream-rootless)
       run_mode "Rift Streaming" "rift-streaming"
       ;;
-    rift-checked)
+    rift-checked|checked-region-stream)
       run_mode "Rift checked RegionBuffer" "rift-checked"
       ;;
-    checked-page-token)
+    checked-page-token|checked-page-token-stream|checked-region-stream-page-token)
       run_mode "Checked page-token SELECT" "checked-page-token" "" "" "select"
       ;;
-    checked-page-token-scoped)
+    checked-page-token-scoped|checked-region-scoped-page-token)
       run_mode "Checked scoped page-token SELECT" "checked-page-token-scoped" "1" "32768" "select"
       ;;
-    checked-epoch-fold)
+    checked-epoch-fold|checked-region-stream-epoch-fold)
       run_mode "Checked epoch-fold AGGREGATE" "checked-epoch-fold" "" "" "aggregate"
+      ;;
+    checked-epoch-stream|checked-region-stream-epoch)
+      run_mode "Checked direct epoch stream" "checked-epoch-stream"
+      ;;
+    checked-epoch-scoped|checked-region-scoped-epoch)
+      run_mode "Checked direct epoch scoped" "checked-epoch-scoped" "1" "32768"
       ;;
     *)
       echo "unknown DATAFLOW_MODES entry: ${selected_mode}" >&2

@@ -1,7 +1,10 @@
 # Stancu Region Matrix
 
+Last updated: 2026-05-08 21:07 CEST
+
 Status: Stancu-style annotation/accounting probe with validated smoke, default
-median, pressure median, heavier-object median, and boundary-sensitivity runs.
+median, pressure median, heavier-object median, boundary-sensitivity runs, and
+direct checked epoch rows.
 
 The harness is implemented in
 `sandbox/src/main/scala-next/StancuRegionMatrix.scala` and run with
@@ -29,6 +32,9 @@ The current workload is a small warehouse transaction shape:
 
 Heap mode allocates transaction objects with `new`; SafeZone mode allocates
 them in Scala Native SafeZone; Rift modes allocate them with `region.alloc`.
+Checked direct epoch modes allocate transaction line/order objects inside one
+`RiftRegion.epoch { ... }` per transaction batch while durable stock/revenue
+metadata stays on the heap.
 
 ## Default Configuration
 
@@ -274,6 +280,103 @@ Interpretation:
   while removing measured GC.
 - Improved SafeZone is still faster than Rift, so this is a Rift-vs-heap win,
   not a Rift-vs-improved-SafeZone win.
+
+## Direct Checked Epoch Follow-Up
+
+Date/time: 2026-05-08 21:07 CEST.
+
+This follow-up applies the reusable `RiftRegion.epoch { ... }` topology to the
+Stancu-style transaction boundary. The checked path uses one epoch block for
+each `STANCU_TX_PER_REGION` batch. Ordinary transaction line and order objects
+live in the epoch region; durable product stock, warehouse revenue, and
+customer checksum state remain heap arrays.
+
+Smoke command:
+
+```sh
+STANCU_TRANSACTIONS=20000 \
+STANCU_ITEMS_PER_TX=8 \
+STANCU_TX_PER_REGION=64 \
+STANCU_BENCHMARK_RUNS=1 \
+STANCU_WARMUPS=0 \
+STANCU_MODES="heap rift-streaming rift-checked-direct-epoch rift-checked-safezone-direct-epoch" \
+STANCU_OUTPUT_DIR=/tmp/stancu-direct-epoch-smoke-2026-05-08 \
+  zsh sandbox/run_stancu_region_instrumented_matrix.sh
+```
+
+200k command:
+
+```sh
+STANCU_BUILD=0 \
+STANCU_TRANSACTIONS=200000 \
+STANCU_ITEMS_PER_TX=8 \
+STANCU_TX_PER_REGION=64 \
+STANCU_BENCHMARK_RUNS=3 \
+STANCU_WARMUPS=1 \
+STANCU_MODES="heap improved-safezone rift-streaming rift-checked-direct-epoch rift-checked-safezone-direct-epoch" \
+STANCU_OUTPUT_DIR=/Users/siyaoliu/rift/cache/stancu-direct-epoch-200k-2026-05-08 \
+  zsh sandbox/run_stancu_region_instrumented_matrix.sh
+```
+
+1M command:
+
+```sh
+STANCU_BUILD=0 \
+STANCU_TRANSACTIONS=1000000 \
+STANCU_ITEMS_PER_TX=8 \
+STANCU_TX_PER_REGION=64 \
+STANCU_BENCHMARK_RUNS=3 \
+STANCU_WARMUPS=1 \
+STANCU_MODES="heap improved-safezone rift-streaming rift-checked-direct-epoch rift-checked-safezone-direct-epoch" \
+STANCU_OUTPUT_DIR=/Users/siyaoliu/rift/cache/stancu-direct-epoch-1m-2026-05-08 \
+  zsh sandbox/run_stancu_region_instrumented_matrix.sh
+```
+
+20k smoke rows:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Region opens/closes/resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---|---:|---:|
+| heap | 4.754 | 0.731 | 0.000 | 0 | 0 / 0 / 0 | 7929856 | 4921059990652481282 |
+| Rift Streaming | 4.403 | 0.000 | 0.031 | 180000 | 1 / 1 / 312 | 7946240 | 4921059990652481282 |
+| checked direct epoch | 3.528 | 0.000 | 0.030 | 160000 | 1 / 1 / 313 | 7946240 | 4921059990652481282 |
+| scoped checked direct epoch | 3.304 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 7962624 | 4921059990652481282 |
+
+200k rows:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Region opens/closes/resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---|---:|---:|
+| heap | 45.211 | 4.595 | 0.000 | 0 | 0 / 0 / 0 | 7929856 | -1953196317317355226 |
+| improved SafeZone | 37.468 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 7995392 | -1953196317317355226 |
+| Rift Streaming | 44.880 | 0.000 | 0.223 | 1800000 | 1 / 1 / 3124 | 7946240 | -1953196317317355226 |
+| checked direct epoch | 35.196 | 0.000 | 0.213 | 1600000 | 1 / 1 / 3125 | 7946240 | -1953196317317355226 |
+| scoped checked direct epoch | 31.638 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 7995392 | -1953196317317355226 |
+
+1M rows:
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Region opens/closes/resets | Peak RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---|---:|---:|
+| heap | 225.798 | 23.901 | 0.000 | 0 | 0 / 0 / 0 | 7929856 | -3971418759171958816 |
+| improved SafeZone | 186.122 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 8044544 | -3971418759171958816 |
+| Rift Streaming | 219.668 | 0.000 | 1.019 | 9000000 | 1 / 1 / 15624 | 7946240 | -3971418759171958816 |
+| checked direct epoch | 174.137 | 0.000 | 1.040 | 8000000 | 1 / 1 / 15625 | 7946240 | -3971418759171958816 |
+| scoped checked direct epoch | 160.198 | 0.299 | 0.000 | 0 | 0 / 0 / 0 | 7995392 | -3971418759171958816 |
+
+Interpretation:
+
+- Direct checked epoch changes the Stancu-style result from a trusted
+  Rift-vs-heap story into a checked-region win. At 1M, scoped checked direct
+  epoch is `160.198 ms` versus heap `225.798 ms`, improved SafeZone
+  `186.122 ms`, and trusted Streaming `219.668 ms`.
+- The Rift streaming checked epoch is also faster than improved SafeZone at
+  200k and 1M in this same-run follow-up, though the SafeZone-backed scoped
+  checked backend is the fastest row.
+- The result matches the design: transaction line/order objects have a coarse
+  batch lifetime; durable accounting arrays remain heap control metadata; the
+  epoch closes in bulk after the batch.
+- The lower `median_rift_alloc_object_total` in checked direct epoch is a
+  runtime-counter artifact of the open allocation path and should not be used
+  as the logical object count. Use `logical_region_objects` for the intended
+  candidate population.
 
 Caveats:
 

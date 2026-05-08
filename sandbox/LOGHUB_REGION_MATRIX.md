@@ -1,13 +1,14 @@
 # LogHub Region Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-08 09:10 CEST
+Last updated: 2026-05-08 11:35 CEST
 
 Status: implemented real-input candidate. The matrix has a generated fallback
 for compile/smoke validation and a file-backed byte-line path for extracted
-real LogHub files. The first real BGL rows and the richer q3 template/session
-extension are correctness-valid and show modest throughput/RSS/fixed-memory
-value, but not a flagship GC-heavy case.
+real LogHub files. The first real BGL rows, the richer BGL q3
+template/session extension, and the HDFS v1 follow-up are correctness-valid
+and show modest throughput/RSS/fixed-memory value, but not a flagship
+GC-heavy case.
 
 ## Goal
 
@@ -41,6 +42,7 @@ Current local real input:
 | Dataset | Local file | Lines | Size |
 |---|---|---:|---:|
 | LogHub BGL | `/Users/siyaoliu/rift/cache/benchmark-data/loghub/BGL/BGL.log` | `4747963` | `743185031` bytes |
+| LogHub HDFS v1 | `/Users/siyaoliu/rift/cache/benchmark-data/loghub/HDFS_1/HDFS.log` | `11175629` | `1576383671` bytes |
 
 The matrix also supports generated smoke input:
 
@@ -225,6 +227,66 @@ session-candidate record; window close counts session buckets.
 | q2-window-counts | `384M` | `5724.792` | `145.934` | `152.610` | `2` | `406667264` |
 | q2-window-counts | `256M` | `5768.222` | `199.503` | `265.396` | `4` | `272465920` |
 
+### HDFS v1, 1M, 3-run medians
+
+HDFS v1 was added on 2026-05-08 as a larger real machine-log follow-up after
+BGL q3 and RIoTBench/MHEALTH did not expose flagship GC pressure. The 20k
+smoke matched checksums/output counts for q1/q2/q3 across heap, improved
+SafeZone-32k, trusted Streaming, and checked scoped page-token. The 1M run used
+the extracted LogHub HDFS v1 file:
+
+`/Users/siyaoliu/rift/cache/benchmark-data/loghub/HDFS_1/HDFS.log`
+
+Command:
+
+```sh
+LOGHUB_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/loghub/HDFS_1/HDFS.log \
+LOGHUB_LINES=1000000 \
+LOGHUB_BENCHMARK_RUNS=3 \
+LOGHUB_WARMUPS=1 \
+LOGHUB_QUERIES="q1-tokens q2-window-counts q3-template-session" \
+LOGHUB_MODES="heap-immix safezone-improved-32k rift-trusted-streaming rift-checked-safezone-page-token" \
+LOGHUB_OUTPUT_DIR=/Users/siyaoliu/rift/cache/loghub-hdfs-1m-2026-05-08 \
+LOGHUB_BUILD=0 \
+zsh sandbox/run_loghub_region_matrix.sh
+```
+
+| Query | Mode | Elapsed ms | GC median ms | GC max ms | Runs with GC | RSS bytes | Output |
+|---|---|---:|---:|---:|---:|---:|---:|
+| q1-tokens | heap-immix | `8059.155` | `139.906` | `191.623` | `3/3` | `408551424` | `13495462` |
+| q1-tokens | safezone-improved-32k | `7919.352` | `0.000` | `0.000` | `0/3` | `356286464` | `13495462` |
+| q1-tokens | rift-trusted-streaming | `7938.369` | `0.000` | `0.000` | `0/3` | `356171776` | `13495462` |
+| q1-tokens | rift-checked-safezone-page-token | `7923.079` | `0.000` | `0.000` | `0/3` | `356319232` | `13495462` |
+| q2-window-counts | heap-immix | `8227.369` | `92.659` | `104.790` | `3/3` | `408666112` | `41` |
+| q2-window-counts | safezone-improved-32k | `7924.213` | `0.000` | `0.000` | `0/3` | `394887168` | `41` |
+| q2-window-counts | rift-trusted-streaming | `7871.713` | `0.000` | `0.000` | `0/3` | `356073472` | `41` |
+| q2-window-counts | rift-checked-safezone-page-token | `7871.856` | `0.000` | `0.000` | `0/3` | `394969088` | `41` |
+| q3-template-session | heap-immix | `8460.928` | `81.910` | `88.603` | `3/3` | `408666112` | `283857` |
+| q3-template-session | safezone-improved-32k | `8360.487` | `44.009` | `46.158` | `3/3` | `319864832` | `283857` |
+| q3-template-session | rift-trusted-streaming | `8439.205` | `35.908` | `37.188` | `3/3` | `319143936` | `283857` |
+| q3-template-session | rift-checked-safezone-page-token | `8506.708` | `52.221` | `55.345` | `3/3` | `319864832` | `283857` |
+
+Interpretation:
+
+- HDFS q1/q2 are modest real-input wins for the SafeZone/Streaming/page-token
+  family, with q2 the strongest checked row: checked scoped page-token
+  `7871.856 ms` versus heap `8227.369 ms`, while removing heap's `92.659 ms`
+  median timed GC and lowering RSS.
+- HDFS q3 is useful RSS/tail evidence but not an elapsed win for checked
+  page-token. Improved SafeZone wins elapsed versus heap, and trusted
+  Streaming nearly ties heap while cutting RSS/GC.
+- The result is stronger than the MHEALTH ceiling row but still not the
+  missing "huge GC" real-data case: heap GC remains about 1-2% of elapsed,
+  not the dominant bottleneck.
+- Timed GC does not explain the full q2 elapsed gap. Heap spends `92.659 ms`
+  median in timed GC, while checked scoped page-token is about `355 ms` faster
+  than heap. The remaining difference should be reported as broader
+  memory-management/mutator-side cost: heap allocation path work, heap
+  growth/metadata effects, RSS/cache locality, and region-owned append/close
+  bookkeeping. For LogHub rows, read elapsed, RSS, timed GC, and diagnostic
+  allocation/append/close buckets together rather than treating timed GC as
+  the only memory cost.
+
 ### Full BGL q2, single-run scale probe
 
 | Mode | Loaded lines | Elapsed ms | GC ms | GC collections | RSS bytes | Output |
@@ -258,6 +320,9 @@ elapsed. Region/scoped rows reduce RSS by about `53 MB` and cut the GC tail,
 while trusted Streaming is only about `0.8%` faster than heap and checked
 scoped page-token is slightly slower. The current conclusion is therefore
 "real-input modest throughput/RSS/tail evidence," not "GC-heavy real-data case
-study." Next benchmark search should continue to RIoTBench/Theodolite-style
-IoT records or another provenance-clean NDJSON/log workload with heavier
+study." The HDFS v1 follow-up strengthens the modest real-log story: q2 gives
+a clean checked scoped page-token throughput/RSS/GC win over heap, but heap GC
+is still only about 1-2% of elapsed. Next benchmark search should continue to
+Theodolite-style real industrial-energy traces, larger LogHub/Spark/Windows
+logs, or another provenance-clean NDJSON/security workload with heavier
 natural object materialization.

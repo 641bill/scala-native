@@ -1,7 +1,7 @@
 # Scala Native Win Envelope
 
 Date: 2026-05-01
-Last updated: 2026-05-07 13:51 CEST
+Last updated: 2026-05-08 21:07 CEST
 
 Status: Phase 6/7 evidence synthesis. This note classifies where Rift currently
 wins against Scala Native Immix, where it only reduces memory pressure, and
@@ -18,8 +18,73 @@ from the current dirty page-token checkpoint. It strengthens the page-token
 win envelope: Dataflow SELECT scoped page-token is `18.572 ms` versus heap
 `28.942 ms`; generated Common Crawl-shaped q1/q2 checked scoped page-token is
 `3840.668` / `3839.158 ms` versus heap `5618.631` / `5303.179 ms`; and
-DSPBench Fraud q2 checked scoped page-token is now a modest real-input win at
-`818.574 ms` versus heap `862.834 ms`.
+DSPBench Fraud q2 checked scoped page-token has a useful dirty direction check
+at `818.574 ms` versus heap `862.834 ms`.
+
+Latest checked page-token cleanup update:
+The clean page-token path has since moved through no-drain close, live-length
+removal, owned cursor close, and open-allocation lowering. The current
+open-allocation checkpoint keeps generated Common Crawl-shaped q1/q2 as the
+strongest checked memory-pressure rows: checked scoped page-token
+`3707.214/3902.795 ms` versus heap `5577.965/5183.074 ms`, with heap timed GC
+`1741.640/1565.074 ms`. DSPBench Fraud q2 is a modest real-input checked/RSS
+row after open allocation: checked scoped page-token `797.782 ms` versus heap
+`806.697 ms`, while trusted Streaming remains fastest at `778.975 ms`.
+DSPBench Log Processing has also been added. Its 1M q2 row has checked scoped
+page-token fastest (`1733.654 ms` versus heap `1750.291 ms`) and cuts heap max
+GC from `88.210 ms` to `18.584 ms`, but RSS is higher and heap GC remains only
+about `2.6%` of elapsed. Treat Fraud q2 and Log q2 as real-input modest/control
+rows, not the flagship GC-heavy case. LogHub BGL q3 template/session mining was
+then added as a richer real-log object path. At 1M lines, trusted Streaming is
+`8615.627 ms` versus heap `8683.558 ms`, and checked scoped page-token is
+`8722.008 ms`; all region/scoped rows cut RSS from `290 MB` to about `237 MB`.
+Heap GC is still only `84.166 ms` median, under 1% of elapsed, so this also
+belongs in modest/control evidence.
+
+Latest real-log follow-up:
+LogHub HDFS v1 adds a larger public Hadoop log input with `11175629` lines.
+At 1M lines, q2-window-counts is the strongest checked LogHub row so far:
+checked scoped page-token is `7871.856 ms` versus heap `8227.369 ms`, removes
+heap median GC `92.659 ms`, and lowers RSS from `408666112` to `394969088`.
+q1 also modestly favors scoped/checked rows, while q3 is mainly RSS/GC-tail
+evidence. This strengthens the real-input modest-win category, but it is still
+not the missing GC-heavy flagship because heap GC is about 1% of elapsed and
+parser/token/template CPU dominates.
+
+Latest Yak real-input follow-up:
+`YakRegionMatrix` now includes checked `graphreal` topology rows over real SNAP
+LiveJournal edges. The 50M scale row is no longer a sub-second timing:
+`gc-heap` is `1618.105 ms` with `273.410 ms` timed GC and `2761261056` RSS.
+Per-epoch region rows use about `1.53 GB` RSS and report zero timed GC:
+`region-scoped-rooted` is `1256.538 ms`, `region-stream-rootless` is
+`1345.479 ms`, `checked-epoch-scoped` is `1069.241 ms`, and
+`checked-epoch-stream` is `1113.261 ms`. `checked-whole-run-scoped` is fastest
+at `1048.751 ms`, but uses `2977742848` RSS because it does not reclaim until
+the end. Page-token checked rows also beat heap, but are slower
+(`1403.878/1457.811 ms`) because page-token is the wrong topology for Yak. It
+remains local Yak-shaped methodology evidence rather than exact Yak/GraphChi,
+but it is now the strongest real-input prior-work-shaped win and the clearest
+evidence for exposing checked `epoch` topology. The reusable `EpochBuffer`
+follow-up confirms the API direction but not the implementation ceiling:
+`checked-epoch-buffer-scoped` is `1343.071 ms` versus same-rerun heap
+`1514.313 ms`, but it trails linked epoch `1022.643 ms`. `RiftRegion.epoch {
+... }` now exposes the direct checked linked-epoch path as the reusable API;
+the 10M API-backed rerun has direct checked epoch `212.691/229.532 ms`
+scoped/stream versus heap `317.779 ms` and `EpochBuffer` around `286 ms`.
+The apples-to-apples 50M API-backed rerun keeps the win:
+`checked-epoch-scoped` is `1055.958 ms` with `1.53 GB` RSS versus heap
+`1604.811 ms`, `288.801 ms` timed GC, and `2.76 GB` RSS. The same reusable
+epoch topology now covers
+local Yak-shaped `wordcount`, `graphstep`, `topword`, and `graphchi`; at 10M
+logical objects, `checked-epoch-scoped` is fastest among measured rows for all
+four. It now also covers Broom/Dataflow SELECT, AGGREGATE, and JOIN: at
+10 epochs x 100k documents, `checked-epoch-scoped` is
+`19.318/36.016/20.082 ms` versus heap `26.996/52.754/31.281 ms` and improved
+SafeZone `23.339/44.737/24.136 ms`. The remaining Yak `sort` gap is now
+closed with a checked region-captured array row:
+`checked-epoch-stream` `230.000 ms` and `checked-epoch-scoped` `230.799 ms`
+versus heap `235.554 ms`; it is a modest CPU-bound win because heap timed GC
+is only `3.333 ms`.
 
 UnsafeZone-HP checkpoint: `evidence/UNSAFEZONE_HP_BASELINE_MATRIX.md` adds a
 benchmark-only SafeZone no-root control (`SAFEZONE_ROOTS_MODE=3`,
@@ -61,9 +126,13 @@ Common Crawl WET-shaped q1/q2 with the page-token operator. q1 heap is
 `5183.656 ms` with `1526.751 ms` GC; checked SafeZone-backed page-token is
 `3732.171 ms` and checked Rift page-token is `3972.493 ms`. NEXMark
 Beam-default is broadly favorable to checked Rift but mostly modest.
-StreamFlex scoped checked `TransactionRegion` is now the best checked
-StreamFlex row at `39.019 ms`, while trusted Rift remains faster around
-`36.4 ms`.
+StreamFlex direct checked epoch is now the best checked StreamFlex row:
+1M throughput has scoped direct epoch `163.339 ms` versus heap `218.582 ms`,
+improved SafeZone `208.653 ms`, trusted Streaming `182.246 ms`, and scoped
+checked `TransactionRegion` `205.929 ms`.
+Stancu-style transactions now have the same direct checked epoch direction:
+at 1M, scoped direct epoch is `160.198 ms` versus heap `225.798 ms`, improved
+SafeZone `186.122 ms`, and trusted Streaming `219.668 ms`.
 
 ## Purpose
 
@@ -103,13 +172,14 @@ live window payload still dominate.
 | ListOfLists linked | 5-run median | HPZone `12400.062 ms`; unsafezone-hp `9818.653 ms` | heap `15191.230 ms`; improved SafeZone `9914.397 ms` | Runtime + topology; SafeZone-family win | Clean UnsafeZone core/prior sweep |
 | ListOfLists flat | 3-run layout median | HPZone `1515.091 ms` | heap `1766.295 ms` | Layout/topology win | Validated enough for Phase 4 |
 | Pipeline surrogate | 5-run median | HPZone `5.089 ms` | heap `4.924 ms` | CPU-bound/no GC ceiling | Surrogate, not tracked-source evidence |
-| Broom-style Dataflow checked/UnsafeZone | local docs | checked SELECT `24.413 ms`, AGGREGATE `44.146 ms`, JOIN `24.935 ms`; unsafezone-hp `21.957` / `39.434` / `22.359 ms` | heap SELECT `28.258 ms`, AGGREGATE `48.849 ms`, JOIN `29.122 ms`; improved SafeZone `22.501` / `40.124` / `22.784 ms` | Rift checked beats heap on SELECT/JOIN, but SafeZone-family wins | Clean UnsafeZone core/prior sweep |
+| Broom-style Dataflow checked/UnsafeZone | local docs | reusable `checked-epoch-scoped` SELECT/AGGREGATE/JOIN `19.318` / `36.016` / `20.082 ms`; SELECT-only scoped page-token `19.010 ms`; older checked SELECT `24.413 ms`, AGGREGATE `44.146 ms`, JOIN `24.935 ms`; unsafezone-hp `21.957` / `39.434` / `22.359 ms` | same-rerun heap SELECT `26.996 ms`, AGGREGATE `52.754 ms`, JOIN `31.281 ms`; improved SafeZone `23.339` / `44.737` / `24.136 ms` | Direct checked epoch now beats heap and improved SafeZone across the full operator family; page-token remains SELECT-only; generic EpochFold remains negative | Local Broom-style methodology, not exact Naiad/Broom |
 | Broom-scale Dataflow | 40 x 500k docs, single run | HPZone SELECT `451.041 ms`, JOIN `447.803 ms` | heap SELECT `623.761 ms`, JOIN `602.540 ms` | Region-friendly operator win | Provisional single run |
-| StreamFlex pressure | throughput/latency pressure | Streaming throughput `329.896 ms`; latency `157.792 ms`, 0 misses | heap throughput `634.472 ms`; latency `169.331 ms`, 89 misses | Region-friendly latency/throughput win | Local methodology reproduction |
+| StreamFlex pressure | throughput/latency pressure plus direct checked epoch follow-up | 1M scoped direct checked epoch `163.339 ms`, trusted Streaming `182.246 ms`; older pressure Streaming throughput `329.896 ms`, latency `157.792 ms`, 0 misses | same-run 1M heap `218.582 ms`, improved SafeZone `208.653 ms`; older pressure heap throughput `634.472 ms`, latency `169.331 ms`, 89 misses | Direct checked epoch is now the reusable StreamFlex-shaped win; trusted Streaming remains a lower-bound runtime row | Local methodology reproduction |
 | Yak top-word/filter | local methodology | Streaming `68.959 ms`; unsafezone-hp `58.686 ms` | heap `70.370 ms`; improved SafeZone `59.286 ms` | SafeZone-family win; Rift only roughly matches heap | Clean UnsafeZone core/prior sweep |
 | Yak GraphChi-style | 40 x 16 x 15625 edges | Streaming `236.388 ms` | heap `302.599 ms` | Region-friendly vs heap, not improved SafeZone | Local methodology reproduction |
 | Yak grouped sort | 10 x 100k records | HPZone `227.393 ms` | heap `237.354 ms` | CPU/sort-bound, modest allocator win | Local methodology reproduction |
-| Stancu-style tx boundary | 200k tx, 64/region | Streaming `51.478 ms`; unsafezone-hp `33.335 ms` | heap `44.141 ms`; improved SafeZone `33.720 ms` | SafeZone-family win; Rift loses elapsed | Clean UnsafeZone core/prior sweep |
+| Yak real graph replay | 50M SNAP LiveJournal edges | API-backed direct epoch `checked-epoch-scoped` `1055.958 ms`, `checked-epoch-stream` `1101.001 ms`, RSS about `1.53 GB`; older topology rows: low-RSS epoch `1069.241/1113.261 ms`, region baselines `1256.538/1345.479 ms`; reusable `EpochBuffer` scoped `1361.752 ms`; whole-run checked scoped `1048.751 ms` but RSS `2977742848` | API-backed `gc-heap` `1604.811 ms`, GC `288.801 ms`, RSS `2759835648`; older topology heap `1618.105 ms`, GC `273.410 ms`, RSS `2761261056` | Strong real-input Yak-shaped region/RSS/GC win; checked direct epoch is now reusable API evidence; `EpochBuffer` remains a slower generic abstraction; not exact Yak/GraphChi | Local methodology reproduction over real edge list |
+| Stancu-style tx boundary | 1M transactions, 64/epoch | scoped direct checked epoch `160.198 ms`; direct checked epoch `174.137 ms` | heap `225.798 ms`; improved SafeZone `186.122 ms`; trusted Streaming `219.668 ms` | Direct checked epoch win; durable accounting arrays stay heap metadata | Local methodology reproduction, not exact Stancu/SPECjbb2005 |
 | Checked RegionBuffer | 1M records | checked `28.654 ms` | heap `33.825 ms` | Cheap checked container win | Focused checked API evidence |
 | Checked RegionPriorityQueue | 500k records | checked `28.621 ms` | heap `27.369 ms` | Checked-container overhead | Focused checked API evidence |
 | Checked IndexedPriorityQueue | 1M events | checked `103.052 ms` | heap `100.254 ms` | Checked-container overhead | Focused checked API evidence |
@@ -140,7 +210,7 @@ live window payload still dominate.
 | Common Crawl WET-shaped tokenization | 1M generated pages / 137M token records | trusted HPZone `4386.590 ms`; checked `5088.712 ms` in RSS-complete rerun | heap `5466.535 ms` / RSS rerun `5670.270 ms`; improved SafeZone-32k `4608.641 ms` / RSS rerun `4644.747 ms` | Trusted GC-heavy stream-object win; checked beats heap but misses improved-SafeZone/trusted gate | Generated input; checked q1/q2 follow-up recorded |
 | Common Crawl WET-shaped q2 domain window | 1M generated pages / 137M token records | trusted Streaming `4164.288 ms`; checked `5061.479 ms` in RSS-complete rerun | heap `5267.784 ms` / RSS rerun `5342.373 ms`; improved SafeZone-32k `4425.273 ms` / RSS rerun `4444.954 ms` | Trusted GC-heavy stream/window win; checked beats heap modestly but misses improved-SafeZone/trusted gate | Generated input; checked q1/q2 follow-up recorded |
 | Common Crawl checked SafeZone-backed q1/q2 | 1M generated pages / 137M token records | q1 checked SafeZone-backed `4512.743 ms`; q2 `4431.865 ms` | q1 current checked `4744.872 ms`; q2 current checked `4698.903 ms` | Backend helps checked path but misses application gate | Focused backend follow-up, not final application claim |
-| Common Crawl checked page/token q1/q2 | 1M generated pages / 137M token records | q1 checked page-token `3956.366 ms`, SafeZone-backed page-token `3728.286 ms`; q2 checked page-token `4039.855 ms`, SafeZone-backed page-token `3816.247 ms` | q1 heap `5412.618 ms`, current checked `4855.133 ms`; q2 heap `5252.803 ms`, current checked `4820.611 ms` | First checked Common Crawl-shaped application gate pass | Generated stressor evidence; real-input proof still open |
+| Common Crawl checked page/token q1/q2 | 1M generated pages / 137M token records | q1 checked page-token `3933.900 ms`, SafeZone-backed page-token `3707.214 ms`; q2 checked page-token `4040.310 ms`, SafeZone-backed page-token `3902.795 ms` | q1 heap `5577.965 ms`; q2 heap `5183.074 ms`; heap timed GC `1741.640/1565.074 ms` | Strongest current checked stream-object/window win after open-allocation cleanup | Generated stressor evidence; real-input proof still open |
 | Common Crawl WET-shaped q3 parser scratch | 1M generated pages / 137M token records | Streaming `11206.504 ms`, HPZone `11233.751 ms` | heap `10330.962 ms` with `859.220 ms` GC | Negative scratch-shape control where heap wins elapsed despite GC | Generated input; checked modes absent |
 | Common Crawl WET small-bucket control | 100k pages / 13.7M records | Streaming `419.779 ms` | heap `386.807 ms`; improved SafeZone `381.109 ms` | Heap/SafeZone recover with tighter lifetimes | Generated input; not a case-study row |
 | Common Crawl real WET tokenization | 10k requested pages / 349709 token records | Streaming `15.651 ms` | heap `12.079 ms`; improved SafeZone `16.093 ms` | Real preloaded WET is CPU/live-input-bound, not GC-bound | Real preloaded input; no parser/decompression timing |
@@ -148,7 +218,9 @@ live window payload still dominate.
 | Common Crawl real WAT link metadata | 50k requested pages / 1006742 page-link records | SafeZone-backed page-token `31.792 ms` q4, `33.937 ms` q5 | q4 heap `33.646 ms`; q5 heap `35.066 ms`; improved-32k q4 `39.551 ms`, q5 `39.579 ms` | Real link-object path works and checked SafeZone-backed wins modestly, but heap timed GC is zero | Real preloaded WAT input; ceiling/control row |
 | GH Archive real JSON fields | 8-hour oracle, 1M events / 13M event-field records | Streaming rerun `340.820 ms`; SafeZone-backed page-token `348.817 ms` | heap `293.204 ms`, max GC `135.368 ms`, 1/3 runs with GC; improved-32k `374.923 ms` | Heap wins uncapped median by growing to ~1.7 GiB; 1G heap-cap diagnostic makes checked SafeZone-backed faster than heap | Memory-budget/tail-latency candidate, not uncapped throughput win |
 | DSPBench Spike Detection | real bundled `sensors.dat`, 1M replayed sensor events | q1 checked scoped page-token `1163.045 ms`; q2 trusted Streaming `1258.164 ms` | q1 heap `1187.525 ms`, GC `21.421 ms`; q2 heap `1271.677 ms`, GC `32.793 ms` | Real-input modest/control evidence: heap GC is visible but below 3% of elapsed, checked q1 wins modestly, checked q2 loses slightly | Local single-process methodology port, not exact DSPBench engine reproduction |
-| DSPBench Fraud Detection | real bundled `credit-card.dat`, 1M replayed transaction events | after page-token fast path, q2 checked scoped page-token `818.574 ms`, RSS `278544384`; original full matrix q2 trusted Streaming `763.819 ms`, RSS `282460160` | fast-path q2 heap `862.834 ms`, GC `79.393 ms`, RSS `358268928`; original full q2 heap `801.790 ms`, GC `69.686 ms`, RSS `358252544` | Modest checked real-input win plus trusted-runtime win; still not flagship GC-heavy because parser/replay/predictor/checksum CPU dominates | Local single-process methodology port with deterministic Markov-style proxy |
+| DSPBench Fraud Detection | real bundled `credit-card.dat`, 1M replayed transaction events | open-allocation q2 trusted Streaming `778.975 ms`, RSS `282443776`; checked scoped page-token `797.782 ms`, RSS `278511616` | open-allocation q2 heap `806.697 ms`, GC `69.624 ms`, RSS `358252544`; original full q2 heap `801.790 ms`, GC `69.686 ms`, RSS `358252544` | Modest checked elapsed/RSS win plus trusted-runtime win; still not flagship GC-heavy because parser/replay/predictor/checksum CPU dominates | Local single-process methodology port with deterministic Markov-style proxy |
+| DSPBench Log Processing | real bundled `http-server.log`, 1M replayed common-log events | q2 checked scoped page-token `1733.654 ms`, trusted Streaming `1737.469 ms`, RSS `322027520/324435968` | q2 heap `1750.291 ms`, median/max GC `44.992/88.210 ms`, RSS `307773440` | Modest checked real-input throughput/GC-tail row; not flagship because heap GC is only about `2.6%` of elapsed and RSS rises | Local single-process methodology port of DSPBench Spark Log Processing shape |
+| LogHub HDFS v1 q2 | 1M real Hadoop log lines / `13495462` line+token records | checked scoped page-token `7871.856 ms`, trusted Streaming `7871.713 ms`, RSS `394969088/356073472` | heap `8227.369 ms`, median/max GC `92.659/104.790 ms`, RSS `408666112` | Strongest checked LogHub row so far: modest throughput/RSS/GC-tail win, not flagship because heap GC is about 1% elapsed | Real file-backed LogPAI HDFS v1 input |
 | Wikimedia generated clickstream | 1M events / 2M records | HPZone `147.163 ms`, Streaming `148.364 ms` | heap `159.746 ms`; improved SafeZone `147.936 ms` | Promising Q2 row but not a 10% win over improved SafeZone | Generated TSV-shaped input only |
 | Wikimedia generated clickstream scale check | 10M events / 20M records | HPZone `1462.015 ms`, Streaming `1464.663 ms` | heap `1459.438 ms`; improved SafeZone `1473.088 ms` | Lower GC but elapsed near-tie | Single run only |
 | Wikimedia real enwiki clickstream | 1M events / 2M records | Streaming `157.449 ms` | heap `126.800 ms`; improved SafeZone `149.062 ms` | Heap wins; median timed GC zero, with one heap collection outlier | Real preloaded TSV input |

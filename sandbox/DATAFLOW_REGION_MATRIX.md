@@ -1,8 +1,10 @@
 # Dataflow Region Matrix
 
+Last updated: 2026-05-08 19:10 CEST
+
 Status: Broom-style methodology reproduction harness with trusted
-heap/SafeZone/Rift medians and checked RegionBuffer modes for SELECT,
-AGGREGATE, and JOIN.
+heap/SafeZone/Rift medians, checked RegionBuffer modes, and reusable checked
+direct-epoch modes for SELECT, AGGREGATE, and JOIN.
 
 The harness is implemented in
 `sandbox/src/main/scala-next/DataflowRegionMatrix.scala` and run with
@@ -30,6 +32,17 @@ Heap and Rift variants use the same logical programs:
   `RiftRegion.streaming/reset`. SELECT and JOIN use growable `RegionBuffer`
   for output records. AGGREGATE uses a region-owned table array with linked
   region-owned aggregate entries.
+- `checked-epoch-stream`: checked safe-API variant using
+  `RiftRegion.epoch { ... }` over the Rift streaming backend. It exposes the
+  direct per-epoch topology as a reusable API rather than benchmark-local
+  reset plumbing.
+- `checked-epoch-scoped`: checked safe-API variant using the same
+  `RiftRegion.epoch { ... }` source shape over the SafeZone-backed scoped
+  backend.
+- `checked-page-token-scoped`: operator-owned checked page-token path. This is
+  valid for SELECT/filter/project-style rows only, not AGGREGATE or JOIN.
+- `checked-epoch-fold`: older generic fold API for AGGREGATE. It remains a
+  negative/speed-gated control.
 
 The benchmark intentionally uses ordinary Scala object graphs in regions. It is
 not a primitive-key-only layout experiment.
@@ -101,9 +114,10 @@ DATAFLOW_EPOCHS=40 DATAFLOW_DOCS_PER_EPOCH=500000 DATAFLOW_BENCHMARK_RUNS=3 DATA
 
 ## Result Status
 
-Smoke, local medians, native-only instrumented RSS runs, and checked
-RegionBuffer/table medians have been recorded. These are local methodology
-reproduction numbers, not exact Broom/Naiad numbers.
+Smoke, local medians, native-only instrumented RSS runs, checked
+RegionBuffer/table medians, and reusable checked direct-epoch medians have
+been recorded. These are local methodology reproduction numbers, not exact
+Broom/Naiad numbers.
 
 Validation commands run on 2026-04-25:
 
@@ -275,6 +289,79 @@ Interpretation:
   `0.178 ms` for SELECT.
 - This is still a local methodology reproduction, not exact Naiad/Broom
   evidence and not a DEBS application result.
+
+## Reusable Checked Epoch Topology Rerun, 10 Epochs x 100k Documents
+
+Date: 2026-05-08
+
+This run applies the reusable `RiftRegion.epoch { ... }` API to the
+Broom/Dataflow methodology harness. The goal is to test whether the direct
+checked epoch topology that won on Yak/LiveJournal generalizes to another
+epoch-shaped benchmark before designing more operators.
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+DATAFLOW_EPOCHS=10 \
+DATAFLOW_DOCS_PER_EPOCH=100000 \
+DATAFLOW_AUTHORS_PER_EPOCH=20 \
+DATAFLOW_BENCHMARK_RUNS=3 \
+DATAFLOW_WARMUPS=1 \
+DATAFLOW_MODES="heap improved-safezone rift-streaming checked-epoch-scoped checked-epoch-stream checked-page-token-scoped checked-epoch-fold" \
+DATAFLOW_OPERATOR=all \
+  zsh sandbox/run_dataflow_region_matrix.sh
+```
+
+Configuration:
+
+- `DATAFLOW_EPOCHS=10`
+- `DATAFLOW_DOCS_PER_EPOCH=100000`
+- `DATAFLOW_AUTHORS_PER_EPOCH=20`
+- `DATAFLOW_BENCHMARK_RUNS=3`
+- `DATAFLOW_WARMUPS=1`
+- normal `run_dataflow_region_matrix.sh`, so no peak RSS was collected in this
+  pass.
+
+| Operator | Mode | Topology/API | Median elapsed ms | Median GC ms | Median region op ms | Region objects | Opens/closes/resets |
+|---|---|---|---:|---:|---:|---:|---:|
+| SELECT | `gc-heap` | heap | 26.996 | 6.355 | 0.000 | 0 | 0 / 0 / 0 |
+| SELECT | `region-scoped-rooted` | improved SafeZone | 23.339 | 0.000 | 0.000 | 0 | 0 / 0 / 0 |
+| SELECT | `region-stream-rootless` | trusted streaming | 22.563 | 0.000 | 0.050 | 1124990 | 1 / 1 / 9 |
+| SELECT | `checked-epoch-scoped` | direct epoch, SafeZone-backed | 19.318 | 0.000 | 0.000 | 0 | 0 / 0 / 0 |
+| SELECT | `checked-epoch-stream` | direct epoch, Rift streaming | 21.328 | 0.000 | 0.056 | 1124990 | 1 / 1 / 10 |
+| SELECT | `checked-page-token-scoped` | page-token SELECT only | 19.010 | 0.000 | 0.000 | 0 | 0 / 0 / 0 |
+| AGGREGATE | `gc-heap` | heap | 52.754 | 13.209 | 0.000 | 0 | 0 / 0 / 0 |
+| AGGREGATE | `region-scoped-rooted` | improved SafeZone | 44.737 | 0.000 | 0.000 | 0 | 0 / 0 / 0 |
+| AGGREGATE | `region-stream-rootless` | trusted streaming | 50.345 | 0.000 | 0.341 | 1627152 | 1 / 1 / 9 |
+| AGGREGATE | `checked-epoch-scoped` | direct epoch, SafeZone-backed | 36.016 | 0.000 | 0.000 | 0 | 0 / 0 / 0 |
+| AGGREGATE | `checked-epoch-stream` | direct epoch, Rift streaming | 39.926 | 0.000 | 0.300 | 1627152 | 1 / 1 / 10 |
+| AGGREGATE | `checked-epoch-fold` | generic fold control | 93.491 | 2.648 | 0.126 | 1000004 | 11 / 11 / 0 |
+| JOIN | `gc-heap` | heap | 31.281 | 9.672 | 0.000 | 0 | 0 / 0 / 0 |
+| JOIN | `region-scoped-rooted` | improved SafeZone | 24.136 | 0.000 | 0.000 | 0 | 0 / 0 / 0 |
+| JOIN | `region-stream-rootless` | trusted streaming | 23.467 | 0.000 | 0.053 | 1078279 | 1 / 1 / 9 |
+| JOIN | `checked-epoch-scoped` | direct epoch, SafeZone-backed | 20.082 | 0.000 | 0.000 | 0 | 0 / 0 / 0 |
+| JOIN | `checked-epoch-stream` | direct epoch, Rift streaming | 21.307 | 0.000 | 0.052 | 1078279 | 1 / 1 / 10 |
+
+Interpretation:
+
+- Reusable direct `RiftRegion.epoch { ... }` now covers Broom/Dataflow-style
+  SELECT, AGGREGATE, and JOIN, not only Yak/graph workloads.
+- `checked-epoch-scoped` is the fastest full-operator row in this rerun:
+  `19.318/36.016/20.082 ms` for SELECT/AGGREGATE/JOIN versus heap
+  `26.996/52.754/31.281 ms` and improved SafeZone
+  `23.339/44.737/24.136 ms`.
+- SELECT still has a slightly faster specialized page-token row
+  (`19.010 ms`), but page-token does not cover AGGREGATE/JOIN. The direct
+  epoch API is the reusable topology for this whole operator family.
+- `checked-epoch-stream` also beats heap and removes timed GC, but the
+  SafeZone-backed scoped backend is faster in this matrix.
+- `checked-epoch-fold` remains speed-gated. It is correct but much slower than
+  direct epoch AGGREGATE, so it should stay out of application/headline claims
+  until redesigned.
+- This run did not collect peak RSS. Use the earlier native-only rows for RSS,
+  or rerun this same matrix with an instrumented/native-only runner before
+  using it in final paper tables.
 
 ## Provisional Broom-Scale Single Run, 40 Epochs x 500k Documents
 

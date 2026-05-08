@@ -1631,6 +1631,45 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def streamingEpochOpenRegionCompiles(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Record(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    var sum = 0
+      |    RiftRegion.epoch { epoch ?=>
+      |      val record: Record^{epoch} =
+      |        RiftRegion.allocOpen(new Record(42))
+      |      sum = record.value
+      |    }
+      |    sum
+      |  }
+      |""".stripMargin)
+
+  @Test def streamingEpochValueCannotEscapeParent(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Record(val value: Int)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    var leaked: Record^{stream} = null
+      |    RiftRegion.epoch { epoch ?=>
+      |      val record: Record^{epoch} =
+      |        RiftRegion.allocOpen(new Record(42))
+      |      leaked = record
+      |    }
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set {stream}"
+    )
+
   @Test def childStreamingBucketEventGraphCompiles(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking
@@ -2012,6 +2051,35 @@ class RiftRegionCheckedCompilerTest {
       |    val region = RiftRegion.epochBufferRegionFor(stream, buffer)
       |    val event: Event^{stream} =
       |      RiftRegion.alloc(new Event(41))(using region)
+      |    RiftRegion.appendEpochBuffer(stream, buffer, event)
+      |    RiftRegion.closeEpochBufferWithCursor(stream, buffer)(consume)
+      |    total + RiftRegion.epochBufferLength(stream, buffer)
+      |  }
+      |""".stripMargin)
+
+  @Test def epochBufferOpenRegionStoresChildEpochRecords(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    val buffer = RiftRegion.epochBuffer[Event]()
+      |    var total = 0
+      |    def consume(
+      |        bucket: RiftRegion.StreamBucket^{stream},
+      |        cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+      |    ): Unit =
+      |      var current = cursor.nextOwnedOrNull()
+      |      while current != null do
+      |        val event = current.asInstanceOf[Event^{stream}]
+      |        total += event.value + bucket.startSeconds.toInt
+      |        current = cursor.nextOwnedOrNull()
+      |    val region = RiftRegion.epochBufferOpenRegionFor(stream, buffer)
+      |    val event: Event^{stream} =
+      |      RiftRegion.allocOpen(new Event(41))(using region)
       |    RiftRegion.appendEpochBuffer(stream, buffer, event)
       |    RiftRegion.closeEpochBufferWithCursor(stream, buffer)(consume)
       |    total + RiftRegion.epochBufferLength(stream, buffer)

@@ -430,6 +430,95 @@ object StreamFlexRegionMatrixHelpers {
     checksum
   }
 
+  private def processCheckedDirectEpochBatch(
+      startSeq: Int,
+      count: Int,
+      objectsPerEvent: Int
+  )(using region: RiftRegion.OpenStreamingRegion^): Long = {
+    final class DirectPacket(
+        val seq: Int,
+        val key: Int,
+        val payload: Int,
+        val next: DirectPacket^{region}
+    )
+
+    final class DirectDecoded(
+        val seq: Int,
+        val lane: Int,
+        val magnitude: Int,
+        val next: DirectDecoded^{region}
+    )
+
+    final class DirectClassified(
+        val seq: Int,
+        val lane: Int,
+        val score: Long,
+        val next: DirectClassified^{region}
+    )
+
+    final class DirectAlert(
+        val seq: Int,
+        val lane: Int,
+        val score: Long,
+        val next: DirectAlert^{region}
+    )
+
+    var packets: DirectPacket^{region} = null
+    var i = 0
+    while (i < count) {
+      val seq = startSeq + i
+      var fragment = 0
+      while (fragment < objectsPerEvent) {
+        val seed = mix(seq * 1009 + fragment * 9176)
+        packets = RiftRegion.allocOpen(
+          new DirectPacket(seq, seed & 0xff, mix(seed + 31), packets)
+        )
+        fragment += 1
+      }
+      i += 1
+    }
+
+    var decoded: DirectDecoded^{region} = null
+    var packet = packets
+    while (packet != null) {
+      val lane = (packet.key ^ (packet.payload >>> 7)) & 0x3f
+      val magnitude = mix(packet.payload + lane)
+      decoded = RiftRegion.allocOpen(
+        new DirectDecoded(packet.seq, lane, magnitude, decoded)
+      )
+      packet = packet.next
+    }
+
+    var classified: DirectClassified^{region} = null
+    var dec = decoded
+    while (dec != null) {
+      val score =
+        (dec.magnitude.toLong * 31L) ^ (dec.lane.toLong << 11) ^ dec.seq.toLong
+      classified = RiftRegion.allocOpen(
+        new DirectClassified(dec.seq, dec.lane, score, classified)
+      )
+      dec = dec.next
+    }
+
+    var alerts: DirectAlert^{region} = null
+    var cls = classified
+    while (cls != null) {
+      if (((cls.score ^ (cls.score >>> 13)) & 7L) == 0L)
+        alerts = RiftRegion.allocOpen(
+          new DirectAlert(cls.seq, cls.lane, cls.score, alerts)
+        )
+      cls = cls.next
+    }
+
+    var checksum = 0L
+    var alert = alerts
+    while (alert != null) {
+      checksum += alert.score ^ alert.seq.toLong ^ alert.lane.toLong
+      alert = alert.next
+    }
+    checksum
+  }
+
   private def processCheckedTransactionBatch(
       stream: RiftRegion.StreamingRegion^,
       tx: RiftRegion.TransactionRegion^{stream},
@@ -544,6 +633,42 @@ object StreamFlexRegionMatrixHelpers {
     checksum
   }
 
+  def runCheckedDirectEpochThroughputBody()(using
+      stream: RiftRegion.StreamingRegion^
+  ): Long = {
+    val cfg = StreamFlexRegionConfig
+    var checksum = 0L
+    var processed = 0
+    while (processed < cfg.events) {
+      val count = math.min(cfg.batchSize, cfg.events - processed)
+      checksum += RiftRegion.epoch {
+        processCheckedDirectEpochBatch(
+          processed,
+          count,
+          cfg.objectsPerEvent
+        )
+      }
+      processed += count
+    }
+    checksum
+  }
+
+  def runCheckedDirectEpochThroughput(): Long = {
+    val checksum = RiftRegion.streaming { stream ?=>
+      runCheckedDirectEpochThroughputBody()
+    }
+    checksumSink = checksum
+    checksum
+  }
+
+  def runCheckedSafeZoneDirectEpochThroughput(): Long = {
+    val checksum = RiftRegion.streamingSafeZone { stream ?=>
+      runCheckedDirectEpochThroughputBody()
+    }
+    checksumSink = checksum
+    checksum
+  }
+
   def runCheckedTransactionThroughputBody()(using
       stream: RiftRegion.StreamingRegion^
   ): Long = {
@@ -620,6 +745,40 @@ object StreamFlexRegionMatrixHelpers {
   def runCheckedSafeZoneEpochLatency(): LatencyRun =
     RiftRegion.streamingSafeZone { stream ?=>
       runCheckedEpochLatencyBody()
+    }
+
+  def runCheckedDirectEpochLatencyBody()(using
+      stream: RiftRegion.StreamingRegion^
+  ): LatencyRun = {
+    val cfg = StreamFlexRegionConfig
+    val samples = new Array[Long](cfg.latencyEvents)
+    var checksum = 0L
+    var i = 0
+    while (i < cfg.latencyEvents) {
+      val start = System.nanoTime()
+      checksum += RiftRegion.epoch {
+        processCheckedDirectEpochBatch(
+          i,
+          1,
+          cfg.latencyObjectsPerEvent
+        )
+      }
+      val end = System.nanoTime()
+      samples(i) = end - start
+      i += 1
+    }
+    checksumSink = checksum
+    summarizeLatency(samples, checksum)
+  }
+
+  def runCheckedDirectEpochLatency(): LatencyRun =
+    RiftRegion.streaming { stream ?=>
+      runCheckedDirectEpochLatencyBody()
+    }
+
+  def runCheckedSafeZoneDirectEpochLatency(): LatencyRun =
+    RiftRegion.streamingSafeZone { stream ?=>
+      runCheckedDirectEpochLatencyBody()
     }
 
   def runCheckedTransactionLatencyBody()(using
@@ -936,6 +1095,10 @@ object StreamFlexRegionMatrixHelpers {
 
   private def runThroughput(mode: String): Long =
     if (mode == "safezone") runSafeZoneThroughput()
+    else if (mode == "rift-checked-direct-epoch")
+      runCheckedDirectEpochThroughput()
+    else if (mode == "rift-checked-safezone-direct-epoch")
+      runCheckedSafeZoneDirectEpochThroughput()
     else if (mode == "rift-checked-epoch-buffer") runCheckedEpochThroughput()
     else if (mode == "rift-checked-safezone-epoch-buffer")
       runCheckedSafeZoneEpochThroughput()
@@ -947,6 +1110,10 @@ object StreamFlexRegionMatrixHelpers {
 
   private def runLatency(mode: String): LatencyRun =
     if (mode == "safezone") runSafeZoneLatency()
+    else if (mode == "rift-checked-direct-epoch")
+      runCheckedDirectEpochLatency()
+    else if (mode == "rift-checked-safezone-direct-epoch")
+      runCheckedSafeZoneDirectEpochLatency()
     else if (mode == "rift-checked-epoch-buffer") runCheckedEpochLatency()
     else if (mode == "rift-checked-safezone-epoch-buffer")
       runCheckedSafeZoneEpochLatency()
@@ -961,6 +1128,7 @@ object StreamFlexRegionMatrixHelpers {
     val usesRift =
       mode == "rift-hp" ||
         mode == "rift-streaming" ||
+        mode == "rift-checked-direct-epoch" ||
         mode == "rift-checked-epoch-buffer" ||
         mode == "rift-checked-transaction-region"
     val expected = runThroughput("heap")
@@ -1034,6 +1202,7 @@ object StreamFlexRegionMatrixHelpers {
     val usesRift =
       mode == "rift-hp" ||
         mode == "rift-streaming" ||
+        mode == "rift-checked-direct-epoch" ||
         mode == "rift-checked-epoch-buffer" ||
         mode == "rift-checked-transaction-region"
     val expected = runLatency("heap").checksum
@@ -1122,6 +1291,8 @@ object StreamFlexRegionMatrixHelpers {
   def validateMode(mode: String): Unit =
     mode match {
       case "heap" | "safezone" | "rift-hp" | "rift-streaming" |
+          "rift-checked-direct-epoch" |
+          "rift-checked-safezone-direct-epoch" |
           "rift-checked-epoch-buffer" |
           "rift-checked-safezone-epoch-buffer" |
           "rift-checked-transaction-region" |
@@ -1129,7 +1300,7 @@ object StreamFlexRegionMatrixHelpers {
         ()
       case other =>
         throw new IllegalArgumentException(
-          s"unknown StreamFlex mode '$other'; expected heap, safezone, rift-hp, rift-streaming, rift-checked-epoch-buffer, rift-checked-safezone-epoch-buffer, rift-checked-transaction-region, or rift-checked-safezone-transaction-region"
+          s"unknown StreamFlex mode '$other'; expected heap, safezone, rift-hp, rift-streaming, rift-checked-direct-epoch, rift-checked-safezone-direct-epoch, rift-checked-epoch-buffer, rift-checked-safezone-epoch-buffer, rift-checked-transaction-region, or rift-checked-safezone-transaction-region"
         )
     }
 }
@@ -1144,6 +1315,7 @@ object StreamFlexRegionMatrixHelpers {
   val usesRift =
     mode == "rift-hp" ||
       mode == "rift-streaming" ||
+      mode == "rift-checked-direct-epoch" ||
       mode == "rift-checked-epoch-buffer" ||
       mode == "rift-checked-transaction-region"
   if (usesRift) RiftRegion.init(0)
