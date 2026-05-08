@@ -1,3 +1,5 @@
+import java.io.File
+
 import scala.language.experimental.captureChecking
 
 import scala.scalanative.memory.{RiftRegion, SafeZone}
@@ -40,6 +42,8 @@ object RiotBenchRegionConfig {
   val warmupRuns: Int = envNonNegativeInt("RIOTBENCH_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("RIOTBENCH_BENCHMARK_RUNS", 3)
   val inputPath: String = BenchmarkInputSupport.envString("RIOTBENCH_INPUT")
+  val inputKind: String =
+    BenchmarkInputSupport.envString("RIOTBENCH_INPUT_KIND").toLowerCase
 }
 
 object RiotBenchRegionMatrixHelpers {
@@ -254,6 +258,37 @@ object RiotBenchRegionMatrixHelpers {
   private def readingHash(index: Int, sensor: Int, value: Int): Long =
     mix(index * 1000003 + sensor * 8191 + value * 131).toLong
 
+  private def parseDouble(value: String, default: Double): Double =
+    try value.toDouble
+    catch {
+      case _: NumberFormatException => default
+    }
+
+  private def parseNumericInt(value: String, default: Int): Int =
+    try value.toInt
+    catch {
+      case _: NumberFormatException =>
+        try value.toDouble.toInt
+        catch {
+          case _: NumberFormatException => default
+        }
+    }
+
+  private def subjectFromName(path: String, fallback: Int): Int = {
+    val name = new File(path).getName
+    val prefix = "mHealth_subject"
+    val start = name.indexOf(prefix)
+    if (start < 0) fallback
+    else {
+      val numberStart = start + prefix.length
+      var numberEnd = numberStart
+      while (numberEnd < name.length && name.charAt(numberEnd).isDigit)
+        numberEnd += 1
+      if (numberEnd == numberStart) fallback
+      else BenchmarkInputSupport.parseInt(name.substring(numberStart, numberEnd), fallback)
+    }
+  }
+
   private def bucketStart(eventIndex: Int): Long = {
     val cfg = RiotBenchRegionConfig
     (eventIndex / cfg.eventsPerBucket).toLong * cfg.eventsPerBucket.toLong
@@ -283,14 +318,41 @@ object RiotBenchRegionMatrixHelpers {
     val values = scala.collection.mutable.ArrayBuffer.empty[Int]
     val qualities = scala.collection.mutable.ArrayBuffer.empty[Int]
     val hashes = scala.collection.mutable.ArrayBuffer.empty[Long]
-    val reader = BenchmarkInputSupport.openText(cfg.inputPath)
+    var sawMHealth = false
 
-    try {
-      var line = reader.readLine()
-      while (line != null && sensors.length < cfg.events) {
-        val trimmed = line.trim
-        if (trimmed.nonEmpty && trimmed.charAt(0) != '#') {
-          val fields = trimmed.split("[,\\t ]+")
+    def appendLine(trimmed: String, sourcePath: String, sourceIndex: Int): Unit =
+      if (trimmed.nonEmpty && trimmed.charAt(0) != '#') {
+        val fields = trimmed.split("[,\\t ]+")
+        val isMHealth =
+          cfg.inputKind == "mhealth" ||
+            sourcePath.contains("MHEALTHDATASET") ||
+            (fields.length >= 24 && fields(fields.length - 1).forall(_.isDigit))
+
+        if (isMHealth && fields.length >= 24) {
+          sawMHealth = true
+          val subject = subjectFromName(sourcePath, sourceIndex + 1)
+          val label = BenchmarkInputSupport.parseInt(fields(fields.length - 1), 0)
+          val ax = parseDouble(fields(0), 0.0)
+          val ay = parseDouble(fields(1), 0.0)
+          val az = parseDouble(fields(2), 0.0)
+          val wx = parseDouble(fields(14), 0.0)
+          val wy = parseDouble(fields(15), 0.0)
+          val wz = parseDouble(fields(16), 0.0)
+          val chestMagnitude = math.sqrt(ax * ax + ay * ay + az * az)
+          val wristMagnitude = math.sqrt(wx * wx + wy * wy + wz * wz)
+          val value = ((chestMagnitude + wristMagnitude) * 5.0).toInt
+          val sensor = BenchmarkInputSupport.positiveModulo(
+            BenchmarkInputSupport.stableHash(fields(0)) +
+              subject * 131 + label * 17,
+            cfg.sensorSpace
+          )
+          sensors += sensor
+          devices += BenchmarkInputSupport.positiveModulo(subject, cfg.deviceSpace)
+          values += value
+          qualities += (if (label > 0) 1 else 0)
+          hashes += (BenchmarkInputSupport.stableHash(trimmed).toLong ^
+            (subject.toLong << 32) ^ label.toLong)
+        } else {
           val sensorText = if (fields.length > 0) fields(0) else trimmed
           val deviceText = if (fields.length > 1) fields(1) else sensorText
           val valueText = if (fields.length > 2) fields(2) else "0"
@@ -303,14 +365,38 @@ object RiotBenchRegionMatrixHelpers {
             BenchmarkInputSupport.stableHash(deviceText),
             cfg.deviceSpace
           )
-          values += BenchmarkInputSupport.parseInt(valueText, 0)
-          qualities += (if (BenchmarkInputSupport.parseInt(qualityText, 1) > 0) 1 else 0)
+          values += parseNumericInt(valueText, 0)
+          qualities += (if (parseNumericInt(qualityText, 1) > 0) 1 else 0)
           hashes += BenchmarkInputSupport.stableHash(trimmed).toLong
         }
-        line = reader.readLine()
       }
-    } finally {
-      reader.close()
+
+    def readFile(path: String, sourceIndex: Int): Unit = {
+      val reader = BenchmarkInputSupport.openText(path)
+      try {
+        var line = reader.readLine()
+        while (line != null && sensors.length < cfg.events) {
+          appendLine(line.trim, path, sourceIndex)
+          line = reader.readLine()
+        }
+      } finally {
+        reader.close()
+      }
+    }
+
+    val inputFile = new File(cfg.inputPath)
+    if (inputFile.isDirectory) {
+      val files = inputFile
+        .listFiles()
+        .filter(file => file.isFile && file.getName.endsWith(".log"))
+        .sortBy(_.getName)
+      var fileIndex = 0
+      while (fileIndex < files.length && sensors.length < cfg.events) {
+        readFile(files(fileIndex).getPath, fileIndex)
+        fileIndex += 1
+      }
+    } else {
+      readFile(cfg.inputPath, 0)
     }
 
     if (sensors.isEmpty)
@@ -319,7 +405,8 @@ object RiotBenchRegionMatrixHelpers {
       )
 
     new InputData(
-      "real-riotbench-preloaded",
+      if (sawMHealth) "real-riotbench-mhealth-preloaded"
+      else "real-riotbench-preloaded",
       sensors.length,
       sensors.toArray,
       devices.toArray,

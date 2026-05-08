@@ -1,11 +1,13 @@
 # RIoTBench Region Matrix
 
 Date: 2026-05-01
+Last updated: 2026-05-08 10:04 CEST
 
 Status: new RIoTBench-style local memory-management probe. This is not an
 exact RIoTBench distributed stream-processing artifact. It is a generated or
 preloaded local Scala Native matrix for IoT ETL/statistics shapes where
-external brokers and services do not hide allocator/GC behavior.
+external brokers and services do not hide allocator/GC behavior. It now also
+has a real-input MHEALTH row tied to the RIoTBench/FIT workload lineage.
 
 ## Workload
 
@@ -64,6 +66,21 @@ RIOTBENCH_BUILD=0 \
 zsh sandbox/run_riotbench_region_matrix.sh
 ```
 
+Real MHEALTH 1M medians:
+
+```bash
+RIOTBENCH_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/riot-bench/mhealth/MHEALTHDATASET \
+RIOTBENCH_INPUT_KIND=mhealth \
+RIOTBENCH_EVENTS=1000000 \
+RIOTBENCH_BENCHMARK_RUNS=3 \
+RIOTBENCH_WARMUPS=1 \
+RIOTBENCH_QUERIES="q1-clean-annotate q2-window-stats" \
+RIOTBENCH_MODES="heap safezone-improved rift-streaming" \
+RIOTBENCH_OUTPUT_DIR=/tmp/riotbench-mhealth-1m \
+RIOTBENCH_BUILD=0 \
+zsh sandbox/run_riotbench_region_matrix.sh
+```
+
 ## Current Results
 
 ### 20k Smoke
@@ -111,6 +128,41 @@ Interpretation:
 - `q2-window-stats` reduces RSS and max-GC in region modes, but heap and
   improved SafeZone are faster. Do not tune this shape before a 1M scale check
   or a cheaper checked aggregate operator.
+
+### Real MHEALTH 1M Medians
+
+Input:
+`/Users/siyaoliu/rift/cache/benchmark-data/riot-bench/mhealth/MHEALTHDATASET`.
+This is the UCI MHEALTH dataset, used here as a RIoTBench/FIT-style
+provenance-clean real sensor trace. The local loader consumed `1000000` rows
+from the ten subject logs. The full extracted dataset has `1215745` rows.
+
+Checksums and output counts matched across modes. The row is a useful
+real-input ceiling/control, but it is not the missing GC-heavy stream case:
+heap reports zero timed GC for both q1 and q2.
+
+| Query | Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | Rift op ms | Region objects | RSS bytes | Outputs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| q1-clean-annotate | heap | 117.977 | 0.000 | 0.000 | 0 | 0.000 | 0 | 7585677312 | 1273497 |
+| q1-clean-annotate | safezone-improved | 121.024 | 0.000 | 0.000 | 0 | 0.000 | 0 | 11959386112 | 1273497 |
+| q1-clean-annotate | rift-streaming | 119.077 | 0.000 | 0.000 | 0 | 0.163 | 1273497 | 10965843968 | 1273497 |
+| q2-window-stats | heap | 109.589 | 0.000 | 0.000 | 0 | 0.000 | 0 | 10995482624 | 273497 |
+| q2-window-stats | safezone-improved | 107.194 | 0.000 | 0.000 | 0 | 0.000 | 0 | 10964779008 | 273497 |
+| q2-window-stats | rift-streaming | 110.760 | 0.000 | 0.000 | 0 | 0.071 | 273497 | 11643322368 | 273497 |
+
+Interpretation:
+
+- q1 is a near-tie with heap fastest (`117.977 ms`) and trusted Streaming
+  close (`119.077 ms`); SafeZone trails slightly. No mode shows GC pressure.
+- q2 gives a small SafeZone throughput win (`107.194 ms` vs heap
+  `109.589 ms`) but still zero timed GC. Trusted Streaming trails heap.
+- The very high RSS rows are dominated by process/input-preload footprint and
+  should not be treated as evidence of efficient memory use. A file-backed
+  MHEALTH parser could reduce that footprint, but the zero-GC timed rows mean
+  this is not a priority flagship candidate.
+- Decision: keep MHEALTH as a provenance-clean RIoTBench real-input
+  ceiling/control. Do not tune RIoTBench until a richer IoT task or a
+  file-backed variant shows material heap allocation/GC pressure.
 
 ## Interpretation Contract
 

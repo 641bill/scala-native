@@ -36,7 +36,10 @@ object LogHubRegionConfig {
   val linesPerBucket: Int = envInt("LOGHUB_LINES_PER_BUCKET", 25000)
   val liveBuckets: Int = envInt("LOGHUB_LIVE_BUCKETS", 4)
   val componentBuckets: Int = envInt("LOGHUB_COMPONENT_BUCKETS", 4096)
+  val templateBuckets: Int = envInt("LOGHUB_TEMPLATE_BUCKETS", 8192)
+  val sessionBuckets: Int = envInt("LOGHUB_SESSION_BUCKETS", 8192)
   val tokenLimit: Int = envInt("LOGHUB_TOKEN_LIMIT", 16)
+  val templateTokenLimit: Int = envInt("LOGHUB_TEMPLATE_TOKEN_LIMIT", 24)
   val sampleEvery: Int = envInt("LOGHUB_SAMPLE_EVERY", 4096)
   val warmupRuns: Int = envNonNegativeInt("LOGHUB_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("LOGHUB_BENCHMARK_RUNS", 3)
@@ -153,6 +156,9 @@ object LogHubRegionMatrixHelpers {
         component: Int,
         severity: Int,
         tokens: Int,
+        templateTokens: Int,
+        templateBucket: Int,
+        sessionBucket: Int,
         hash: Long
     ): Unit
   }
@@ -278,6 +284,17 @@ object LogHubRegionMatrixHelpers {
   private def generatedTokens(index: Int): Int =
     4 + (mix(index * 8191 + 17) % LogHubRegionConfig.tokenLimit)
 
+  private def generatedTemplateTokens(index: Int): Int =
+    4 + (mix(index * 65537 + 31) % LogHubRegionConfig.templateTokenLimit)
+
+  private def generatedTemplateBucket(index: Int, severity: Int): Int =
+    mix(index * 1009 + severity * 9176 + 71) %
+      LogHubRegionConfig.templateBuckets
+
+  private def generatedSessionBucket(index: Int, templateBucket: Int): Int =
+    mix((index / 32) * 131071 + templateBucket * 31337 + 19) %
+      LogHubRegionConfig.sessionBuckets
+
   private def generatedHash(index: Int, severity: Int): Long =
     mix(index * 1000003 + severity * 131 + 53).toLong
 
@@ -300,10 +317,24 @@ object LogHubRegionMatrixHelpers {
   }
 
   private def tokenQuery(query: String): Boolean =
-    query == "q1-tokens" || query == "q2-window-counts"
+    query == "q1-tokens" || query == "q2-window-counts" ||
+      query == "q3-template-session"
 
   private def windowQuery(query: String): Boolean =
-    query == "q2-window-counts"
+    query == "q2-window-counts" || query == "q3-template-session"
+
+  private def templateSessionQuery(query: String): Boolean =
+    query == "q3-template-session"
+
+  private def windowBucketCount(query: String): Int =
+    if (templateSessionQuery(query)) LogHubRegionConfig.sessionBuckets
+    else LogHubRegionConfig.componentBuckets
+
+  private def includeWindowRecord(query: String, kind: Int): Boolean =
+    !templateSessionQuery(query) || kind == 40
+
+  private def templateSalt(query: String, templateBucket: Int): Long =
+    if (templateSessionQuery(query)) templateBucket.toLong << 21 else 0L
 
   private def loadInput(): InputData = {
     val cfg = LogHubRegionConfig
@@ -376,6 +407,9 @@ object LogHubRegionMatrixHelpers {
     else if (containsAscii(bytes, length, "DEBUG")) 1
     else 0
 
+  private def tokenSeparator(byte: Int): Boolean =
+    byte <= 32 || byte == ','.toInt || byte == ';'.toInt || byte == '|'.toInt
+
   private def countTokens(bytes: Array[Byte], length: Int): Int = {
     val limit = LogHubRegionConfig.tokenLimit
     var count = 0
@@ -383,7 +417,7 @@ object LogHubRegionMatrixHelpers {
     var i = 0
     while (i < length && count < limit) {
       val b = bytes(i) & 0xff
-      val sep = b <= 32 || b == ','.toInt || b == ';'.toInt || b == '|'.toInt
+      val sep = tokenSeparator(b)
       if (sep) inToken = false
       else if (!inToken) {
         inToken = true
@@ -392,6 +426,115 @@ object LogHubRegionMatrixHelpers {
       i += 1
     }
     if (count == 0) 1 else count
+  }
+
+  private def tokenStartAfter(
+      bytes: Array[Byte],
+      length: Int,
+      tokensToSkip: Int
+  ): Int = {
+    var tokens = 0
+    var inToken = false
+    var i = 0
+    while (i < length) {
+      val sep = tokenSeparator(bytes(i) & 0xff)
+      if (sep) inToken = false
+      else if (!inToken) {
+        if (tokens == tokensToSkip) return i
+        inToken = true
+        tokens += 1
+      }
+      i += 1
+    }
+    length
+  }
+
+  private def countTokensFrom(
+      bytes: Array[Byte],
+      length: Int,
+      start: Int,
+      limit: Int
+  ): Int = {
+    var count = 0
+    var inToken = false
+    var i = start
+    while (i < length && count < limit) {
+      val sep = tokenSeparator(bytes(i) & 0xff)
+      if (sep) inToken = false
+      else if (!inToken) {
+        inToken = true
+        count += 1
+      }
+      i += 1
+    }
+    if (count == 0) 1 else count
+  }
+
+  private def tokenHash(
+      bytes: Array[Byte],
+      length: Int,
+      tokenIndex: Int
+  ): Int = {
+    var tokens = 0
+    var inToken = false
+    var start = 0
+    var i = 0
+    while (i < length) {
+      val sep = tokenSeparator(bytes(i) & 0xff)
+      if (sep) {
+        if (inToken && tokens == tokenIndex + 1)
+          return BenchmarkInputSupport.stableHash(bytes, start, i - start)
+        inToken = false
+      } else if (!inToken) {
+        if (tokens == tokenIndex) start = i
+        inToken = true
+        tokens += 1
+      }
+      i += 1
+    }
+    if (inToken && tokens == tokenIndex + 1)
+      BenchmarkInputSupport.stableHash(bytes, start, length - start)
+    else 0
+  }
+
+  private def messageStart(bytes: Array[Byte], length: Int): Int = {
+    val bglMessageStart = tokenStartAfter(bytes, length, 9)
+    if (bglMessageStart < length) bglMessageStart
+    else tokenStartAfter(bytes, length, 4)
+  }
+
+  private def templateBucketFor(bytes: Array[Byte], length: Int): Int = {
+    val start = messageStart(bytes, length)
+    val hash =
+      if (start < length) BenchmarkInputSupport.stableHash(bytes, start, length - start)
+      else BenchmarkInputSupport.stableHash(bytes, 0, length)
+    BenchmarkInputSupport.positiveModulo(
+      hash,
+      LogHubRegionConfig.templateBuckets
+    )
+  }
+
+  private def sessionBucketFor(
+      bytes: Array[Byte],
+      length: Int,
+      templateBucket: Int
+  ): Int = {
+    val nodeHash = tokenHash(bytes, length, 3)
+    val blockHash = tokenHash(bytes, length, 5)
+    BenchmarkInputSupport.positiveModulo(
+      (nodeHash.toLong << 32) ^ blockHash.toLong ^ templateBucket.toLong,
+      LogHubRegionConfig.sessionBuckets
+    )
+  }
+
+  private def templateTokensFor(bytes: Array[Byte], length: Int): Int = {
+    val start = messageStart(bytes, length)
+    countTokensFrom(
+      bytes,
+      length,
+      start,
+      LogHubRegionConfig.templateTokenLimit
+    )
   }
 
   private def componentFor(bytes: Array[Byte], length: Int): Int = {
@@ -414,11 +557,15 @@ object LogHubRegionMatrixHelpers {
     var i = 0
     while (i < input.lines) {
       val severity = generatedSeverity(i)
+      val templateBucket = generatedTemplateBucket(i, severity)
       consumer(
         i,
         generatedComponent(i),
         severity,
         generatedTokens(i),
+        generatedTemplateTokens(i),
+        templateBucket,
+        generatedSessionBucket(i, templateBucket),
         generatedHash(i, severity)
       )
       i += 1
@@ -438,11 +585,15 @@ object LogHubRegionMatrixHelpers {
           if (length > 0) {
             val line = reader.bytes
             val severity = severityFor(line, length)
+            val templateBucket = templateBucketFor(line, length)
             consumer(
               index,
               componentFor(line, length),
               severity,
               countTokens(line, length),
+              templateTokensFor(line, length),
+              templateBucket,
+              sessionBucketFor(line, length, templateBucket),
               BenchmarkInputSupport.stableHash(line, 0, length).toLong ^
                 (severity.toLong * 1099511628211L)
             )
@@ -502,10 +653,11 @@ object LogHubRegionMatrixHelpers {
 
     def consumeBucket(bucket: HeapBucket): Unit =
       if (windowQuery(query)) {
-        val counts = new Array[Int](cfg.componentBuckets)
+        val counts = new Array[Int](windowBucketCount(query))
         var record = bucket.head
         while (record != null) {
-          counts(record.component) += 1
+          if (includeWindowRecord(query, record.kind))
+            counts(record.component) += 1
           record = record.next
         }
         var component = 0
@@ -580,6 +732,9 @@ object LogHubRegionMatrixHelpers {
         component: Int,
         severity: Int,
         tokens: Int,
+        templateTokens: Int,
+        templateBucket: Int,
+        sessionBucket: Int,
         hash: Long
     ): Unit = {
       val start = bucketStart(i)
@@ -589,22 +744,42 @@ object LogHubRegionMatrixHelpers {
         new HeapRecord(10, i, component, severity, tokens, hash, null)
       )
       if (tokenQuery(query)) {
+        val tokenCount =
+          if (templateSessionQuery(query)) templateTokens else tokens
+        val tokenComponent =
+          if (templateSessionQuery(query)) templateBucket else component
+        val tokenKindBase = if (templateSessionQuery(query)) 30 else 20
         var token = 0
-        while (token < tokens) {
+        while (token < tokenCount) {
           appendRecord(
             bucket,
             new HeapRecord(
-              20 + (token & 3),
+              tokenKindBase + (token & 3),
               i,
-              component,
+              tokenComponent,
               severity,
               token,
-              hash ^ (token.toLong * 1315423911L),
+              hash ^ (token.toLong * 1315423911L) ^
+                templateSalt(query, templateBucket),
               null
             )
           )
           token += 1
         }
+      }
+      if (templateSessionQuery(query)) {
+        appendRecord(
+          bucket,
+          new HeapRecord(
+            40,
+            i,
+            sessionBucket,
+            severity,
+            templateBucket,
+            hash ^ (sessionBucket.toLong * 1099511628211L),
+            null
+          )
+        )
       }
       if (i % cfg.sampleEvery == 0)
         checksum = fold(checksum, 99, i, component, severity, tokens, hash, start)
@@ -616,9 +791,21 @@ object LogHubRegionMatrixHelpers {
           component: Int,
           severity: Int,
           tokens: Int,
+          templateTokens: Int,
+          templateBucket: Int,
+          sessionBucket: Int,
           hash: Long
       ): Unit =
-        processLine(i, component, severity, tokens, hash)
+        processLine(
+          i,
+          component,
+          severity,
+          tokens,
+          templateTokens,
+          templateBucket,
+          sessionBucket,
+          hash
+        )
     })
     closeExpired(Long.MaxValue)
 
@@ -637,10 +824,11 @@ object LogHubRegionMatrixHelpers {
 
     def consumeBucket(bucket: SafeBucket): Unit =
       if (windowQuery(query)) {
-        val counts = new Array[Int](cfg.componentBuckets)
+        val counts = new Array[Int](windowBucketCount(query))
         var record = bucket.head
         while (record != null) {
-          counts(record.component) += 1
+          if (includeWindowRecord(query, record.kind))
+            counts(record.component) += 1
           record = record.next
         }
         var component = 0
@@ -720,6 +908,9 @@ object LogHubRegionMatrixHelpers {
         component: Int,
         severity: Int,
         tokens: Int,
+        templateTokens: Int,
+        templateBucket: Int,
+        sessionBucket: Int,
         hash: Long
     ): Unit = {
       val start = bucketStart(i)
@@ -734,20 +925,26 @@ object LogHubRegionMatrixHelpers {
           .asInstanceOf[SafeRecord]
       )
       if (tokenQuery(query)) {
+        val tokenCount =
+          if (templateSessionQuery(query)) templateTokens else tokens
+        val tokenComponent =
+          if (templateSessionQuery(query)) templateBucket else component
+        val tokenKindBase = if (templateSessionQuery(query)) 30 else 20
         var token = 0
-        while (token < tokens) {
+        while (token < tokenCount) {
           appendRecord(
             bucket,
             SafeZoneAllocator
               .allocate(
                 bucket.zone,
                 new SafeRecord(
-                  20 + (token & 3),
+                  tokenKindBase + (token & 3),
                   i,
-                  component,
+                  tokenComponent,
                   severity,
                   token,
-                  hash ^ (token.toLong * 1315423911L),
+                  hash ^ (token.toLong * 1315423911L) ^
+                    templateSalt(query, templateBucket),
                   null
                 )
               )
@@ -755,6 +952,25 @@ object LogHubRegionMatrixHelpers {
           )
           token += 1
         }
+      }
+      if (templateSessionQuery(query)) {
+        appendRecord(
+          bucket,
+          SafeZoneAllocator
+            .allocate(
+              bucket.zone,
+              new SafeRecord(
+                40,
+                i,
+                sessionBucket,
+                severity,
+                templateBucket,
+                hash ^ (sessionBucket.toLong * 1099511628211L),
+                null
+              )
+            )
+            .asInstanceOf[SafeRecord]
+        )
       }
       if (i % cfg.sampleEvery == 0)
         checksum = fold(checksum, 99, i, component, severity, tokens, hash, start)
@@ -767,9 +983,21 @@ object LogHubRegionMatrixHelpers {
             component: Int,
             severity: Int,
             tokens: Int,
+            templateTokens: Int,
+            templateBucket: Int,
+            sessionBucket: Int,
             hash: Long
         ): Unit =
-          processLine(i, component, severity, tokens, hash)
+          processLine(
+            i,
+            component,
+            severity,
+            tokens,
+            templateTokens,
+            templateBucket,
+            sessionBucket,
+            hash
+          )
       })
       closeExpired(Long.MaxValue)
     } finally {
@@ -795,10 +1023,11 @@ object LogHubRegionMatrixHelpers {
 
     def consumeBucket(bucket: TrustedBucket): Unit =
       if (windowQuery(query)) {
-        val counts = new Array[Int](cfg.componentBuckets)
+        val counts = new Array[Int](windowBucketCount(query))
         var record = bucket.head
         while (record != null) {
-          counts(record.component) += 1
+          if (includeWindowRecord(query, record.kind))
+            counts(record.component) += 1
           record = record.next
         }
         var component = 0
@@ -878,6 +1107,9 @@ object LogHubRegionMatrixHelpers {
         component: Int,
         severity: Int,
         tokens: Int,
+        templateTokens: Int,
+        templateBucket: Int,
+        sessionBucket: Int,
         hash: Long
     ): Unit = {
       val start = bucketStart(i)
@@ -890,24 +1122,46 @@ object LogHubRegionMatrixHelpers {
         )
       )
       if (tokenQuery(query)) {
+        val tokenCount =
+          if (templateSessionQuery(query)) templateTokens else tokens
+        val tokenComponent =
+          if (templateSessionQuery(query)) templateBucket else component
+        val tokenKindBase = if (templateSessionQuery(query)) 30 else 20
         var token = 0
-        while (token < tokens) {
+        while (token < tokenCount) {
           appendRecord(
             bucket,
             region.alloc(
               new TrustedRecord(
-                20 + (token & 3),
+                tokenKindBase + (token & 3),
                 i,
-                component,
+                tokenComponent,
                 severity,
                 token,
-                hash ^ (token.toLong * 1315423911L),
+                hash ^ (token.toLong * 1315423911L) ^
+                  templateSalt(query, templateBucket),
                 null
               )
             )
           )
           token += 1
         }
+      }
+      if (templateSessionQuery(query)) {
+        appendRecord(
+          bucket,
+          region.alloc(
+            new TrustedRecord(
+              40,
+              i,
+              sessionBucket,
+              severity,
+              templateBucket,
+              hash ^ (sessionBucket.toLong * 1099511628211L),
+              null
+            )
+          )
+        )
       }
       if (i % cfg.sampleEvery == 0)
         checksum = fold(checksum, 99, i, component, severity, tokens, hash, start)
@@ -920,9 +1174,21 @@ object LogHubRegionMatrixHelpers {
             component: Int,
             severity: Int,
             tokens: Int,
+            templateTokens: Int,
+            templateBucket: Int,
+            sessionBucket: Int,
             hash: Long
         ): Unit =
-          processLine(i, component, severity, tokens, hash)
+          processLine(
+            i,
+            component,
+            severity,
+            tokens,
+            templateTokens,
+            templateBucket,
+            sessionBucket,
+            hash
+          )
       })
       closeExpired(Long.MaxValue)
     } finally {
@@ -964,10 +1230,11 @@ object LogHubRegionMatrixHelpers {
         cursor: RiftRegion.StreamAppendCursor[CheckedRecord]^{stream}
     ): Unit =
       if (windowQuery(query)) {
-        val counts = new Array[Int](cfg.componentBuckets)
+        val counts = new Array[Int](windowBucketCount(query))
         while (cursor.hasNext) {
           val record: CheckedRecord^{stream} = cursor.next()
-          counts(record.component) += 1
+          if (includeWindowRecord(query, record.kind))
+            counts(record.component) += 1
         }
         var component = 0
         while (component < counts.length) {
@@ -1012,6 +1279,9 @@ object LogHubRegionMatrixHelpers {
         component: Int,
         severity: Int,
         tokens: Int,
+        templateTokens: Int,
+        templateBucket: Int,
+        sessionBucket: Int,
         hash: Long
     ): Unit = {
       val start = bucketStart(i)
@@ -1031,22 +1301,42 @@ object LogHubRegionMatrixHelpers {
         )(using currentRegion)
       RiftRegion.appendPageToken(stream, window, lineRecord)
       if (tokenQuery(query)) {
+        val tokenCount =
+          if (templateSessionQuery(query)) templateTokens else tokens
+        val tokenComponent =
+          if (templateSessionQuery(query)) templateBucket else component
+        val tokenKindBase = if (templateSessionQuery(query)) 30 else 20
         var token = 0
-        while (token < tokens) {
+        while (token < tokenCount) {
           val tokenRecord: CheckedRecord^{stream} =
             RiftRegion.allocOpen(
               new CheckedRecord(
-                20 + (token & 3),
+                tokenKindBase + (token & 3),
                 i,
-                component,
+                tokenComponent,
                 severity,
                 token,
-                hash ^ (token.toLong * 1315423911L)
+                hash ^ (token.toLong * 1315423911L) ^
+                  templateSalt(query, templateBucket)
               )
             )(using currentRegion)
           RiftRegion.appendPageToken(stream, window, tokenRecord)
           token += 1
         }
+      }
+      if (templateSessionQuery(query)) {
+        val sessionRecord: CheckedRecord^{stream} =
+          RiftRegion.allocOpen(
+            new CheckedRecord(
+              40,
+              i,
+              sessionBucket,
+              severity,
+              templateBucket,
+              hash ^ (sessionBucket.toLong * 1099511628211L)
+            )
+          )(using currentRegion)
+        RiftRegion.appendPageToken(stream, window, sessionRecord)
       }
       if (i % cfg.sampleEvery == 0)
         checksum = fold(checksum, 99, i, component, severity, tokens, hash, start)
@@ -1058,9 +1348,21 @@ object LogHubRegionMatrixHelpers {
           component: Int,
           severity: Int,
           tokens: Int,
+          templateTokens: Int,
+          templateBucket: Int,
+          sessionBucket: Int,
           hash: Long
       ): Unit =
-        processLine(i, component, severity, tokens, hash)
+        processLine(
+          i,
+          component,
+          severity,
+          tokens,
+          templateTokens,
+          templateBucket,
+          sessionBucket,
+          hash
+        )
     })
 
     RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
@@ -1116,7 +1418,9 @@ object LogHubRegionMatrixHelpers {
 
   def validateQuery(query: String): Unit =
     query match {
-      case "q0-lines" | "q1-tokens" | "q2-window-counts" => ()
+      case "q0-lines" | "q1-tokens" | "q2-window-counts" |
+          "q3-template-session" =>
+        ()
       case other =>
         throw new IllegalArgumentException(
           s"unknown LogHub query '$other'"
@@ -1249,7 +1553,9 @@ object LogHubRegionMatrixHelpers {
       s"CONFIG mode=$mode canonical_mode=${canonicalMode(mode)} query=$query " +
         s"lines=${input.lines} configured_lines=${cfg.lines} " +
         s"lines_per_bucket=${cfg.linesPerBucket} live_buckets=${cfg.liveBuckets} " +
-        s"component_buckets=${cfg.componentBuckets} token_limit=${cfg.tokenLimit} " +
+        s"component_buckets=${cfg.componentBuckets} " +
+        s"template_buckets=${cfg.templateBuckets} session_buckets=${cfg.sessionBuckets} " +
+        s"token_limit=${cfg.tokenLimit} template_token_limit=${cfg.templateTokenLimit} " +
         s"sample_every=${cfg.sampleEvery} warmups=${cfg.warmupRuns} " +
         s"runs=${cfg.benchmarkRuns} input=${input.label} input_mode=${cfg.inputMode} " +
         s"input_path=${cfg.inputPath}"
