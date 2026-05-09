@@ -52,6 +52,9 @@ object CommonCrawlWetConfig {
   val inputPath: String =
     BenchmarkInputSupport.envString("COMMON_CRAWL_WET_INPUT")
   val diagnostics: Boolean = envFlag("COMMON_CRAWL_WET_DIAG")
+  val finalClean: Boolean =
+    envFlag("RIFT_FINAL_CLEAN") ||
+      sys.env.get("RIFT_EVAL_MEASUREMENT_LEVEL").exists(_.equalsIgnoreCase("L1"))
 }
 
 object CommonCrawlWetMatrixHelpers {
@@ -1761,6 +1764,35 @@ object CommonCrawlWetMatrixHelpers {
     val cfg = CommonCrawlWetConfig
     val input = inputData
     val usesRift = usesRiftRuntime(mode)
+    if (cfg.finalClean) {
+      var run = 0
+      var checksum = 0L
+      var outputCount = 0L
+      while (run < cfg.benchmarkRuns) {
+        val outcome = runMode(mode, query)
+        if (run == 0) {
+          checksum = outcome.checksum
+          outputCount = outcome.outputCount
+        } else if (
+          outcome.checksum != checksum || outcome.outputCount != outputCount
+        ) {
+          throw new IllegalStateException(
+            s"final-clean common-crawl mismatch query=$query mode=$mode first_checksum=$checksum first_output_count=$outputCount actual=$outcome"
+          )
+        }
+        run += 1
+      }
+      println(
+        s"RESULT name=common-crawl-wet-$query-$mode " +
+          s"measurement_level=L1 final_clean=1 query=$query mode=$mode " +
+          s"backend_mode=${canonicalMode(mode)} input=${input.label} " +
+          s"pages=${input.pages} configured_pages=${cfg.pages} " +
+          s"runs=${cfg.benchmarkRuns} checksum=$checksum " +
+          s"output_count=$outputCount"
+      )
+      return
+    }
+
     val expected = runHeap(query)
 
     var warmup = 0

@@ -41,6 +41,14 @@ object DataflowRegionConfig {
   val selectModulo: Int = envInt("DATAFLOW_SELECT_MODULO", 8)
   val warmupRuns: Int = envNonNegativeInt("DATAFLOW_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("DATAFLOW_BENCHMARK_RUNS", 3)
+
+  private def truthy(value: String): Boolean =
+    value == "1" || value.equalsIgnoreCase("true") ||
+      value.equalsIgnoreCase("yes")
+
+  val finalClean: Boolean =
+    sys.env.get("RIFT_FINAL_CLEAN").exists(truthy) ||
+      sys.env.get("RIFT_EVAL_MEASUREMENT_LEVEL").exists(_.equalsIgnoreCase("L1"))
 }
 
 object DataflowRegionMatrixHelpers {
@@ -1422,6 +1430,29 @@ object DataflowRegionMatrixHelpers {
         internalMode == "rift-checked-page-token" ||
         internalMode == "rift-checked-epoch-fold" ||
         internalMode == "rift-checked-direct-epoch"
+
+    if (cfg.finalClean) {
+      var run = 0
+      var checksum = 0L
+      while (run < cfg.benchmarkRuns) {
+        val result = runOperator(operator, mode)
+        if (run == 0) checksum = result
+        else if (result != checksum)
+          throw new IllegalStateException(
+            s"final-clean dataflow mismatch operator=$operator mode=$mode first_checksum=$checksum actual=$result"
+          )
+        run += 1
+      }
+      println(
+        s"RESULT name=dataflow-$operator-$mode " +
+          s"measurement_level=L1 final_clean=1 operator=$operator " +
+          s"mode=$mode backend_mode=$internalMode runs=${cfg.benchmarkRuns} " +
+          s"epochs=${cfg.epochs} docs_per_epoch=${cfg.docsPerEpoch} " +
+          s"checksum=$checksum"
+      )
+      return
+    }
+
     val expectedChecksum = expected(operator)
 
     var warmup = 0

@@ -46,6 +46,14 @@ object ReMLRegionConfig {
   val ratioCount: Int = envInt("REML_RATIO_COUNT", 500000)
   val warmupRuns: Int = envNonNegativeInt("REML_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("REML_BENCHMARK_RUNS", 3)
+
+  private def truthy(value: String): Boolean =
+    value == "1" || value.equalsIgnoreCase("true") ||
+      value.equalsIgnoreCase("yes")
+
+  val finalClean: Boolean =
+    sys.env.get("RIFT_FINAL_CLEAN").exists(truthy) ||
+      sys.env.get("RIFT_EVAL_MEASUREMENT_LEVEL").exists(_.equalsIgnoreCase("L1"))
 }
 
 object ReMLRegionMatrixHelpers {
@@ -703,6 +711,27 @@ object ReMLRegionMatrixHelpers {
     val workload = workloadArg
     val mode = canonicalMode(modeArg)
     val cfg = ReMLRegionConfig
+    if (cfg.finalClean) {
+      var run = 0
+      var checksum = 0L
+      while (run < cfg.benchmarkRuns) {
+        val result = runWorkload(workload, mode)
+        if (run == 0) checksum = result
+        else if (result != checksum)
+          throw new IllegalStateException(
+            s"final-clean ReML mismatch workload=$workload mode=$mode first_checksum=$checksum actual=$result"
+          )
+        run += 1
+      }
+      checksumSink = checksum
+      println(
+        s"RESULT name=reml-region-$workload-$mode " +
+          s"measurement_level=L1 final_clean=1 workload=$workload " +
+          s"mode=$mode runs=${cfg.benchmarkRuns} checksum=$checksum"
+      )
+      return
+    }
+
     val totalRuns = cfg.warmupRuns + cfg.benchmarkRuns
     val times = new Array[Double](cfg.benchmarkRuns)
     val gcTimes = new Array[Double](cfg.benchmarkRuns)

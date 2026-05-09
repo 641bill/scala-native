@@ -33,6 +33,14 @@ object RetainedEpochReclaimConfig {
   val sampleEvery: Int = envInt("RETAINED_EPOCH_SAMPLE_EVERY", 4096)
   val warmupRuns: Int = envNonNegativeInt("RETAINED_EPOCH_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("RETAINED_EPOCH_BENCHMARK_RUNS", 3)
+
+  private def truthy(value: String): Boolean =
+    value == "1" || value.equalsIgnoreCase("true") ||
+      value.equalsIgnoreCase("yes")
+
+  val finalClean: Boolean =
+    sys.env.get("RIFT_FINAL_CLEAN").exists(truthy) ||
+      sys.env.get("RIFT_EVAL_MEASUREMENT_LEVEL").exists(_.equalsIgnoreCase("L1"))
 }
 
 object RetainedEpochReclaimMatrixHelpers {
@@ -369,6 +377,38 @@ object RetainedEpochReclaimMatrixHelpers {
   def run(modeArg: String): Unit = {
     val mode = canonicalMode(modeArg)
     val cfg = RetainedEpochReclaimConfig
+    val topology =
+      if (mode == "heap-direct-summary-only") "summary-only"
+      else "retained-epoch-no-traverse"
+    if (cfg.finalClean) {
+      var run = 0
+      var checksum = 0L
+      var outputCount = 0L
+      while (run < cfg.benchmarkRuns) {
+        val result = runMode(mode)
+        if (run == 0) {
+          checksum = result.checksum
+          outputCount = result.outputCount
+        } else if (
+          result.checksum != checksum || result.outputCount != outputCount
+        ) {
+          throw new IllegalStateException(
+            s"final-clean retained epoch mismatch mode=$mode first_checksum=$checksum first_output_count=$outputCount actual=$result"
+          )
+        }
+        run += 1
+      }
+      println(
+        s"RESULT name=retained-epoch-reclaim-$mode " +
+          s"measurement_level=L1 final_clean=1 " +
+          s"mode=$mode topology=$topology records=${cfg.records} " +
+          s"records_per_epoch=${cfg.recordsPerEpoch} " +
+          s"key_buckets=${cfg.keyBuckets} runs=${cfg.benchmarkRuns} " +
+          s"checksum=$checksum output_count=$outputCount"
+      )
+      return
+    }
+
     val expected = runHeapSummaryOnly()
     val totalRuns = cfg.warmupRuns + cfg.benchmarkRuns
     val times = new Array[Double](cfg.benchmarkRuns)
@@ -426,10 +466,6 @@ object RetainedEpochReclaimMatrixHelpers {
     val medianOpen = medianLong(riftOpenTotal)
     val medianClose = medianLong(riftCloseTotal)
     val medianReset = medianLong(riftResetTotal)
-    val topology =
-      if (mode == "heap-direct-summary-only") "summary-only"
-      else "retained-epoch-no-traverse"
-
     println(
       f"RESULT name=retained-epoch-reclaim-$mode " +
         s"mode=$mode topology=$topology records=${cfg.records} " +

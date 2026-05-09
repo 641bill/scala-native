@@ -52,6 +52,14 @@ object YakRegionConfig {
   val scratchSlots: Int = envInt("YAK_SCRATCH_SLOTS", 128)
   val benchmarkRuns: Int = envInt("YAK_BENCHMARK_RUNS", 3)
   val warmupRuns: Int = envNonNegativeInt("YAK_WARMUPS", 1)
+
+  private def truthy(value: String): Boolean =
+    value == "1" || value.equalsIgnoreCase("true") ||
+      value.equalsIgnoreCase("yes")
+
+  val finalClean: Boolean =
+    sys.env.get("RIFT_FINAL_CLEAN").exists(truthy) ||
+      sys.env.get("RIFT_EVAL_MEASUREMENT_LEVEL").exists(_.equalsIgnoreCase("L1"))
 }
 
 object YakRegionMatrixHelpers {
@@ -2008,6 +2016,30 @@ object YakRegionMatrixHelpers {
         mode == "checked-whole-run-stream" ||
         mode == "checked-epoch-stream" ||
         mode == "checked-epoch-buffer-stream"
+    if (cfg.finalClean) {
+      var run = 0
+      var checksum = 0L
+      while (run < cfg.benchmarkRuns) {
+        val result = runWorkload(mode, workload)
+        if (run == 0) checksum = result.checksum
+        else if (result.checksum != checksum)
+          throw new IllegalStateException(
+            s"final-clean Yak mismatch workload=$workload mode=$mode first_checksum=$checksum actual=${result.checksum}"
+          )
+        run += 1
+      }
+      val dataObjects = logicalDataObjects(workload)
+      val slots = controlSlots(workload)
+      println(
+        s"RESULT name=yak-$workload-$mode " +
+          s"measurement_level=L1 final_clean=1 workload=$workload " +
+          s"mode=$mode runs=${cfg.benchmarkRuns} " +
+          s"logical_data_objects=$dataObjects control_slots=$slots " +
+          s"checksum=$checksum"
+      )
+      return
+    }
+
     val expected = runWorkload("heap", workload)
 
     var warmup = 0
