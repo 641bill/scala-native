@@ -156,6 +156,12 @@ run_case() {
     gc-heap|heap-immix)
       binary_mode="heap"
       ;;
+    heap-direct-summary-only|heap-direct-epoch|heap-same-shape-direct-epoch|heap-direct-aggregate)
+      binary_mode="heap-direct-epoch"
+      ;;
+    heap-epoch-retained-no-traverse)
+      binary_mode="heap-epoch-retained-no-traverse"
+      ;;
     safezone-current)
       binary_mode="safezone"
       roots_mode="0"
@@ -184,6 +190,22 @@ run_case() {
       roots_mode="1"
       page_size="32768"
       ;;
+    checked-epoch-stream|checked-region-stream-epoch|rift-checked-direct-epoch)
+      binary_mode="rift-checked-direct-epoch"
+      ;;
+    checked-epoch-scoped|checked-region-scoped-epoch|rift-checked-safezone-direct-epoch)
+      binary_mode="rift-checked-safezone-direct-epoch"
+      roots_mode="1"
+      page_size="32768"
+      ;;
+    checked-epoch-retained-no-traverse|checked-region-stream-retained-epoch)
+      binary_mode="checked-epoch-retained-no-traverse"
+      ;;
+    checked-scoped-epoch-retained-no-traverse|checked-region-scoped-retained-epoch)
+      binary_mode="checked-scoped-epoch-retained-no-traverse"
+      roots_mode="1"
+      page_size="32768"
+      ;;
   esac
 
   env_args=()
@@ -196,7 +218,7 @@ run_case() {
   if [[ -n "${heap_cap}" && "${heap_cap}" != "uncapped" ]]; then
     env_args+=(GC_MAXIMUM_HEAP_SIZE="${heap_cap}")
   fi
-  if [[ -z "${query_input}" ]]; then
+  if [[ -z "${query_input}" && "${binary_mode}" != "heap-direct-epoch" && "${binary_mode}" != "heap-epoch-retained-no-traverse" && "${binary_mode}" != "checked-epoch-retained-no-traverse" && "${binary_mode}" != "checked-scoped-epoch-retained-no-traverse" ]]; then
     if [[ "${query}" == fraud-* && -e "${default_fraud_input}" ]]; then
       query_input="${default_fraud_input}"
     elif [[ "${query}" == log-* && -e "${default_log_input}" ]]; then

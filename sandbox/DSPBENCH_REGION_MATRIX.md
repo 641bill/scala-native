@@ -1,7 +1,7 @@
 # DSPBench Region Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-07 22:34 CEST
+Last updated: 2026-05-09 19:45 CEST
 
 Status: implemented three local DSPBench-family real-input candidates: Spike
 Detection, Fraud Detection, and Log Processing. This is not an exact DSPBench
@@ -730,3 +730,100 @@ control and as another page-token regression row. Do not tune it into a
 flagship case. The next real-input search should continue with a richer
 DSPBench or log/session/template workload that materializes more intermediate
 objects per record, or with a provenance-clean RIoTBench/Theodolite input.
+
+## Generated Direct-Epoch q2 Topology Follow-Up
+
+Direct-epoch modes were added for generated/indexable q2 rows:
+
+- `rift-checked-direct-epoch`
+- `rift-checked-safezone-direct-epoch`
+
+These modes allocate ordinary q2 records inside a checked bucket epoch, then
+retain only primitive per-key summary counts until the original bucket close
+point. They intentionally avoid the generic page-token append-window traversal,
+so they are topology/operator evidence. A `heap-direct-epoch` same-shape
+control was added on 2026-05-09 to test the same direct aggregate topology with
+ordinary heap allocation.
+
+Command:
+
+```bash
+cd /Users/siyaoliu/rift/scala-native-rift
+DSPBENCH_INPUT= \
+DSPBENCH_INPUTS= \
+DSPBENCH_INPUT_MODE=generated \
+DSPBENCH_EVENTS=1000000 \
+DSPBENCH_BENCHMARK_RUNS=3 \
+DSPBENCH_WARMUPS=1 \
+DSPBENCH_QUERIES="fraud-q2-alert-window log-q2-window" \
+DSPBENCH_MODES="heap-immix heap-direct-epoch checked-epoch-stream checked-epoch-scoped" \
+DSPBENCH_BUILD=0 \
+zsh sandbox/run_dspbench_region_matrix.sh
+```
+
+1M generated/indexable same-shape rows:
+
+| Query | Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes | Output count |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `fraud-q2-alert-window` | `heap-immix` | `400.900` | `49.663` | `82.598` | `2/3` | `575979520` | `613295` |
+| `fraud-q2-alert-window` | `heap-direct-epoch` | `272.251` | `0.000` | `0.000` | `0/3` | `575651840` | `613295` |
+| `fraud-q2-alert-window` | `checked-epoch-scoped` | `267.739` | `0.000` | `0.000` | `0/3` | `575717376` | `613295` |
+| `fraud-q2-alert-window` | `checked-epoch-stream` | `268.907` | `0.000` | `0.000` | `0/3` | `575717376` | `613295` |
+| `log-q2-window` | `heap-immix` | `372.174` | `43.983` | `46.425` | `3/3` | `206438400` | `200` |
+| `log-q2-window` | `heap-direct-epoch` | `227.036` | `10.019` | `10.053` | `2/3` | `206258176` | `200` |
+| `log-q2-window` | `checked-epoch-scoped` | `230.374` | `9.995` | `12.461` | `2/3` | `206307328` | `200` |
+| `log-q2-window` | `checked-epoch-stream` | `228.960` | `9.841` | `10.009` | `2/3` | `206307328` | `200` |
+
+Interpretation: the large DSPBench q2 speedup is mostly from direct aggregate
+topology, not from regions alone. On Fraud q2, checked direct epoch is still
+slightly faster than same-shape heap while matching checksum/output count. On
+Log q2, checked direct epoch is essentially tied with same-shape heap; the
+remaining timed GC is from non-region heap work that this direct operator does
+not eliminate.
+
+The same modes intentionally reject file-backed DSPBench inputs for now because
+the current direct-epoch implementation requires an indexable/generated source
+to process one bucket as a lexical epoch. Real file-backed Fraud/Log rows remain
+page-token rows until a streaming bucket iterator or preloaded real-input path
+is added.
+
+## Fraud q2 Retained-Epoch Reclaim Control
+
+The direct-epoch rows above are summary-only topology/operator evidence: record
+objects are used to update summaries on append, but the old heap-direct row does
+not retain those objects until bucket close. A retained no-traverse control was
+added on 2026-05-09 to test the fair memory-management question: heap and
+checked regions both materialize ordinary Scala records, both update primitive
+summaries on append, both avoid close-time record traversal, and the retained
+object graph dies at the epoch boundary.
+
+Command:
+
+```bash
+cd /Users/siyaoliu/rift/scala-native-rift
+DSPBENCH_BUILD=0 \
+DSPBENCH_EVENTS=1000000 \
+DSPBENCH_EVENTS_PER_BUCKET=25000 \
+DSPBENCH_WARMUPS=1 \
+DSPBENCH_BENCHMARK_RUNS=3 \
+DSPBENCH_INPUT_MODE=generated \
+DSPBENCH_QUERIES="fraud-q2-alert-window" \
+DSPBENCH_MODES="heap-direct-summary-only heap-epoch-retained-no-traverse checked-epoch-retained-no-traverse checked-scoped-epoch-retained-no-traverse" \
+zsh sandbox/run_dspbench_region_matrix.sh
+```
+
+All rows matched checksum `-5765375221524988491` and output count `613295`.
+
+| Mode | Evidence class | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes |
+|---|---|---:|---:|---:|---:|---:|
+| `heap-direct-summary-only` | topology lower bound | `279.103` | `0.000` | `0.000` | `0/3` | `575668224` |
+| `heap-epoch-retained-no-traverse` | retained heap control | `387.943` | `35.797` | `38.527` | `2/3` | `575979520` |
+| `checked-epoch-retained-no-traverse` | retained checked region | `373.837` | `0.000` | `0.000` | `0/3` | `582729728` |
+| `checked-scoped-epoch-retained-no-traverse` | retained checked scoped region | `364.535` | `0.000` | `0.000` | `0/3` | `582746112` |
+
+Interpretation: this is the first DSPBench q2 row that should count as
+memory-management evidence rather than only topology evidence. Checked scoped
+retained epoch is `6.0%` faster than retained heap and removes `35.797 ms`
+median timed GC. RSS is slightly higher than retained heap, so this is a
+throughput/GC win, not an RSS win. The summary-only row remains useful as the
+operator lower bound but should not be used as a Rift placement headline.

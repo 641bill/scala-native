@@ -1,7 +1,7 @@
 # Direct Epoch Topology Matrix
 
 Date: 2026-05-08
-Last updated: 2026-05-08 22:00 CEST
+Last updated: 2026-05-09 19:45 CEST
 
 Status: clean post-checkpoint sweep for reusable `RiftRegion.epoch { ... }`
 topology. Parent repo commit: `b462db8`. Child repo commit: `c71e56ae0`.
@@ -21,6 +21,15 @@ choice.
 Direct epoch is the right shape when ordinary Scala objects are created,
 consumed, and discarded as one batch/epoch. Page-token remains the right shape
 for page/window streams.
+
+Important evidence split:
+
+- Summary-only direct-epoch rows are topology/operator evidence. They update
+  primitive summaries on append and do not retain ordinary records until close.
+- Retained no-traverse rows are the fair memory-management control. Heap and
+  checked regions both materialize ordinary Scala records and retain them until
+  epoch close, but neither traverses records at close. The intended difference
+  is heap GC reclaim versus region bulk close.
 
 ## Validation
 
@@ -152,6 +161,94 @@ Interpretation: this turns the local Stancu-shaped transaction row into a
 checked direct-epoch win. It remains a local methodology probe; the stronger
 SPECjbb2005-workload port is tracked separately.
 
+### Generated Stream q2/q3 Direct-Epoch Follow-Up
+
+After the first direct-epoch sweep, direct-epoch modes were also wired into
+generated/indexable stream benchmark rows where bucket summaries are independent
+of later sliding-window state:
+
+- DSPBench `fraud-q2-alert-window`;
+- DSPBench `log-q2-window`;
+- GH Archive-shaped `q2-repo-window`;
+- LogHub-shaped `q2-window-counts`;
+- LogHub-shaped `q3-template-session`.
+
+These rows use direct epochs to allocate ordinary event/token/alert objects
+inside the bucket epoch, then keep only primitive bucket-summary metadata until
+the original close point. This preserves checksum ordering while removing
+page-token append-window traversal.
+
+On 2026-05-09, a `heap-direct-epoch` same-shape control was added. It uses the
+same direct-epoch aggregate algorithm with ordinary heap `new`, so it separates
+operator/topology wins from region-allocation wins.
+
+1M generated/indexable rows, 3-run medians:
+
+| Benchmark/query | Heap ms / GC ms | Heap same-shape direct ms / GC ms | Checked direct epoch stream ms / GC ms | Checked direct epoch scoped ms / GC ms | Interpretation |
+|---|---:|---:|---:|---:|---|
+| DSPBench Fraud q2 | 400.900 / 49.663 | 272.251 / 0.000 | 268.907 / 0.000 | 267.739 / 0.000 | Most of the win is direct-epoch aggregate topology; checked regions still beat same-shape heap slightly. |
+| DSPBench Log q2 | 372.174 / 43.983 | 227.036 / 10.019 | 228.960 / 9.841 | 230.374 / 9.995 | Direct topology dominates; checked regions are roughly tied with same-shape heap. |
+| GH Archive-shaped q2 | 287.380 / 84.904 | 54.642 / 0.000 | 56.167 / 0.000 | 56.013 / 0.000 | This is almost entirely an aggregate-topology win; same-shape heap is slightly faster than checked regions. |
+| LogHub-shaped q2 | 526.803 / 124.142 | 191.601 / 0.000 | 193.441 / 0.000 | 193.938 / 0.000 | Direct topology explains the large win; checked overhead is small but measurable. |
+| LogHub-shaped q3 | 2225.364 / 175.674 | 1779.064 / 0.000 | 1784.048 / 0.000 | 1792.397 / 0.000 | Richer generated template/session row still benefits; checked regions are close to same-shape heap. |
+
+Applicability notes:
+
+- The current DSPBench and LogHub direct-epoch modes require generated/indexable
+  input. File-backed real rows still use page-token until a preloaded/indexed
+  real-input path or streaming bucket iterator is added.
+- GH Archive direct epoch works for generated and real-preloaded rows; it
+  rejects file-backed rows because file-backed parsing is a sequential reader
+  path.
+- NEXMark Q3/Q8/Q9/Q11 were intentionally not given direct-epoch rows here:
+  their join/window state affects later events, so a bucket cannot be reclaimed
+  immediately as an independent epoch without changing semantics. Page-token or
+  a checked join/window operator remains the correct topology for those queries.
+- These q2/q3 rows are now classified as topology/operator evidence first.
+  They show that direct epoch is the right reusable shape, but pure memory
+  placement claims should compare checked rows against `heap-direct-epoch`, not
+  against the older linked page-token or heap traversal shape.
+
+### Retained-Epoch Reclaim Follow-Up
+
+`evidence/RETAINED_EPOCH_RECLAIM_MATRIX.md` adds the missing retained-object
+control. The retained modes keep ordinary Scala records alive until epoch close
+and update primitive summaries on append; close touches only the bucket
+`head`/`tail` anchors and does not traverse records.
+
+Focused 1M retained epoch:
+
+| Mode | Evidence class | Median ms | Median GC ms | RSS bytes |
+|---|---|---:|---:|---:|
+| `heap-direct-summary-only` | topology lower bound | `11.041` | `0.000` | `3801088` |
+| `heap-epoch-retained-no-traverse` | retained heap control | `34.405` | `9.646` | `21331968` |
+| `checked-epoch-retained-no-traverse` | retained checked region | `25.366` | `0.000` | `4816896` |
+| `checked-scoped-epoch-retained-no-traverse` | retained checked scoped region | `23.999` | `0.000` | `4866048` |
+
+DSPBench Fraud q2 1M retained controls:
+
+| Mode | Evidence class | Median ms | Median GC ms | RSS bytes |
+|---|---|---:|---:|---:|
+| `heap-direct-summary-only` | topology lower bound | `279.103` | `0.000` | `575668224` |
+| `heap-epoch-retained-no-traverse` | retained heap control | `387.943` | `35.797` | `575979520` |
+| `checked-epoch-retained-no-traverse` | retained checked region | `373.837` | `0.000` | `582729728` |
+| `checked-scoped-epoch-retained-no-traverse` | retained checked scoped region | `364.535` | `0.000` | `582746112` |
+
+Interpretation: summary-only direct epoch remains topology evidence. Retained
+heap versus retained checked epoch is now the fair memory-management evidence:
+checked scoped retained epoch is `30.2%` faster than retained heap in the
+focused matrix, and `6.0%` faster on DSPBench Fraud q2 while removing heap GC.
+Fraud q2 keeps similar/slightly higher RSS in checked retained rows, so that
+row is a throughput/GC win rather than an RSS win.
+
+Additional 1M retained application rows:
+
+| Benchmark/query | Retained heap ms / GC ms / RSS | Checked retained stream ms / GC ms / RSS | Checked retained scoped ms / GC ms / RSS | Interpretation |
+|---|---:|---:|---:|---|
+| GH Archive-shaped q2 | 244.988 / 69.552 / 147 MB | 191.064 / 0.000 / 15 MB | 181.345 / 0.000 / 15 MB | strong retained memory/RSS win |
+| LogHub-shaped q2 | 464.389 / 64.349 / 813 MB | 413.203 / 0.000 / 305 MB | 402.611 / 0.000 / 694 MB | retained throughput/GC win; stream backend has better RSS |
+| LogHub-shaped q3 | 2217.322 / 146.514 / 2291 MB | 2213.846 / 43.315 / 834 MB | 2101.599 / 0.000 / 2312 MB | mixed; scoped improves elapsed, stream improves RSS |
+
 ## Conclusions
 
 - Direct checked epoch is now a reusable positive operator/topology, not a
@@ -165,3 +262,11 @@ SPECjbb2005-workload port is tracked separately.
   but it is not the right topology for Yak-style graph replay.
 - Generic `EpochBuffer` is correct and often beats heap, but direct linked
   epoch is the faster checked lowering for these epoch-shaped workloads.
+- Generated stream q2/q3 direct-epoch rows show a promising reusable operator
+  family: epoch-local objects plus durable primitive summary metadata. The
+  same-shape heap control shows that the large speedups mostly come from the
+  topology; checked regions are close to, and sometimes slightly faster than,
+  same-shape heap.
+- Retained no-traverse controls now show genuine memory-management wins when
+  ordinary objects must survive until the epoch boundary: region close removes
+  heap GC work without requiring a close-time object traversal.

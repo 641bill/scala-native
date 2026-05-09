@@ -1,7 +1,7 @@
 # NEXMark Region Matrix
 
 Date: 2026-05-01
-Last updated: 2026-05-07 13:51 CEST
+Last updated: 2026-05-09 00:15 CEST
 
 Status: first NEXMark-style methodology benchmark for the broader
 stream-processing win envelope. This is not an exact Apache Beam NEXMark
@@ -53,6 +53,13 @@ Modes:
 - `rift-checked-join-api`: Q8-only checked `StreamJoinWindow` API control.
 - `rift-hp`: trusted low-level HPZone bucket regions.
 - `rift-streaming`: trusted low-level Streaming bucket regions.
+
+Direct-epoch note: NEXMark Q3/Q8/Q9/Q11 were reviewed as possible
+direct-epoch candidates, but they are not independent bucket-epoch workloads.
+Their join/window/rank/session state affects later events, so reclaiming each
+bucket as a lexical epoch would change semantics. Page-token/window operators,
+and eventually reusable checked join/rank/session operators, remain the correct
+topology for these rows.
 
 Default settings:
 

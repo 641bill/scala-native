@@ -1,7 +1,7 @@
 # GH Archive Region Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-07 00:16 CEST
+Last updated: 2026-05-09 19:57 CEST
 
 Status: first real NDJSON/log-event stream matrix added, with both preloaded
 and file-backed q1/q2 rows. The preloaded rows time object allocation/query
@@ -59,6 +59,13 @@ environment settings internally:
 - `rift-trusted-streaming`
 - `rift-checked-page-token`
 - `rift-checked-safezone-page-token`
+- `heap-direct-epoch`
+- `rift-checked-direct-epoch`
+- `rift-checked-safezone-direct-epoch`
+
+The direct-epoch modes currently support generated/preloaded `q2-repo-window`
+only. They reject file-backed rows because file-backed input is a sequential
+reader path; page-token remains the checked mode for file-backed GH Archive.
 
 ## Commands
 
@@ -654,6 +661,78 @@ first generated/preloaded row suggested:
   lifetimes.
 - q2 is no longer only a repo-aggregation CPU ceiling once parser allocation is
   reduced; the byte-slice two-hour q2 row also favors regions modestly.
+
+## Generated/Preloaded Direct-Epoch q2 Follow-Up
+
+Direct-epoch q2 modes were added after the reusable epoch topology work:
+
+```bash
+cd /Users/siyaoliu/rift/scala-native-rift
+GITHUB_ARCHIVE_INPUT= \
+GITHUB_ARCHIVE_INPUTS= \
+GITHUB_ARCHIVE_INPUT_MODE=preloaded \
+GITHUB_ARCHIVE_EVENTS=1000000 \
+GITHUB_ARCHIVE_BENCHMARK_RUNS=3 \
+GITHUB_ARCHIVE_WARMUPS=1 \
+GITHUB_ARCHIVE_QUERIES="q2-repo-window" \
+GITHUB_ARCHIVE_MODES="gc-heap heap-direct-epoch checked-epoch-stream checked-epoch-scoped" \
+GITHUB_ARCHIVE_BUILD=0 \
+zsh sandbox/run_github_archive_region_matrix.sh
+```
+
+1M generated/preloaded direct-epoch same-shape rows:
+
+| Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes | Output count |
+|---|---:|---:|---:|---:|---:|---:|
+| `gc-heap` | `287.380` | `84.904` | `103.436` | `3/3` | `206618624` | `163487` |
+| `heap-direct-epoch` | `54.642` | `0.000` | `0.000` | `0/3` | `6078464` | `163487` |
+| `checked-epoch-stream` | `56.167` | `0.000` | `0.000` | `0/3` | `6111232` | `163487` |
+| `checked-epoch-scoped` | `56.013` | `0.000` | `0.000` | `0/3` | `6111232` | `163487` |
+
+Interpretation: this is an excellent direct-aggregate topology result, not a
+pure memory-placement result. The checked direct-epoch q2 path allocates
+ordinary event/field objects inside each bucket epoch and retains only primitive
+repo counts until the original close point. The `heap-direct-epoch` control
+shows that almost all of the speedup comes from avoiding generic page-token
+close traversal and retaining summaries instead of records. Checked regions are
+within about 3% of same-shape heap here.
+
+## Generated/Preloaded Retained-Epoch q2 Reclaim Control
+
+Retained no-traverse modes were added on 2026-05-09. These modes update the
+same primitive summaries on append but keep ordinary Scala event/field records
+linked and alive until the epoch closes. Close touches only head/tail anchors
+and does not traverse records.
+
+Command:
+
+```bash
+cd /Users/siyaoliu/rift/scala-native-rift
+GITHUB_ARCHIVE_BUILD=0 \
+GITHUB_ARCHIVE_EVENTS=1000000 \
+GITHUB_ARCHIVE_EVENTS_PER_BUCKET=25000 \
+GITHUB_ARCHIVE_WARMUPS=1 \
+GITHUB_ARCHIVE_BENCHMARK_RUNS=3 \
+GITHUB_ARCHIVE_INPUT_MODE=preloaded \
+GITHUB_ARCHIVE_QUERIES="q2-repo-window" \
+GITHUB_ARCHIVE_MODES="heap-direct-summary-only heap-epoch-retained-no-traverse checked-epoch-retained-no-traverse checked-scoped-epoch-retained-no-traverse" \
+zsh sandbox/run_github_archive_region_matrix.sh
+```
+
+All rows matched checksum `7294087528134281006` and output count `163487`.
+
+| Mode | Evidence class | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes |
+|---|---|---:|---:|---:|---:|---:|
+| `heap-direct-summary-only` | topology lower bound | `70.416` | `0.000` | `0.000` | `0/3` | `6078464` |
+| `heap-epoch-retained-no-traverse` | retained heap control | `244.988` | `69.552` | `76.134` | `3/3` | `147275776` |
+| `checked-epoch-retained-no-traverse` | retained checked region | `191.064` | `0.000` | `0.000` | `0/3` | `15138816` |
+| `checked-scoped-epoch-retained-no-traverse` | retained checked scoped region | `181.345` | `0.000` | `0.000` | `0/3` | `15187968` |
+
+Interpretation: the retained control turns the generated/preloaded GH-shaped q2
+row into strong memory-management evidence. Checked scoped retained epoch is
+`26.0%` faster than retained heap, removes `69.552 ms` median timed GC, and
+uses roughly `90%` less RSS. The summary-only row is still topology/operator
+evidence only.
 
 Next useful GH Archive work:
 

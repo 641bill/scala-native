@@ -80,6 +80,7 @@ object GithubArchiveRegionConfig {
 object GithubArchiveRegionMatrixHelpers {
   @volatile private var checksumSink = 0L
   @volatile private var outputSink = 0L
+  @volatile private var retainedAnchorSink = 0L
 
   private final class HeapRecord(
       val kind: Int,
@@ -817,8 +818,13 @@ object GithubArchiveRegionMatrixHelpers {
 
   def validateMode(mode: String): Unit =
     canonicalMode(mode) match {
-      case "heap" | "safezone" | "rift-hp" | "rift-streaming" |
-          "rift-checked-page-token" | "rift-checked-safezone-page-token" =>
+      case "heap" | "heap-direct-epoch" | "safezone" | "rift-hp" |
+          "rift-streaming" | "rift-checked-page-token" |
+          "rift-checked-safezone-page-token" | "rift-checked-direct-epoch" |
+          "rift-checked-safezone-direct-epoch" |
+          "heap-epoch-retained-no-traverse" |
+          "checked-epoch-retained-no-traverse" |
+          "checked-scoped-epoch-retained-no-traverse" =>
         ()
       case other =>
         throw new IllegalArgumentException(
@@ -1579,33 +1585,433 @@ object GithubArchiveRegionMatrixHelpers {
       runRiftCheckedPageTokenBody(query)
     }
 
+  private def runHeapDirectEpochAggregate(
+      query: String,
+      retainRecords: Boolean = false
+  ): RunOutcome = {
+    val cfg = GithubArchiveRegionConfig
+    val input = inputData
+    if (cfg.fileBackedInput)
+      throw new IllegalArgumentException(
+        "GH Archive heap direct-epoch requires generated or preloaded input; use page-token for file-backed rows"
+      )
+    if (!windowQuery(query))
+      throw new IllegalArgumentException(
+        s"GH Archive heap direct-epoch supports q2/window queries, not '$query'"
+      )
+
+    final class HeapDirectRecord(
+        val kind: Int,
+        val eventIndex: Int,
+        val repoBucket: Int,
+        val eventType: Int,
+        val value: Int,
+        val hash: Long
+    )
+
+    final class HeapRetainedRecord(
+        val kind: Int,
+        val eventIndex: Int,
+        val repoBucket: Int,
+        val eventType: Int,
+        val value: Int,
+        val hash: Long,
+        val next: HeapRetainedRecord
+    )
+
+    val slots = cfg.liveBuckets + 1
+    val starts = Array.fill[Long](slots)(Long.MinValue)
+    val counts = new Array[Int](slots * cfg.repoBuckets)
+    var nextCloseStart = 0L
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedAnchor = 0L
+
+    def slotFor(start: Long): Int =
+      ((start / cfg.eventsPerBucket.toLong) % slots.toLong).toInt
+
+    def clearSlot(slot: Int): Unit = {
+      val base = slot * cfg.repoBuckets
+      var repo = 0
+      while (repo < cfg.repoBuckets) {
+        counts(base + repo) = 0
+        repo += 1
+      }
+    }
+
+    def closeSummaries(cutoffEvent: Long): Unit =
+      while (
+        nextCloseStart < input.events.toLong &&
+        nextCloseStart + cfg.eventsPerBucket.toLong <= cutoffEvent
+      ) {
+        val slot = slotFor(nextCloseStart)
+        if (starts(slot) == nextCloseStart) {
+          val base = slot * cfg.repoBuckets
+          var repo = 0
+          while (repo < cfg.repoBuckets) {
+            val count = counts(base + repo)
+            if (count != 0) {
+              checksum = fold(
+                checksum,
+                44,
+                nextCloseStart.toInt,
+                repo,
+                0,
+                count,
+                (repo.toLong << 32) ^ count.toLong,
+                nextCloseStart
+              )
+              outputCount += 1L
+            }
+            repo += 1
+          }
+          starts(slot) = Long.MinValue
+        }
+        nextCloseStart += cfg.eventsPerBucket.toLong
+      }
+
+    def runBucket(startEvent: Int, endEvent: Int): Unit = {
+      val start = startEvent.toLong
+      closeSummaries(closeCutoff(start))
+      val slot = slotFor(start)
+      clearSlot(slot)
+      starts(slot) = start
+      val base = slot * cfg.repoBuckets
+      var head: HeapRetainedRecord = null
+      var tail: HeapRetainedRecord = null
+      var retainedCount = 0
+
+      def appendHeapDirect(
+          kind: Int,
+          i: Int,
+          repo: Int,
+          eventType: Int,
+          value: Int,
+          hash: Long
+      ): Unit = {
+        if (retainRecords) {
+          val record =
+            new HeapRetainedRecord(kind, i, repo, eventType, value, hash, head)
+          if (head == null) tail = record
+          head = record
+          retainedCount += 1
+          counts(base + record.repoBucket) += 1
+        } else {
+          val record =
+            new HeapDirectRecord(kind, i, repo, eventType, value, hash)
+          counts(base + record.repoBucket) += 1
+        }
+      }
+
+      var i = startEvent
+      while (i < endEvent) {
+        val repo = input.repoAt(i)
+        val eventType = input.eventTypeAt(i)
+        val fields = input.fieldCountAt(i)
+        val hash = input.hashAt(i, eventType)
+        appendHeapDirect(10, i, repo, eventType, fields, hash)
+        var field = 0
+        while (field < fields) {
+          appendHeapDirect(
+            20 + (field & 3),
+            i,
+            repo,
+            eventType,
+            field,
+            hash ^ (field.toLong * 1315423911L)
+          )
+          field += 1
+        }
+        if (i % cfg.sampleEvery == 0)
+          checksum = fold(checksum, 99, i, repo, eventType, fields, hash, start)
+        i += 1
+      }
+      if (retainRecords && head != null && tail != null)
+        retainedAnchor =
+          (retainedAnchor * 1099511628211L) ^
+            head.hash ^
+            (tail.hash << 1) ^
+            retainedCount.toLong ^
+            start
+    }
+
+    var bucketStartEvent = 0
+    while (bucketStartEvent < input.events) {
+      val bucketEnd =
+        math.min(input.events, bucketStartEvent + cfg.eventsPerBucket)
+      runBucket(bucketStartEvent, bucketEnd)
+      bucketStartEvent = bucketEnd
+    }
+    closeSummaries(Long.MaxValue)
+
+    checksumSink = checksum
+    outputSink = outputCount
+    if (retainRecords) retainedAnchorSink = retainedAnchor
+    RunOutcome(checksum, outputCount)
+  }
+
+  private def runRiftCheckedDirectEpochBody(
+      query: String,
+      retainRecords: Boolean = false
+  )(using
+      stream: RiftRegion.StreamingRegion^
+  ): RunOutcome = {
+    val cfg = GithubArchiveRegionConfig
+    val input = inputData
+    if (cfg.fileBackedInput)
+      throw new IllegalArgumentException(
+        "GH Archive checked direct-epoch requires generated or preloaded input; use page-token for file-backed rows"
+      )
+    if (!windowQuery(query))
+      throw new IllegalArgumentException(
+        s"GH Archive checked direct-epoch supports q2/window queries, not '$query'"
+      )
+
+    val slots = cfg.liveBuckets + 1
+    val starts = Array.fill[Long](slots)(Long.MinValue)
+    val counts = new Array[Int](slots * cfg.repoBuckets)
+    var nextCloseStart = 0L
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedAnchor = 0L
+
+    def slotFor(start: Long): Int =
+      ((start / cfg.eventsPerBucket.toLong) % slots.toLong).toInt
+
+    def clearSlot(slot: Int): Unit = {
+      val base = slot * cfg.repoBuckets
+      var repo = 0
+      while (repo < cfg.repoBuckets) {
+        counts(base + repo) = 0
+        repo += 1
+      }
+    }
+
+    def closeSummaries(cutoffEvent: Long): Unit =
+      while (
+        nextCloseStart < input.events.toLong &&
+        nextCloseStart + cfg.eventsPerBucket.toLong <= cutoffEvent
+      ) {
+        val slot = slotFor(nextCloseStart)
+        if (starts(slot) == nextCloseStart) {
+          val base = slot * cfg.repoBuckets
+          var repo = 0
+          while (repo < cfg.repoBuckets) {
+            val count = counts(base + repo)
+            if (count != 0) {
+              checksum = fold(
+                checksum,
+                44,
+                nextCloseStart.toInt,
+                repo,
+                0,
+                count,
+                (repo.toLong << 32) ^ count.toLong,
+                nextCloseStart
+              )
+              outputCount += 1L
+            }
+            repo += 1
+          }
+          starts(slot) = Long.MinValue
+        }
+        nextCloseStart += cfg.eventsPerBucket.toLong
+      }
+
+    def runBucket(startEvent: Int, endEvent: Int): Unit = {
+      val start = startEvent.toLong
+      closeSummaries(closeCutoff(start))
+      val slot = slotFor(start)
+      clearSlot(slot)
+      starts(slot) = start
+      val base = slot * cfg.repoBuckets
+
+      RiftRegion.epoch { region ?=>
+        final class CheckedRecord(
+            val kind: Int,
+            val eventIndex: Int,
+            val repoBucket: Int,
+            val eventType: Int,
+            val value: Int,
+            val hash: Long
+        )
+
+        final class CheckedRetainedRecord(
+            val kind: Int,
+            val eventIndex: Int,
+            val repoBucket: Int,
+            val eventType: Int,
+            val value: Int,
+            val hash: Long
+        ) {
+          var next: CheckedRetainedRecord^{region} = null
+        }
+
+        var head: CheckedRetainedRecord^{region} = null
+        var tail: CheckedRetainedRecord^{region} = null
+        var retainedCount = 0
+
+        def appendChecked(
+            kind: Int,
+            i: Int,
+            repo: Int,
+            eventType: Int,
+            value: Int,
+            hash: Long
+        ): Unit = {
+          if (retainRecords) {
+            val record: CheckedRetainedRecord^{region} =
+              RiftRegion.allocOpen(
+                new CheckedRetainedRecord(kind, i, repo, eventType, value, hash)
+              )
+            record.next = head
+            if (head == null) tail = record
+            head = record
+            retainedCount += 1
+            counts(base + record.repoBucket) += 1
+          } else {
+            val record =
+              RiftRegion.allocOpen(
+                new CheckedRecord(kind, i, repo, eventType, value, hash)
+              )
+            counts(base + record.repoBucket) += 1
+          }
+        }
+
+        var i = startEvent
+        while (i < endEvent) {
+          val repo = input.repoAt(i)
+          val eventType = input.eventTypeAt(i)
+          val fields = input.fieldCountAt(i)
+          val hash = input.hashAt(i, eventType)
+          appendChecked(10, i, repo, eventType, fields, hash)
+          var field = 0
+          while (field < fields) {
+            appendChecked(
+              20 + (field & 3),
+              i,
+              repo,
+              eventType,
+              field,
+              hash ^ (field.toLong * 1315423911L)
+            )
+            field += 1
+          }
+          if (i % cfg.sampleEvery == 0)
+            checksum = fold(checksum, 99, i, repo, eventType, fields, hash, start)
+          i += 1
+        }
+        if (retainRecords && head != null && tail != null)
+          retainedAnchor =
+            (retainedAnchor * 1099511628211L) ^
+              head.hash ^
+              (tail.hash << 1) ^
+              retainedCount.toLong ^
+              start
+      }
+    }
+
+    var bucketStartEvent = 0
+    while (bucketStartEvent < input.events) {
+      val bucketEnd =
+        math.min(input.events, bucketStartEvent + cfg.eventsPerBucket)
+      runBucket(bucketStartEvent, bucketEnd)
+      bucketStartEvent = bucketEnd
+    }
+    closeSummaries(Long.MaxValue)
+
+    checksumSink = checksum
+    outputSink = outputCount
+    if (retainRecords) retainedAnchorSink = retainedAnchor
+    RunOutcome(checksum, outputCount)
+  }
+
+  private def runRiftCheckedDirectEpoch(query: String): RunOutcome =
+    RiftRegion.streaming { stream ?=>
+      runRiftCheckedDirectEpochBody(query)
+    }
+
+  private def runRiftCheckedSafeZoneDirectEpoch(query: String): RunOutcome =
+    RiftRegion.streamingSafeZone { stream ?=>
+      runRiftCheckedDirectEpochBody(query)
+    }
+
+  private def runHeapRetainedEpochNoTraverse(query: String): RunOutcome =
+    runHeapDirectEpochAggregate(query, retainRecords = true)
+
+  private def runRiftCheckedRetainedEpochNoTraverse(
+      query: String
+  ): RunOutcome =
+    RiftRegion.streaming { stream ?=>
+      runRiftCheckedDirectEpochBody(query, retainRecords = true)
+    }
+
+  private def runRiftCheckedSafeZoneRetainedEpochNoTraverse(
+      query: String
+  ): RunOutcome =
+    RiftRegion.streamingSafeZone { stream ?=>
+      runRiftCheckedDirectEpochBody(query, retainRecords = true)
+    }
+
   private def canonicalMode(mode: String): String =
     mode match {
-      case "heap-immix" => "heap"
+      case "gc-heap" | "heap-immix" => "heap"
+      case "heap-direct-summary-only" =>
+        "heap-direct-epoch"
+      case "heap-same-shape-direct-epoch" | "heap-direct-aggregate" |
+          "heap-direct-epoch" =>
+        "heap-direct-epoch"
+      case "heap-epoch-retained-no-traverse" =>
+        "heap-epoch-retained-no-traverse"
       case "safezone-current" | "safezone-improved" |
           "safezone-improved-32k" | "safezone-rootless-32k" |
           "unsafezone-hp" =>
         "safezone"
       case "rift-trusted-hp"        => "rift-hp"
       case "rift-trusted-streaming" => "rift-streaming"
+      case "checked-epoch-stream" | "checked-region-stream-epoch" |
+          "rift-checked-direct-epoch" =>
+        "rift-checked-direct-epoch"
+      case "checked-epoch-scoped" | "checked-region-scoped-epoch" |
+          "rift-checked-safezone-direct-epoch" =>
+        "rift-checked-safezone-direct-epoch"
+      case "checked-epoch-retained-no-traverse" |
+          "checked-region-stream-retained-epoch" =>
+        "checked-epoch-retained-no-traverse"
+      case "checked-scoped-epoch-retained-no-traverse" |
+          "checked-region-scoped-retained-epoch" =>
+        "checked-scoped-epoch-retained-no-traverse"
       case other                    => other
     }
 
   private def usesRiftRuntime(mode: String): Boolean =
     canonicalMode(mode) match {
-      case "rift-hp" | "rift-streaming" | "rift-checked-page-token" => true
+      case "rift-hp" | "rift-streaming" | "rift-checked-page-token" |
+          "rift-checked-direct-epoch" |
+          "checked-epoch-retained-no-traverse" =>
+        true
       case _                                                        => false
     }
 
   private def runMode(mode: String, query: String): RunOutcome =
     canonicalMode(mode) match {
       case "heap"                        => runHeap(query)
+      case "heap-direct-epoch"           => runHeapDirectEpochAggregate(query)
+      case "heap-epoch-retained-no-traverse" =>
+        runHeapRetainedEpochNoTraverse(query)
       case "safezone"                    => runSafeZone(query)
       case "rift-hp"                     => runRiftTrusted(query, RiftRegion.HPZone)
       case "rift-streaming"              => runRiftTrusted(query, RiftRegion.Streaming)
       case "rift-checked-page-token"     => runRiftCheckedPageToken(query)
       case "rift-checked-safezone-page-token" =>
         runRiftCheckedSafeZonePageToken(query)
+      case "rift-checked-direct-epoch" => runRiftCheckedDirectEpoch(query)
+      case "rift-checked-safezone-direct-epoch" =>
+        runRiftCheckedSafeZoneDirectEpoch(query)
+      case "checked-epoch-retained-no-traverse" =>
+        runRiftCheckedRetainedEpochNoTraverse(query)
+      case "checked-scoped-epoch-retained-no-traverse" =>
+        runRiftCheckedSafeZoneRetainedEpochNoTraverse(query)
       case other =>
         throw new IllegalArgumentException(
           s"unknown GH Archive mode '$other'"

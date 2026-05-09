@@ -91,6 +91,7 @@ object DSPBenchRegionConfig {
 object DSPBenchRegionMatrixHelpers {
   @volatile private var checksumSink = 0L
   @volatile private var outputSink = 0L
+  @volatile private var retainedAnchorSink = 0L
 
   private final class MemoryCostDiagnostics {
     var bucketSwitchNanos = 0L
@@ -2218,9 +2219,553 @@ object DSPBenchRegionMatrixHelpers {
       runRiftCheckedPageTokenBody(query, "rift-checked-safezone-page-token")
     }
 
+  private def runHeapDirectEpochAggregate(
+      query: String,
+      retainRecords: Boolean = false
+  ): RunOutcome = {
+    val cfg = DSPBenchRegionConfig
+    if (cfg.fileBackedInput)
+      throw new IllegalArgumentException(
+        "DSPBench heap direct-epoch aggregate currently requires generated/indexable input; use page-token for file-backed rows"
+      )
+    if (!windowQuery(query))
+      throw new IllegalArgumentException(
+        s"DSPBench heap direct-epoch aggregate supports q2/window queries, not '$query'"
+      )
+
+    val state = new MovingAverageState()
+    val fraudState = new FraudPredictorState()
+    val logState = new LogStatusState()
+    val keyCount = keyBucketCount(query)
+    val slots = cfg.liveBuckets + 1
+    val starts = Array.fill[Long](slots)(Long.MinValue)
+    val counts = new Array[Int](slots * keyCount)
+    val spikes = new Array[Int](slots * keyCount)
+    val targetKind = windowRecordKind(query)
+    var nextCloseStart = 0L
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedAnchor = 0L
+
+    final class HeapDirectRecord(
+        val kind: Int,
+        val eventIndex: Int,
+        val device: Int,
+        val valueScaled: Int,
+        val avgScaled: Int,
+        val spike: Boolean,
+        val hash: Long
+    )
+
+    final class HeapRetainedRecord(
+        val kind: Int,
+        val eventIndex: Int,
+        val device: Int,
+        val valueScaled: Int,
+        val avgScaled: Int,
+        val spike: Boolean,
+        val hash: Long,
+        val next: HeapRetainedRecord
+    )
+
+    def slotFor(start: Long): Int =
+      ((start / cfg.eventsPerBucket.toLong) % slots.toLong).toInt
+
+    def clearSlot(slot: Int): Unit = {
+      val base = slot * keyCount
+      var key = 0
+      while (key < keyCount) {
+        counts(base + key) = 0
+        spikes(base + key) = 0
+        key += 1
+      }
+    }
+
+    def closeSummaries(cutoffEvent: Long): Unit =
+      while (
+        nextCloseStart < cfg.events.toLong &&
+        nextCloseStart + cfg.eventsPerBucket.toLong <= cutoffEvent
+      ) {
+        val slot = slotFor(nextCloseStart)
+        if (starts(slot) == nextCloseStart) {
+          val base = slot * keyCount
+          var key = 0
+          while (key < keyCount) {
+            val count = counts(base + key)
+            if (count != 0) {
+              checksum = fold(
+                checksum,
+                windowSummaryKind(query),
+                nextCloseStart.toInt,
+                key,
+                count,
+                spikes(base + key),
+                spikes(base + key) != 0,
+                (key.toLong << 32) ^ count.toLong ^ spikes(base + key).toLong,
+                nextCloseStart
+              )
+              outputCount += 1L
+            }
+            key += 1
+          }
+          starts(slot) = Long.MinValue
+        }
+        nextCloseStart += cfg.eventsPerBucket.toLong
+      }
+
+    def runBucket(startEvent: Int, endEvent: Int): Unit = {
+      val start = startEvent.toLong
+      closeSummaries(closeCutoff(start))
+      val slot = slotFor(start)
+      clearSlot(slot)
+      starts(slot) = start
+      val base = slot * keyCount
+      var head: HeapRetainedRecord = null
+      var tail: HeapRetainedRecord = null
+      var retainedCount = 0
+
+      def appendHeapDirect(
+          kind: Int,
+          i: Int,
+          key: Int,
+          value: Int,
+          score: Int,
+          flag: Boolean,
+          hash: Long
+      ): Unit = {
+        if (retainRecords) {
+          val record =
+            new HeapRetainedRecord(kind, i, key, value, score, flag, hash, head)
+          if (head == null) tail = record
+          head = record
+          retainedCount += 1
+          if (record.kind == targetKind) {
+            counts(base + record.device) += 1
+            if (record.spike) spikes(base + record.device) += 1
+          }
+        } else {
+          val record =
+            new HeapDirectRecord(kind, i, key, value, score, flag, hash)
+          if (record.kind == targetKind) {
+            counts(base + record.device) += 1
+            if (record.spike) spikes(base + record.device) += 1
+          }
+        }
+      }
+
+      var i = startEvent
+      if (fraudQuery(query)) {
+        while (i < endEvent) {
+          val entity = generatedFraudEntity(i)
+          val stateCode = generatedFraudState(i, entity)
+          val hash = generatedHash(i, entity, stateCode)
+          appendHeapDirect(110, i, entity, stateCode, 0, false, hash)
+          if (fraudPredictQuery(query)) {
+            val prediction = fraudState.update(entity, stateCode)
+            appendHeapDirect(
+              120,
+              i,
+              entity,
+              stateCode,
+              prediction._1,
+              prediction._2,
+              hash ^ prediction._3.toLong ^ 120L
+            )
+            appendHeapDirect(121, i, entity, prediction._3, prediction._1, false, hash ^ 121L)
+            appendHeapDirect(122, i, entity, stateCode, prediction._1, prediction._2, hash ^ 122L)
+            if (fraudAlertQuery(query) && prediction._2)
+              appendHeapDirect(130, i, entity, stateCode, prediction._1, true, hash ^ 130L)
+          }
+          if (i % cfg.sampleEvery == 0)
+            checksum = fold(checksum, 199, i, entity, stateCode, 0, false, hash, start)
+          i += 1
+        }
+      } else if (logQuery(query)) {
+        while (i < endEvent) {
+          val status = generatedLogStatus(i)
+          val statusBucket =
+            BenchmarkInputSupport.positiveModulo(status, cfg.logStatusBuckets)
+          val minuteBucket =
+            BenchmarkInputSupport.positiveModulo(i / 60, cfg.logMinuteBuckets)
+          val byteSize = 64 + (mix(i * 1664525 + 1013904223) % 32768)
+          val requestHash = mix(i * 1009 + status * 37)
+          val hash = generatedHash(i, statusBucket, byteSize) ^
+            (minuteBucket.toLong << 23) ^
+            requestHash.toLong
+          val error = statusBucket >= 400 && statusBucket < 600
+          appendHeapDirect(210, i, statusBucket, byteSize, minuteBucket, error, hash)
+          if (logStatusQuery(query)) {
+            val updated = logState.update(statusBucket, minuteBucket, byteSize)
+            appendHeapDirect(
+              220,
+              i,
+              statusBucket,
+              updated._1,
+              updated._2,
+              error,
+              hash ^ requestHash.toLong ^ 220L
+            )
+            if (logWindowQuery(query))
+              appendHeapDirect(230, i, statusBucket, byteSize, minuteBucket, error, hash ^ 230L)
+          }
+          if (i % cfg.sampleEvery == 0)
+            checksum = fold(
+              checksum,
+              299,
+              i,
+              statusBucket,
+              byteSize,
+              minuteBucket,
+              error,
+              hash,
+              start
+            )
+          i += 1
+        }
+      } else {
+        while (i < endEvent) {
+          val device = generatedDevice(i)
+          val value = generatedValue(i)
+          val hash = generatedHash(i, device, value)
+          appendHeapDirect(10, i, device, value, 0, false, hash)
+          if (averageQuery(query)) {
+            val avg = state.update(device, value)
+            appendHeapDirect(20, i, device, value, avg, false, hash ^ 20L)
+            if (candidateQuery(query)) {
+              val spike = isSpike(value, avg)
+              appendHeapDirect(30, i, device, value, avg, spike, hash ^ 30L)
+            }
+          }
+          if (i % cfg.sampleEvery == 0)
+            checksum = fold(checksum, 99, i, device, value, 0, false, hash, start)
+          i += 1
+        }
+      }
+      if (retainRecords && head != null && tail != null)
+        retainedAnchor =
+          (retainedAnchor * 1099511628211L) ^
+            head.hash ^
+            (tail.hash << 1) ^
+            retainedCount.toLong ^
+            start
+    }
+
+    var bucketStartEvent = 0
+    while (bucketStartEvent < cfg.events) {
+      val bucketEnd =
+        math.min(cfg.events, bucketStartEvent + cfg.eventsPerBucket)
+      runBucket(bucketStartEvent, bucketEnd)
+      bucketStartEvent = bucketEnd
+    }
+    closeSummaries(Long.MaxValue)
+
+    checksumSink = checksum
+    outputSink = outputCount
+    if (retainRecords) retainedAnchorSink = retainedAnchor
+    RunOutcome(checksum, outputCount)
+  }
+
+  private def runRiftCheckedDirectEpochBody(
+      query: String,
+      retainRecords: Boolean = false
+  )(using
+      stream: RiftRegion.StreamingRegion^
+  ): RunOutcome = {
+    val cfg = DSPBenchRegionConfig
+    if (cfg.fileBackedInput)
+      throw new IllegalArgumentException(
+        "DSPBench checked direct-epoch currently requires generated/indexable input; use page-token for file-backed rows"
+      )
+    if (!windowQuery(query))
+      throw new IllegalArgumentException(
+        s"DSPBench checked direct-epoch supports q2/window queries, not '$query'"
+      )
+
+    val state = new MovingAverageState()
+    val fraudState = new FraudPredictorState()
+    val logState = new LogStatusState()
+    val keyCount = keyBucketCount(query)
+    val slots = cfg.liveBuckets + 1
+    val starts = Array.fill[Long](slots)(Long.MinValue)
+    val counts = new Array[Int](slots * keyCount)
+    val spikes = new Array[Int](slots * keyCount)
+    val targetKind = windowRecordKind(query)
+    var nextCloseStart = 0L
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedAnchor = 0L
+
+    def slotFor(start: Long): Int =
+      ((start / cfg.eventsPerBucket.toLong) % slots.toLong).toInt
+
+    def clearSlot(slot: Int): Unit = {
+      val base = slot * keyCount
+      var key = 0
+      while (key < keyCount) {
+        counts(base + key) = 0
+        spikes(base + key) = 0
+        key += 1
+      }
+    }
+
+    def closeSummaries(cutoffEvent: Long): Unit =
+      while (
+        nextCloseStart < cfg.events.toLong &&
+        nextCloseStart + cfg.eventsPerBucket.toLong <= cutoffEvent
+      ) {
+        val slot = slotFor(nextCloseStart)
+        if (starts(slot) == nextCloseStart) {
+          val base = slot * keyCount
+          var key = 0
+          while (key < keyCount) {
+            val count = counts(base + key)
+            if (count != 0) {
+              checksum = fold(
+                checksum,
+                windowSummaryKind(query),
+                nextCloseStart.toInt,
+                key,
+                count,
+                spikes(base + key),
+                spikes(base + key) != 0,
+                (key.toLong << 32) ^ count.toLong ^ spikes(base + key).toLong,
+                nextCloseStart
+              )
+              outputCount += 1L
+            }
+            key += 1
+          }
+          starts(slot) = Long.MinValue
+        }
+        nextCloseStart += cfg.eventsPerBucket.toLong
+      }
+
+    def runBucket(startEvent: Int, endEvent: Int): Unit = {
+      val start = startEvent.toLong
+      closeSummaries(closeCutoff(start))
+      val slot = slotFor(start)
+      clearSlot(slot)
+      starts(slot) = start
+      val base = slot * keyCount
+
+      RiftRegion.epoch { region ?=>
+        final class CheckedRecord(
+            val kind: Int,
+            val eventIndex: Int,
+            val device: Int,
+            val valueScaled: Int,
+            val avgScaled: Int,
+            val spike: Boolean,
+            val hash: Long
+        )
+
+        final class CheckedRetainedRecord(
+            val kind: Int,
+            val eventIndex: Int,
+            val device: Int,
+            val valueScaled: Int,
+            val avgScaled: Int,
+            val spike: Boolean,
+            val hash: Long
+        ) {
+          var next: CheckedRetainedRecord^{region} = null
+        }
+
+        var head: CheckedRetainedRecord^{region} = null
+        var tail: CheckedRetainedRecord^{region} = null
+        var retainedCount = 0
+
+        def appendChecked(
+            kind: Int,
+            i: Int,
+            key: Int,
+            value: Int,
+            score: Int,
+            flag: Boolean,
+            hash: Long
+        ): Unit = {
+          if (retainRecords) {
+            val record: CheckedRetainedRecord^{region} =
+              RiftRegion.allocOpen(
+                new CheckedRetainedRecord(
+                  kind,
+                  i,
+                  key,
+                  value,
+                  score,
+                  flag,
+                  hash
+                )
+              )
+            record.next = head
+            if (head == null) tail = record
+            head = record
+            retainedCount += 1
+            if (record.kind == targetKind) {
+              counts(base + record.device) += 1
+              if (record.spike) spikes(base + record.device) += 1
+            }
+          } else {
+            val record = RiftRegion.allocOpen(
+              new CheckedRecord(kind, i, key, value, score, flag, hash)
+            )
+            if (record.kind == targetKind) {
+              counts(base + record.device) += 1
+              if (record.spike) spikes(base + record.device) += 1
+            }
+          }
+        }
+
+        var i = startEvent
+        if (fraudQuery(query)) {
+          while (i < endEvent) {
+            val entity = generatedFraudEntity(i)
+            val stateCode = generatedFraudState(i, entity)
+            val hash = generatedHash(i, entity, stateCode)
+            appendChecked(110, i, entity, stateCode, 0, false, hash)
+            if (fraudPredictQuery(query)) {
+              val prediction = fraudState.update(entity, stateCode)
+              appendChecked(
+                120,
+                i,
+                entity,
+                stateCode,
+                prediction._1,
+                prediction._2,
+                hash ^ prediction._3.toLong ^ 120L
+              )
+              appendChecked(121, i, entity, prediction._3, prediction._1, false, hash ^ 121L)
+              appendChecked(122, i, entity, stateCode, prediction._1, prediction._2, hash ^ 122L)
+              if (fraudAlertQuery(query) && prediction._2)
+                appendChecked(130, i, entity, stateCode, prediction._1, true, hash ^ 130L)
+            }
+            if (i % cfg.sampleEvery == 0)
+              checksum = fold(checksum, 199, i, entity, stateCode, 0, false, hash, start)
+            i += 1
+          }
+        } else if (logQuery(query)) {
+          while (i < endEvent) {
+            val status = generatedLogStatus(i)
+            val statusBucket =
+              BenchmarkInputSupport.positiveModulo(status, cfg.logStatusBuckets)
+            val minuteBucket =
+              BenchmarkInputSupport.positiveModulo(i / 60, cfg.logMinuteBuckets)
+            val byteSize = 64 + (mix(i * 1664525 + 1013904223) % 32768)
+            val requestHash = mix(i * 1009 + status * 37)
+            val hash = generatedHash(i, statusBucket, byteSize) ^
+              (minuteBucket.toLong << 23) ^
+              requestHash.toLong
+            val error = statusBucket >= 400 && statusBucket < 600
+            appendChecked(210, i, statusBucket, byteSize, minuteBucket, error, hash)
+            if (logStatusQuery(query)) {
+              val updated = logState.update(statusBucket, minuteBucket, byteSize)
+              appendChecked(
+                220,
+                i,
+                statusBucket,
+                updated._1,
+                updated._2,
+                error,
+                hash ^ requestHash.toLong ^ 220L
+              )
+              if (logWindowQuery(query))
+                appendChecked(230, i, statusBucket, byteSize, minuteBucket, error, hash ^ 230L)
+            }
+            if (i % cfg.sampleEvery == 0)
+              checksum = fold(
+                checksum,
+                299,
+                i,
+                statusBucket,
+                byteSize,
+                minuteBucket,
+                error,
+                hash,
+                start
+              )
+            i += 1
+          }
+        } else {
+          while (i < endEvent) {
+            val device = generatedDevice(i)
+            val value = generatedValue(i)
+            val hash = generatedHash(i, device, value)
+            appendChecked(10, i, device, value, 0, false, hash)
+            if (averageQuery(query)) {
+              val avg = state.update(device, value)
+              appendChecked(20, i, device, value, avg, false, hash ^ 20L)
+              if (candidateQuery(query)) {
+                val spike = isSpike(value, avg)
+                appendChecked(30, i, device, value, avg, spike, hash ^ 30L)
+              }
+            }
+            if (i % cfg.sampleEvery == 0)
+              checksum = fold(checksum, 99, i, device, value, 0, false, hash, start)
+            i += 1
+          }
+        }
+        if (retainRecords && head != null && tail != null)
+          retainedAnchor =
+            (retainedAnchor * 1099511628211L) ^
+              head.hash ^
+              (tail.hash << 1) ^
+              retainedCount.toLong ^
+              start
+      }
+    }
+
+    var bucketStartEvent = 0
+    while (bucketStartEvent < cfg.events) {
+      val bucketEnd =
+        math.min(cfg.events, bucketStartEvent + cfg.eventsPerBucket)
+      runBucket(bucketStartEvent, bucketEnd)
+      bucketStartEvent = bucketEnd
+    }
+    closeSummaries(Long.MaxValue)
+
+    checksumSink = checksum
+    outputSink = outputCount
+    if (retainRecords) retainedAnchorSink = retainedAnchor
+    RunOutcome(checksum, outputCount)
+  }
+
+  private def runRiftCheckedDirectEpoch(query: String): RunOutcome =
+    RiftRegion.streaming { stream ?=>
+      runRiftCheckedDirectEpochBody(query)
+    }
+
+  private def runRiftCheckedSafeZoneDirectEpoch(query: String): RunOutcome =
+    RiftRegion.streamingSafeZone { stream ?=>
+      runRiftCheckedDirectEpochBody(query)
+    }
+
+  private def runHeapRetainedEpochNoTraverse(query: String): RunOutcome =
+    runHeapDirectEpochAggregate(query, retainRecords = true)
+
+  private def runRiftCheckedRetainedEpochNoTraverse(
+      query: String
+  ): RunOutcome =
+    RiftRegion.streaming { stream ?=>
+      runRiftCheckedDirectEpochBody(query, retainRecords = true)
+    }
+
+  private def runRiftCheckedSafeZoneRetainedEpochNoTraverse(
+      query: String
+  ): RunOutcome =
+    RiftRegion.streamingSafeZone { stream ?=>
+      runRiftCheckedDirectEpochBody(query, retainRecords = true)
+    }
+
   private def canonicalMode(mode: String): String =
     mode match {
       case "gc-heap" | "heap-immix" => "heap"
+      case "heap-direct-summary-only" =>
+        "heap-direct-epoch"
+      case "heap-same-shape-direct-epoch" | "heap-direct-aggregate" |
+          "heap-direct-epoch" =>
+        "heap-direct-epoch"
+      case "heap-epoch-retained-no-traverse" =>
+        "heap-epoch-retained-no-traverse"
       case "region-scoped-rooted" | "safezone-improved" |
           "safezone-improved-32k" =>
         "safezone"
@@ -2235,19 +2780,40 @@ object DSPBenchRegionMatrixHelpers {
         "rift-checked-page-token"
       case "checked-region-scoped" | "rift-checked-safezone-page-token" =>
         "rift-checked-safezone-page-token"
+      case "checked-epoch-stream" | "checked-region-stream-epoch" |
+          "rift-checked-direct-epoch" =>
+        "rift-checked-direct-epoch"
+      case "checked-epoch-scoped" | "checked-region-scoped-epoch" |
+          "rift-checked-safezone-direct-epoch" =>
+        "rift-checked-safezone-direct-epoch"
+      case "checked-epoch-retained-no-traverse" |
+          "checked-region-stream-retained-epoch" =>
+        "checked-epoch-retained-no-traverse"
+      case "checked-scoped-epoch-retained-no-traverse" |
+          "checked-region-scoped-retained-epoch" =>
+        "checked-scoped-epoch-retained-no-traverse"
       case other => other
     }
 
   private def usesRiftRuntime(mode: String): Boolean =
     canonicalMode(mode) match {
-      case "rift-hp" | "rift-streaming" | "rift-checked-page-token" => true
+      case "rift-hp" | "rift-streaming" | "rift-checked-page-token" |
+          "rift-checked-direct-epoch" |
+          "checked-epoch-retained-no-traverse" =>
+        true
       case _                                                        => false
     }
 
   def validateMode(mode: String): Unit =
     canonicalMode(mode) match {
       case "heap" | "safezone" | "rift-hp" | "rift-streaming" |
-          "rift-checked-page-token" | "rift-checked-safezone-page-token" =>
+          "heap-direct-epoch" |
+          "rift-checked-page-token" | "rift-checked-safezone-page-token" |
+          "rift-checked-direct-epoch" |
+          "rift-checked-safezone-direct-epoch" |
+          "heap-epoch-retained-no-traverse" |
+          "checked-epoch-retained-no-traverse" |
+          "checked-scoped-epoch-retained-no-traverse" =>
         ()
       case other =>
         throw new IllegalArgumentException(
@@ -2271,12 +2837,22 @@ object DSPBenchRegionMatrixHelpers {
   private def runMode(mode: String, query: String): RunOutcome =
     canonicalMode(mode) match {
       case "heap"           => runHeap(query)
+      case "heap-direct-epoch" => runHeapDirectEpochAggregate(query)
+      case "heap-epoch-retained-no-traverse" =>
+        runHeapRetainedEpochNoTraverse(query)
       case "safezone"       => runSafeZone(query)
       case "rift-hp"        => runRiftTrusted(query, RiftRegion.HPZone)
       case "rift-streaming" => runRiftTrusted(query, RiftRegion.Streaming)
       case "rift-checked-page-token" => runRiftCheckedPageToken(query)
       case "rift-checked-safezone-page-token" =>
         runRiftCheckedSafeZonePageToken(query)
+      case "rift-checked-direct-epoch" => runRiftCheckedDirectEpoch(query)
+      case "rift-checked-safezone-direct-epoch" =>
+        runRiftCheckedSafeZoneDirectEpoch(query)
+      case "checked-epoch-retained-no-traverse" =>
+        runRiftCheckedRetainedEpochNoTraverse(query)
+      case "checked-scoped-epoch-retained-no-traverse" =>
+        runRiftCheckedSafeZoneRetainedEpochNoTraverse(query)
       case other =>
         throw new IllegalArgumentException(
           s"unknown DSPBench mode '$other'"

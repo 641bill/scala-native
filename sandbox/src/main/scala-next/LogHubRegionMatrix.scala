@@ -77,6 +77,7 @@ object LogHubRegionConfig {
 object LogHubRegionMatrixHelpers {
   @volatile private var checksumSink = 0L
   @volatile private var outputSink = 0L
+  @volatile private var retainedAnchorSink = 0L
 
   private final class HeapRecord(
       val kind: Int,
@@ -1384,9 +1385,439 @@ object LogHubRegionMatrixHelpers {
       runRiftCheckedPageTokenBody(query)
     }
 
+  private def runHeapDirectEpochAggregate(
+      query: String,
+      retainRecords: Boolean = false
+  ): RunOutcome = {
+    val cfg = LogHubRegionConfig
+    if (cfg.fileBackedInput)
+      throw new IllegalArgumentException(
+        "LogHub heap direct-epoch currently requires generated/indexable input; use page-token for file-backed rows"
+      )
+    if (!windowQuery(query))
+      throw new IllegalArgumentException(
+        s"LogHub heap direct-epoch supports q2/q3 window queries, not '$query'"
+      )
+
+    final class HeapDirectRecord(
+        val kind: Int,
+        val lineIndex: Int,
+        val component: Int,
+        val severity: Int,
+        val value: Int,
+        val hash: Long
+    )
+
+    final class HeapRetainedRecord(
+        val kind: Int,
+        val lineIndex: Int,
+        val component: Int,
+        val severity: Int,
+        val value: Int,
+        val hash: Long,
+        val next: HeapRetainedRecord
+    )
+
+    val bucketCount = windowBucketCount(query)
+    val slots = cfg.liveBuckets + 1
+    val starts = Array.fill[Long](slots)(Long.MinValue)
+    val counts = new Array[Int](slots * bucketCount)
+    var nextCloseStart = 0L
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedAnchor = 0L
+
+    def slotFor(start: Long): Int =
+      ((start / cfg.linesPerBucket.toLong) % slots.toLong).toInt
+
+    def clearSlot(slot: Int): Unit = {
+      val base = slot * bucketCount
+      var key = 0
+      while (key < bucketCount) {
+        counts(base + key) = 0
+        key += 1
+      }
+    }
+
+    def closeSummaries(cutoffLine: Long): Unit =
+      while (
+        nextCloseStart < cfg.lines.toLong &&
+        nextCloseStart + cfg.linesPerBucket.toLong <= cutoffLine
+      ) {
+        val slot = slotFor(nextCloseStart)
+        if (starts(slot) == nextCloseStart) {
+          val base = slot * bucketCount
+          var key = 0
+          while (key < bucketCount) {
+            val count = counts(base + key)
+            if (count != 0) {
+              checksum = fold(
+                checksum,
+                44,
+                nextCloseStart.toInt,
+                key,
+                0,
+                count,
+                (key.toLong << 32) ^ count.toLong,
+                nextCloseStart
+              )
+              outputCount += 1L
+            }
+            key += 1
+          }
+          starts(slot) = Long.MinValue
+        }
+        nextCloseStart += cfg.linesPerBucket.toLong
+      }
+
+    def runBucket(startLine: Int, endLine: Int): Unit = {
+      val start = startLine.toLong
+      closeSummaries(closeCutoff(start))
+      val slot = slotFor(start)
+      clearSlot(slot)
+      starts(slot) = start
+      val base = slot * bucketCount
+      var head: HeapRetainedRecord = null
+      var tail: HeapRetainedRecord = null
+      var retainedCount = 0
+
+      def appendHeapDirect(
+          kind: Int,
+          i: Int,
+          component: Int,
+          severity: Int,
+          value: Int,
+          hash: Long
+      ): Unit = {
+        if (retainRecords) {
+          val record =
+            new HeapRetainedRecord(
+              kind,
+              i,
+              component,
+              severity,
+              value,
+              hash,
+              head
+            )
+          if (head == null) tail = record
+          head = record
+          retainedCount += 1
+          if (includeWindowRecord(query, record.kind))
+            counts(base + record.component) += 1
+        } else {
+          val record =
+            new HeapDirectRecord(kind, i, component, severity, value, hash)
+          if (includeWindowRecord(query, record.kind))
+            counts(base + record.component) += 1
+        }
+      }
+
+      var i = startLine
+      while (i < endLine) {
+        val severity = generatedSeverity(i)
+        val templateBucket = generatedTemplateBucket(i, severity)
+        val component = generatedComponent(i)
+        val tokens = generatedTokens(i)
+        val templateTokens = generatedTemplateTokens(i)
+        val sessionBucket = generatedSessionBucket(i, templateBucket)
+        val hash = generatedHash(i, severity)
+        appendHeapDirect(10, i, component, severity, tokens, hash)
+        val tokenCount =
+          if (templateSessionQuery(query)) templateTokens else tokens
+        val tokenComponent =
+          if (templateSessionQuery(query)) templateBucket else component
+        val tokenKindBase = if (templateSessionQuery(query)) 30 else 20
+        var token = 0
+        while (token < tokenCount) {
+          appendHeapDirect(
+            tokenKindBase + (token & 3),
+            i,
+            tokenComponent,
+            severity,
+            token,
+            hash ^ (token.toLong * 1315423911L) ^
+              templateSalt(query, templateBucket)
+          )
+          token += 1
+        }
+        if (templateSessionQuery(query))
+          appendHeapDirect(
+            40,
+            i,
+            sessionBucket,
+            severity,
+            templateBucket,
+            hash ^ (sessionBucket.toLong * 1099511628211L)
+          )
+        if (i % cfg.sampleEvery == 0)
+          checksum = fold(checksum, 99, i, component, severity, tokens, hash, start)
+        i += 1
+      }
+      if (retainRecords && head != null && tail != null)
+        retainedAnchor =
+          (retainedAnchor * 1099511628211L) ^
+            head.hash ^
+            (tail.hash << 1) ^
+            retainedCount.toLong ^
+            start
+    }
+
+    var bucketStartLine = 0
+    while (bucketStartLine < cfg.lines) {
+      val bucketEnd =
+        math.min(cfg.lines, bucketStartLine + cfg.linesPerBucket)
+      runBucket(bucketStartLine, bucketEnd)
+      bucketStartLine = bucketEnd
+    }
+    closeSummaries(Long.MaxValue)
+
+    checksumSink = checksum
+    outputSink = outputCount
+    if (retainRecords) retainedAnchorSink = retainedAnchor
+    RunOutcome(checksum, outputCount)
+  }
+
+  private def runRiftCheckedDirectEpochBody(
+      query: String,
+      retainRecords: Boolean = false
+  )(using
+      stream: RiftRegion.StreamingRegion^
+  ): RunOutcome = {
+    val cfg = LogHubRegionConfig
+    if (cfg.fileBackedInput)
+      throw new IllegalArgumentException(
+        "LogHub checked direct-epoch currently requires generated/indexable input; use page-token for file-backed rows"
+      )
+    if (!windowQuery(query))
+      throw new IllegalArgumentException(
+        s"LogHub checked direct-epoch supports q2/q3 window queries, not '$query'"
+      )
+
+    val bucketCount = windowBucketCount(query)
+    val slots = cfg.liveBuckets + 1
+    val starts = Array.fill[Long](slots)(Long.MinValue)
+    val counts = new Array[Int](slots * bucketCount)
+    var nextCloseStart = 0L
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedAnchor = 0L
+
+    def slotFor(start: Long): Int =
+      ((start / cfg.linesPerBucket.toLong) % slots.toLong).toInt
+
+    def clearSlot(slot: Int): Unit = {
+      val base = slot * bucketCount
+      var key = 0
+      while (key < bucketCount) {
+        counts(base + key) = 0
+        key += 1
+      }
+    }
+
+    def closeSummaries(cutoffLine: Long): Unit =
+      while (
+        nextCloseStart < cfg.lines.toLong &&
+        nextCloseStart + cfg.linesPerBucket.toLong <= cutoffLine
+      ) {
+        val slot = slotFor(nextCloseStart)
+        if (starts(slot) == nextCloseStart) {
+          val base = slot * bucketCount
+          var key = 0
+          while (key < bucketCount) {
+            val count = counts(base + key)
+            if (count != 0) {
+              checksum = fold(
+                checksum,
+                44,
+                nextCloseStart.toInt,
+                key,
+                0,
+                count,
+                (key.toLong << 32) ^ count.toLong,
+                nextCloseStart
+              )
+              outputCount += 1L
+            }
+            key += 1
+          }
+          starts(slot) = Long.MinValue
+        }
+        nextCloseStart += cfg.linesPerBucket.toLong
+      }
+
+    def runBucket(startLine: Int, endLine: Int): Unit = {
+      val start = startLine.toLong
+      closeSummaries(closeCutoff(start))
+      val slot = slotFor(start)
+      clearSlot(slot)
+      starts(slot) = start
+      val base = slot * bucketCount
+
+      RiftRegion.epoch { region ?=>
+        final class CheckedRecord(
+            val kind: Int,
+            val lineIndex: Int,
+            val component: Int,
+            val severity: Int,
+            val value: Int,
+            val hash: Long
+        )
+
+        final class CheckedRetainedRecord(
+            val kind: Int,
+            val lineIndex: Int,
+            val component: Int,
+            val severity: Int,
+            val value: Int,
+            val hash: Long
+        ) {
+          var next: CheckedRetainedRecord^{region} = null
+        }
+
+        var head: CheckedRetainedRecord^{region} = null
+        var tail: CheckedRetainedRecord^{region} = null
+        var retainedCount = 0
+
+        def appendChecked(
+            kind: Int,
+            i: Int,
+            component: Int,
+            severity: Int,
+            value: Int,
+            hash: Long
+        ): Unit = {
+          if (retainRecords) {
+            val record: CheckedRetainedRecord^{region} =
+              RiftRegion.allocOpen(
+                new CheckedRetainedRecord(
+                  kind,
+                  i,
+                  component,
+                  severity,
+                  value,
+                  hash
+                )
+              )
+            record.next = head
+            if (head == null) tail = record
+            head = record
+            retainedCount += 1
+            if (includeWindowRecord(query, record.kind))
+              counts(base + record.component) += 1
+          } else {
+            val record =
+              RiftRegion.allocOpen(
+                new CheckedRecord(kind, i, component, severity, value, hash)
+              )
+            if (includeWindowRecord(query, record.kind))
+              counts(base + record.component) += 1
+          }
+        }
+
+        var i = startLine
+        while (i < endLine) {
+          val severity = generatedSeverity(i)
+          val templateBucket = generatedTemplateBucket(i, severity)
+          val component = generatedComponent(i)
+          val tokens = generatedTokens(i)
+          val templateTokens = generatedTemplateTokens(i)
+          val sessionBucket = generatedSessionBucket(i, templateBucket)
+          val hash = generatedHash(i, severity)
+          appendChecked(10, i, component, severity, tokens, hash)
+          val tokenCount =
+            if (templateSessionQuery(query)) templateTokens else tokens
+          val tokenComponent =
+            if (templateSessionQuery(query)) templateBucket else component
+          val tokenKindBase = if (templateSessionQuery(query)) 30 else 20
+          var token = 0
+          while (token < tokenCount) {
+            appendChecked(
+              tokenKindBase + (token & 3),
+              i,
+              tokenComponent,
+              severity,
+              token,
+              hash ^ (token.toLong * 1315423911L) ^
+                templateSalt(query, templateBucket)
+            )
+            token += 1
+          }
+          if (templateSessionQuery(query))
+            appendChecked(
+              40,
+              i,
+              sessionBucket,
+              severity,
+              templateBucket,
+              hash ^ (sessionBucket.toLong * 1099511628211L)
+            )
+          if (i % cfg.sampleEvery == 0)
+            checksum = fold(checksum, 99, i, component, severity, tokens, hash, start)
+          i += 1
+        }
+        if (retainRecords && head != null && tail != null)
+          retainedAnchor =
+            (retainedAnchor * 1099511628211L) ^
+              head.hash ^
+              (tail.hash << 1) ^
+              retainedCount.toLong ^
+              start
+      }
+    }
+
+    var bucketStartLine = 0
+    while (bucketStartLine < cfg.lines) {
+      val bucketEnd =
+        math.min(cfg.lines, bucketStartLine + cfg.linesPerBucket)
+      runBucket(bucketStartLine, bucketEnd)
+      bucketStartLine = bucketEnd
+    }
+    closeSummaries(Long.MaxValue)
+
+    checksumSink = checksum
+    outputSink = outputCount
+    if (retainRecords) retainedAnchorSink = retainedAnchor
+    RunOutcome(checksum, outputCount)
+  }
+
+  private def runRiftCheckedDirectEpoch(query: String): RunOutcome =
+    RiftRegion.streaming { stream ?=>
+      runRiftCheckedDirectEpochBody(query)
+    }
+
+  private def runRiftCheckedSafeZoneDirectEpoch(query: String): RunOutcome =
+    RiftRegion.streamingSafeZone { stream ?=>
+      runRiftCheckedDirectEpochBody(query)
+    }
+
+  private def runHeapRetainedEpochNoTraverse(query: String): RunOutcome =
+    runHeapDirectEpochAggregate(query, retainRecords = true)
+
+  private def runRiftCheckedRetainedEpochNoTraverse(
+      query: String
+  ): RunOutcome =
+    RiftRegion.streaming { stream ?=>
+      runRiftCheckedDirectEpochBody(query, retainRecords = true)
+    }
+
+  private def runRiftCheckedSafeZoneRetainedEpochNoTraverse(
+      query: String
+  ): RunOutcome =
+    RiftRegion.streamingSafeZone { stream ?=>
+      runRiftCheckedDirectEpochBody(query, retainRecords = true)
+    }
+
   private def canonicalMode(mode: String): String =
     mode match {
-      case "heap-immix" => "heap"
+      case "gc-heap" | "heap-immix" => "heap"
+      case "heap-direct-summary-only" =>
+        "heap-direct-epoch"
+      case "heap-same-shape-direct-epoch" | "heap-direct-aggregate" |
+          "heap-direct-epoch" =>
+        "heap-direct-epoch"
+      case "heap-epoch-retained-no-traverse" =>
+        "heap-epoch-retained-no-traverse"
       case "safezone-current" | "safezone-improved" |
           "safezone-improved-32k" | "safezone-rootless-32k" |
           "unsafezone-hp" =>
@@ -1396,19 +1827,39 @@ object LogHubRegionMatrixHelpers {
       case "rift-checked-page-token" |
           "rift-checked-safezone-page-token" =>
         mode
+      case "checked-epoch-stream" | "checked-region-stream-epoch" |
+          "rift-checked-direct-epoch" =>
+        "rift-checked-direct-epoch"
+      case "checked-epoch-scoped" | "checked-region-scoped-epoch" |
+          "rift-checked-safezone-direct-epoch" =>
+        "rift-checked-safezone-direct-epoch"
+      case "checked-epoch-retained-no-traverse" |
+          "checked-region-stream-retained-epoch" =>
+        "checked-epoch-retained-no-traverse"
+      case "checked-scoped-epoch-retained-no-traverse" |
+          "checked-region-scoped-retained-epoch" =>
+        "checked-scoped-epoch-retained-no-traverse"
       case other => other
     }
 
   private def usesRiftRuntime(mode: String): Boolean =
     canonicalMode(mode) match {
-      case "rift-hp" | "rift-streaming" | "rift-checked-page-token" => true
+      case "rift-hp" | "rift-streaming" | "rift-checked-page-token" |
+          "rift-checked-direct-epoch" |
+          "checked-epoch-retained-no-traverse" =>
+        true
       case _                                                        => false
     }
 
   def validateMode(mode: String): Unit =
     canonicalMode(mode) match {
-      case "heap" | "safezone" | "rift-hp" | "rift-streaming" |
-          "rift-checked-page-token" | "rift-checked-safezone-page-token" =>
+      case "heap" | "heap-direct-epoch" | "safezone" | "rift-hp" |
+          "rift-streaming" | "rift-checked-page-token" |
+          "rift-checked-safezone-page-token" | "rift-checked-direct-epoch" |
+          "rift-checked-safezone-direct-epoch" |
+          "heap-epoch-retained-no-traverse" |
+          "checked-epoch-retained-no-traverse" |
+          "checked-scoped-epoch-retained-no-traverse" =>
         ()
       case other =>
         throw new IllegalArgumentException(
@@ -1430,12 +1881,22 @@ object LogHubRegionMatrixHelpers {
   private def runMode(mode: String, query: String): RunOutcome =
     canonicalMode(mode) match {
       case "heap"           => runHeap(query)
+      case "heap-direct-epoch" => runHeapDirectEpochAggregate(query)
+      case "heap-epoch-retained-no-traverse" =>
+        runHeapRetainedEpochNoTraverse(query)
       case "safezone"       => runSafeZone(query)
       case "rift-hp"        => runRiftTrusted(query, RiftRegion.HPZone)
       case "rift-streaming" => runRiftTrusted(query, RiftRegion.Streaming)
       case "rift-checked-page-token" => runRiftCheckedPageToken(query)
       case "rift-checked-safezone-page-token" =>
         runRiftCheckedSafeZonePageToken(query)
+      case "rift-checked-direct-epoch" => runRiftCheckedDirectEpoch(query)
+      case "rift-checked-safezone-direct-epoch" =>
+        runRiftCheckedSafeZoneDirectEpoch(query)
+      case "checked-epoch-retained-no-traverse" =>
+        runRiftCheckedRetainedEpochNoTraverse(query)
+      case "checked-scoped-epoch-retained-no-traverse" =>
+        runRiftCheckedSafeZoneRetainedEpochNoTraverse(query)
       case other =>
         throw new IllegalArgumentException(
           s"unknown LogHub mode '$other'"

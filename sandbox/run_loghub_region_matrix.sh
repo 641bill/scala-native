@@ -143,8 +143,14 @@ run_case() {
   local -a env_args
 
   case "${mode}" in
-    heap-immix)
+    gc-heap|heap-immix)
       binary_mode="heap"
+      ;;
+    heap-direct-summary-only|heap-direct-epoch|heap-same-shape-direct-epoch|heap-direct-aggregate)
+      binary_mode="heap-direct-epoch"
+      ;;
+    heap-epoch-retained-no-traverse)
+      binary_mode="heap-epoch-retained-no-traverse"
       ;;
     safezone-current)
       binary_mode="safezone"
@@ -173,6 +179,22 @@ run_case() {
       ;;
     rift-checked-safezone-page-token)
       binary_mode="${mode}"
+      roots_mode="1"
+      page_size="32768"
+      ;;
+    checked-epoch-stream|checked-region-stream-epoch|rift-checked-direct-epoch)
+      binary_mode="rift-checked-direct-epoch"
+      ;;
+    checked-epoch-scoped|checked-region-scoped-epoch|rift-checked-safezone-direct-epoch)
+      binary_mode="rift-checked-safezone-direct-epoch"
+      roots_mode="1"
+      page_size="32768"
+      ;;
+    checked-epoch-retained-no-traverse|checked-region-stream-retained-epoch)
+      binary_mode="checked-epoch-retained-no-traverse"
+      ;;
+    checked-scoped-epoch-retained-no-traverse|checked-region-scoped-retained-epoch)
+      binary_mode="checked-scoped-epoch-retained-no-traverse"
       roots_mode="1"
       page_size="32768"
       ;;

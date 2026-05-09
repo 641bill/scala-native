@@ -1,7 +1,7 @@
 # LogHub Region Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-08 11:35 CEST
+Last updated: 2026-05-09 19:57 CEST
 
 Status: implemented real-input candidate. The matrix has a generated fallback
 for compile/smoke validation and a file-backed byte-line path for extracted
@@ -71,10 +71,17 @@ The runner accepts:
 - `rift-trusted-streaming`
 - `rift-checked-page-token`
 - `rift-checked-safezone-page-token`
+- `heap-direct-epoch`
+- `rift-checked-direct-epoch`
+- `rift-checked-safezone-direct-epoch`
 
 Default runs include heap, improved SafeZone-32k, and checked scoped
 page-token. Set `RIFT_BENCH_INCLUDE_CONTROLS=1` or pass `LOGHUB_MODES=...` to
 include rootless/trusted controls.
+
+The direct-epoch modes currently support generated/indexable q2/q3 rows only.
+Real file-backed LogHub rows remain page-token rows until a preloaded real-log
+path or streaming bucket iterator is added.
 
 ## Commands
 
@@ -295,6 +302,83 @@ Interpretation:
 | safezone-improved-32k | `4747963` | `31459.104` | `0.000` | `0` | `490258432` | `562` |
 | rift-trusted-streaming | `4747963` | `30899.595` | `0.000` | `0` | `658178048` | `562` |
 | rift-checked-safezone-page-token | `4747963` | `31165.087` | `0.000` | `0` | `490946560` | `562` |
+
+### Generated Direct-Epoch q2/q3 Follow-Up
+
+Direct-epoch modes were added for generated/indexable window rows:
+
+```bash
+cd /Users/siyaoliu/rift/scala-native-rift
+LOGHUB_INPUT= \
+LOGHUB_INPUTS= \
+LOGHUB_INPUT_MODE=generated \
+LOGHUB_LINES=1000000 \
+LOGHUB_BENCHMARK_RUNS=3 \
+LOGHUB_WARMUPS=1 \
+LOGHUB_QUERIES="q2-window-counts q3-template-session" \
+LOGHUB_MODES="gc-heap heap-direct-epoch checked-epoch-stream checked-epoch-scoped" \
+LOGHUB_BUILD=0 \
+zsh sandbox/run_loghub_region_matrix.sh
+```
+
+| Query | Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes | Output |
+|---|---|---:|---:|---:|---:|---:|---:|
+| q2-window-counts | gc-heap | `526.803` | `124.142` | `145.882` | `2/3` | `812711936` | `163487` |
+| q2-window-counts | heap-direct-epoch | `191.601` | `0.000` | `0.000` | `0/3` | `678690816` | `163487` |
+| q2-window-counts | checked-epoch-stream | `193.441` | `0.000` | `0.000` | `0/3` | `678739968` | `163487` |
+| q2-window-counts | checked-epoch-scoped | `193.938` | `0.000` | `0.000` | `0/3` | `678707200` | `163487` |
+| q3-template-session | gc-heap | `2225.364` | `175.674` | `183.261` | `2/3` | `2291122176` | `312151` |
+| q3-template-session | heap-direct-epoch | `1779.064` | `0.000` | `118.088` | `1/3` | `2290974720` | `312151` |
+| q3-template-session | checked-epoch-stream | `1784.048` | `0.000` | `127.952` | `1/3` | `2291040256` | `312151` |
+| q3-template-session | checked-epoch-scoped | `1792.397` | `0.000` | `124.048` | `1/3` | `2291040256` | `312151` |
+
+Interpretation: generated LogHub q2/q3 strongly favor direct epoch because the
+operator closes a bucket epoch after producing primitive summary metadata,
+instead of preserving linked records for generic page-token close traversal.
+The `heap-direct-epoch` control shows that this is mainly an operator-topology
+win. Checked direct epoch remains close to same-shape heap while preserving the
+checked lifetime boundary. Real file-backed LogHub q2/q3 still use page-token
+until an indexable/preloaded real-input path exists.
+
+### Generated Retained-Epoch q2/q3 Reclaim Control
+
+Retained no-traverse modes were added on 2026-05-09. They keep ordinary
+Scala line/token/template/session records linked and alive until the epoch
+closes, update primitive summaries on append, and close without traversing
+records.
+
+Command:
+
+```bash
+cd /Users/siyaoliu/rift/scala-native-rift
+LOGHUB_BUILD=0 \
+LOGHUB_LINES=1000000 \
+LOGHUB_LINES_PER_BUCKET=25000 \
+LOGHUB_WARMUPS=1 \
+LOGHUB_BENCHMARK_RUNS=3 \
+LOGHUB_INPUT_MODE=generated \
+LOGHUB_QUERIES="q2-window-counts q3-template-session" \
+LOGHUB_MODES="heap-direct-summary-only heap-epoch-retained-no-traverse checked-epoch-retained-no-traverse checked-scoped-epoch-retained-no-traverse" \
+zsh sandbox/run_loghub_region_matrix.sh
+```
+
+| Query | Mode | Evidence class | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes |
+|---|---|---|---:|---:|---:|---:|---:|
+| `q2-window-counts` | `heap-direct-summary-only` | topology lower bound | `216.636` | `0.000` | `0.000` | `0/3` | `678739968` |
+| `q2-window-counts` | `heap-epoch-retained-no-traverse` | retained heap control | `464.389` | `64.349` | `70.366` | `2/3` | `812761088` |
+| `q2-window-counts` | `checked-epoch-retained-no-traverse` | retained checked region | `413.203` | `0.000` | `0.000` | `0/3` | `305184768` |
+| `q2-window-counts` | `checked-scoped-epoch-retained-no-traverse` | retained checked scoped region | `402.611` | `0.000` | `0.000` | `0/3` | `693960704` |
+| `q3-template-session` | `heap-direct-summary-only` | topology lower bound | `1812.573` | `0.000` | `115.524` | `1/3` | `2291040256` |
+| `q3-template-session` | `heap-epoch-retained-no-traverse` | retained heap control | `2217.322` | `146.514` | `154.948` | `2/3` | `2291138560` |
+| `q3-template-session` | `checked-epoch-retained-no-traverse` | retained checked region | `2213.846` | `43.315` | `81.758` | `3/3` | `834338816` |
+| `q3-template-session` | `checked-scoped-epoch-retained-no-traverse` | retained checked scoped region | `2101.599` | `0.000` | `130.038` | `1/3` | `2312257536` |
+
+Interpretation: q2 is a retained throughput/GC/RSS win; checked scoped retained
+epoch is `13.3%` faster than retained heap and removes median timed GC. q3 is
+mixed but useful: checked scoped retained is `5.2%` faster than retained heap
+and removes median timed GC, while checked stream retained cuts RSS sharply but
+nearly ties elapsed. The summary-only rows remain topology/operator lower
+bounds.
 
 ## Interpretation
 
