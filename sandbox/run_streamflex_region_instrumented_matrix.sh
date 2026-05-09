@@ -48,8 +48,26 @@ read_max_rss_bytes() {
   fi
 }
 
+read_time_seconds() {
+  local time_log="$1"
+  local field="$2"
+  if [[ "${platform}" == "Darwin" ]]; then
+    case "${field}" in
+      real) awk '/ real .* user .* sys/ { print $1; found = 1; exit } END { if (!found) print "" }' "${time_log}" ;;
+      user) awk '/ real .* user .* sys/ { print $3; found = 1; exit } END { if (!found) print "" }' "${time_log}" ;;
+      sys) awk '/ real .* user .* sys/ { print $5; found = 1; exit } END { if (!found) print "" }' "${time_log}" ;;
+    esac
+  else
+    case "${field}" in
+      user) awk -F ':' '/User time \(seconds\)/ { gsub(/^[ \t]+/, "", $2); print $2; found = 1; exit } END { if (!found) print "" }' "${time_log}" ;;
+      sys) awk -F ':' '/System time \(seconds\)/ { gsub(/^[ \t]+/, "", $2); print $2; found = 1; exit } END { if (!found) print "" }' "${time_log}" ;;
+      real) awk -F ':' '/Elapsed \(wall clock\) time/ { gsub(/^[ \t]+/, "", $2); print $2; found = 1; exit } END { if (!found) print "" }' "${time_log}" ;;
+    esac
+  fi
+}
+
 write_summary_header() {
-  printf "label\tmode\tworkload\tmedian_ms\tmedian_gc_ms\tmedian_rift_op_ms\tmedian_rift_alloc_object_total\tmedian_p50_ns\tmedian_p99_ns\tmedian_p999_ns\tmedian_max_ns\tmedian_deadline_misses\tperiod_ns\tchecksum\tmax_rss_bytes\n" > "${summary}"
+  printf "label\tmode\texternal_real_s\texternal_user_s\texternal_sys_s\tworkload\tmedian_ms\tmedian_gc_ms\tmedian_rift_op_ms\tmedian_rift_alloc_object_total\tmedian_p50_ns\tmedian_p99_ns\tmedian_p999_ns\tmedian_max_ns\tmedian_deadline_misses\tperiod_ns\tchecksum\tmax_rss_bytes\n" > "${summary}"
 }
 
 write_result_rows() {
@@ -57,7 +75,10 @@ write_result_rows() {
   local mode="$2"
   local run_log="$3"
   local max_rss_bytes="$4"
-  local line token key value name op
+  local external_real_s="$5"
+  local external_user_s="$6"
+  local external_sys_s="$7"
+  local line token key value name op p50_ns p99_ns p999_ns max_ns misses
   typeset -A fields
 
   while IFS= read -r line; do
@@ -72,19 +93,27 @@ write_result_rows() {
     name=${fields[name]-}
     op=${name#streamflex-}
     op=${op%-${mode}}
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    p50_ns=${fields[median_p50_ns]-${fields[p50_ns]-}}
+    p99_ns=${fields[median_p99_ns]-${fields[p99_ns]-}}
+    p999_ns=${fields[median_p999_ns]-${fields[p999_ns]-}}
+    max_ns=${fields[median_max_ns]-${fields[max_ns]-}}
+    misses=${fields[median_deadline_misses]-${fields[deadline_misses]-}}
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
       "${label}" \
       "${mode}" \
+      "${external_real_s}" \
+      "${external_user_s}" \
+      "${external_sys_s}" \
       "${op}" \
       "${fields[median_ms]-}" \
       "${fields[median_gc_ms]-}" \
       "${fields[median_rift_op_ms]-}" \
       "${fields[median_rift_alloc_object_total]-}" \
-      "${fields[median_p50_ns]-}" \
-      "${fields[median_p99_ns]-}" \
-      "${fields[median_p999_ns]-}" \
-      "${fields[median_max_ns]-}" \
-      "${fields[median_deadline_misses]-}" \
+      "${p50_ns}" \
+      "${p99_ns}" \
+      "${p999_ns}" \
+      "${max_ns}" \
+      "${misses}" \
       "${fields[period_ns]-}" \
       "${fields[checksum]-}" \
       "${max_rss_bytes}" >> "${summary}"
@@ -99,6 +128,9 @@ run_mode() {
   local run_log="${output_dir}/run-${label}.log"
   local time_log="${output_dir}/time-${label}.log"
   local max_rss_bytes
+  local external_real_s
+  local external_user_s
+  local external_sys_s
 
   echo
   echo "== ${label} =="
@@ -109,9 +141,12 @@ run_mode() {
   fi
 
   max_rss_bytes=$(read_max_rss_bytes "${time_log}")
+  external_real_s=$(read_time_seconds "${time_log}" real)
+  external_user_s=$(read_time_seconds "${time_log}" user)
+  external_sys_s=$(read_time_seconds "${time_log}" sys)
   grep "^RESULT name=streamflex-" "${run_log}"
-  echo "STREAMFLEX_RSS_RESULT label=${label} mode=${mode} max_rss_bytes=${max_rss_bytes}"
-  write_result_rows "${label}" "${mode}" "${run_log}" "${max_rss_bytes}"
+  echo "STREAMFLEX_EXTERNAL_RESULT label=${label} mode=${mode} external_real_s=${external_real_s} external_user_s=${external_user_s} external_sys_s=${external_sys_s} max_rss_bytes=${max_rss_bytes}"
+  write_result_rows "${label}" "${mode}" "${run_log}" "${max_rss_bytes}" "${external_real_s}" "${external_user_s}" "${external_sys_s}"
 }
 
 write_summary_header

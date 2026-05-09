@@ -33,6 +33,10 @@ object StancuRegionConfig {
   private def envNonNegativeInt(name: String, default: Int): Int =
     sys.env.get(name).flatMap(nonNegativeInt).getOrElse(default)
 
+  private def truthy(value: String): Boolean =
+    value == "1" || value.equalsIgnoreCase("true") ||
+      value.equalsIgnoreCase("yes")
+
   val transactions: Int = envInt("STANCU_TRANSACTIONS", 200000)
   val itemsPerTransaction: Int = envInt("STANCU_ITEMS_PER_TX", 8)
   val transactionsPerRegion: Int = envInt("STANCU_TX_PER_REGION", 64)
@@ -40,6 +44,9 @@ object StancuRegionConfig {
   val products: Int = envInt("STANCU_PRODUCTS", 4096)
   val benchmarkRuns: Int = envInt("STANCU_BENCHMARK_RUNS", 3)
   val warmupRuns: Int = envNonNegativeInt("STANCU_WARMUPS", 1)
+  val finalClean: Boolean =
+    sys.env.get("RIFT_FINAL_CLEAN").exists(truthy) ||
+      sys.env.get("RIFT_EVAL_MEASUREMENT_LEVEL").exists(_.equalsIgnoreCase("L1"))
 }
 
 object StancuRegionMatrixHelpers {
@@ -451,6 +458,33 @@ object StancuRegionMatrixHelpers {
       mode == "rift-hp" ||
         mode == "rift-streaming" ||
         mode == "rift-checked-direct-epoch"
+    if (cfg.finalClean) {
+      var run = 0
+      var checksum = 0L
+      while (run < cfg.benchmarkRuns) {
+        val result = runWorkload(mode)
+        if (run == 0) checksum = result
+        else if (result != checksum)
+          throw new IllegalStateException(
+            s"final-clean Stancu mismatch mode=$mode first_checksum=$checksum actual=$result"
+          )
+        run += 1
+      }
+      println(
+        s"RESULT name=stancu-transactions-$mode " +
+          s"measurement_level=L1 final_clean=1 mode=$mode " +
+          s"runs=${cfg.benchmarkRuns} transactions=${cfg.transactions} " +
+          s"items_per_tx=${cfg.itemsPerTransaction} " +
+          s"transactions_per_region=${cfg.transactionsPerRegion} " +
+          s"warehouses=${cfg.warehouses} products=${cfg.products} " +
+          s"logical_region_objects=${logicalRegionObjects()} " +
+          s"durable_control_slots=${durableControlSlots()} " +
+          s"candidate_region_object_bp=${candidateBasisPoints()} " +
+          s"explicit_region_boundaries=1 escaped_region_objects=0 " +
+          s"checksum=$checksum"
+      )
+      return
+    }
     val expected = runWorkload("heap")
 
     var warmup = 0

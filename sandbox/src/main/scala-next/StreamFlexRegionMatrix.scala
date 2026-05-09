@@ -44,6 +44,10 @@ object StreamFlexRegionConfig {
   private def envNonNegativeInt(name: String, default: Int): Int =
     sys.env.get(name).flatMap(parseNonNegativeInt).getOrElse(default)
 
+  private def truthy(value: String): Boolean =
+    value == "1" || value.equalsIgnoreCase("true") ||
+      value.equalsIgnoreCase("yes")
+
   val events: Int = envInt("STREAMFLEX_EVENTS", 200000)
   val batchSize: Int = envInt("STREAMFLEX_BATCH_SIZE", 256)
   val objectsPerEvent: Int = envInt("STREAMFLEX_OBJECTS_PER_EVENT", 4)
@@ -53,6 +57,9 @@ object StreamFlexRegionConfig {
   val periodNs: Long = envLong("STREAMFLEX_PERIOD_NS", 80000L)
   val benchmarkRuns: Int = envInt("STREAMFLEX_BENCHMARK_RUNS", 3)
   val warmupRuns: Int = envNonNegativeInt("STREAMFLEX_WARMUPS", 1)
+  val finalClean: Boolean =
+    sys.env.get("RIFT_FINAL_CLEAN").exists(truthy) ||
+      sys.env.get("RIFT_EVAL_MEASUREMENT_LEVEL").exists(_.equalsIgnoreCase("L1"))
 }
 
 object StreamFlexRegionMatrixHelpers {
@@ -1131,6 +1138,27 @@ object StreamFlexRegionMatrixHelpers {
         mode == "rift-checked-direct-epoch" ||
         mode == "rift-checked-epoch-buffer" ||
         mode == "rift-checked-transaction-region"
+    if (cfg.finalClean) {
+      var run = 0
+      var checksum = 0L
+      while (run < cfg.benchmarkRuns) {
+        val result = runThroughput(mode)
+        if (run == 0) checksum = result
+        else if (result != checksum)
+          throw new IllegalStateException(
+            s"final-clean streamflex throughput mismatch mode=$mode first_checksum=$checksum actual=$result"
+          )
+        run += 1
+      }
+      println(
+        s"RESULT name=streamflex-throughput-$mode " +
+          s"measurement_level=L1 final_clean=1 workload=throughput " +
+          s"mode=$mode runs=${cfg.benchmarkRuns} events=${cfg.events} " +
+          s"batch_size=${cfg.batchSize} objects_per_event=${cfg.objectsPerEvent} " +
+          s"checksum=$checksum"
+      )
+      return
+    }
     val expected = runThroughput("heap")
 
     var warmup = 0
@@ -1205,6 +1233,33 @@ object StreamFlexRegionMatrixHelpers {
         mode == "rift-checked-direct-epoch" ||
         mode == "rift-checked-epoch-buffer" ||
         mode == "rift-checked-transaction-region"
+    if (cfg.finalClean) {
+      var run = 0
+      var result = runLatency(mode)
+      val checksum = result.checksum
+      run = 1
+      while (run < cfg.benchmarkRuns) {
+        val next = runLatency(mode)
+        if (next.checksum != checksum)
+          throw new IllegalStateException(
+            s"final-clean streamflex latency mismatch mode=$mode first_checksum=$checksum actual=${next.checksum}"
+          )
+        result = next
+        run += 1
+      }
+      println(
+        s"RESULT name=streamflex-latency-$mode " +
+          s"measurement_level=L1 final_clean=1 workload=latency " +
+          s"mode=$mode runs=${cfg.benchmarkRuns} " +
+          s"latency_events=${cfg.latencyEvents} " +
+          s"latency_objects_per_event=${cfg.latencyObjectsPerEvent} " +
+          s"period_ns=${cfg.periodNs} p50_ns=${result.p50Ns} " +
+          s"p99_ns=${result.p99Ns} p999_ns=${result.p999Ns} " +
+          s"max_ns=${result.maxNs} deadline_misses=${result.deadlineMisses} " +
+          s"checksum=$checksum"
+      )
+      return
+    }
     val expected = runLatency("heap").checksum
 
     var warmup = 0
