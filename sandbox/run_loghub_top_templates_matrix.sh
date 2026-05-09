@@ -8,7 +8,7 @@ output_dir=${LOGHUB_TOP_OUTPUT_DIR:-"/tmp/loghub-top-templates-matrix"}
 summary=${LOGHUB_TOP_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${LOGHUB_TOP_BUILD:-1}
 platform=$(uname -s)
-modes=(${(z)${LOGHUB_TOP_MODES:-"heap-natural heap-retained-drop-anchor checked-epoch-retained-no-traverse checked-scoped-epoch-retained-no-traverse"}})
+modes=(${(z)${LOGHUB_TOP_MODES:-"heap-natural heap-retained-drop-anchor checked-epoch-retained-no-traverse checked-scoped-epoch-retained-no-traverse checked-epoch-topk-retained-no-traverse checked-scoped-epoch-topk-retained-no-traverse"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"
@@ -125,6 +125,12 @@ binary_mode_for() {
     checked-scoped-epoch-retained-no-traverse|checked-region-scoped-retained-epoch)
       echo "checked-scoped-epoch-retained-no-traverse"
       ;;
+    checked-epoch-topk-retained-no-traverse|checked-region-stream-epoch-topk|checked-topk-stream)
+      echo "checked-epoch-topk-retained-no-traverse"
+      ;;
+    checked-scoped-epoch-topk-retained-no-traverse|checked-region-scoped-epoch-topk|checked-topk-scoped)
+      echo "checked-scoped-epoch-topk-retained-no-traverse"
+      ;;
     *)
       echo "${mode}"
       ;;
@@ -146,6 +152,10 @@ run_case() {
   env_args=()
   case "${mode}" in
     checked-scoped-epoch-retained-no-traverse|checked-region-scoped-retained-epoch)
+      env_args+=(SAFEZONE_ROOTS_MODE="1")
+      env_args+=(SAFEZONE_PAGE_SIZE="32768")
+      ;;
+    checked-scoped-epoch-topk-retained-no-traverse|checked-region-scoped-epoch-topk|checked-topk-scoped)
       env_args+=(SAFEZONE_ROOTS_MODE="1")
       env_args+=(SAFEZONE_PAGE_SIZE="32768")
       ;;

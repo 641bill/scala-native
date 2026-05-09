@@ -1,13 +1,14 @@
 # LogHub Top Templates Matrix
 
 Date: 2026-05-09
-Last updated: 2026-05-09 22:15 CEST
+Last updated: 2026-05-09 22:33 CEST
 
-Status: focused top-k/rank candidate matrix with retained-object controls.
-This is not a full LogPAI/Drain reproduction. It is a local single-process
-benchmark over generated LogHub-shaped data and real HDFS log lines, designed
-to decide whether a top-k/template-ranking operator is worth promoting under
-the comparison-class rules.
+Status: focused top-k/rank candidate matrix with retained-object controls and
+the first reusable `EpochTopKByKey` checked API gate. This is not a full
+LogPAI/Drain reproduction. It is a local single-process benchmark over
+generated LogHub-shaped data and real HDFS log lines, designed to decide
+whether a top-k/template-ranking operator is worth promoting under the
+comparison-class rules.
 
 ## Intent
 
@@ -30,6 +31,10 @@ The key comparison is retained heap versus retained checked epoch:
   `RiftRegion.epoch` over the Rift streaming backend.
 - `checked-scoped-epoch-retained-no-traverse`: same retained shape using
   `RiftRegion.epoch` over the SafeZone-backed scoped checked backend.
+- `checked-epoch-topk-retained-no-traverse`: same retained shape using the
+  reusable `RiftRegion.EpochTopKByKey` API over the Rift streaming backend.
+- `checked-scoped-epoch-topk-retained-no-traverse`: same retained shape using
+  `EpochTopKByKey` over the SafeZone-backed scoped checked backend.
 
 For file-backed rows, the input is preloaded into primitive arrays before the
 timed section. Treat those rows as preloaded real-input memory-management
@@ -40,6 +45,18 @@ provenance is real HDFS.
 
 - Matrix: `sandbox/src/main/scala-next/LogHubTopTemplatesMatrix.scala`
 - Runner: `sandbox/run_loghub_top_templates_matrix.sh`
+- Reusable checked API:
+  - `RiftRegion.epochTopKByKey(keySpace, topK)`
+  - `beginEpochTopKByKey(parent, op)`
+  - `incrementEpochTopKByKey(parent, op, key)` /
+    `addEpochTopKByKey(parent, op, key, amount)`
+  - `finishEpochTopKByKey(parent, op)`
+  - `epochTopKKey(parent, op, rank)` / `epochTopKCount(parent, op, rank)`
+
+`EpochTopKByKey` keeps only parent-owned primitive counts and top-k scratch
+arrays. Ordinary token/template records still live in the checked epoch
+region, so close/reclaim does not traverse retained records. The top-k scan is
+over the primitive key table, not the retained record graph.
 
 Default configuration:
 
@@ -105,6 +122,22 @@ LOGHUB_TOP_OUTPUT_DIR=/tmp/loghub-top-templates-real-smoke \
 All real-smoke modes matched checksum `8243024414237720723` and output count
 `128`.
 
+Reusable top-k generated 20k smoke:
+
+```sh
+LOGHUB_TOP_BUILD=1 \
+LOGHUB_TOP_LINES=20000 \
+LOGHUB_TOP_LINES_PER_EPOCH=5000 \
+LOGHUB_TOP_BENCHMARK_RUNS=1 \
+LOGHUB_TOP_WARMUPS=0 \
+LOGHUB_TOP_MODES="heap-natural heap-retained-drop-anchor checked-epoch-retained-no-traverse checked-scoped-epoch-retained-no-traverse checked-epoch-topk-retained-no-traverse checked-scoped-epoch-topk-retained-no-traverse" \
+LOGHUB_TOP_OUTPUT_DIR=/tmp/loghub-top-templates-topk-smoke \
+  zsh sandbox/run_loghub_top_templates_matrix.sh
+```
+
+All reusable top-k smoke modes matched checksum `2679852081608533090` and
+output count `128`.
+
 ## Generated 100k Gate
 
 Command:
@@ -167,6 +200,44 @@ Interpretation:
 - This is a good candidate shape for a reusable top-k/rank operator, but the
   current implementation is still a focused matrix, not a public operator API.
 
+## Reusable EpochTopKByKey 1M Gate
+
+Command:
+
+```sh
+LOGHUB_TOP_BUILD=0 \
+LOGHUB_TOP_LINES=1000000 \
+LOGHUB_TOP_LINES_PER_EPOCH=25000 \
+LOGHUB_TOP_BENCHMARK_RUNS=3 \
+LOGHUB_TOP_WARMUPS=1 \
+LOGHUB_TOP_MODES="heap-retained-drop-anchor checked-epoch-retained-no-traverse checked-scoped-epoch-retained-no-traverse checked-epoch-topk-retained-no-traverse checked-scoped-epoch-topk-retained-no-traverse" \
+LOGHUB_TOP_OUTPUT_DIR=/tmp/loghub-top-templates-topk-1m-rss \
+  zsh sandbox/run_loghub_top_templates_matrix.sh
+```
+
+All modes matched checksum `-761408849270161430` and output count `1280`.
+
+| Mode | Class | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes |
+|---|---|---:|---:|---:|---:|---:|
+| `heap-retained-drop-anchor` | retained heap control | `463.578` | `138.050` | `207.089` | `3/3` | `407683072` |
+| `checked-epoch-retained-no-traverse` | benchmark-local checked retained stream | `320.091` | `0.000` | `0.000` | `0/3` | `304545792` |
+| `checked-scoped-epoch-retained-no-traverse` | benchmark-local checked retained scoped | `300.984` | `0.000` | `0.000` | `0/3` | `304594944` |
+| `checked-epoch-topk-retained-no-traverse` | reusable checked top-k stream | `353.049` | `0.000` | `0.000` | `0/3` | `304545792` |
+| `checked-scoped-epoch-topk-retained-no-traverse` | reusable checked top-k scoped | `341.905` | `0.000` | `0.000` | `0/3` | `304611328` |
+
+Interpretation:
+
+- `EpochTopKByKey` passes the retained-object API gate on the generated
+  stressor: checked scoped top-k is `26.3%` faster than retained heap, removes
+  `138.050 ms` median timed GC, and cuts RSS by about `25%`.
+- The benchmark-local manual count-array path is still faster
+  (`300.984 ms` scoped versus `341.905 ms` reusable scoped). Treat this as a
+  passed reusable API with measurable abstraction overhead, not as the final
+  top-k lower bound.
+- The retained-object memory-management claim remains valid because both
+  reusable top-k rows retain ordinary records until epoch close and do not
+  traverse them at close.
+
 ## Real HDFS 1M Gate
 
 Command:
@@ -205,9 +276,44 @@ Interpretation:
   a memory-management/operator probe, but the report should label it
   `real-preloaded`, not `real-file-backed` headline evidence.
 
+Reusable top-k real HDFS 1M gate:
+
+```sh
+LOGHUB_TOP_BUILD=0 \
+LOGHUB_TOP_INPUT_MODE=file-backed \
+LOGHUB_TOP_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/loghub/HDFS_1/HDFS.log \
+LOGHUB_TOP_LINES=1000000 \
+LOGHUB_TOP_LINES_PER_EPOCH=25000 \
+LOGHUB_TOP_BENCHMARK_RUNS=3 \
+LOGHUB_TOP_WARMUPS=1 \
+LOGHUB_TOP_MODES="heap-retained-drop-anchor checked-scoped-epoch-retained-no-traverse checked-scoped-epoch-topk-retained-no-traverse" \
+LOGHUB_TOP_OUTPUT_DIR=/tmp/loghub-top-templates-hdfs-topk-1m \
+  zsh sandbox/run_loghub_top_templates_matrix.sh
+```
+
+All modes matched checksum `4142347521733569598` and output count `1280`.
+
+| Mode | Class | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes |
+|---|---|---:|---:|---:|---:|---:|
+| `heap-retained-drop-anchor` | retained heap control | `123.024` | `33.966` | `36.715` | `3/3` | `146046976` |
+| `checked-scoped-epoch-retained-no-traverse` | benchmark-local checked retained scoped | `83.697` | `0.000` | `0.000` | `0/3` | `150028288` |
+| `checked-scoped-epoch-topk-retained-no-traverse` | reusable checked top-k scoped | `95.267` | `0.000` | `0.000` | `0/3` | `150061056` |
+
+Interpretation:
+
+- `EpochTopKByKey` also passes on real-preloaded HDFS: the reusable checked
+  scoped row is `22.6%` faster than retained heap and removes `33.966 ms`
+  median timed GC.
+- RSS is slightly higher than retained heap, so this is throughput/GC evidence,
+  not an RSS win.
+- The API overhead caveat remains: the benchmark-local scoped path is
+  `83.697 ms`, while the reusable top-k scoped path is `95.267 ms`.
+
 ## Decision
 
-LogHub top templates advances from "candidate" to "promising retained top-k
-operator shape." The next implementation step should not be DEBS ranking.
-Instead, design a reusable checked top-k/template-ranking API around this
-retained epoch shape, then rerun the same `heap-retained-drop-anchor` controls.
+LogHub top templates advances from "candidate" to a passed reusable checked
+top-k API gate with an overhead caveat. `EpochTopKByKey` beats retained heap on
+generated and real-preloaded HDFS rows while preserving the retained-object
+comparison. The benchmark-local manual path remains faster, so the next top-k
+step should profile or inline the operator update/getter path before using it
+as an application headline. DEBS ranking and generic mutable rank remain gated.

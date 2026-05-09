@@ -425,6 +425,24 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     private[memory] var currentBucket: StreamBucket = null
   }
 
+  /** Checked epoch-local top-k-by-key operator.
+   *
+   *  Ordinary records live in direct `epoch` child regions. Parent-owned
+   *  primitive metadata counts keys during append and computes top-k output at
+   *  the epoch boundary without traversing the retained record graph. This is
+   *  the reusable shape for LogHub template-ranking and Yak-style epochal
+   *  top-word workloads where records naturally die at the batch boundary.
+   */
+  final class EpochTopKByKey private[memory] (
+      private[memory] val keySpace: Int,
+      private[memory] val topK: Int,
+      private[memory] val counts: Array[Int],
+      private[memory] val topKeys: Array[Int],
+      private[memory] val topCounts: Array[Int]
+  ) {
+    private[memory] var topLength: Int = 0
+  }
+
   /** Close-time cursor over records linked in one append-window bucket.
    *
    *  Cursor close drains amortize close callback dispatch to once per bucket.
@@ -3199,6 +3217,29 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
         .asInstanceOf[StreamWindowFold[T]]
     ).asInstanceOf[EpochFold[T]^{parent}]
 
+  /** Opens an epoch-local top-k-by-key operator.
+   *
+   *  `keySpace` is the dense key domain `[0, keySpace)`. The operator is
+   *  parent-owned metadata; epoch-local records are still allocated with
+   *  `RiftRegion.epoch` and can be bulk-reclaimed independently of this table.
+   */
+  def epochTopKByKey(
+      keySpace: Int,
+      topK: Int
+  )(using parent: StreamingRegion^): EpochTopKByKey^{parent} = {
+    if (keySpace <= 0)
+      throw new IllegalArgumentException("keySpace must be positive")
+    if (topK <= 0)
+      throw new IllegalArgumentException("topK must be positive")
+    new EpochTopKByKey(
+      keySpace,
+      topK,
+      new Array[Int](keySpace),
+      Array.fill[Int](topK)(-1),
+      new Array[Int](topK)
+    ).asInstanceOf[EpochTopKByKey^{parent}]
+  }
+
   /** Allocates an empty checked linked list in `region`. */
   def regionList[T <: RegionListNode]()(using
       region: RiftRegion^
@@ -4337,6 +4378,121 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
         onEntry(keys(index), sums(index), counts(index))
       index += 1
     }
+  }
+
+  /** Clears all per-key counts before starting a new top-k epoch. */
+  def beginEpochTopKByKey(
+      parent: StreamingRegion^,
+      topK: EpochTopKByKey^{parent}
+  ): Unit = {
+    java.util.Arrays.fill(topK.counts, 0)
+    topK.topLength = 0
+  }
+
+  /** Adds `amount` to the key count for the active top-k epoch. */
+  def addEpochTopKByKey(
+      parent: StreamingRegion^,
+      topK: EpochTopKByKey^{parent},
+      key: Int,
+      amount: Int
+  ): Unit = {
+    if (key < 0 || key >= topK.keySpace)
+      throw new IndexOutOfBoundsException(
+        s"key $key outside EpochTopKByKey keySpace ${topK.keySpace}"
+      )
+    if (amount != 0)
+      topK.counts(key) += amount
+  }
+
+  /** Increments the key count for the active top-k epoch. */
+  def incrementEpochTopKByKey(
+      parent: StreamingRegion^,
+      topK: EpochTopKByKey^{parent},
+      key: Int
+  ): Unit =
+    addEpochTopKByKey(parent, topK, key, 1)
+
+  private def betterEpochTopK(
+      count: Int,
+      key: Int,
+      otherCount: Int,
+      otherKey: Int
+  ): Boolean =
+    count > otherCount || (count == otherCount && (otherKey < 0 || key < otherKey))
+
+  /** Computes top-k entries from the current epoch counts.
+   *
+   *  The retained epoch record graph is not traversed here: callers update the
+   *  primitive counts while appending records, close/reset the epoch region,
+   *  and then call this method to scan only the parent-owned key table.
+   */
+  def finishEpochTopKByKey(
+      parent: StreamingRegion^,
+      topK: EpochTopKByKey^{parent}
+  ): Int = {
+    java.util.Arrays.fill(topK.topKeys, -1)
+    java.util.Arrays.fill(topK.topCounts, 0)
+    topK.topLength = 0
+
+    var key = 0
+    while (key < topK.keySpace) {
+      val count = topK.counts(key)
+      if (
+        count > 0 &&
+        (topK.topLength < topK.topK ||
+          betterEpochTopK(
+            count,
+            key,
+            topK.topCounts(topK.topK - 1),
+            topK.topKeys(topK.topK - 1)
+          ))
+      ) {
+        var pos =
+          if (topK.topLength < topK.topK) topK.topLength
+          else topK.topK - 1
+        if (topK.topLength < topK.topK)
+          topK.topLength += 1
+        while (
+          pos > 0 &&
+          betterEpochTopK(
+            count,
+            key,
+            topK.topCounts(pos - 1),
+            topK.topKeys(pos - 1)
+          )
+        ) {
+          topK.topCounts(pos) = topK.topCounts(pos - 1)
+          topK.topKeys(pos) = topK.topKeys(pos - 1)
+          pos -= 1
+        }
+        topK.topCounts(pos) = count
+        topK.topKeys(pos) = key
+      }
+      key += 1
+    }
+    topK.topLength
+  }
+
+  /** Returns the key at `rank` after `finishEpochTopKByKey`. */
+  def epochTopKKey(
+      parent: StreamingRegion^,
+      topK: EpochTopKByKey^{parent},
+      rank: Int
+  ): Int = {
+    if (rank < 0 || rank >= topK.topLength)
+      throw new IndexOutOfBoundsException("EpochTopKByKey rank out of range")
+    topK.topKeys(rank)
+  }
+
+  /** Returns the count at `rank` after `finishEpochTopKByKey`. */
+  def epochTopKCount(
+      parent: StreamingRegion^,
+      topK: EpochTopKByKey^{parent},
+      rank: Int
+  ): Int = {
+    if (rank < 0 || rank >= topK.topLength)
+      throw new IndexOutOfBoundsException("EpochTopKByKey rank out of range")
+    topK.topCounts(rank)
   }
 
   /** Appends a left-side join record and returns the new live left count. */

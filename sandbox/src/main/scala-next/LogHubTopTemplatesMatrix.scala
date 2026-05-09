@@ -461,6 +461,36 @@ object LogHubTopTemplatesMatrixHelpers {
     RunOutcome(checksum, outputCount)
   }
 
+  private def emitTopTemplatesFromOperator(
+      stream: RiftRegion.StreamingRegion^,
+      topK: RiftRegion.EpochTopKByKey^{stream},
+      epochStart: Long,
+      checksum0: Long,
+      output0: Long
+  ): RunOutcome = {
+    val length = RiftRegion.finishEpochTopKByKey(stream, topK)
+    var checksum = checksum0
+    var outputCount = output0
+    var rank = 0
+    while (rank < length) {
+      val template = RiftRegion.epochTopKKey(stream, topK, rank)
+      val count = RiftRegion.epochTopKCount(stream, topK, rank)
+      checksum = fold(
+        checksum,
+        70,
+        epochStart.toInt,
+        template,
+        rank,
+        count,
+        (template.toLong << 32) ^ count.toLong ^ rank.toLong,
+        epochStart
+      )
+      outputCount += 1L
+      rank += 1
+    }
+    RunOutcome(checksum, outputCount)
+  }
+
   private def runHeapSummaryOnly(): RunOutcome = {
     val cfg = LogHubTopTemplatesConfig
     val input = inputData
@@ -705,6 +735,97 @@ object LogHubTopTemplatesMatrixHelpers {
       runCheckedRetainedBody()
     }
 
+  private def runCheckedTopKBody()(using
+      stream: RiftRegion.StreamingRegion^
+  ): RunOutcome = {
+    val cfg = LogHubTopTemplatesConfig
+    val input = inputData
+    val topK = RiftRegion.epochTopKByKey(cfg.templateBuckets, cfg.topK)
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedAnchor = 0L
+    var epochStart = 0
+    while (epochStart < input.lines) {
+      val epochEnd = math.min(input.lines, epochStart + cfg.linesPerEpoch)
+      RiftRegion.beginEpochTopKByKey(stream, topK)
+
+      RiftRegion.epoch { region ?=>
+        final class CheckedRecord(
+            val lineIndex: Int,
+            val template: Int,
+            val token: Int,
+            val hash: Long
+        ) {
+          var next: CheckedRecord^{region} = null
+        }
+
+        var head: CheckedRecord^{region} = null
+        var tail: CheckedRecord^{region} = null
+        var retainedCount = 0
+
+        def append(record: CheckedRecord^{region}): Unit = {
+          record.next = head
+          if (head == null) tail = record
+          head = record
+          retainedCount += 1
+          RiftRegion.incrementEpochTopKByKey(stream, topK, record.template)
+        }
+
+        var i = epochStart
+        while (i < epochEnd) {
+          val template = input.templates(i)
+          val tokenCount = input.tokenCounts(i)
+          var token = 0
+          while (token < tokenCount) {
+            val record: CheckedRecord^{region} =
+              RiftRegion.allocOpen(
+                new CheckedRecord(
+                  i,
+                  template,
+                  token,
+                  input.hashes(i) ^ (token.toLong * 1315423911L)
+                )
+              )
+            append(record)
+            token += 1
+          }
+          if (i % cfg.sampleEvery == 0)
+            checksum =
+              fold(checksum, 99, i, template, 0, tokenCount, input.hashes(i), epochStart)
+          i += 1
+        }
+
+        if (head != null && tail != null)
+          retainedAnchor =
+            (retainedAnchor * 1099511628211L) ^
+              head.hash ^
+              (tail.hash << 1) ^
+              retainedCount.toLong ^
+              epochStart.toLong
+      }
+
+      val emitted =
+        emitTopTemplatesFromOperator(stream, topK, epochStart.toLong, checksum, outputCount)
+      checksum = emitted.checksum
+      outputCount = emitted.outputCount
+      epochStart = epochEnd
+    }
+    checksumSink = checksum
+    outputSink = outputCount
+    retainedAnchorSink = retainedAnchor
+    RunOutcome(checksum, outputCount)
+  }
+
+  private def runCheckedTopKStream(): RunOutcome =
+    RiftRegion.streaming { stream ?=>
+      runCheckedTopKBody()
+    }
+
+  private def runCheckedTopKScoped(): RunOutcome =
+    RiftRegion.streamingSafeZone { stream ?=>
+      runCheckedTopKBody()
+    }
+
   private def canonicalMode(mode: String): String =
     mode match {
       case "gc-heap" | "heap-immix" | "heap-natural" => "heap-natural"
@@ -719,18 +840,31 @@ object LogHubTopTemplatesMatrixHelpers {
       case "checked-scoped-epoch-retained-no-traverse" |
           "checked-region-scoped-retained-epoch" =>
         "checked-scoped-epoch-retained-no-traverse"
+      case "checked-epoch-topk-retained-no-traverse" |
+          "checked-region-stream-epoch-topk" | "checked-topk-stream" =>
+        "checked-epoch-topk-retained-no-traverse"
+      case "checked-scoped-epoch-topk-retained-no-traverse" |
+          "checked-region-scoped-epoch-topk" | "checked-topk-scoped" =>
+        "checked-scoped-epoch-topk-retained-no-traverse"
       case other => other
     }
 
   private def usesRiftRuntime(mode: String): Boolean =
-    canonicalMode(mode) == "checked-epoch-retained-no-traverse"
+    canonicalMode(mode) match {
+      case "checked-epoch-retained-no-traverse" |
+          "checked-epoch-topk-retained-no-traverse" =>
+        true
+      case _ => false
+    }
 
   def validateMode(mode: String): Unit =
     canonicalMode(mode) match {
       case "heap-natural" | "heap-summary-only" |
           "heap-retained-drop-anchor" |
           "checked-epoch-retained-no-traverse" |
-          "checked-scoped-epoch-retained-no-traverse" =>
+          "checked-scoped-epoch-retained-no-traverse" |
+          "checked-epoch-topk-retained-no-traverse" |
+          "checked-scoped-epoch-topk-retained-no-traverse" =>
         ()
       case other =>
         throw new IllegalArgumentException(
@@ -747,6 +881,10 @@ object LogHubTopTemplatesMatrixHelpers {
         runCheckedRetainedStream()
       case "checked-scoped-epoch-retained-no-traverse" =>
         runCheckedRetainedScoped()
+      case "checked-epoch-topk-retained-no-traverse" =>
+        runCheckedTopKStream()
+      case "checked-scoped-epoch-topk-retained-no-traverse" =>
+        runCheckedTopKScoped()
       case other =>
         throw new IllegalArgumentException(
           s"unknown LogHub top-template mode '$other'"
@@ -878,7 +1016,9 @@ object LogHubTopTemplatesMatrixHelpers {
   def requiresRiftRuntime(mode: String): Boolean =
     canonicalMode(mode) match {
       case "checked-epoch-retained-no-traverse" |
-          "checked-scoped-epoch-retained-no-traverse" =>
+          "checked-epoch-topk-retained-no-traverse" |
+          "checked-scoped-epoch-retained-no-traverse" |
+          "checked-scoped-epoch-topk-retained-no-traverse" =>
         true
       case _ => false
     }

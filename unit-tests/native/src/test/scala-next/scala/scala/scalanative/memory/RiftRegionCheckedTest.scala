@@ -1556,6 +1556,73 @@ class RiftRegionCheckedTest {
     assertEquals(36, total)
   }
 
+  @Test def epochTopKByKeyRanksAndClearsEpochs(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val key: Int, val value: Int)
+
+        val topK = RiftRegion.epochTopKByKey(8, 3)
+        var checksum = 0
+        var epochIndex = 0
+        while (epochIndex < 2) {
+          RiftRegion.beginEpochTopKByKey(stream, topK)
+          RiftRegion.epoch { epoch ?=>
+            val first: Event^{epoch} =
+              RiftRegion.allocOpen(new Event(2, 10))
+            val second: Event^{epoch} =
+              RiftRegion.allocOpen(new Event(if (epochIndex == 0) 1 else 3, 20))
+            RiftRegion.incrementEpochTopKByKey(stream, topK, first.key)
+            RiftRegion.addEpochTopKByKey(stream, topK, second.key, 2)
+            first.value + second.value
+          }
+
+          val length = RiftRegion.finishEpochTopKByKey(stream, topK)
+          checksum += length
+          var rank = 0
+          while (rank < length) {
+            checksum +=
+              RiftRegion.epochTopKKey(stream, topK, rank) * (rank + 1) * 10
+            checksum += RiftRegion.epochTopKCount(stream, topK, rank)
+            rank += 1
+          }
+          epochIndex += 1
+        }
+        checksum
+      }
+
+      assertEquals(130, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def safeZoneBackedEpochTopKByKeyRanksAndClearsEpochs(): Unit = {
+    val total = RiftRegion.streamingSafeZone { stream ?=>
+      final class Event(val key: Int, val value: Int)
+
+      val topK = RiftRegion.epochTopKByKey(8, 2)
+      RiftRegion.beginEpochTopKByKey(stream, topK)
+      RiftRegion.epoch { epoch ?=>
+        val first: Event^{epoch} =
+          RiftRegion.allocOpen(new Event(4, 40))
+        val second: Event^{epoch} =
+          RiftRegion.allocOpen(new Event(1, 2))
+        RiftRegion.addEpochTopKByKey(stream, topK, first.key, 1)
+        RiftRegion.addEpochTopKByKey(stream, topK, second.key, 2)
+      }
+
+      val length = RiftRegion.finishEpochTopKByKey(stream, topK)
+      length +
+        RiftRegion.epochTopKKey(stream, topK, 0) * 10 +
+        RiftRegion.epochTopKCount(stream, topK, 0) +
+        RiftRegion.epochTopKKey(stream, topK, 1) * 100 +
+        RiftRegion.epochTopKCount(stream, topK, 1)
+    }
+
+    assertEquals(415, total)
+  }
+
   @Test def streamPageTokenAppendWindowAllocatesAndDrainsRecords(): Unit = {
     RiftRegion.init(1)
     try {
