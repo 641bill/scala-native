@@ -48,8 +48,28 @@ read_max_rss_bytes() {
   fi
 }
 
+read_time_seconds() {
+  local time_log="$1"
+  local field="$2"
+  if [[ "${platform}" == "Darwin" ]]; then
+    case "${field}" in
+      real) awk '/ real .* user .* sys/ { print $1; found = 1; exit } END { if (!found) print "" }' "${time_log}" ;;
+      user) awk '/ real .* user .* sys/ { print $3; found = 1; exit } END { if (!found) print "" }' "${time_log}" ;;
+      sys) awk '/ real .* user .* sys/ { print $5; found = 1; exit } END { if (!found) print "" }' "${time_log}" ;;
+      *) print "" ;;
+    esac
+  else
+    case "${field}" in
+      user) awk -F ':' '/User time \(seconds\)/ { gsub(/^[ \t]+/, "", $2); print $2; found = 1; exit } END { if (!found) print "" }' "${time_log}" ;;
+      sys) awk -F ':' '/System time \(seconds\)/ { gsub(/^[ \t]+/, "", $2); print $2; found = 1; exit } END { if (!found) print "" }' "${time_log}" ;;
+      real) awk -F ':' '/Elapsed \(wall clock\) time/ { gsub(/^[ \t]+/, "", $2); print $2; found = 1; exit } END { if (!found) print "" }' "${time_log}" ;;
+      *) print "" ;;
+    esac
+  fi
+}
+
 write_summary_header() {
-  printf "label\tmode\toperator\tmedian_ms\tmedian_gc_ms\tmedian_rift_op_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\tmax_rss_bytes\n" > "${summary}"
+  printf "label\tmode\texternal_real_s\texternal_user_s\texternal_sys_s\toperator\tmedian_ms\tmedian_gc_ms\tmedian_rift_op_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\tmax_rss_bytes\n" > "${summary}"
 }
 
 write_result_rows() {
@@ -57,6 +77,9 @@ write_result_rows() {
   local mode="$2"
   local run_log="$3"
   local max_rss_bytes="$4"
+  local external_real_s="$5"
+  local external_user_s="$6"
+  local external_sys_s="$7"
   local line token key value name op
   typeset -A fields
 
@@ -72,9 +95,12 @@ write_result_rows() {
     name=${fields[name]-}
     op=${name#dataflow-}
     op=${op%-${mode}}
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
       "${label}" \
       "${mode}" \
+      "${external_real_s}" \
+      "${external_user_s}" \
+      "${external_sys_s}" \
       "${op}" \
       "${fields[median_ms]-}" \
       "${fields[median_gc_ms]-}" \
@@ -96,6 +122,9 @@ run_mode() {
   local run_log="${output_dir}/run-${label}.log"
   local time_log="${output_dir}/time-${label}.log"
   local max_rss_bytes
+  local external_real_s
+  local external_user_s
+  local external_sys_s
 
   echo
   echo "== ${label} =="
@@ -106,35 +135,53 @@ run_mode() {
   fi
 
   max_rss_bytes=$(read_max_rss_bytes "${time_log}")
+  external_real_s=$(read_time_seconds "${time_log}" real)
+  external_user_s=$(read_time_seconds "${time_log}" user)
+  external_sys_s=$(read_time_seconds "${time_log}" sys)
   grep "^RESULT name=dataflow-" "${run_log}"
-  echo "DATAFLOW_RSS_RESULT label=${label} mode=${mode} max_rss_bytes=${max_rss_bytes}"
-  write_result_rows "${label}" "${mode}" "${run_log}" "${max_rss_bytes}"
+  echo "DATAFLOW_EXTERNAL_RESULT label=${label} mode=${mode} external_real_s=${external_real_s} external_user_s=${external_user_s} external_sys_s=${external_sys_s} max_rss_bytes=${max_rss_bytes}"
+  write_result_rows "${label}" "${mode}" "${run_log}" "${max_rss_bytes}" "${external_real_s}" "${external_user_s}" "${external_sys_s}"
 }
 
 write_summary_header
 
 for selected_mode in "${modes[@]}"; do
   case "${selected_mode}" in
-    heap)
+    heap|gc-heap|heap-immix)
       run_mode "heap" "heap" "0"
       ;;
     current-safezone)
       run_mode "current-safezone" "safezone" "0"
       ;;
-    improved-safezone)
+    improved-safezone|safezone-improved)
       run_mode "improved-safezone" "safezone" "1"
+      ;;
+    safezone-improved-32k|region-scoped-rooted)
+      run_mode "region-scoped-rooted" "safezone" "1" "32768"
       ;;
     unsafezone-hp)
       run_mode "unsafezone-hp" "safezone" "3" "32768"
       ;;
-    rift-hp)
+    rift-hp|rift-trusted-hp|region-hp-rootless)
       run_mode "rift-hp" "rift-hp" "0"
       ;;
-    rift-streaming)
+    rift-streaming|rift-trusted-streaming|region-stream-rootless)
       run_mode "rift-streaming" "rift-streaming" "0"
       ;;
-    rift-checked)
+    rift-checked|checked-region-stream)
       run_mode "rift-checked" "rift-checked" "0"
+      ;;
+    checked-page-token|checked-page-token-stream|rift-checked-page-token)
+      run_mode "checked-page-token" "rift-checked-page-token" "0"
+      ;;
+    checked-page-token-scoped|checked-region-scoped-page-token|rift-checked-safezone-page-token)
+      run_mode "checked-page-token-scoped" "rift-checked-safezone-page-token" "1" "32768"
+      ;;
+    checked-epoch-stream|checked-region-stream-epoch)
+      run_mode "checked-epoch-stream" "rift-checked-direct-epoch" "0"
+      ;;
+    checked-epoch-scoped|checked-region-scoped-epoch)
+      run_mode "checked-epoch-scoped" "rift-checked-safezone-direct-epoch" "1" "32768"
       ;;
     *)
       echo "unknown DATAFLOW_MODES entry: ${selected_mode}" >&2

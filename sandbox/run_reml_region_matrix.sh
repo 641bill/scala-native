@@ -48,8 +48,28 @@ read_max_rss_bytes() {
   fi
 }
 
+read_time_seconds() {
+  local time_log="$1"
+  local field="$2"
+  if [[ "${platform}" == "Darwin" ]]; then
+    case "${field}" in
+      real) awk '/ real .* user .* sys/ { print $1; found = 1; exit } END { if (!found) print "" }' "${time_log}" ;;
+      user) awk '/ real .* user .* sys/ { print $3; found = 1; exit } END { if (!found) print "" }' "${time_log}" ;;
+      sys) awk '/ real .* user .* sys/ { print $5; found = 1; exit } END { if (!found) print "" }' "${time_log}" ;;
+      *) print "" ;;
+    esac
+  else
+    case "${field}" in
+      user) awk -F ':' '/User time \(seconds\)/ { gsub(/^[ \t]+/, "", $2); print $2; found = 1; exit } END { if (!found) print "" }' "${time_log}" ;;
+      sys) awk -F ':' '/System time \(seconds\)/ { gsub(/^[ \t]+/, "", $2); print $2; found = 1; exit } END { if (!found) print "" }' "${time_log}" ;;
+      real) awk -F ':' '/Elapsed \(wall clock\) time/ { gsub(/^[ \t]+/, "", $2); print $2; found = 1; exit } END { if (!found) print "" }' "${time_log}" ;;
+      *) print "" ;;
+    esac
+  fi
+}
+
 write_summary_header() {
-  printf "workload\tmode\tstatus\tmedian_ms\tmedian_gc_ms\tmax_gc_ms\truns_with_gc\tmedian_rift_op_ms\tmedian_rift_slow_alloc_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\tmax_rss_bytes\n" > "${summary}"
+  printf "workload\tmode\tstatus\texternal_real_s\texternal_user_s\texternal_sys_s\tmedian_ms\tmedian_gc_ms\tmax_gc_ms\truns_with_gc\tmedian_rift_op_ms\tmedian_rift_slow_alloc_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\tmax_rss_bytes\n" > "${summary}"
 }
 
 write_result_row() {
@@ -58,6 +78,9 @@ write_result_row() {
   local run_status="$3"
   local run_log="$4"
   local max_rss_bytes="$5"
+  local external_real_s="$6"
+  local external_user_s="$7"
+  local external_sys_s="$8"
   local line token key value
   typeset -A fields
 
@@ -71,10 +94,13 @@ write_result_row() {
     fi
   done
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "${workload}" \
     "${mode}" \
     "${run_status}" \
+    "${external_real_s}" \
+    "${external_user_s}" \
+    "${external_sys_s}" \
     "${fields[median_ms]-}" \
     "${fields[median_gc_ms]-}" \
     "${fields[max_gc_ms]-}" \
@@ -97,6 +123,9 @@ run_one() {
   local run_log="${output_dir}/run-${workload}-${mode}.log"
   local time_log="${output_dir}/time-${workload}-${mode}.log"
   local max_rss_bytes
+  local external_real_s
+  local external_user_s
+  local external_sys_s
   local command_status
 
   case "${mode}" in
@@ -124,18 +153,21 @@ run_one() {
   set -e
 
   max_rss_bytes=$(read_max_rss_bytes "${time_log}")
+  external_real_s=$(read_time_seconds "${time_log}" real)
+  external_user_s=$(read_time_seconds "${time_log}" user)
+  external_sys_s=$(read_time_seconds "${time_log}" sys)
   if ! grep -q "^RESULT name=reml-region-" "${run_log}"; then
     cat "${run_log}" >&2
     cat "${time_log}" >&2
-    echo "REML_RESULT workload=${workload} mode=${mode} status=failed exit_status=${command_status} max_rss_bytes=${max_rss_bytes}" >&2
-    printf "%s\t%s\tfailed\t\t\t\t\t\t\t\t\t\t\t\t%s\n" \
-      "${workload}" "${mode}" "${max_rss_bytes}" >> "${summary}"
+    echo "REML_RESULT workload=${workload} mode=${mode} status=failed exit_status=${command_status} external_real_s=${external_real_s} external_user_s=${external_user_s} external_sys_s=${external_sys_s} max_rss_bytes=${max_rss_bytes}" >&2
+    printf "%s\t%s\tfailed\t%s\t%s\t%s\t\t\t\t\t\t\t\t\t\t\t\t%s\n" \
+      "${workload}" "${mode}" "${external_real_s}" "${external_user_s}" "${external_sys_s}" "${max_rss_bytes}" >> "${summary}"
     return 0
   fi
 
   grep "^RESULT name=reml-region-" "${run_log}"
-  echo "REML_RSS_RESULT workload=${workload} mode=${mode} max_rss_bytes=${max_rss_bytes}"
-  write_result_row "${workload}" "${mode}" "ok" "${run_log}" "${max_rss_bytes}"
+  echo "REML_EXTERNAL_RESULT workload=${workload} mode=${mode} external_real_s=${external_real_s} external_user_s=${external_user_s} external_sys_s=${external_sys_s} max_rss_bytes=${max_rss_bytes}"
+  write_result_row "${workload}" "${mode}" "ok" "${run_log}" "${max_rss_bytes}" "${external_real_s}" "${external_user_s}" "${external_sys_s}"
 }
 
 write_summary_header
