@@ -1,12 +1,26 @@
 # Direct Epoch Topology Matrix
 
 Date: 2026-05-08
-Last updated: 2026-05-09 19:45 CEST
+Last updated: 2026-05-09 21:15 CEST
 
-Status: clean post-checkpoint sweep for reusable `RiftRegion.epoch { ... }`
-topology. Parent repo commit: `b462db8`. Child repo commit: `c71e56ae0`.
+Status: clean committed representative rerun for reusable
+`RiftRegion.epoch { ... }` topology. The latest direct-epoch representative
+rows were run after child commit `918c7d4c1` and parent commit `ab570b1`.
+Earlier local-Yak and generated q2/q3 direct-aggregate rows remain in this file
+as clean topology/operator evidence from prior checkpoints.
 
-Raw logs are under:
+Latest clean-run summaries:
+
+- Yak LiveJournal:
+  `/Users/siyaoliu/rift/cache/yak-livejournal-direct-clean-2026-05-09/`
+- Dataflow:
+  `/Users/siyaoliu/rift/cache/dataflow-direct-clean-2026-05-09/1m/summary.tsv`
+- StreamFlex:
+  `/Users/siyaoliu/rift/cache/streamflex-direct-clean-2026-05-09/`
+- Stancu:
+  `/Users/siyaoliu/rift/cache/stancu-direct-clean-2026-05-09/1m/summary.tsv`
+
+Earlier broad direct-epoch logs:
 
 `/Users/siyaoliu/rift/cache/direct-epoch-sweep-2026-05-08/`
 
@@ -71,36 +85,36 @@ All checksums matched per workload.
 Input: SNAP LiveJournal
 `/Users/siyaoliu/rift/cache/benchmark-data/yak/snap/soc-LiveJournal1.txt.gz`.
 
-10M replayed real edges:
+Clean committed 10M replayed real edges:
 
 | Mode | Topology | Median ms | GC ms | Rift op ms | RSS bytes |
 |---|---|---:|---:|---:|---:|
-| gc-heap | heap | 315.164 | 51.113 | 0.000 | 605536256 |
-| region-scoped-rooted | scoped epoch | 247.730 | 0.000 | 0.000 | 328646656 |
-| region-stream-rootless | streaming epoch | 256.790 | 0.000 | 0.532 | 328531968 |
-| checked-whole-run-scoped | whole run | 215.099 | 0.000 | 0.000 | 617201664 |
-| checked-epoch-scoped | direct epoch | 214.587 | 0.000 | 0.000 | 328646656 |
-| checked-page-token-scoped | page-token | 273.415 | 0.000 | 0.000 | 328646656 |
-| checked-epoch-buffer-scoped | EpochBuffer | 278.581 | 0.000 | 0.000 | 328613888 |
-| checked-epoch-stream | direct epoch | 213.781 | 0.000 | 0.588 | 328548352 |
+| gc-heap | heap | 599.428 | 94.371 | 0.000 | 605732864 |
+| region-scoped-rooted | scoped epoch | 496.827 | 0.000 | 0.000 | 459276288 |
+| region-stream-rootless | streaming epoch | 521.498 | 0.000 | 1.636 | 459161600 |
+| checked-epoch-scoped | direct epoch | 417.426 | 0.000 | 0.000 | 459292672 |
+| checked-epoch-stream | direct epoch | 425.983 | 0.000 | 1.392 | 459161600 |
+| checked-page-token-scoped | page-token | 539.450 | 0.000 | 0.000 | 459276288 |
+| checked-page-token-stream | page-token | 569.829 | 0.000 | 1.491 | 459243520 |
 
-50M replayed real edges:
+Clean committed 50M replayed real edges:
 
 | Mode | Topology | Median ms | GC ms | Rift op ms | RSS bytes |
 |---|---|---:|---:|---:|---:|
-| gc-heap | heap | 1612.834 | 274.756 | 0.000 | 2761310208 |
-| region-scoped-rooted | scoped epoch | 1199.260 | 0.000 | 0.000 | 1534984192 |
-| region-stream-rootless | streaming epoch | 1315.363 | 0.000 | 23.181 | 1534738432 |
-| checked-whole-run-scoped | whole run | 1028.817 | 0.000 | 0.000 | 2977824768 |
-| checked-epoch-scoped | direct epoch | 1030.943 | 0.000 | 0.000 | 1535016960 |
-| checked-page-token-scoped | page-token | 1333.360 | 0.000 | 0.000 | 1535033344 |
-| checked-epoch-buffer-scoped | EpochBuffer | 1349.152 | 0.000 | 0.000 | 1535049728 |
-| checked-epoch-stream | direct epoch | 1083.050 | 0.000 | 23.113 | 1534754816 |
+| gc-heap | heap | 2958.659 | 400.484 | 0.000 | 3913564160 |
+| region-scoped-rooted | scoped epoch | 2351.582 | 0.000 | 0.000 | 2105999360 |
+| region-stream-rootless | streaming epoch | 2499.975 | 0.000 | 40.260 | 2105769984 |
+| checked-epoch-scoped | direct epoch | 2008.320 | 0.000 | 0.000 | 2105999360 |
+| checked-epoch-stream | direct epoch | 2064.867 | 0.000 | 41.568 | 2105786368 |
+| checked-page-token-scoped | page-token | 2586.919 | 0.000 | 0.000 | 2105966592 |
+| checked-page-token-stream | page-token | 2746.897 | 0.000 | 43.983 | 2105819136 |
 
-Interpretation: whole-run checked scoped is slightly faster, but it keeps all
-records live and uses about `2.98 GB` RSS. Direct epoch preserves the low-RSS
-shape at about `1.53 GB` and still beats heap by about 36%. Page-token and
-EpochBuffer beat heap but are the wrong topology for this graph replay.
+Interpretation: checked direct epoch is the right low-overhead topology for
+Yak-style real graph replay. At 50M, checked scoped epoch is `32.1%` faster
+than heap, removes `400.484 ms` median timed GC, and cuts RSS from about
+`3.91 GB` to about `2.11 GB`. Page-token still beats heap at 50M, but it is
+the wrong topology for this workload and leaves too much page/window operator
+overhead.
 
 ### Dataflow SELECT / AGGREGATE / JOIN
 
@@ -108,9 +122,9 @@ Configuration: 10 epochs x 100k documents.
 
 | Operator | Heap ms / GC ms | Region scoped rooted ms | Checked epoch scoped ms | Checked epoch stream ms | Control |
 |---|---:|---:|---:|---:|---|
-| SELECT | 26.686 / 6.300 | 22.161 | 18.483 | 20.963 | scoped page-token SELECT 17.946 |
-| AGGREGATE | 49.611 / 12.438 | 39.028 | 33.896 | 36.162 | EpochFold remains gated |
-| JOIN | 29.622 / 9.512 | 22.605 | 19.581 | 20.402 | direct epoch covers full operator |
+| SELECT | 27.775 / 6.828 | 22.971 | 19.691 | 20.091 | scoped page-token SELECT remains a SELECT-only control |
+| AGGREGATE | 50.837 / 11.564 | 39.665 | 34.676 | 37.328 | EpochFold remains gated |
+| JOIN | 30.387 / 9.331 | 22.619 | 19.762 | 20.401 | direct epoch covers full operator |
 
 Interpretation: direct checked scoped epoch is the reusable full-family win.
 Page-token remains slightly faster for SELECT only, but it does not cover
@@ -122,23 +136,21 @@ AGGREGATE or JOIN.
 
 | Mode | Median ms | GC ms | Rift op ms | RSS bytes |
 |---|---:|---:|---:|---:|
-| heap | 215.097 | 46.023 | 0.000 | 8028160 |
-| improved SafeZone | 203.733 | 0.000 | 0.000 | 8142848 |
-| Rift Streaming | 178.028 | 0.000 | 0.592 | 8126464 |
-| checked direct epoch | 168.915 | 0.000 | 0.591 | 8126464 |
-| scoped checked direct epoch | 159.767 | 0.000 | 0.000 | 8159232 |
-| scoped checked TransactionRegion | 202.604 | 0.000 | 0.000 | 8175616 |
+| heap | 216.853 | 46.036 | 0.000 | 8028160 |
+| improved SafeZone | 208.837 | 0.000 | 0.000 | 8142848 |
+| Rift Streaming | 186.029 | 0.000 | 0.600 | 8142848 |
+| checked direct epoch | 174.957 | 0.000 | 0.595 | 8142848 |
+| scoped checked direct epoch | 157.334 | 0.000 | 0.000 | 8159232 |
 
-10k latency:
+200k latency:
 
-| Mode | Median ms | p99 ns | max ns | deadline misses |
-|---|---:|---:|---:|---:|
-| heap | 9.114 | 792 | 281791 | 4 |
-| improved SafeZone | 11.786 | 1209 | 254750 | 1 |
-| Rift Streaming | 9.057 | 875 | 2917 | 0 |
-| checked direct epoch | 9.679 | 917 | 1208 | 0 |
-| scoped checked direct epoch | 9.042 | 875 | 6084 | 0 |
-| scoped checked TransactionRegion | 12.640 | 1209 | 6584 | 0 |
+| Mode | Median ms | GC ms | p50 ns | p99 ns | p999 ns | max ns | deadline misses |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| heap | 200.924 | 20.653 | 708 | 959 | 2167 | 1065125 | 21 |
+| improved SafeZone | 226.854 | 1.700 | 917 | 1208 | 2125 | 727959 | 1 |
+| Rift Streaming | 198.660 | 0.655 | 833 | 1083 | 1250 | 25666 | 0 |
+| checked direct epoch | 195.931 | 1.743 | 792 | 1083 | 1583 | 700250 | 1 |
+| scoped checked direct epoch | 192.557 | 1.570 | 750 | 1000 | 2292 | 887875 | 1 |
 
 Interpretation: direct checked epoch supersedes `TransactionRegion` for this
 pipeline shape. `TransactionRegion` remains a useful multi-list control, but
@@ -151,11 +163,11 @@ Configuration: 1M transactions, 8 items/transaction, 64 transactions/region.
 
 | Mode | Median ms | GC ms | Rift op ms | Logical region objects | RSS bytes |
 |---|---:|---:|---:|---:|---:|
-| heap | 222.415 | 23.573 | 0.000 | 9000000 | 7929856 |
-| improved SafeZone | 180.912 | 0.000 | 0.000 | 9000000 | 7995392 |
-| Rift Streaming | 214.052 | 0.000 | 0.991 | 9000000 | 7946240 |
-| checked direct epoch | 168.617 | 0.000 | 1.032 | 9000000 | 7946240 |
-| scoped checked direct epoch | 155.992 | 0.311 | 0.000 | 9000000 | 8028160 |
+| heap | 220.951 | 22.819 | 0.000 | 9000000 | 7929856 |
+| improved SafeZone | 183.365 | 0.358 | 0.000 | 9000000 | 7979008 |
+| Rift Streaming | 218.327 | 0.000 | 1.041 | 9000000 | 7929856 |
+| checked direct epoch | 165.116 | 0.000 | 1.152 | 9000000 | 7929856 |
+| scoped checked direct epoch | 155.863 | 0.381 | 0.000 | 9000000 | 7979008 |
 
 Interpretation: this turns the local Stancu-shaped transaction row into a
 checked direct-epoch win. It remains a local methodology probe; the stronger
@@ -216,28 +228,28 @@ control. The retained modes keep ordinary Scala records alive until epoch close
 and update primitive summaries on append; close touches only the bucket
 `head`/`tail` anchors and does not traverse records.
 
-Focused 1M retained epoch:
+Clean committed focused 1M retained epoch:
 
 | Mode | Evidence class | Median ms | Median GC ms | RSS bytes |
 |---|---|---:|---:|---:|
-| `heap-direct-summary-only` | topology lower bound | `11.041` | `0.000` | `3801088` |
-| `heap-epoch-retained-no-traverse` | retained heap control | `34.405` | `9.646` | `21331968` |
-| `checked-epoch-retained-no-traverse` | retained checked region | `25.366` | `0.000` | `4816896` |
-| `checked-scoped-epoch-retained-no-traverse` | retained checked scoped region | `23.999` | `0.000` | `4866048` |
+| `heap-direct-summary-only` | topology lower bound | `11.211` | `0.000` | `3817472` |
+| `heap-epoch-retained-no-traverse` | retained heap control | `36.233` | `10.109` | `21348352` |
+| `checked-epoch-retained-no-traverse` | retained checked region | `27.703` | `0.000` | `4833280` |
+| `checked-scoped-epoch-retained-no-traverse` | retained checked scoped region | `24.274` | `0.000` | `4882432` |
 
 DSPBench Fraud q2 1M retained controls:
 
 | Mode | Evidence class | Median ms | Median GC ms | RSS bytes |
 |---|---|---:|---:|---:|
-| `heap-direct-summary-only` | topology lower bound | `279.103` | `0.000` | `575668224` |
-| `heap-epoch-retained-no-traverse` | retained heap control | `387.943` | `35.797` | `575979520` |
-| `checked-epoch-retained-no-traverse` | retained checked region | `373.837` | `0.000` | `582729728` |
-| `checked-scoped-epoch-retained-no-traverse` | retained checked scoped region | `364.535` | `0.000` | `582746112` |
+| `heap-direct-summary-only` | topology lower bound | `286.318` | `0.000` | `575651840` |
+| `heap-epoch-retained-no-traverse` | retained heap control | `392.743` | `35.631` | `575963136` |
+| `checked-epoch-retained-no-traverse` | retained checked region | `383.628` | `0.000` | `582713344` |
+| `checked-scoped-epoch-retained-no-traverse` | retained checked scoped region | `370.746` | `0.000` | `582746112` |
 
 Interpretation: summary-only direct epoch remains topology evidence. Retained
 heap versus retained checked epoch is now the fair memory-management evidence:
-checked scoped retained epoch is `30.2%` faster than retained heap in the
-focused matrix, and `6.0%` faster on DSPBench Fraud q2 while removing heap GC.
+checked scoped retained epoch is `33.0%` faster than retained heap in the
+focused matrix, and `5.6%` faster on DSPBench Fraud q2 while removing heap GC.
 Fraud q2 keeps similar/slightly higher RSS in checked retained rows, so that
 row is a throughput/GC win rather than an RSS win.
 
@@ -245,17 +257,17 @@ Additional 1M retained application rows:
 
 | Benchmark/query | Retained heap ms / GC ms / RSS | Checked retained stream ms / GC ms / RSS | Checked retained scoped ms / GC ms / RSS | Interpretation |
 |---|---:|---:|---:|---|
-| GH Archive-shaped q2 | 244.988 / 69.552 / 147 MB | 191.064 / 0.000 / 15 MB | 181.345 / 0.000 / 15 MB | strong retained memory/RSS win |
-| LogHub-shaped q2 | 464.389 / 64.349 / 813 MB | 413.203 / 0.000 / 305 MB | 402.611 / 0.000 / 694 MB | retained throughput/GC win; stream backend has better RSS |
-| LogHub-shaped q3 | 2217.322 / 146.514 / 2291 MB | 2213.846 / 43.315 / 834 MB | 2101.599 / 0.000 / 2312 MB | mixed; scoped improves elapsed, stream improves RSS |
+| GH Archive-shaped q2 | 257.377 / 77.208 / 147 MB | 194.827 / 0.000 / 15 MB | 186.868 / 0.000 / 15 MB | strong retained memory/RSS win |
+| LogHub-shaped q2 | 469.079 / 64.060 / 813 MB | 420.734 / 0.000 / 694 MB | 402.821 / 0.000 / 694 MB | retained throughput/GC win |
+| LogHub-shaped q3 | 2244.266 / 143.539 / 2291 MB | 2169.804 / 0.000 / 2312 MB | 2106.541 / 0.000 / 2312 MB | mixed; scoped improves elapsed but not RSS |
 
 ## Conclusions
 
 - Direct checked epoch is now a reusable positive operator/topology, not a
   benchmark-specific trick.
 - The strongest clean row is real-input Yak LiveJournal: checked epoch removes
-  timed heap GC and cuts RSS roughly from `2.76 GB` to `1.53 GB` at 50M replayed
-  edges.
+  timed heap GC and cuts RSS roughly from `3.91 GB` to `2.11 GB` at 50M
+  replayed edges in the latest committed rerun.
 - Scoped checked epoch is the best backend for Dataflow, StreamFlex throughput,
   and Stancu-shaped transactions in this sweep.
 - Page-token is still the right checked operator for page/window append streams,
