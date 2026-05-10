@@ -32,6 +32,10 @@ object LogHubRegionConfig {
   private def envNonNegativeInt(name: String, default: Int): Int =
     sys.env.get(name).flatMap(parseNonNegativeInt).getOrElse(default)
 
+  private def truthy(value: String): Boolean =
+    value == "1" || value.equalsIgnoreCase("true") ||
+      value.equalsIgnoreCase("yes")
+
   val lines: Int = envInt("LOGHUB_LINES", 100000)
   val linesPerBucket: Int = envInt("LOGHUB_LINES_PER_BUCKET", 25000)
   val liveBuckets: Int = envInt("LOGHUB_LIVE_BUCKETS", 4)
@@ -43,6 +47,11 @@ object LogHubRegionConfig {
   val sampleEvery: Int = envInt("LOGHUB_SAMPLE_EVERY", 4096)
   val warmupRuns: Int = envNonNegativeInt("LOGHUB_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("LOGHUB_BENCHMARK_RUNS", 3)
+  val finalClean: Boolean =
+    sys.env.get("RIFT_FINAL_CLEAN").exists(truthy) ||
+      sys.env
+        .get("RIFT_EVAL_MEASUREMENT_LEVEL")
+        .exists(_.equalsIgnoreCase("L1"))
 
   private val inputPathsRaw: String = {
     val multiple = BenchmarkInputSupport.envString("LOGHUB_INPUTS")
@@ -1908,6 +1917,31 @@ object LogHubRegionMatrixHelpers {
     val input = inputData
     val canonical = canonicalMode(mode)
     val usesRift = usesRiftRuntime(mode)
+
+    if (cfg.finalClean) {
+      var run = 0
+      var expected: RunOutcome = null
+      while (run < cfg.benchmarkRuns) {
+        val outcome = runMode(mode, query)
+        if (run == 0) expected = outcome
+        else if (outcome != expected)
+          throw new IllegalStateException(
+            s"final-clean mismatch query=$query mode=$mode expected=$expected actual=$outcome"
+          )
+        run += 1
+      }
+
+      println(
+        s"RESULT name=loghub-$query-$canonical " +
+          s"measurement_level=L1 final_clean=1 query=$query mode=$canonical " +
+          s"input=${input.label} input_mode=${cfg.inputMode} " +
+          s"loaded_events=${input.lines} input_files=${input.inputFiles} " +
+          s"runs=${cfg.benchmarkRuns} checksum=${expected.checksum} " +
+          s"output_count=${expected.outputCount}"
+      )
+      return
+    }
+
     val expected = runHeap(query)
     System.gc()
 
