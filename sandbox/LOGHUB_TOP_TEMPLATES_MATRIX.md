@@ -1,14 +1,16 @@
 # LogHub Top Templates Matrix
 
 Date: 2026-05-09
-Last updated: 2026-05-09 22:33 CEST
+Last updated: 2026-05-10 09:59 CEST
 
 Status: focused top-k/rank candidate matrix with retained-object controls and
-the first reusable `EpochTopKByKey` checked API gate. This is not a full
-LogPAI/Drain reproduction. It is a local single-process benchmark over
-generated LogHub-shaped data and real HDFS log lines, designed to decide
-whether a top-k/template-ranking operator is worth promoting under the
-comparison-class rules.
+the first reusable `EpochTopKByKey` checked API gate. L1 final-clean support
+is now implemented and the real HDFS reusable top-k row has an external
+timing/RSS representative result. This is not a full LogPAI/Drain
+reproduction. It is a local single-process benchmark over generated
+LogHub-shaped data and real HDFS log lines, designed to decide whether a
+top-k/template-ranking operator is worth promoting under the comparison-class
+rules.
 
 ## Intent
 
@@ -308,6 +310,55 @@ Interpretation:
   not an RSS win.
 - The API overhead caveat remains: the benchmark-local scoped path is
   `83.697 ms`, while the reusable top-k scoped path is `95.267 ms`.
+
+## Real HDFS L1 Final-Clean Top-K Row
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+for i in 1 2 3; do
+  RIFT_FINAL_CLEAN=1 \
+  LOGHUB_TOP_BUILD=0 \
+  LOGHUB_TOP_INPUT_MODE=file-backed \
+  LOGHUB_TOP_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/loghub/HDFS_1/HDFS.log \
+  LOGHUB_TOP_LINES=1000000 \
+  LOGHUB_TOP_LINES_PER_EPOCH=25000 \
+  LOGHUB_TOP_BENCHMARK_RUNS=20 \
+  LOGHUB_TOP_WARMUPS=0 \
+  LOGHUB_TOP_MODES="heap-retained-drop-anchor checked-scoped-epoch-retained-no-traverse checked-scoped-epoch-topk-retained-no-traverse" \
+  LOGHUB_TOP_OUTPUT_DIR=/tmp/rift-l1-loghub-top-hdfs-1m-x20-3598efe29-r${i} \
+  zsh sandbox/run_loghub_top_templates_matrix.sh
+done
+```
+
+Configuration:
+
+- child commit: `3598efe29`;
+- measurement level: L1 final-clean, external `/usr/bin/time -l`;
+- input: real HDFS log file, loaded into primitive arrays before the 20 replay
+  iterations;
+- loaded events: 1,000,000;
+- epoch size: 25,000 lines;
+- top-k: 32;
+- checksum: `4142347521733569598`;
+- output count: `1280`.
+
+| Mode | Class | Median real s | Min real s | Max real s | Median RSS bytes | Claim |
+|---|---|---:|---:|---:|---:|---|
+| `heap-retained-drop-anchor` | retained heap control | `5.46` | `5.43` | `5.47` | `205406208` | L1 retained heap/drop-anchor control. |
+| `checked-scoped-epoch-retained-no-traverse` | benchmark-local checked retained scoped | `4.84` | `4.82` | `4.88` | `28262400` | L1 checked retained win over heap retained; benchmark-local lower bound. |
+| `checked-scoped-epoch-topk-retained-no-traverse` | reusable checked top-k scoped | `5.05` | `5.05` | `5.08` | `28114944` | L1 reusable checked top-k win over heap retained with much lower RSS. |
+
+Interpretation:
+
+- The reusable `EpochTopKByKey` row is `7.5%` faster than retained heap on L1
+  total process time and cuts RSS by about `86%`.
+- The benchmark-local checked retained path is still faster (`4.84 s`), so the
+  operator API retains a measurable abstraction cost.
+- This is a real-input, preloaded/replayed memory-management row: the external
+  process includes one HDFS input load plus 20 replay iterations. Use the L2
+  rows above for GC interpretation.
 
 ## Decision
 

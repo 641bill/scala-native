@@ -1,6 +1,6 @@
 # ReML / MLKit Lineage Comparison Matrix
 
-Last updated: 2026-05-08 22:16 CEST
+Last updated: 2026-05-10 01:04 CEST
 
 Status: new Phase 6c evidence track. This file separates three evidence
 classes:
@@ -10,6 +10,13 @@ classes:
   provenance;
 - **Scala Native ReML-shaped ports**, newly scaffolded in
 `sandbox/src/main/scala-next/ReMLRegionMatrix.scala`.
+
+The dedicated thesis-facing PLDI-style table is now
+`evidence/REML_MLKIT_PLDI_TABLE.md`. Keep this file as the fuller provenance,
+local-port, and safety-probe evidence pack.
+Use the PLDI-style table's L1 final-clean section for current headline local
+elapsed/RSS claims; the older Tier 1 rows below remain L2 standard-stats
+interpretation and provenance.
 
 Default local ReML-shaped runs now include only `gc-heap`,
 `region-scoped-rooted`, `checked-region-stream`, and
@@ -257,6 +264,23 @@ zsh sandbox/run_reml_region_matrix.sh
 
 All checksums matched. These are **Scala Native port medians**, not exact
 MLKit/ReML artifact reruns.
+
+### Tier 1 L1 Final-Clean Rows, 2026-05-10
+
+The dedicated L1 table now records external `/usr/bin/time -l` rows from child
+`7573d7577` for Tier 1 local Scala Native ports. The current useful rows are:
+
+- `msort`: checked stream `2.06 s` total for 20 iterations versus heap
+  `2.46 s`, with RSS about `10 MB` versus `21 MB`.
+- `msort-r`: checked stream `2.05 s` versus heap `2.25 s`, with RSS about
+  `10 MB` versus `39 MB`.
+- `ratio`: checked scoped `0.91 s` versus heap `0.93 s`, with RSS about
+  `16 MB` versus `80 MB`.
+
+`fib37` and `life` are near-tie controls, while `tak`, `fft`, and `mandel` are
+too short under the current configuration for headline external timing.
+See `evidence/REML_MLKIT_PLDI_TABLE.md` and
+`evidence/FINAL_CLEAN_HEADLINE_RESULTS.md` for the L1 rows.
 
 ## Paper-Style Combined Snapshot
 
