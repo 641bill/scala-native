@@ -4396,12 +4396,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       key: Int,
       amount: Int
   ): Unit = {
-    if (key < 0 || key >= topK.keySpace)
-      throw new IndexOutOfBoundsException(
-        s"key $key outside EpochTopKByKey keySpace ${topK.keySpace}"
-      )
-    if (amount != 0)
-      topK.counts(key) += amount
+    topK.counts(key) += amount
   }
 
   /** Increments the key count for the active top-k epoch. */
@@ -4410,7 +4405,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       topK: EpochTopKByKey^{parent},
       key: Int
   ): Unit =
-    addEpochTopKByKey(parent, topK, key, 1)
+    topK.counts(key) += 1
 
   private def betterEpochTopK(
       count: Int,

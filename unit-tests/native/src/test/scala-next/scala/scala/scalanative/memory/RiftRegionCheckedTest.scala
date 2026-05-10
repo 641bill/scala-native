@@ -1623,6 +1623,31 @@ class RiftRegionCheckedTest {
     assertEquals(415, total)
   }
 
+  @Test def epochTopKByKeyRejectsInvalidKeys(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        val topK = RiftRegion.epochTopKByKey(4, 2)
+        RiftRegion.beginEpochTopKByKey(stream, topK)
+
+        assertThrows(
+          classOf[IndexOutOfBoundsException],
+          () => RiftRegion.incrementEpochTopKByKey(stream, topK, -1)
+        )
+        assertThrows(
+          classOf[IndexOutOfBoundsException],
+          () => RiftRegion.addEpochTopKByKey(stream, topK, 4, 0)
+        )
+
+        42
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def streamPageTokenAppendWindowAllocatesAndDrainsRecords(): Unit = {
     RiftRegion.init(1)
     try {

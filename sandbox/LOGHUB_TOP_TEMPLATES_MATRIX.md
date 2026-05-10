@@ -1,7 +1,7 @@
 # LogHub Top Templates Matrix
 
 Date: 2026-05-09
-Last updated: 2026-05-10 09:59 CEST
+Last updated: 2026-05-10 22:49 CEST
 
 Status: focused top-k/rank candidate matrix with retained-object controls and
 the first reusable `EpochTopKByKey` checked API gate. L1 final-clean support
@@ -240,6 +240,41 @@ Interpretation:
   reusable top-k rows retain ordinary records until epoch close and do not
   traverse them at close.
 
+Hot-path follow-up, 2026-05-10:
+
+`incrementEpochTopKByKey` now updates the parent-owned primitive count array
+directly instead of delegating through `addEpochTopKByKey`; `add` still relies
+on the array bounds check for invalid keys. This removes a duplicate method hop
+and duplicate hot-path validation from the common increment case.
+
+Command:
+
+```sh
+LOGHUB_TOP_BUILD=0 \
+LOGHUB_TOP_LINES=1000000 \
+LOGHUB_TOP_LINES_PER_EPOCH=25000 \
+LOGHUB_TOP_BENCHMARK_RUNS=3 \
+LOGHUB_TOP_WARMUPS=1 \
+LOGHUB_TOP_INPUT_MODE=generated \
+LOGHUB_TOP_MODES="heap-retained-drop-anchor checked-scoped-epoch-retained-no-traverse checked-epoch-topk-retained-no-traverse checked-scoped-epoch-topk-retained-no-traverse" \
+LOGHUB_TOP_OUTPUT_DIR=/tmp/rift-loghub-topk-hotpath-1m-bc9fd5979 \
+zsh sandbox/run_loghub_top_templates_matrix.sh
+```
+
+All modes matched checksum `-761408849270161430` and output count `1280`.
+
+| Mode | Class | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes |
+|---|---|---:|---:|---:|---:|---:|
+| `heap-retained-drop-anchor` | retained heap control | `397.788` | `126.601` | `179.193` | `3/3` | `407683072` |
+| `checked-scoped-epoch-retained-no-traverse` | benchmark-local checked retained scoped | `260.130` | `0.000` | `0.000` | `0/3` | `304611328` |
+| `checked-epoch-topk-retained-no-traverse` | reusable checked top-k stream | `288.601` | `0.000` | `0.000` | `0/3` | `304545792` |
+| `checked-scoped-epoch-topk-retained-no-traverse` | reusable checked top-k scoped | `274.914` | `0.000` | `0.000` | `0/3` | `304578560` |
+
+Interpretation: the reusable scoped top-k API remains faster than retained
+heap and now trails the benchmark-local checked scoped lower bound by about
+`5.7%` in this same-run generated gate. This is an overhead-reduction result,
+not a new benchmark-local algorithm.
+
 ## Real HDFS 1M Gate
 
 Command:
@@ -311,6 +346,34 @@ Interpretation:
 - The API overhead caveat remains: the benchmark-local scoped path is
   `83.697 ms`, while the reusable top-k scoped path is `95.267 ms`.
 
+Reusable top-k real HDFS hot-path follow-up:
+
+```sh
+LOGHUB_TOP_BUILD=0 \
+LOGHUB_TOP_INPUT_MODE=file-backed \
+LOGHUB_TOP_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/loghub/HDFS_1/HDFS.log \
+LOGHUB_TOP_LINES=1000000 \
+LOGHUB_TOP_LINES_PER_EPOCH=25000 \
+LOGHUB_TOP_BENCHMARK_RUNS=3 \
+LOGHUB_TOP_WARMUPS=1 \
+LOGHUB_TOP_MODES="heap-retained-drop-anchor checked-scoped-epoch-retained-no-traverse checked-scoped-epoch-topk-retained-no-traverse" \
+LOGHUB_TOP_OUTPUT_DIR=/tmp/rift-loghub-topk-hotpath-hdfs-1m-bc9fd5979 \
+zsh sandbox/run_loghub_top_templates_matrix.sh
+```
+
+All modes matched checksum `4142347521733569598` and output count `1280`.
+
+| Mode | Class | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes |
+|---|---|---:|---:|---:|---:|---:|
+| `heap-retained-drop-anchor` | retained heap control | `111.704` | `30.542` | `32.272` | `3/3` | `146079744` |
+| `checked-scoped-epoch-retained-no-traverse` | benchmark-local checked retained scoped | `76.818` | `0.000` | `0.000` | `0/3` | `150077440` |
+| `checked-scoped-epoch-topk-retained-no-traverse` | reusable checked top-k scoped | `82.170` | `0.000` | `0.000` | `0/3` | `150077440` |
+
+Interpretation: on real-preloaded HDFS, the reusable scoped top-k row is now
+`26.4%` faster than retained heap and removes `30.542 ms` median timed GC. It
+trails the benchmark-local checked scoped lower bound by about `7.0%`, down
+from the previous recorded `13.8%` caveat.
+
 ## Real HDFS L1 Final-Clean Top-K Row
 
 Command:
@@ -360,11 +423,42 @@ Interpretation:
   process includes one HDFS input load plus 20 replay iterations. Use the L2
   rows above for GC interpretation.
 
+Hot-path L1 follow-up, same input and protocol:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+for i in 1 2 3; do
+  RIFT_FINAL_CLEAN=1 \
+  LOGHUB_TOP_BUILD=0 \
+  LOGHUB_TOP_INPUT_MODE=file-backed \
+  LOGHUB_TOP_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/loghub/HDFS_1/HDFS.log \
+  LOGHUB_TOP_LINES=1000000 \
+  LOGHUB_TOP_LINES_PER_EPOCH=25000 \
+  LOGHUB_TOP_BENCHMARK_RUNS=20 \
+  LOGHUB_TOP_WARMUPS=0 \
+  LOGHUB_TOP_MODES="heap-retained-drop-anchor checked-scoped-epoch-retained-no-traverse checked-scoped-epoch-topk-retained-no-traverse" \
+  LOGHUB_TOP_OUTPUT_DIR=/tmp/rift-l1-loghub-topk-hotpath-hdfs-1m-x20-bc9fd5979-r${i} \
+  zsh sandbox/run_loghub_top_templates_matrix.sh
+done
+```
+
+| Mode | Class | Median real s | Min real s | Max real s | Median RSS bytes | Claim |
+|---|---|---:|---:|---:|---:|---|
+| `heap-retained-drop-anchor` | retained heap control | `5.52` | `5.50` | `5.52` | `205406208` | L1 retained heap/drop-anchor control. |
+| `checked-scoped-epoch-retained-no-traverse` | benchmark-local checked retained scoped | `4.80` | `4.73` | `4.81` | `28262400` | L1 checked retained lower bound over heap retained. |
+| `checked-scoped-epoch-topk-retained-no-traverse` | reusable checked top-k scoped | `4.88` | `4.87` | `4.94` | `28098560` | L1 reusable checked top-k win over heap retained with much lower RSS. |
+
+Interpretation: after the hot-path change, the reusable `EpochTopKByKey` L1
+row is `11.6%` faster than retained heap and cuts RSS by about `86%`. The
+report-facing API overhead versus the benchmark-local checked retained lower
+bound is now about `1.7%` (`4.88 s` versus `4.80 s`), so the previous overhead
+caveat is materially reduced.
+
 ## Decision
 
 LogHub top templates advances from "candidate" to a passed reusable checked
 top-k API gate with an overhead caveat. `EpochTopKByKey` beats retained heap on
 generated and real-preloaded HDFS rows while preserving the retained-object
-comparison. The benchmark-local manual path remains faster, so the next top-k
-step should profile or inline the operator update/getter path before using it
-as an application headline. DEBS ranking and generic mutable rank remain gated.
+comparison. After the increment hot-path follow-up, the benchmark-local manual
+path remains slightly faster, but the L1 API overhead on real HDFS is down to
+about `1.7%`. DEBS ranking and generic mutable rank remain gated.
