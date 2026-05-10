@@ -1,7 +1,7 @@
 # GH Archive Region Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-10 17:37 CEST
+Last updated: 2026-05-10 17:47 CEST
 
 Status: first real NDJSON/log-event stream matrix added, with both preloaded
 and file-backed q1/q2 rows. The preloaded rows time object allocation/query
@@ -751,6 +751,43 @@ repo counts until the original close point. The `heap-direct-epoch` control
 shows that almost all of the speedup comes from avoiding generic page-token
 close traversal and retaining summaries instead of records. Checked regions are
 within about 3% of same-shape heap here.
+
+### L1 Final-Clean Direct-Summary q2 Counterparts
+
+These rows make the direct-summary lower bound symmetric. If the table reports
+`heap-direct-summary-only`, it must also report the checked/region
+direct-summary counterparts where the framework topology exists.
+
+Command shape:
+
+```bash
+cd /Users/siyaoliu/rift/scala-native-rift
+RIFT_FINAL_CLEAN=1 \
+GITHUB_ARCHIVE_BUILD=0 \
+GITHUB_ARCHIVE_EVENTS=1000000 \
+GITHUB_ARCHIVE_EVENTS_PER_BUCKET=25000 \
+GITHUB_ARCHIVE_BENCHMARK_RUNS=20 \
+GITHUB_ARCHIVE_WARMUPS=0 \
+GITHUB_ARCHIVE_INPUT_MODE=preloaded \
+GITHUB_ARCHIVE_QUERIES="q2-repo-window" \
+GITHUB_ARCHIVE_MODES="heap-direct-summary-only checked-epoch-stream checked-epoch-scoped" \
+GITHUB_ARCHIVE_OUTPUT_DIR=/tmp/rift-l1-gharchive-direct-summary-q2-1m-x20-b9ac4a647-r1 \
+zsh sandbox/run_github_archive_region_matrix.sh
+```
+
+All rows matched checksum `7294087528134281006` and output count `163487`.
+
+| Mode | Evidence class | External real median | External user median | Max RSS median |
+|---|---|---:|---:|---:|
+| `heap-direct-summary-only` | topology lower bound | `1.36 s` | `1.33 s` | `6832128` |
+| `checked-epoch-stream` | checked direct-summary counterpart | `1.45 s` | `1.42 s` | `6946816` |
+| `checked-epoch-scoped` | checked scoped direct-summary counterpart | `1.45 s` | `1.44 s` | `6995968` |
+
+Interpretation: region direct-summary is also very fast. The checked direct
+counterparts are within about `7%` of heap direct-summary and keep RSS near the
+same small footprint. This is still topology/operator lower-bound evidence,
+not a memory-management claim, because the program does not retain ordinary
+records until close.
 
 ## Generated/Preloaded Retained-Epoch q2 Reclaim Control
 
