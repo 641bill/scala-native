@@ -1,7 +1,7 @@
 # LogHub Region Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-09 19:57 CEST
+Last updated: 2026-05-10 15:09 CEST
 
 Status: implemented real-input candidate. The matrix has a generated fallback
 for compile/smoke validation and a file-backed byte-line path for extracted
@@ -293,6 +293,49 @@ Interpretation:
   bookkeeping. For LogHub rows, read elapsed, RSS, timed GC, and diagnostic
   allocation/append/close buckets together rather than treating timed GC as
   the only memory cost.
+
+### HDFS v1 q2 final-clean L1 row
+
+Final-clean support was added on 2026-05-10. In L1 mode,
+`LogHubRegionMatrix` skips warmups, heap-expected replay, internal timing,
+GC-stat reads, and Rift-stat reads. The runner records only external
+`/usr/bin/time -l` real/user/sys time and max RSS. This row is the clean
+headline timing counterpart to the L2 HDFS q2 standard-stats row above.
+
+Command shape:
+
+```sh
+RIFT_FINAL_CLEAN=1 \
+LOGHUB_BUILD=0 \
+LOGHUB_INPUT_MODE=file-backed \
+LOGHUB_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/loghub/HDFS_1/HDFS.log \
+LOGHUB_LINES=1000000 \
+LOGHUB_LINES_PER_BUCKET=25000 \
+LOGHUB_BENCHMARK_RUNS=3 \
+LOGHUB_WARMUPS=0 \
+LOGHUB_QUERIES="q2-window-counts" \
+LOGHUB_MODES="heap-immix safezone-improved-32k rift-checked-safezone-page-token" \
+LOGHUB_OUTPUT_DIR=/tmp/rift-l1-loghub-hdfs-q2-1m-x3-fe8f0d853-r1 \
+zsh sandbox/run_loghub_region_matrix.sh
+```
+
+Three external repeats were collected from clean child commit `fe8f0d853`.
+Each process loads 1M real HDFS log lines and runs q2 three times. The first
+attempt used 20 q2 iterations per process; it was stopped after the heap row
+because one mode took `165.25 s`, so the report row uses 3 inner iterations.
+
+| Mode | Median external real s | Min/Max external real s | Median user s | Median sys s | Median RSS bytes | Checksum | Output |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `heap-immix` | `25.60` | `25.58 / 25.75` | `25.21` | `0.35` | `408649728` | `-4515648042024502814` | `41` |
+| `safezone-improved-32k` | `25.35` | `25.33 / 25.39` | `24.96` | `0.31` | `79003648` | `-4515648042024502814` | `41` |
+| `rift-checked-safezone-page-token` | `25.56` | `25.56 / 25.58` | `25.16` | `0.31` | `79036416` | `-4515648042024502814` | `41` |
+
+Interpretation: this is an L1 real-input RSS win, not a throughput headline.
+Checked scoped page-token essentially ties heap on total file-backed elapsed
+(`25.56 s` versus `25.60 s`) while cutting max RSS from about `409 MB` to
+about `79 MB`. The L2 row remains the source for GC interpretation: heap q2
+spends `92.659 ms` median in timed GC while checked scoped page-token reports
+zero timed GC.
 
 ### Full BGL q2, single-run scale probe
 
