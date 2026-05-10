@@ -1,7 +1,7 @@
 # DSPBench Region Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-10 15:40 CEST
+Last updated: 2026-05-10 18:03 CEST
 
 Status: implemented three local DSPBench-family real-input candidates: Spike
 Detection, Fraud Detection, and Log Processing. This is not an exact DSPBench
@@ -839,6 +839,43 @@ slightly faster than same-shape heap while matching checksum/output count. On
 Log q2, checked direct epoch is essentially tied with same-shape heap; the
 remaining timed GC is from non-region heap work that this direct operator does
 not eliminate.
+
+Final-clean L1 symmetric direct-summary follow-up, 2026-05-10:
+
+```bash
+cd /Users/siyaoliu/rift/scala-native-rift
+RIFT_FINAL_CLEAN=1 \
+DSPBENCH_BUILD=0 \
+DSPBENCH_EVENTS=1000000 \
+DSPBENCH_EVENTS_PER_BUCKET=25000 \
+DSPBENCH_BENCHMARK_RUNS=20 \
+DSPBENCH_WARMUPS=0 \
+DSPBENCH_INPUT_MODE=generated \
+DSPBENCH_QUERIES="fraud-q2-alert-window log-q2-window" \
+DSPBENCH_MODES="heap-direct-summary-only checked-epoch-stream checked-epoch-scoped" \
+DSPBENCH_OUTPUT_DIR=/tmp/rift-l1-dspbench-direct-summary-q2-1m-x20-eea5894d5-r1 \
+zsh sandbox/run_dspbench_region_matrix.sh
+```
+
+The command was repeated with `r2` and `r3` output directories. Each row is one
+external process with 20 in-process 1M-event iterations; the table reports the
+median external real time across three processes.
+
+| Query | Mode | Median external real s | Min / max s | Per-iteration ms | Max RSS bytes | Output count |
+|---|---|---:|---:|---:|---:|---:|
+| `fraud-q2-alert-window` | `heap-direct-summary-only` | `5.62` | `5.57 / 5.71` | `281.0` | `39747584` | `613295` |
+| `fraud-q2-alert-window` | `checked-epoch-stream` | `5.67` | `5.61 / 5.87` | `283.5` | `39829504` | `613295` |
+| `fraud-q2-alert-window` | `checked-epoch-scoped` | `5.68` | `5.64 / 5.78` | `284.0` | `39829504` | `613295` |
+| `log-q2-window` | `heap-direct-summary-only` | `4.55` | `4.50 / 4.63` | `227.5` | `48693248` | `200` |
+| `log-q2-window` | `checked-epoch-stream` | `4.56` | `4.55 / 4.64` | `228.0` | `39829504` | `200` |
+| `log-q2-window` | `checked-epoch-scoped` | `4.59` | `4.57 / 4.60` | `229.5` | `39829504` | `200` |
+
+Interpretation: L1 confirms that direct-summary is a symmetric topology lower
+bound, not a heap-only artifact. Checked direct epoch is within about `1%` of
+heap direct summary on both generated q2 rows, with matching checksum/output
+counts. This remains topology/operator evidence rather than a memory-placement
+claim, because the query legally computes summaries on append and does not
+retain ordinary records until bucket close.
 
 The same modes intentionally reject file-backed DSPBench inputs for now because
 the current direct-epoch implementation requires an indexable/generated source

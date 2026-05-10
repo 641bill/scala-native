@@ -1,7 +1,7 @@
 # LogHub Region Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-10 15:09 CEST
+Last updated: 2026-05-10 18:03 CEST
 
 Status: implemented real-input candidate. The matrix has a generated fallback
 for compile/smoke validation and a file-backed byte-line path for extracted
@@ -382,6 +382,41 @@ The `heap-direct-epoch` control shows that this is mainly an operator-topology
 win. Checked direct epoch remains close to same-shape heap while preserving the
 checked lifetime boundary. Real file-backed LogHub q2/q3 still use page-token
 until an indexable/preloaded real-input path exists.
+
+Final-clean L1 symmetric direct-summary follow-up, 2026-05-10:
+
+```bash
+cd /Users/siyaoliu/rift/scala-native-rift
+RIFT_FINAL_CLEAN=1 \
+LOGHUB_BUILD=0 \
+LOGHUB_LINES=1000000 \
+LOGHUB_LINES_PER_BUCKET=25000 \
+LOGHUB_BENCHMARK_RUNS=20 \
+LOGHUB_WARMUPS=0 \
+LOGHUB_INPUT_MODE=generated \
+LOGHUB_QUERIES="q2-window-counts q3-template-session" \
+LOGHUB_MODES="heap-direct-summary-only checked-epoch-stream checked-epoch-scoped" \
+LOGHUB_OUTPUT_DIR=/tmp/rift-l1-loghub-direct-summary-q2q3-1m-x20-eea5894d5-r1 \
+zsh sandbox/run_loghub_region_matrix.sh
+```
+
+The command was repeated with `r2` and `r3` output directories. Each row is one
+external process with 20 in-process 1M-line iterations; the table reports the
+median external real time across three processes.
+
+| Query | Mode | Median external real s | Min / max s | Per-iteration ms | Max RSS bytes | Output count |
+|---|---|---:|---:|---:|---:|---:|
+| `q2-window-counts` | `heap-direct-summary-only` | `4.23` | `4.19 / 4.24` | `211.5` | `6504448` | `163487` |
+| `q2-window-counts` | `checked-epoch-stream` | `4.39` | `4.33 / 4.41` | `219.5` | `6668288` | `163487` |
+| `q2-window-counts` | `checked-epoch-scoped` | `4.38` | `4.33 / 4.38` | `219.0` | `6701056` | `163487` |
+| `q3-template-session` | `heap-direct-summary-only` | `37.01` | `36.83 / 37.16` | `1850.5` | `8372224` | `312151` |
+| `q3-template-session` | `checked-epoch-stream` | `37.65` | `37.15 / 37.71` | `1882.5` | `8437760` | `312151` |
+| `q3-template-session` | `checked-epoch-scoped` | `38.00` | `37.36 / 38.33` | `1900.0` | `8388608` | `312151` |
+
+Interpretation: L1 confirms that generated LogHub direct-summary is a symmetric
+topology lower bound. Checked direct epoch is within about `4%` of heap
+direct-summary for q2 and about `2-3%` for q3. The q3 row remains dominated by
+template/session query CPU, so this is not a memory-management win by itself.
 
 ### Generated Retained-Epoch q2/q3 Reclaim Control
 
