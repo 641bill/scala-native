@@ -1,8 +1,9 @@
 # SPECjbb2005 Workload Port Matrix
 
-Last updated: 2026-05-08 22:16 CEST
+Last updated: 2026-05-10 09:40 CEST
 
-Status: clean initial Scala Native workload-port rows.
+Status: clean initial Scala Native workload-port rows plus an L1 final-clean
+8-warehouse representative row from child commit `678a6eb41`.
 
 This is **not** an official SPECjbb2005 result. It is a deterministic
 single-process Scala Native workload port that preserves the memory-management
@@ -19,6 +20,9 @@ Raw logs:
 - `/tmp/specjbb2005-port-6w-2026-05-08/`
 - `/tmp/specjbb2005-port-7w-2026-05-08/`
 - `/tmp/specjbb2005-port-8w-2026-05-08/`
+- `/tmp/rift-l1-specjbb-8w-x20-678a6eb41-r1/`
+- `/tmp/rift-l1-specjbb-8w-x20-678a6eb41-r2/`
+- `/tmp/rift-l1-specjbb-8w-x20-678a6eb41-r3/`
 
 ## Workload
 
@@ -36,7 +40,35 @@ order-status, delivery, and stock-level-style cases. The port records Stancu-lik
 axes: elapsed, GC time/count, RSS, transaction-local object proxy, region-freed
 object/byte proxy, max live region payload proxy, and API-boundary count.
 
+## L1 Final-Clean 8-Warehouse Row
+
+Configuration:
+
+- child commit: `678a6eb41`;
+- measurement level: L1 final-clean, external `/usr/bin/time -l`;
+- warehouses: 8;
+- iterations: 100,000 transactions per warehouse;
+- total transactions: 800,000 per inner iteration;
+- process runs: 3 external processes, each with 20 identical workload
+  iterations inside the optimized native binary;
+- transaction epoch: 64 transactions per region;
+- checksum: `-9186304385429183494` across all modes.
+
+| Mode | Median real s | Min real s | Max real s | Median RSS bytes | User s | Sys s | Claim |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `gc-heap` | 2.64 | 2.63 | 2.66 | 12,369,920 | 2.64 | 0.00 | L1 natural heap baseline. |
+| `region-scoped-rooted` | 2.48 | 2.46 | 2.48 | 7,962,624 | 2.47 | 0.00 | L1 rooted scoped-region baseline. |
+| `checked-epoch-scoped` | 2.21 | 2.21 | 2.22 | 7,995,392 | 2.20 | 0.00-0.01 | L1 checked transaction/epoch win over heap and rooted baseline. |
+
+Interpretation: this L1 row preserves the L2 direction without internal
+timers. `checked-epoch-scoped` is about 16.3% faster than `gc-heap` and about
+10.9% faster than `region-scoped-rooted`, while RSS is about 35% lower than
+heap and near the rooted scoped baseline.
+
 ## Scale Results
+
+These rows are L2 standard-stats rows from the initial port. Use them for
+GC-count/time interpretation, not as final-clean headline elapsed timing.
 
 | Warehouses | Mode | Median ms | GC ms | GC count | RSS bytes | Region-freed object proxy | Candidate object bp |
 |---:|---|---:|---:|---:|---:|---:|---:|
