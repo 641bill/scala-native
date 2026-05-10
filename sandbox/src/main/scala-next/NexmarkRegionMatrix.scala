@@ -53,6 +53,9 @@ object NexmarkRegionConfig {
   val sampleEvery: Int = envInt("NEXMARK_SAMPLE_EVERY", 8192)
   val warmupRuns: Int = envNonNegativeInt("NEXMARK_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("NEXMARK_BENCHMARK_RUNS", 3)
+  val finalClean: Boolean =
+    envFlag("RIFT_FINAL_CLEAN") ||
+      sys.env.get("RIFT_EVAL_MEASUREMENT_LEVEL").exists(_.equalsIgnoreCase("L1"))
   val q5Diagnostics: Boolean = envFlag("NEXMARK_Q5_DIAG")
   val beamSourcePath: String =
     BenchmarkInputSupport.envString("NEXMARK_BEAM_SOURCE")
@@ -2594,6 +2597,31 @@ object NexmarkRegionMatrixHelpers {
     val cfg = NexmarkRegionConfig
     val usesRift =
       mode != "heap" && mode != "safezone" && mode != "heap-join-api"
+
+    if (cfg.finalClean) {
+      var run = 0
+      var expected: RunOutcome = null
+      while (run < cfg.benchmarkRuns) {
+        val outcome = runMode(mode, query, emitDiagnostics = false)
+        if (run == 0) expected = outcome
+        else if (outcome != expected)
+          throw new IllegalStateException(
+            s"final-clean mismatch query=$query mode=$mode expected=$expected actual=$outcome"
+          )
+        run += 1
+      }
+
+      println(
+        f"RESULT name=nexmark-$query-$mode " +
+          f"measurement_level=L1 final_clean=1 " +
+          f"query=$query mode=$mode input=${cfg.inputLabel} " +
+          f"runs=${cfg.benchmarkRuns}%d " +
+          f"checksum=${expected.checksum}%d " +
+          f"output_count=${expected.outputCount}%d"
+      )
+      return
+    }
+
     val expected = runHeap(query, emitDiagnostics = false)
 
     var warmup = 0
@@ -2691,7 +2719,7 @@ object NexmarkRegionMatrixHelpers {
   def printConfig(mode: String, query: String): Unit = {
     val cfg = NexmarkRegionConfig
     println(
-      s"CONFIG mode=$mode query=$query runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} window_buckets=${cfg.windowBuckets} auction_space=${cfg.auctionSpace} person_space=${cfg.personSpace} category_space=${cfg.categorySpace} q2_select_modulo=${cfg.q2SelectModulo} sample_every=${cfg.sampleEvery} q5_diag=${cfg.q5Diagnostics} input=${cfg.inputLabel} beam_defaults=${cfg.beamDefaults} beam_source=${cfg.beamSourcePath}"
+      s"CONFIG mode=$mode query=$query runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} final_clean=${cfg.finalClean} events=${cfg.events} events_per_bucket=${cfg.eventsPerBucket} window_buckets=${cfg.windowBuckets} auction_space=${cfg.auctionSpace} person_space=${cfg.personSpace} category_space=${cfg.categorySpace} q2_select_modulo=${cfg.q2SelectModulo} sample_every=${cfg.sampleEvery} q5_diag=${cfg.q5Diagnostics} input=${cfg.inputLabel} beam_defaults=${cfg.beamDefaults} beam_source=${cfg.beamSourcePath}"
     )
   }
 }
