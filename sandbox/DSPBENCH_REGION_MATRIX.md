@@ -1,13 +1,15 @@
 # DSPBench Region Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-09 19:45 CEST
+Last updated: 2026-05-10 15:40 CEST
 
 Status: implemented three local DSPBench-family real-input candidates: Spike
 Detection, Fraud Detection, and Log Processing. This is not an exact DSPBench
 artifact reproduction: the benchmark uses public DSPBench sample inputs, but
 runs local single-process Scala Native kernels so Storm/Spark/Flink/thread-engine
-overhead does not hide memory-management effects.
+overhead does not hide memory-management effects. Final-clean L1 support now
+exists for the matrix; use L1 rows for elapsed/RSS headline timing and L2 rows
+for GC/counter interpretation.
 
 ## Spike Input And Queries
 
@@ -264,6 +266,45 @@ Input replays: `6`.
 | `fraud-q2-alert-window` | `safezone-improved-32k` | `795.836` | `15.179` | `16.006` | `2/3` | `282476544` | `594182` |
 | `fraud-q2-alert-window` | `rift-trusted-streaming` | `763.819` | `12.492` | `12.910` | `2/3` | `282460160` | `594182` |
 | `fraud-q2-alert-window` | `rift-checked-safezone-page-token` | `822.846` | `15.554` | `16.804` | `2/3` | `278593536` | `594182` |
+
+### Fraud q2 final-clean L1 row
+
+Final-clean support was added on 2026-05-10. In L1 mode, the binary skips
+warmups, heap-expected replay, internal timing, GC-stat reads, and Rift-stat
+reads. The runner records external `/usr/bin/time -l` real/user/sys time and
+max RSS. Three external repeats were collected from clean child commit
+`95f4f4d71`; each process loads/replays the real DSPBench credit-card sample
+to 1M events and runs q2 five times.
+
+Command shape:
+
+```sh
+RIFT_FINAL_CLEAN=1 \
+DSPBENCH_BUILD=0 \
+DSPBENCH_EVENTS=1000000 \
+DSPBENCH_EVENTS_PER_BUCKET=25000 \
+DSPBENCH_BENCHMARK_RUNS=5 \
+DSPBENCH_WARMUPS=0 \
+DSPBENCH_QUERIES="fraud-q2-alert-window" \
+DSPBENCH_MODES="heap-immix safezone-improved-32k rift-trusted-streaming rift-checked-safezone-page-token" \
+DSPBENCH_OUTPUT_DIR=/tmp/rift-l1-dspbench-q2-1m-x5-95f4f4d71-r1 \
+zsh sandbox/run_dspbench_region_matrix.sh
+```
+
+| Mode | Median external real s | Min/Max external real s | Median user s | Median sys s | Median RSS bytes | Checksum | Output |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `heap-immix` | `4.39` | `4.28 / 4.39` | `4.28` | `0.09` | `358318080` | `2645894572926148009` | `594182` |
+| `safezone-improved-32k` | `4.47` | `4.36 / 4.54` | `4.39` | `0.07` | `63455232` | `2645894572926148009` | `594182` |
+| `rift-trusted-streaming` | `4.18` | `4.07 / 4.18` | `4.09` | `0.07` | `63389696` | `2645894572926148009` | `594182` |
+| `rift-checked-safezone-page-token` | `4.44` | `4.34 / 4.46` | `4.36` | `0.07` | `59539456` | `2645894572926148009` | `594182` |
+
+Interpretation: L1 confirms the same direction as L2 but changes the headline
+classification. Trusted Streaming is the elapsed lower-bound winner
+(`4.18 s` vs heap `4.39 s`). Checked scoped page-token is slightly slower than
+heap on final-clean elapsed (`4.44 s` vs `4.39 s`), but cuts RSS by about
+`83%`. Use this row as a real-input RSS/tail/control row, not a checked
+throughput headline. The L2 row above remains the source for timed-GC
+interpretation.
 
 ### Fraud q2 heap-cap follow-up
 
@@ -707,6 +748,24 @@ Input replays: `19`.
 | `log-q2-window` | `safezone-improved-32k` | `1768.410` | `20.289` | `23.385` | `3/3` | `324567040` | `179` |
 | `log-q2-window` | `rift-trusted-streaming` | `1737.469` | `15.311` | `16.228` | `3/3` | `324435968` | `179` |
 | `log-q2-window` | `rift-checked-safezone-page-token` | `1733.654` | `18.402` | `18.584` | `3/3` | `322027520` | `179` |
+
+### Log q2 final-clean L1 row
+
+Three external repeats were collected from clean child commit `95f4f4d71`.
+Each process loads/replays the real DSPBench common-log sample to 1M events
+and runs q2 five times.
+
+| Mode | Median external real s | Min/Max external real s | Median user s | Median sys s | Median RSS bytes | Checksum | Output |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `heap-immix` | `8.89` | `8.66 / 8.91` | `8.69` | `0.17` | `307593216` | `-4720769113503374536` | `179` |
+| `safezone-improved-32k` | `8.91` | `8.74 / 8.97` | `8.79` | `0.09` | `47939584` | `-4720769113503374536` | `179` |
+| `rift-trusted-streaming` | `8.51` | `8.39 / 8.73` | `8.44` | `0.06` | `47792128` | `-4720769113503374536` | `179` |
+| `rift-checked-safezone-page-token` | `8.79` | `8.66 / 8.97` | `8.69` | `0.06` | `47611904` | `-4720769113503374536` | `179` |
+
+Interpretation: L1 strengthens Log q2 as a modest real-input page/window row.
+Checked scoped page-token is `1.1%` faster than heap on final-clean elapsed and
+cuts RSS by about `85%`. Trusted Streaming remains the elapsed lower-bound
+winner. The L2 row remains the source for GC-tail interpretation.
 
 ## Log Processing Interpretation
 
