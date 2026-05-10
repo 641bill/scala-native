@@ -1,7 +1,7 @@
 # GH Archive Region Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-10 17:15 CEST
+Last updated: 2026-05-10 17:37 CEST
 
 Status: first real NDJSON/log-event stream matrix added, with both preloaded
 and file-backed q1/q2 rows. The preloaded rows time object allocation/query
@@ -788,6 +788,47 @@ row into strong memory-management evidence. Checked scoped retained epoch is
 `26.0%` faster than retained heap, removes `69.552 ms` median timed GC, and
 uses roughly `90%` less RSS. The summary-only row is still topology/operator
 evidence only.
+
+### L1 Final-Clean Retained q2 Row
+
+Child evidence commit: `36bbfa9cd`.
+
+This reruns the generated/preloaded retained q2 control with
+`RIFT_FINAL_CLEAN=1`. Each external process runs 20 identical 1M-event q2
+iterations and `/usr/bin/time -l` supplies external elapsed/RSS. L2 rows above
+remain the source for GC interpretation.
+
+Command shape:
+
+```bash
+cd /Users/siyaoliu/rift/scala-native-rift
+RIFT_FINAL_CLEAN=1 \
+GITHUB_ARCHIVE_BUILD=0 \
+GITHUB_ARCHIVE_EVENTS=1000000 \
+GITHUB_ARCHIVE_EVENTS_PER_BUCKET=25000 \
+GITHUB_ARCHIVE_BENCHMARK_RUNS=20 \
+GITHUB_ARCHIVE_WARMUPS=0 \
+GITHUB_ARCHIVE_INPUT_MODE=preloaded \
+GITHUB_ARCHIVE_QUERIES="q2-repo-window" \
+GITHUB_ARCHIVE_MODES="heap-direct-summary-only heap-epoch-retained-no-traverse checked-epoch-retained-no-traverse checked-scoped-epoch-retained-no-traverse" \
+GITHUB_ARCHIVE_OUTPUT_DIR=/tmp/rift-l1-gharchive-retained-q2-1m-x20-36bbfa9cd-r1 \
+zsh sandbox/run_github_archive_region_matrix.sh
+```
+
+All rows matched checksum `7294087528134281006` and output count `163487`.
+
+| Mode | Evidence class | External real median | External user median | Max RSS median |
+|---|---|---:|---:|---:|
+| `heap-direct-summary-only` | topology lower bound | `1.28 s` | `1.27 s` | `6832128` |
+| `heap-epoch-retained-no-traverse` | retained heap control | `4.62 s` | `4.60 s` | `147341312` |
+| `checked-epoch-retained-no-traverse` | retained checked region | `3.65 s` | `3.64 s` | `15990784` |
+| `checked-scoped-epoch-retained-no-traverse` | retained checked scoped region | `3.44 s` | `3.42 s` | `16056320` |
+
+Interpretation: L1 confirms the retained-object memory-management direction
+with measurement-clean external timing. Checked scoped retained epoch is
+`25.5%` faster than retained heap and uses about `89%` less RSS. The
+summary-only row remains a topology lower bound and is not a memory-management
+claim.
 
 Next useful GH Archive work:
 

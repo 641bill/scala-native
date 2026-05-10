@@ -1,7 +1,7 @@
 # Retained Epoch Reclaim Matrix
 
 Date: 2026-05-09
-Last updated: 2026-05-09 21:15 CEST
+Last updated: 2026-05-10 17:37 CEST
 
 Status: clean committed rerun completed after child commit `918c7d4c1` and
 parent commit `ab570b1`. These rows separate summary-only topology wins from
@@ -17,6 +17,8 @@ Raw clean-run summaries:
   `/Users/siyaoliu/rift/cache/dspbench-retained-clean-2026-05-09/1m/summary.tsv`
 - GH Archive-shaped 1M:
   `/Users/siyaoliu/rift/cache/github-archive-retained-clean-2026-05-09/1m/summary.tsv`
+- GH Archive-shaped L1 final-clean:
+  `/tmp/rift-l1-gharchive-retained-q2-1m-x20-36bbfa9cd-r{1,2,3}/summary.tsv`
 - LogHub 1M:
   `/Users/siyaoliu/rift/cache/loghub-retained-clean-2026-05-09/1m/summary.tsv`
 
@@ -188,6 +190,27 @@ Interpretation: this is a strong retained memory-management row for the
 GH-shaped generated/preloaded workload. Checked scoped retained epoch is
 `27.4%` faster than retained heap, removes `77.208 ms` median timed GC, and
 uses about `90%` less RSS. The summary-only row remains topology evidence.
+
+### L1 Final-Clean GH Archive-Shaped q2
+
+This row reruns the same generated/preloaded retained q2 shape with
+`RIFT_FINAL_CLEAN=1`. Each external process runs 20 identical 1M-event q2
+iterations. L1 external timing/RSS comes from `/usr/bin/time -l`; the L2 row
+above remains the GC interpretation source.
+
+All rows matched checksum `7294087528134281006` and output count `163487`.
+
+| Mode | Topology | External real median | External user median | Max RSS median |
+|---|---|---:|---:|---:|
+| `heap-direct-summary-only` | summary-only | `1.28 s` | `1.27 s` | `6832128` |
+| `heap-epoch-retained-no-traverse` | retained epoch | `4.62 s` | `4.60 s` | `147341312` |
+| `checked-epoch-retained-no-traverse` | retained epoch | `3.65 s` | `3.64 s` | `15990784` |
+| `checked-scoped-epoch-retained-no-traverse` | retained epoch | `3.44 s` | `3.42 s` | `16056320` |
+
+Interpretation: L1 confirms this retained-object memory-management win with
+measurement-clean external timing. Checked scoped retained epoch is `25.5%`
+faster than retained heap and uses about `89%` less RSS. Summary-only remains
+the topology/operator lower bound.
 
 ## LogHub q2/q3 1M Retained Controls
 
