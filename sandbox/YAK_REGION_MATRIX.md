@@ -1,7 +1,7 @@
 # Yak Region Matrix
 
 Date: 2026-04-25
-Last updated: 2026-05-10 23:26 CEST
+Last updated: 2026-05-10 23:41 CEST
 
 Status: Yak-style methodology reproduction harness with validated smoke,
 default median, pressure median, external-sort-shaped median, top-word/filter
@@ -536,6 +536,37 @@ Interpretation:
   Yak topword row in this run. Therefore the new top-k API passes as reusable
   top-k evidence, but it is not the best topology for this specific local
   Yak topword workload.
+
+L1 final-clean topword top-k follow-up, 10M x20:
+
+Raw summaries:
+`/Users/siyaoliu/rift/cache/yak-topword-topk-l1-10m-x20-2026-05-10/summary.tsv`,
+`/Users/siyaoliu/rift/cache/yak-topword-topk-l1-10m-x20-2026-05-10-r2/summary.tsv`,
+and
+`/Users/siyaoliu/rift/cache/yak-topword-topk-l1-10m-x20-2026-05-10-r3/summary.tsv`.
+
+These rows run with `RIFT_FINAL_CLEAN=1`, so elapsed/RSS comes from
+`/usr/bin/time -l` around the whole optimized native process. Each process runs
+20 internal 10M-record topword iterations; no GC/region counters are read in
+the benchmark timed section.
+
+| Workload | Mode | Topology/operator | Median real s | Min real s | Max real s | Max RSS bytes | Checksum |
+|---|---|---|---:|---:|---:|---:|---:|
+| `topword` | `gc-heap` | retained + close traversal | `6.25` | `6.08` | `6.26` | `75317248` | `3387296563095546471` |
+| `topword` | `region-scoped-rooted` | retained + close traversal | `5.09` | `5.00` | `5.13` | `16007168` | `3387296563095546471` |
+| `topword` | `heap-topk-retained-no-traverse` | retained + append-time top-k | `5.72` | `5.64` | `5.73` | `146833408` | `3387296563095546471` |
+| `topword` | `checked-epoch-scoped` | `RiftRegion.epoch` retained + close traversal | `4.61` | `4.55` | `4.61` | `16023552` | `3387296563095546471` |
+| `topword` | `checked-epoch-topk-stream` | reusable `EpochTopKByKey` | `5.12` | `5.08` | `5.13` | `15958016` | `3387296563095546471` |
+| `topword` | `checked-epoch-topk-scoped` | reusable `EpochTopKByKey` | `4.94` | `4.91` | `4.96` | `16023552` | `3387296563095546471` |
+
+L1 interpretation:
+
+- `checked-epoch-topk-scoped` is `21.0%` faster than natural heap and `13.6%`
+  faster than the same-shape heap top-k retained control, while cutting RSS by
+  about `79%` versus natural heap and `89%` versus same-shape heap top-k.
+- Direct `checked-epoch-scoped` remains the best Yak topword topology
+  (`4.61 s`), so the reusable top-k operator is validated but not the default
+  Yak topword implementation choice.
 
 Interpretation:
 
