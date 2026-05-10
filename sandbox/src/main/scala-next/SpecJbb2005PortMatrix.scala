@@ -33,6 +33,10 @@ object SpecJbb2005PortConfig {
   private def envNonNegativeInt(name: String, default: Int): Int =
     sys.env.get(name).flatMap(nonNegativeInt).getOrElse(default)
 
+  private def truthy(value: String): Boolean =
+    value == "1" || value.equalsIgnoreCase("true") ||
+      value.equalsIgnoreCase("yes")
+
   val warehouses: Int = envInt("SPECJBB_WAREHOUSES", 4)
   val iterationsPerWarehouse: Int =
     envInt("SPECJBB_ITERATIONS_PER_WAREHOUSE", 100000)
@@ -45,6 +49,11 @@ object SpecJbb2005PortConfig {
     envInt("SPECJBB_DISTRICTS_PER_WAREHOUSE", 10)
   val benchmarkRuns: Int = envInt("SPECJBB_BENCHMARK_RUNS", 3)
   val warmupRuns: Int = envNonNegativeInt("SPECJBB_WARMUPS", 1)
+  val finalClean: Boolean =
+    sys.env.get("RIFT_FINAL_CLEAN").exists(truthy) ||
+      sys.env
+        .get("RIFT_EVAL_MEASUREMENT_LEVEL")
+        .exists(_.equalsIgnoreCase("L1"))
 
   val totalTransactions: Int = warehouses * iterationsPerWarehouse
 }
@@ -1080,6 +1089,43 @@ object SpecJbb2005PortMatrixHelpers {
       mode == "rift-hp" ||
         mode == "rift-streaming" ||
         mode == "rift-checked-direct-epoch"
+
+    if (cfg.finalClean) {
+      var run = 0
+      var checksum = 0L
+      while (run < cfg.benchmarkRuns) {
+        val result = runWorkload(mode)
+        if (run == 0) checksum = result
+        else if (result != checksum)
+          throw new IllegalStateException(
+            s"final-clean SPECjbb2005 port mismatch mode=$mode first_checksum=$checksum actual=$result"
+          )
+        run += 1
+      }
+
+      println(
+        s"RESULT name=specjbb2005-port-$mode " +
+          s"measurement_level=L1 final_clean=1 mode=$mode " +
+          s"runs=${cfg.benchmarkRuns} warehouses=${cfg.warehouses} " +
+          s"iterations_per_warehouse=${cfg.iterationsPerWarehouse} " +
+          s"transactions=${cfg.totalTransactions} " +
+          s"items_per_order=${cfg.itemsPerOrder} " +
+          s"transactions_per_region=${cfg.transactionsPerRegion} " +
+          s"logical_region_objects=${logicalRegionObjects()} " +
+          s"region_freed_object_proxy=${logicalRegionObjects()} " +
+          s"logical_region_byte_proxy=${logicalRegionBytesProxy()} " +
+          s"region_freed_byte_proxy=${logicalRegionBytesProxy()} " +
+          s"max_live_region_object_proxy=${maxLiveRegionObjectsProxy()} " +
+          s"max_live_region_byte_proxy=${maxLiveRegionBytesProxy()} " +
+          s"durable_control_slots=${durableControlSlots()} " +
+          s"candidate_region_object_bp=${candidateBasisPoints()} " +
+          s"annotation_api_boundaries=1 explicit_region_boundaries=1 " +
+          s"escaped_region_objects=0 official_specjbb2005=0 " +
+          s"checksum=$checksum"
+      )
+      return
+    }
+
     val expected = runWorkload("heap")
 
     var warmup = 0
