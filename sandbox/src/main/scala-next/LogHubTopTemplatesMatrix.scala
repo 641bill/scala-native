@@ -31,6 +31,10 @@ object LogHubTopTemplatesConfig {
   private def envNonNegativeInt(name: String, default: Int): Int =
     sys.env.get(name).flatMap(parseNonNegativeInt).getOrElse(default)
 
+  private def truthy(value: String): Boolean =
+    value == "1" || value.equalsIgnoreCase("true") ||
+      value.equalsIgnoreCase("yes")
+
   val lines: Int = envInt("LOGHUB_TOP_LINES", 100000)
   val linesPerEpoch: Int = envInt("LOGHUB_TOP_LINES_PER_EPOCH", 25000)
   val templateBuckets: Int = envInt("LOGHUB_TOP_TEMPLATE_BUCKETS", 8192)
@@ -39,6 +43,11 @@ object LogHubTopTemplatesConfig {
   val sampleEvery: Int = envInt("LOGHUB_TOP_SAMPLE_EVERY", 4096)
   val warmupRuns: Int = envNonNegativeInt("LOGHUB_TOP_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("LOGHUB_TOP_BENCHMARK_RUNS", 3)
+  val finalClean: Boolean =
+    sys.env.get("RIFT_FINAL_CLEAN").exists(truthy) ||
+      sys.env
+        .get("RIFT_EVAL_MEASUREMENT_LEVEL")
+        .exists(_.equalsIgnoreCase("L1"))
 
   private val inputPathsRaw: String = {
     val multiple = BenchmarkInputSupport.envString("LOGHUB_TOP_INPUTS")
@@ -896,6 +905,33 @@ object LogHubTopTemplatesMatrixHelpers {
     val input = inputData
     val canonical = canonicalMode(mode)
     val usesRift = usesRiftRuntime(mode)
+
+    if (cfg.finalClean) {
+      var run = 0
+      var expected: RunOutcome = null
+      while (run < cfg.benchmarkRuns) {
+        val outcome = runMode(mode)
+        if (run == 0) expected = outcome
+        else if (outcome != expected)
+          throw new IllegalStateException(
+            s"final-clean mismatch mode=$mode expected=$expected actual=$outcome"
+          )
+        run += 1
+      }
+
+      println(
+        s"RESULT name=loghub-top-templates-$canonical " +
+          s"measurement_level=L1 final_clean=1 mode=$canonical " +
+          s"input=${input.label} input_mode=${cfg.inputMode} " +
+          s"loaded_events=${input.lines} input_files=${input.inputFiles} " +
+          s"lines_per_epoch=${cfg.linesPerEpoch} " +
+          s"template_buckets=${cfg.templateBuckets} top_k=${cfg.topK} " +
+          s"runs=${cfg.benchmarkRuns} checksum=${expected.checksum} " +
+          s"output_count=${expected.outputCount}"
+      )
+      return
+    }
+
     val expected = runHeapNatural()
     System.gc()
 
