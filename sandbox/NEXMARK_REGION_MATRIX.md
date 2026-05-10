@@ -1,7 +1,7 @@
 # NEXMark Region Matrix
 
 Date: 2026-05-01
-Last updated: 2026-05-09 00:15 CEST
+Last updated: 2026-05-10 16:05 CEST
 
 Status: first NEXMark-style methodology benchmark for the broader
 stream-processing win envelope. This is not an exact Apache Beam NEXMark
@@ -106,6 +106,41 @@ All rows matched checksum/output count.
 Interpretation: the selected Beam-default controls remain positive after the
 page-token fast-path checkpoint. These rows are generated methodology
 evidence; they are not exact Apache Beam runner evidence.
+
+## 2026-05-10 Final-Clean L1 Beam-Default Rows
+
+Source: child commit `dffe178a0` (`Add final-clean NEXMark support`).
+
+Command shape:
+
+```sh
+RIFT_FINAL_CLEAN=1 \
+NEXMARK_BUILD=0 \
+NEXMARK_BEAM_DEFAULTS=1 \
+NEXMARK_EVENTS=1000000 \
+NEXMARK_BENCHMARK_RUNS=20 \
+NEXMARK_WARMUPS=0 \
+NEXMARK_QUERIES="q3 q8 q9 q11" \
+NEXMARK_MODES="heap-immix safezone-improved rift-checked" \
+NEXMARK_OUTPUT_DIR=/tmp/rift-l1-nexmark-q3q8q9q11-1m-x20-dffe178a0-rN \
+zsh sandbox/run_nexmark_region_matrix.sh
+```
+
+Each row is the median of three external `/usr/bin/time -l` processes; each
+process runs twenty 1M-event query iterations inside the optimized native
+binary. All checksums/output counts matched across modes.
+
+| Query | Heap L1 real / RSS | Improved SafeZone L1 real / RSS | Checked Rift L1 real / RSS | Claim |
+|---|---:|---:|---:|---|
+| q3 | `6.18 s` / `75.2 MB` | `6.38 s` / `9.8 MB` | `5.86 s` / `9.6 MB` | checked framework/API win on generated methodology |
+| q8 | `9.54 s` / `75.2 MB` | `10.13 s` / `10.4 MB` | `9.21 s` / `10.2 MB` | checked modest elapsed/RSS win |
+| q9 | `16.27 s` / `146.7 MB` | `18.10 s` / `13.9 MB` | `15.03 s` / `13.2 MB` | strongest selected NEXMark L1 row |
+| q11 | `4.47 s` / `75.2 MB` | `5.11 s` / `15.3 MB` | `4.36 s` / `14.2 MB` | checked modest elapsed/RSS win |
+
+Interpretation: the final-clean L1 rows confirm that the selected
+Beam-default-style NEXMark rows are checked framework wins under the local
+Scala Native harness. They remain generated methodology evidence, not
+real-input proof and not exact Beam runner evidence.
 
 Apache Beam compatibility source:
 
