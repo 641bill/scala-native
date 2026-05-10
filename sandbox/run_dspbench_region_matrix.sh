@@ -52,8 +52,55 @@ read_max_rss_bytes() {
   fi
 }
 
+read_time_seconds() {
+  local time_log="$1"
+  local field="$2"
+  if [[ "${platform}" == "Darwin" ]]; then
+    awk -v field="${field}" '
+      {
+        for (i = 1; i <= NF; i++) {
+          if ($i == field && i > 1) {
+            print $(i - 1)
+            found = 1
+            exit
+          }
+        }
+      }
+      END { if (!found) print "" }
+    ' "${time_log}"
+  else
+    awk -v field="${field}" -F ':' '
+      field == "real" && /Elapsed \(wall clock\) time/ {
+        gsub(/^[ \t]+/, "", $2)
+        split($2, parts, ":")
+        if (length(parts) == 3)
+          print parts[1] * 3600 + parts[2] * 60 + parts[3]
+        else if (length(parts) == 2)
+          print parts[1] * 60 + parts[2]
+        else
+          print $2
+        found = 1
+        exit
+      }
+      field == "user" && /User time/ {
+        gsub(/^[ \t]+/, "", $2)
+        print $2
+        found = 1
+        exit
+      }
+      field == "sys" && /System time/ {
+        gsub(/^[ \t]+/, "", $2)
+        print $2
+        found = 1
+        exit
+      }
+      END { if (!found) print "" }
+    ' "${time_log}"
+  fi
+}
+
 write_summary_header() {
-  printf "query\tmode\theap_cap\tstatus\tinput\tinput_mode\tloaded_events\tunique_input_lines\tinput_replays\tinput_files\tmedian_ms\tmedian_gc_ms\tmax_gc_ms\truns_with_gc\tmax_gc_collections\tmedian_rift_op_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\toutput_count\tmax_rss_bytes\n" > "${summary}"
+  printf "query\tmode\theap_cap\tstatus\texternal_real_s\texternal_user_s\texternal_sys_s\tinput\tinput_mode\tloaded_events\tunique_input_lines\tinput_replays\tinput_files\tmedian_ms\tmedian_gc_ms\tmax_gc_ms\truns_with_gc\tmax_gc_collections\tmedian_rift_op_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\toutput_count\tmax_rss_bytes\n" > "${summary}"
 }
 
 write_result_row() {
@@ -64,6 +111,9 @@ write_result_row() {
   local binary_mode="$5"
   local run_log="$6"
   local max_rss_bytes="$7"
+  local external_real_s="$8"
+  local external_user_s="$9"
+  local external_sys_s="${10}"
   local line token key value
   typeset -A fields
 
@@ -77,11 +127,14 @@ write_result_row() {
     fi
   done
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "${query}" \
     "${mode}" \
     "${heap_cap}" \
     "${run_status}" \
+    "${external_real_s}" \
+    "${external_user_s}" \
+    "${external_sys_s}" \
     "${fields[input]-}" \
     "${fields[input_mode]-}" \
     "${fields[loaded_events]-}" \
@@ -109,12 +162,18 @@ write_failed_row() {
   local heap_cap="$3"
   local run_status="$4"
   local max_rss_bytes="$5"
+  local external_real_s="$6"
+  local external_user_s="$7"
+  local external_sys_s="$8"
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "${query}" \
     "${mode}" \
     "${heap_cap}" \
     "${run_status}" \
+    "${external_real_s}" \
+    "${external_user_s}" \
+    "${external_sys_s}" \
     "" \
     "" \
     "" \
@@ -147,6 +206,9 @@ run_case() {
   local run_log="${output_dir}/run-${query}-${mode}-${safe_heap_cap}.log"
   local time_log="${output_dir}/time-${query}-${mode}-${safe_heap_cap}.log"
   local max_rss_bytes
+  local external_real_s
+  local external_user_s
+  local external_sys_s
   local command_status
   local -a env_args
   local query_input="${DSPBENCH_INPUT:-}"
@@ -252,15 +314,21 @@ run_case() {
     cat "${run_log}" >&2
     cat "${time_log}" >&2
     max_rss_bytes=$(read_max_rss_bytes "${time_log}")
-    echo "DSPBENCH_RESULT query=${query} mode=${mode} heap_cap=${heap_cap} status=failed exit_status=${command_status} max_rss_bytes=${max_rss_bytes}" >&2
-    write_failed_row "${query}" "${mode}" "${heap_cap}" "failed:${command_status}" "${max_rss_bytes}"
+    external_real_s=$(read_time_seconds "${time_log}" real)
+    external_user_s=$(read_time_seconds "${time_log}" user)
+    external_sys_s=$(read_time_seconds "${time_log}" sys)
+    echo "DSPBENCH_RESULT query=${query} mode=${mode} heap_cap=${heap_cap} status=failed exit_status=${command_status} external_real_s=${external_real_s} external_user_s=${external_user_s} external_sys_s=${external_sys_s} max_rss_bytes=${max_rss_bytes}" >&2
+    write_failed_row "${query}" "${mode}" "${heap_cap}" "failed:${command_status}" "${max_rss_bytes}" "${external_real_s}" "${external_user_s}" "${external_sys_s}"
     return 0
   fi
 
   max_rss_bytes=$(read_max_rss_bytes "${time_log}")
+  external_real_s=$(read_time_seconds "${time_log}" real)
+  external_user_s=$(read_time_seconds "${time_log}" user)
+  external_sys_s=$(read_time_seconds "${time_log}" sys)
   grep "^RESULT name=dspbench-${query}-${binary_mode} " "${run_log}"
-  echo "DSPBENCH_RSS_RESULT query=${query} mode=${mode} heap_cap=${heap_cap} max_rss_bytes=${max_rss_bytes}"
-  write_result_row "${query}" "${mode}" "${heap_cap}" "ok" "${binary_mode}" "${run_log}" "${max_rss_bytes}"
+  echo "DSPBENCH_EXTERNAL_RESULT query=${query} mode=${mode} heap_cap=${heap_cap} external_real_s=${external_real_s} external_user_s=${external_user_s} external_sys_s=${external_sys_s} max_rss_bytes=${max_rss_bytes}"
+  write_result_row "${query}" "${mode}" "${heap_cap}" "ok" "${binary_mode}" "${run_log}" "${max_rss_bytes}" "${external_real_s}" "${external_user_s}" "${external_sys_s}"
 }
 
 write_summary_header

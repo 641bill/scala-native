@@ -57,6 +57,11 @@ object DSPBenchRegionConfig {
   val warmupRuns: Int = envNonNegativeInt("DSPBENCH_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("DSPBENCH_BENCHMARK_RUNS", 3)
   val diagnostics: Boolean = envFlag("DSPBENCH_DIAG")
+  val finalClean: Boolean =
+    envFlag("RIFT_FINAL_CLEAN") ||
+      sys.env
+        .get("RIFT_EVAL_MEASUREMENT_LEVEL")
+        .exists(_.equalsIgnoreCase("L1"))
 
   private val inputPathsRaw: String = {
     val multiple = BenchmarkInputSupport.envString("DSPBENCH_INPUTS")
@@ -2864,6 +2869,33 @@ object DSPBenchRegionMatrixHelpers {
     val input = inputDataFor(query)
     val canonical = canonicalMode(mode)
     val usesRift = usesRiftRuntime(mode)
+
+    if (cfg.finalClean) {
+      var run = 0
+      var expected: RunOutcome = null
+      while (run < cfg.benchmarkRuns) {
+        val outcome = runMode(mode, query)
+        if (run == 0) expected = outcome
+        else if (outcome != expected)
+          throw new IllegalStateException(
+            s"final-clean mismatch query=$query mode=$mode expected=$expected actual=$outcome"
+          )
+        run += 1
+      }
+
+      println(
+        s"RESULT name=dspbench-$query-$canonical " +
+          s"measurement_level=L1 final_clean=1 query=$query mode=$canonical " +
+          s"input=${input.label} input_mode=${cfg.inputMode} " +
+          s"loaded_events=${input.requestedEvents} " +
+          s"unique_input_lines=${input.uniqueInputLines} " +
+          s"input_replays=${input.replayCount} " +
+          s"input_files=${input.inputFiles} runs=${cfg.benchmarkRuns} " +
+          s"checksum=${expected.checksum} output_count=${expected.outputCount}"
+      )
+      return
+    }
+
     val expected = runHeap(query)
     System.gc()
 
