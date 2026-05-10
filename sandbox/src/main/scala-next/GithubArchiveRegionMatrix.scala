@@ -32,6 +32,12 @@ object GithubArchiveRegionConfig {
   private def envNonNegativeInt(name: String, default: Int): Int =
     sys.env.get(name).flatMap(parseNonNegativeInt).getOrElse(default)
 
+  private def envFlag(name: String): Boolean =
+    sys.env.get(name).exists { value =>
+      value == "1" || value.equalsIgnoreCase("true") ||
+        value.equalsIgnoreCase("yes")
+    }
+
   val events: Int = envInt("GITHUB_ARCHIVE_EVENTS", 100000)
   val eventsPerBucket: Int =
     envInt("GITHUB_ARCHIVE_EVENTS_PER_BUCKET", 25000)
@@ -41,6 +47,9 @@ object GithubArchiveRegionConfig {
   val sampleEvery: Int = envInt("GITHUB_ARCHIVE_SAMPLE_EVERY", 4096)
   val warmupRuns: Int = envNonNegativeInt("GITHUB_ARCHIVE_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("GITHUB_ARCHIVE_BENCHMARK_RUNS", 3)
+  val finalClean: Boolean =
+    envFlag("RIFT_FINAL_CLEAN") ||
+      sys.env.get("RIFT_EVAL_MEASUREMENT_LEVEL").exists(_.equalsIgnoreCase("L1"))
   private val inputPathsRaw: String = {
     val multiple = BenchmarkInputSupport.envString("GITHUB_ARCHIVE_INPUTS")
     if (multiple.nonEmpty) multiple
@@ -2023,6 +2032,35 @@ object GithubArchiveRegionMatrixHelpers {
     val input = inputData
     val canonical = canonicalMode(mode)
     val usesRift = usesRiftRuntime(mode)
+
+    if (cfg.finalClean) {
+      var run = 0
+      var expected: RunOutcome = null
+      while (run < cfg.benchmarkRuns) {
+        val outcome = runMode(mode, query)
+        if (run == 0) expected = outcome
+        else if (outcome != expected)
+          throw new IllegalStateException(
+            s"final-clean mismatch query=$query mode=$mode expected=$expected actual=$outcome"
+          )
+        run += 1
+      }
+
+      println(
+        f"RESULT name=github-archive-$query-$canonical " +
+          f"measurement_level=L1 final_clean=1 " +
+          f"query=$query mode=$canonical input=${input.label} " +
+          f"input_mode=${cfg.inputMode} " +
+          f"input_parser=${if (cfg.fileBackedInput) cfg.fileParser else "preloaded"} " +
+          f"loaded_events=${input.events}%d " +
+          f"input_files=${input.inputFiles}%d " +
+          f"runs=${cfg.benchmarkRuns}%d " +
+          f"checksum=${expected.checksum}%d " +
+          f"output_count=${expected.outputCount}%d"
+      )
+      return
+    }
+
     val expected = runExpected(query)
     System.gc()
 
@@ -2132,7 +2170,7 @@ object GithubArchiveRegionMatrixHelpers {
         s"events_per_bucket=${cfg.eventsPerBucket} live_buckets=${cfg.liveBuckets} " +
         s"repo_buckets=${cfg.repoBuckets} field_limit=${cfg.fieldLimit} " +
         s"sample_every=${cfg.sampleEvery} warmups=${cfg.warmupRuns} " +
-        s"runs=${cfg.benchmarkRuns} input=${input.label} input_mode=${cfg.inputMode} " +
+        s"runs=${cfg.benchmarkRuns} final_clean=${cfg.finalClean} input=${input.label} input_mode=${cfg.inputMode} " +
         s"input_parser=${if (cfg.fileBackedInput) cfg.fileParser else "preloaded"} " +
         s"input_path=${cfg.inputPath}"
     )
