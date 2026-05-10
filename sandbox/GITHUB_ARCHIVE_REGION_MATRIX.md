@@ -1,7 +1,7 @@
 # GH Archive Region Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-09 19:57 CEST
+Last updated: 2026-05-10 17:15 CEST
 
 Status: first real NDJSON/log-event stream matrix added, with both preloaded
 and file-backed q1/q2 rows. The preloaded rows time object allocation/query
@@ -646,6 +646,61 @@ Interpretation:
 - This is a better GH Archive story than the legacy string-parser rows, but it
   remains a modest real-input win rather than a GC-heavy case study. Heap GC is
   visible but small relative to total elapsed time.
+
+### L1 Final-Clean 200k Two-Hour Byte-Slice Rows
+
+Child support commit: `54bf38c45`.
+
+These rows rerun the same two-hour byte-slice file-backed shape in
+`RIFT_FINAL_CLEAN=1` mode. The benchmark binary prints only checksum/output
+metadata; `/usr/bin/time -l` supplies external process real/user/sys time and
+max RSS. L2 standard-stats rows above remain the GC interpretation source.
+
+Command shape:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+RIFT_FINAL_CLEAN=1 \
+GITHUB_ARCHIVE_BUILD=0 \
+GITHUB_ARCHIVE_INPUTS="/Users/siyaoliu/rift/cache/benchmark-data/gharchive/2026-04-01-0.json.gz,/Users/siyaoliu/rift/cache/benchmark-data/gharchive/2026-04-01-1.json.gz" \
+GITHUB_ARCHIVE_INPUT_MODE=file-backed \
+GITHUB_ARCHIVE_FILE_PARSER=byte-slice \
+GITHUB_ARCHIVE_EVENTS=200000 \
+GITHUB_ARCHIVE_EVENTS_PER_BUCKET=25000 \
+GITHUB_ARCHIVE_BENCHMARK_RUNS=3 \
+GITHUB_ARCHIVE_WARMUPS=0 \
+GITHUB_ARCHIVE_QUERIES="q1-fields q2-repo-window" \
+GITHUB_ARCHIVE_MODES="heap-immix safezone-improved-32k rift-trusted-streaming rift-checked-safezone-page-token" \
+GITHUB_ARCHIVE_OUTPUT_DIR=/tmp/rift-l1-gharchive-byte-200k-x3-54bf38c45-r1 \
+zsh sandbox/run_github_archive_region_matrix.sh
+```
+
+Valid external repeats: `r1`, `r2e`, and `r3e`. One sandboxed repeat without
+escalation was discarded because `/usr/bin/time -l` could not read max RSS.
+
+| Query | Mode | External real median | External user median | Max RSS median | Output count |
+|---|---|---:|---:|---:|---:|
+| q1-fields | `heap-immix` | `13.17 s` | `12.42 s` | `265142272` | `2600000` |
+| q1-fields | `safezone-improved-32k` | `13.10 s` | `12.62 s` | `101466112` | `2600000` |
+| q1-fields | `rift-trusted-streaming` | `12.81 s` | `12.49 s` | `101351424` | `2600000` |
+| q1-fields | `rift-checked-safezone-page-token` | `12.89 s` | `12.59 s` | `101416960` | `2600000` |
+| q2-repo-window | `heap-immix` | `13.18 s` | `12.91 s` | `244039680` | `31794` |
+| q2-repo-window | `safezone-improved-32k` | `12.90 s` | `12.58 s` | `101892096` | `31794` |
+| q2-repo-window | `rift-trusted-streaming` | `12.79 s` | `12.53 s` | `101826560` | `31794` |
+| q2-repo-window | `rift-checked-safezone-page-token` | `12.87 s` | `12.36 s` | `101859328` | `31794` |
+
+Checksums matched across modes within each query:
+
+- q1-fields: `818187435331427579`
+- q2-repo-window: `3318970041429315053`
+
+Interpretation: the L1 final-clean row confirms the L2 direction without using
+internal GC/region counters in the timed binary. GH Archive byte-slice
+file-backed q1/q2 is a modest real-input elapsed win and a clear RSS win for
+region modes. Checked scoped page-token improves q1 by about `2%` and q2 by
+about `2.4%` over heap, while cutting RSS by roughly `62%` and `58%`
+respectively. This remains a real-input modest/RSS row rather than GC-heavy
+flagship evidence; L2 shows heap GC is only about `1.5-1.6%` of elapsed.
 
 ## Current Decision
 
