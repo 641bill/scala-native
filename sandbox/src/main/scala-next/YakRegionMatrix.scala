@@ -64,6 +64,7 @@ object YakRegionConfig {
 
 object YakRegionMatrixHelpers {
   @volatile private var checksumSink = 0L
+  @volatile private var retainedAnchorSink = 0L
 
   private final class Token(
       val key: Int,
@@ -688,6 +689,66 @@ object YakRegionMatrixHelpers {
     checksum
   }
 
+  def runHeapTopWordEpochTopK(): Long = {
+    val cfg = YakRegionConfig
+    val globalCounts = new Array[Long](cfg.keySpace)
+    val localCounts = new Array[Int](cfg.keySpace)
+    var topChecksum = 0L
+    var retainedAnchor = 0L
+    var epoch = 0
+    while (epoch < cfg.epochs) {
+      java.util.Arrays.fill(localCounts, 0)
+      var records: WordRecord = null
+      var tail: WordRecord = null
+      var retainedCount = 0
+      var i = 0
+      while (i < cfg.recordsPerEpoch) {
+        val seed = mix(epoch * 1000003 + i * 131)
+        val key = seed % cfg.keySpace
+        val weight = (mix(seed + 19) & 15) + 1
+        val keep = ((seed ^ (seed >>> 3)) & 7) != 0
+        val record = new WordRecord(key, weight, keep, records)
+        if (records == null) tail = record
+        records = record
+        retainedCount += 1
+        if (keep) {
+          localCounts(key) += weight
+          globalCounts(key) = (globalCounts(key) + weight.toLong) & 0xffffffffL
+        }
+        i += 1
+      }
+
+      if (records != null && tail != null)
+        retainedAnchor =
+          (retainedAnchor * 1099511628211L) ^
+            records.key.toLong ^
+            (tail.key.toLong << 1) ^
+            retainedCount.toLong ^
+            epoch.toLong
+
+      var bestKey = -1
+      var bestCount = -1L
+      var key = 0
+      while (key < localCounts.length) {
+        val count = localCounts(key).toLong
+        if (count > bestCount || (count == bestCount && key < bestKey)) {
+          bestCount = count
+          bestKey = key
+        }
+        key += 1
+      }
+      topChecksum =
+        (topChecksum * 1099511628211L) ^ bestKey.toLong ^ bestCount
+      records = null
+      tail = null
+      epoch += 1
+    }
+    val checksum = checksumLongs(globalCounts) ^ topChecksum
+    checksumSink = checksum
+    retainedAnchorSink = retainedAnchor
+    checksum
+  }
+
   def runHeapOrRiftGraphChi(modeName: String): Long = {
     val cfg = YakRegionConfig
     val mode = new ModeState(modeName)
@@ -906,6 +967,80 @@ object YakRegionMatrixHelpers {
 
     val checksum = checksumLongs(globalCounts) ^ topChecksum
     checksumSink = checksum
+    checksum
+  }
+
+  def runCheckedTopWordEpochTopK(safeZoneBackend: Boolean): Long = {
+    val cfg = YakRegionConfig
+    val globalCounts = new Array[Long](cfg.keySpace)
+    var topChecksum = 0L
+    var retainedAnchor = 0L
+
+    def run()(using stream: RiftRegion.StreamingRegion^): Unit = {
+      val topK = RiftRegion.epochTopKByKey(cfg.keySpace, 1)
+      var epoch = 0
+      while (epoch < cfg.epochs) {
+        val currentEpoch = epoch
+        RiftRegion.beginEpochTopKByKey(stream, topK)
+        RiftRegion.epoch { region ?=>
+          final class CheckedWordRecord(
+              val key: Int,
+              val weight: Int,
+              val keep: Boolean,
+              val next: CheckedWordRecord^{region}
+          )
+
+          var records: CheckedWordRecord^{region} = null
+          var tail: CheckedWordRecord^{region} = null
+          var retainedCount = 0
+          var i = 0
+          while (i < cfg.recordsPerEpoch) {
+            val seed = mix(currentEpoch * 1000003 + i * 131)
+            val key = seed % cfg.keySpace
+            val weight = (mix(seed + 19) & 15) + 1
+            val keep = ((seed ^ (seed >>> 3)) & 7) != 0
+            val record =
+              RiftRegion.allocOpen(
+                new CheckedWordRecord(key, weight, keep, records)
+              )
+            if (records == null) tail = record
+            records = record
+            retainedCount += 1
+            if (keep) {
+              globalCounts(key) =
+                (globalCounts(key) + weight.toLong) & 0xffffffffL
+              RiftRegion.addEpochTopKByKey(stream, topK, key, weight)
+            }
+            i += 1
+          }
+
+          if (records != null && tail != null)
+            retainedAnchor =
+              (retainedAnchor * 1099511628211L) ^
+                records.key.toLong ^
+                (tail.key.toLong << 1) ^
+                retainedCount.toLong ^
+                currentEpoch.toLong
+        }
+
+        val length = RiftRegion.finishEpochTopKByKey(stream, topK)
+        val bestKey =
+          if (length == 0) -1 else RiftRegion.epochTopKKey(stream, topK, 0)
+        val bestCount =
+          if (length == 0) -1L
+          else RiftRegion.epochTopKCount(stream, topK, 0).toLong
+        topChecksum =
+          (topChecksum * 1099511628211L) ^ bestKey.toLong ^ bestCount
+        epoch += 1
+      }
+    }
+
+    if (safeZoneBackend) RiftRegion.streamingSafeZone { stream ?=> run() }
+    else RiftRegion.streaming { stream ?=> run() }
+
+    val checksum = checksumLongs(globalCounts) ^ topChecksum
+    checksumSink = checksum
+    retainedAnchorSink = retainedAnchor
     checksum
   }
 
@@ -1924,6 +2059,12 @@ object YakRegionMatrixHelpers {
       case "topword" =>
         val checksum =
           if (mode == "safezone") runSafeZoneTopWord()
+          else if (mode == "heap-epoch-topk")
+            runHeapTopWordEpochTopK()
+          else if (mode == "checked-epoch-topk-stream")
+            runCheckedTopWordEpochTopK(false)
+          else if (mode == "checked-epoch-topk-scoped")
+            runCheckedTopWordEpochTopK(true)
           else if (mode == "checked-epoch-stream")
             runCheckedTopWordEpoch(false)
           else if (mode == "checked-epoch-scoped")
@@ -2015,6 +2156,7 @@ object YakRegionMatrixHelpers {
         mode == "checked-page-token-stream" ||
         mode == "checked-whole-run-stream" ||
         mode == "checked-epoch-stream" ||
+        mode == "checked-epoch-topk-stream" ||
         mode == "checked-epoch-buffer-stream"
     if (cfg.finalClean) {
       var run = 0
@@ -2142,6 +2284,8 @@ object YakRegionMatrixHelpers {
           "checked-page-token-stream" | "checked-page-token-scoped" |
           "checked-whole-run-stream" | "checked-whole-run-scoped" |
           "checked-epoch-stream" | "checked-epoch-scoped" |
+          "heap-epoch-topk" |
+          "checked-epoch-topk-stream" | "checked-epoch-topk-scoped" |
           "checked-epoch-buffer-stream" | "checked-epoch-buffer-scoped" =>
         ()
       case other =>
@@ -2164,6 +2308,7 @@ object YakRegionMatrixHelpers {
       mode == "checked-page-token-stream" ||
       mode == "checked-whole-run-stream" ||
       mode == "checked-epoch-stream" ||
+      mode == "checked-epoch-topk-stream" ||
       mode == "checked-epoch-buffer-stream"
   if (usesRift) RiftRegion.init(0)
   try {

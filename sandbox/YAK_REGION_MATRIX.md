@@ -1,7 +1,7 @@
 # Yak Region Matrix
 
 Date: 2026-04-25
-Last updated: 2026-05-08 19:35 CEST
+Last updated: 2026-05-10 23:26 CEST
 
 Status: Yak-style methodology reproduction harness with validated smoke,
 default median, pressure median, external-sort-shaped median, top-word/filter
@@ -12,7 +12,8 @@ LiveJournal follow-up separates checked topology from checked backend:
 whole-run regions, per-epoch regions, and page-token regions are all measured
 over scoped and streaming backends. Direct checked epoch now also covers the
 grouped-sort array topology. These rows are local Yak-shaped probes, not exact
-Yak/GraphChi reproduction.
+Yak/GraphChi reproduction. The latest topword follow-up adds same-shape
+retained/no-traverse heap controls and reusable `EpochTopKByKey` checked rows.
 
 The harness is implemented in
 `sandbox/src/main/scala-next/YakRegionMatrix.scala` and run with
@@ -498,6 +499,43 @@ and
 | `graphchi` | `region-stream-rootless` | `256.171` | `0.000` | `0.496` | `10000000` | `13172736` |
 | `graphchi` | `checked-epoch-scoped` | `195.816` | `0.000` | `0.000` | `10000000` | `13221888` |
 | `graphchi` | `checked-epoch-stream` | `208.460` | `0.000` | `0.507` | `10000000` | `13172736` |
+
+Reusable topword top-k follow-up, 10M logical objects:
+
+Raw summary:
+`/tmp/yak-topword-topk-10m-2026-05-10/summary.tsv`.
+
+This row keeps the Yak topword input/query but adds a fair retained/no-traverse
+top-k shape. `heap-topk-retained-no-traverse` allocates ordinary heap
+`WordRecord` objects, links/retains them until epoch close, updates counts on
+append, and drops the anchor without traversing records at close.
+`checked-epoch-topk-*` uses the reusable `RiftRegion.EpochTopKByKey` operator
+for the same append-time count/top-k policy while ordinary records live in
+checked epoch regions.
+
+| Workload | Mode | Topology/operator | Median elapsed ms | Median GC ms | Median Rift op ms | Logical objects | Peak RSS bytes |
+|---|---|---|---:|---:|---:|---:|---:|
+| `topword` | `gc-heap` | retained + close traversal | `313.724` | `44.654` | `0.000` | `10000000` | `75333632` |
+| `topword` | `region-scoped-rooted` | retained + close traversal | `258.672` | `0.000` | `0.000` | `10000000` | `83279872` |
+| `topword` | `heap-topk-retained-no-traverse` | retained + append-time top-k | `297.740` | `71.767` | `0.000` | `10000000` | `146882560` |
+| `topword` | `checked-epoch-scoped` | `RiftRegion.epoch` retained + close traversal | `234.031` | `0.000` | `0.000` | `10000000` | `83279872` |
+| `topword` | `checked-epoch-topk-stream` | reusable `EpochTopKByKey` | `259.742` | `0.000` | `0.540` | `10000000` | `83247104` |
+| `topword` | `checked-epoch-topk-scoped` | reusable `EpochTopKByKey` | `249.311` | `0.000` | `0.000` | `10000000` | `83329024` |
+
+Interpretation:
+
+- Reusable checked top-k is a real framework API row, not a benchmark-local
+  manual count-array row.
+- The same-shape heap retained/no-traverse control is faster than natural heap
+  elapsed, but its RSS and median timed GC are worse because it retains the
+  epoch object graph while also using append-time summaries.
+- `checked-epoch-topk-scoped` beats natural heap by `20.5%`, beats the
+  same-shape heap top-k control by `16.3%`, removes timed heap GC, and keeps
+  RSS near the other region rows.
+- The older `checked-epoch-scoped` close-traversal topology remains the fastest
+  Yak topword row in this run. Therefore the new top-k API passes as reusable
+  top-k evidence, but it is not the best topology for this specific local
+  Yak topword workload.
 
 Interpretation:
 

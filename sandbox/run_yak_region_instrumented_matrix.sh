@@ -248,6 +248,30 @@ for selected_mode in "${modes[@]}"; do
         exit 1
       fi
       ;;
+    heap-epoch-topk|heap-topk-retained-no-traverse)
+      if [[ "${workload}" == "topword" ]]; then
+        run_mode "heap-topk-retained-no-traverse" "heap-epoch-topk" "0"
+      else
+        echo "heap-epoch-topk is currently implemented only for YAK_WORKLOAD=topword" >&2
+        exit 1
+      fi
+      ;;
+    checked-epoch-topk-stream)
+      if [[ "${workload}" == "topword" ]]; then
+        run_mode "checked-epoch-topk-stream" "checked-epoch-topk-stream" "0"
+      else
+        echo "checked-epoch-topk-stream is currently implemented only for YAK_WORKLOAD=topword" >&2
+        exit 1
+      fi
+      ;;
+    checked-epoch-topk-scoped)
+      if [[ "${workload}" == "topword" ]]; then
+        run_mode "checked-epoch-topk-scoped" "checked-epoch-topk-scoped" "1" "${workload}" "32768"
+      else
+        echo "checked-epoch-topk-scoped is currently implemented only for YAK_WORKLOAD=topword" >&2
+        exit 1
+      fi
+      ;;
     checked-epoch-buffer-stream)
       if [[ "${workload}" == "graphreal" ]]; then
         run_mode "checked-epoch-buffer-stream" "checked-epoch-buffer-stream" "0"
