@@ -1,7 +1,7 @@
 # LogHub Region Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-10 18:03 CEST
+Last updated: 2026-05-11 20:42 CEST
 
 Status: implemented real-input candidate. The matrix has a generated fallback
 for compile/smoke validation and a file-backed byte-line path for extracted
@@ -43,6 +43,7 @@ Current local real input:
 |---|---|---:|---:|
 | LogHub BGL | `/Users/siyaoliu/rift/cache/benchmark-data/loghub/BGL/BGL.log` | `4747963` | `743185031` bytes |
 | LogHub HDFS v1 | `/Users/siyaoliu/rift/cache/benchmark-data/loghub/HDFS_1/HDFS.log` | `11175629` | `1576383671` bytes |
+| LogHub Spark application subset | `/Users/siyaoliu/rift/cache/benchmark-data/loghub/Spark/application_1485248649253_0132/*.log` | `4242303` | about `416 MiB` directory payload |
 
 The matrix also supports generated smoke input:
 
@@ -337,6 +338,62 @@ about `79 MB`. The L2 row remains the source for GC interpretation: heap q2
 spends `92.659 ms` median in timed GC while checked scoped page-token reports
 zero timed GC.
 
+### Spark q3 template/session, 1M control row
+
+Spark q3 was added on 2026-05-11 as the richer local LogHub session/template
+follow-up after Spark and Windows top-template rows confirmed the reusable
+top-k shape but stayed file/parser dominated at L1. The run uses one large
+Spark application directory with enough real log lines for a bounded 1M row:
+
+`/Users/siyaoliu/rift/cache/benchmark-data/loghub/Spark/application_1485248649253_0132/*.log`
+
+Command shape:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+LOGHUB_BUILD=0 \
+LOGHUB_INPUTS="$(printf "%s," /Users/siyaoliu/rift/cache/benchmark-data/loghub/Spark/application_1485248649253_0132/*.log)" \
+LOGHUB_INPUT_MODE=file-backed \
+LOGHUB_LINES=1000000 \
+LOGHUB_BENCHMARK_RUNS=3 \
+LOGHUB_WARMUPS=1 \
+LOGHUB_QUERIES="q3-template-session" \
+LOGHUB_MODES="heap-immix safezone-improved-32k rift-trusted-streaming rift-checked-safezone-page-token" \
+LOGHUB_OUTPUT_DIR=/Users/siyaoliu/rift/cache/loghub-spark-q3-1m-2026-05-11 \
+zsh sandbox/run_loghub_region_matrix.sh
+```
+
+Source summaries:
+
+- `/Users/siyaoliu/rift/cache/loghub-spark-q3-smoke-2026-05-11/summary.tsv`
+- `/Users/siyaoliu/rift/cache/loghub-spark-q3-1m-2026-05-11/summary.tsv`
+- `/Users/siyaoliu/rift/cache/loghub-spark-q3-1m-l1-2026-05-11/summary.tsv`
+
+The 20k smoke matched checksums/output counts. The 1M L2 row loaded 61 Spark
+log files and matched output count `287798` across all modes:
+
+| Mode | Median ms | GC median ms | GC max ms | Runs with GC | RSS bytes | Output |
+|---|---:|---:|---:|---:|---:|---:|
+| `heap-immix` | `7602.328` | `140.934` | `168.854` | `3/3` | `408354816` L1 RSS | `287798` |
+| `safezone-improved-32k` | `7794.877` | `29.986` | `64.175` | `3/3` | `58310656` L1 RSS | `287798` |
+| `rift-trusted-streaming` | `7861.160` | `22.620` | `44.248` | `3/3` | `55934976` L1 RSS | `287798` |
+| `rift-checked-safezone-page-token` | `7534.013` | `31.147` | `58.136` | `3/3` | `56098816` L1 RSS | `287798` |
+
+L1 was also run with `RIFT_FINAL_CLEAN=1` to collect max RSS and checksum
+status. The RSS numbers above come from that L1 run. Its external elapsed
+field is not promoted because two Darwin `/usr/bin/time -l` real-time values
+in that run were inconsistent with the user/sys times and observed process
+duration; keep L2 elapsed as the interpretation source for this control row.
+
+Interpretation: Spark q3 is another real-input modest/control result. Checked
+scoped page-token is only `0.9%` faster than heap in the L2 loop
+(`7534.013 ms` versus `7602.328 ms`) while cutting RSS sharply and reducing
+timed GC. Heap timed GC is still only about `1.9%` of elapsed, so the row does
+not become the missing GC-heavy real-data case. It reinforces the Windows q3
+conclusion: richer log template/session materialization alone is still
+parser/query dominated unless the workload retains enough ordinary objects for
+bulk region close to dominate.
+
 ### Full BGL q2, single-run scale probe
 
 | Mode | Loaded lines | Elapsed ms | GC ms | GC collections | RSS bytes | Output |
@@ -484,7 +541,10 @@ scoped page-token is slightly slower. The current conclusion is therefore
 "real-input modest throughput/RSS/tail evidence," not "GC-heavy real-data case
 study." The HDFS v1 follow-up strengthens the modest real-log story: q2 gives
 a clean checked scoped page-token throughput/RSS/GC win over heap, but heap GC
-is still only about 1-2% of elapsed. Next benchmark search should continue to
-Theodolite-style real industrial-energy traces, larger LogHub/Spark/Windows
-logs, or another provenance-clean NDJSON/security workload with heavier
-natural object materialization.
+is still only about 1-2% of elapsed. Spark q3 confirms the same pattern on a
+larger multi-file Spark log subset: checked scoped page-token slightly wins
+the L2 loop and cuts RSS, but heap timed GC remains below 2% of elapsed. Next
+benchmark search should continue to Thunderbird if fetched, Theodolite-style
+real industrial-energy traces, larger StackOverflow/StackExchange text, or
+another provenance-clean NDJSON/security workload with heavier natural object
+retention.
