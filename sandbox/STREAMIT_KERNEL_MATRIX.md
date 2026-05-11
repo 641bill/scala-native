@@ -1,6 +1,6 @@
 # StreamIt Kernel Matrix
 
-Last updated: 2026-05-12 00:22 CEST
+Last updated: 2026-05-12 01:03 CEST
 
 Status: initial StreamIt-style BeamFormer/FilterBank throughput and latency
 ports. These are methodology controls for StreamFlex-style axes, not exact
@@ -171,6 +171,36 @@ STREAMIT_KERNEL_OUTPUT_DIR=/tmp/streamit-kernel-l2-2026-05-12 \
 | beamformer | latency | heap | 3284.119 | 22.236 | 25845708 | 30216625 | 128 | 24.60 | 8011776 |
 | beamformer | latency | checked-epoch-scoped | 3288.088 | 22.078 | 25921084 | 30335584 | 128 | 24.96 | 8044544 |
 | beamformer | latency | checked-epoch-stream | 3246.326 | 21.479 | 25763417 | 30330458 | 128 | 24.54 | 8060928 |
+
+## First 3-Run L1 Control Matrix
+
+Date/time: 2026-05-12 01:15 CEST.
+
+Command:
+
+```sh
+RIFT_FINAL_CLEAN=1 \
+STREAMIT_KERNEL_BUILD=0 \
+STREAMIT_FILTERBANK_ITERATIONS=64 \
+STREAMIT_BEAMFORMER_FRAMES=16 \
+STREAMIT_LATENCY_ITERATIONS=128 \
+STREAMIT_BENCHMARK_RUNS=3 \
+STREAMIT_WARMUPS=1 \
+STREAMIT_KERNEL_MODES="heap checked-epoch-scoped checked-epoch-stream" \
+STREAMIT_KERNEL_OUTPUT_DIR=/tmp/streamit-kernel-l1-2026-05-12 \
+  zsh sandbox/run_streamit_kernel_matrix.sh
+```
+
+| Mode | External real s | External user s | RSS bytes | Checksum status |
+|---|---:|---:|---:|---|
+| `heap` | 15.00 | 14.77 | 7929856 | FilterBank and BeamFormer throughput/latency matched |
+| `checked-epoch-scoped` | 15.23 | 14.91 | 7979008 | FilterBank and BeamFormer throughput/latency matched |
+| `checked-epoch-stream` | 15.56 | 15.07 | 8011776 | FilterBank and BeamFormer throughput/latency matched |
+
+Latency outputs were also printed for L1 provenance. Every mode misses the
+1 ms deadline for both FilterBank and BeamFormer latency rows because the local
+single-process port runs full kernels per latency iteration. Treat these as
+StreamFlex-axis throughput/latency plumbing controls, not as GC-heavy wins.
 
 ## Interpretation
 
