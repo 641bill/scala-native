@@ -62,7 +62,7 @@ read_time_seconds() {
 }
 
 write_summary_header() {
-  printf "mode\theap_cap\tstatus\texternal_real_s\texternal_user_s\texternal_sys_s\tinput\tinput_mode\tloaded_events\tinput_files\tlines_per_epoch\ttemplate_buckets\ttop_k\tmedian_ms\tmedian_gc_ms\tmax_gc_ms\truns_with_gc\tmax_gc_collections\tmedian_rift_op_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\toutput_count\tmax_rss_bytes\n" > "${summary}"
+  printf "mode\theap_cap\tstatus\texternal_real_s\texternal_user_s\texternal_sys_s\tinput\tinput_mode\tloaded_events\tinput_files\tbytes_read\tparse_errors\tlines_per_epoch\ttemplate_buckets\ttop_k\tmedian_ms\tmedian_gc_ms\tmax_gc_ms\truns_with_gc\tmax_gc_collections\tmedian_rift_op_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\toutput_count\tmax_rss_bytes\n" > "${summary}"
 }
 
 write_result_row() {
@@ -88,7 +88,7 @@ write_result_row() {
     fi
   done
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "${mode}" \
     "${heap_cap}" \
     "${run_status}" \
@@ -99,6 +99,8 @@ write_result_row() {
     "${fields[input_mode]-}" \
     "${fields[loaded_events]-}" \
     "${fields[input_files]-}" \
+    "${fields[bytes_read]-}" \
+    "${fields[parse_errors]-}" \
     "${fields[lines_per_epoch]-}" \
     "${fields[template_buckets]-}" \
     "${fields[top_k]-}" \
@@ -126,14 +128,14 @@ write_failed_row() {
   local external_user_s="$6"
   local external_sys_s="$7"
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "${mode}" \
     "${heap_cap}" \
     "${run_status}" \
     "${external_real_s}" \
     "${external_user_s}" \
     "${external_sys_s}" \
-    "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" \
+    "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" \
     "${max_rss_bytes}" >> "${summary}"
 }
 

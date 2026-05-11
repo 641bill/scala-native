@@ -70,13 +70,17 @@ object LogHubTopTemplatesConfig {
 
   val fileBackedInput: Boolean =
     inputMode match {
-      case "generated"   => false
-      case "file-backed" => true
+      case "generated"      => false
+      case "file-backed"    => true
+      case "streaming-file" => false
       case other =>
         throw new IllegalArgumentException(
-          s"unknown LOGHUB_TOP_INPUT_MODE '$other'; expected generated or file-backed"
+          s"unknown LOGHUB_TOP_INPUT_MODE '$other'; expected generated, file-backed, or streaming-file"
         )
     }
+
+  val streamingFileInput: Boolean =
+    inputMode == "streaming-file"
 }
 
 object LogHubTopTemplatesMatrixHelpers {
@@ -102,7 +106,13 @@ object LogHubTopTemplatesMatrixHelpers {
     def lines: Int = templates.length
   }
 
-  final case class RunOutcome(checksum: Long, outputCount: Long)
+  final case class RunOutcome(
+      checksum: Long,
+      outputCount: Long,
+      recordsRead: Long = 0L,
+      bytesRead: Long = 0L,
+      parseErrors: Long = 0L
+  )
 
   final case class RuntimeSample(
       gcCollections: Long,
@@ -410,6 +420,47 @@ object LogHubTopTemplatesMatrixHelpers {
   private def loadInput(): InputData =
     if (LogHubTopTemplatesConfig.fileBackedInput) loadFileBackedInput()
     else loadGeneratedInput()
+
+  private def streamingInputLabel: String = {
+    val cfg = LogHubTopTemplatesConfig
+    if (cfg.inputPaths.length == 1) "real-loghub-top-templates-streaming-file"
+    else s"real-loghub-top-templates-streaming-file-${cfg.inputPaths.length}files"
+  }
+
+  private def inputLabelFor(outcome: RunOutcome): String = {
+    val cfg = LogHubTopTemplatesConfig
+    if (cfg.streamingFileInput) streamingInputLabel
+    else inputData.label
+  }
+
+  private def loadedEventsFor(outcome: RunOutcome): Long = {
+    val cfg = LogHubTopTemplatesConfig
+    if (cfg.streamingFileInput) outcome.recordsRead
+    else inputData.lines.toLong
+  }
+
+  private def inputFilesFor(outcome: RunOutcome): Int = {
+    val cfg = LogHubTopTemplatesConfig
+    if (cfg.streamingFileInput) cfg.inputPaths.length
+    else inputData.inputFiles
+  }
+
+  private def openStreamingInput(): BenchmarkInputSupport.StreamingByteLineSource = {
+    val cfg = LogHubTopTemplatesConfig
+    if (cfg.inputPaths.isEmpty)
+      throw new IllegalArgumentException(
+        "LOGHUB_TOP_INPUT_MODE=streaming-file requires LOGHUB_TOP_INPUT or LOGHUB_TOP_INPUTS"
+      )
+    BenchmarkInputSupport.openStreamingByteLines(cfg.inputPaths)
+  }
+
+  private def readNextUsableLine(
+      source: BenchmarkInputSupport.StreamingByteLineSource
+  ): Int = {
+    var length = source.readLine()
+    while (length == 0) length = source.readLine()
+    length
+  }
 
   private def clearCounts(counts: Array[Int]): Unit = {
     var i = 0
@@ -835,6 +886,416 @@ object LogHubTopTemplatesMatrixHelpers {
       runCheckedTopKBody()
     }
 
+  private def runHeapSummaryOnlyStreaming(): RunOutcome = {
+    val cfg = LogHubTopTemplatesConfig
+    val source = openStreamingInput()
+    val counts = new Array[Int](cfg.templateBuckets)
+    var checksum = 0L
+    var outputCount = 0L
+    var recordsRead = 0
+    try {
+      var done = false
+      while (!done && recordsRead < cfg.lines) {
+        val epochStart = recordsRead
+        var recordsInEpoch = 0
+        clearCounts(counts)
+        while (!done && recordsInEpoch < cfg.linesPerEpoch && recordsRead < cfg.lines) {
+          val length = readNextUsableLine(source)
+          if (length < 0) done = true
+          else {
+            val line = source.bytes
+            val template = templateBucketFor(line, length)
+            val tokenCount = templateTokensFor(line, length)
+            val hash =
+              BenchmarkInputSupport.stableHash(line, 0, length).toLong ^
+                (template.toLong * 1099511628211L)
+            counts(template) += tokenCount
+            if (recordsRead % cfg.sampleEvery == 0)
+              checksum =
+                fold(checksum, 99, recordsRead, template, 0, tokenCount, hash, epochStart)
+            recordsRead += 1
+            recordsInEpoch += 1
+          }
+        }
+        if (recordsInEpoch > 0) {
+          val emitted = emitTopTemplates(counts, epochStart.toLong, checksum, outputCount)
+          checksum = emitted.checksum
+          outputCount = emitted.outputCount
+        }
+      }
+    } finally {
+      source.close()
+    }
+    checksumSink = checksum
+    outputSink = outputCount
+    RunOutcome(checksum, outputCount, recordsRead.toLong, source.bytesRead, 0L)
+  }
+
+  private def runHeapNaturalStreaming(): RunOutcome = {
+    val cfg = LogHubTopTemplatesConfig
+    val source = openStreamingInput()
+    val counts = new Array[Int](cfg.templateBuckets)
+    var checksum = 0L
+    var outputCount = 0L
+    var recordsRead = 0
+    try {
+      var done = false
+      while (!done && recordsRead < cfg.lines) {
+        val epochStart = recordsRead
+        var recordsInEpoch = 0
+        var head: HeapRecord = null
+        var tail: HeapRecord = null
+
+        def append(record: HeapRecord): Unit =
+          if (head == null) {
+            head = record
+            tail = record
+          } else {
+            tail.next = record
+            tail = record
+          }
+
+        while (!done && recordsInEpoch < cfg.linesPerEpoch && recordsRead < cfg.lines) {
+          val length = readNextUsableLine(source)
+          if (length < 0) done = true
+          else {
+            val line = source.bytes
+            val template = templateBucketFor(line, length)
+            val tokenCount = templateTokensFor(line, length)
+            val hash =
+              BenchmarkInputSupport.stableHash(line, 0, length).toLong ^
+                (template.toLong * 1099511628211L)
+            var token = 0
+            while (token < tokenCount) {
+              append(
+                new HeapRecord(
+                  recordsRead,
+                  template,
+                  token,
+                  hash ^ (token.toLong * 1315423911L),
+                  null
+                )
+              )
+              token += 1
+            }
+            if (recordsRead % cfg.sampleEvery == 0)
+              checksum =
+                fold(checksum, 99, recordsRead, template, 0, tokenCount, hash, epochStart)
+            recordsRead += 1
+            recordsInEpoch += 1
+          }
+        }
+
+        if (recordsInEpoch > 0) {
+          clearCounts(counts)
+          var record = head
+          while (record != null) {
+            counts(record.template) += 1
+            record = record.next
+          }
+          val emitted = emitTopTemplates(counts, epochStart.toLong, checksum, outputCount)
+          checksum = emitted.checksum
+          outputCount = emitted.outputCount
+        }
+      }
+    } finally {
+      source.close()
+    }
+    checksumSink = checksum
+    outputSink = outputCount
+    RunOutcome(checksum, outputCount, recordsRead.toLong, source.bytesRead, 0L)
+  }
+
+  private def runHeapRetainedDropAnchorStreaming(): RunOutcome = {
+    val cfg = LogHubTopTemplatesConfig
+    val source = openStreamingInput()
+    val counts = new Array[Int](cfg.templateBuckets)
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedAnchor = 0L
+    var recordsRead = 0
+    try {
+      var done = false
+      while (!done && recordsRead < cfg.lines) {
+        val epochStart = recordsRead
+        var recordsInEpoch = 0
+        var head: HeapRecord = null
+        var tail: HeapRecord = null
+        var retainedCount = 0
+        clearCounts(counts)
+
+        def append(record: HeapRecord): Unit = {
+          record.next = head
+          if (head == null) tail = record
+          head = record
+          retainedCount += 1
+          counts(record.template) += 1
+        }
+
+        while (!done && recordsInEpoch < cfg.linesPerEpoch && recordsRead < cfg.lines) {
+          val length = readNextUsableLine(source)
+          if (length < 0) done = true
+          else {
+            val line = source.bytes
+            val template = templateBucketFor(line, length)
+            val tokenCount = templateTokensFor(line, length)
+            val hash =
+              BenchmarkInputSupport.stableHash(line, 0, length).toLong ^
+                (template.toLong * 1099511628211L)
+            var token = 0
+            while (token < tokenCount) {
+              append(
+                new HeapRecord(
+                  recordsRead,
+                  template,
+                  token,
+                  hash ^ (token.toLong * 1315423911L),
+                  null
+                )
+              )
+              token += 1
+            }
+            if (recordsRead % cfg.sampleEvery == 0)
+              checksum =
+                fold(checksum, 99, recordsRead, template, 0, tokenCount, hash, epochStart)
+            recordsRead += 1
+            recordsInEpoch += 1
+          }
+        }
+
+        if (recordsInEpoch > 0) {
+          if (head != null && tail != null)
+            retainedAnchor =
+              (retainedAnchor * 1099511628211L) ^
+                head.hash ^
+                (tail.hash << 1) ^
+                retainedCount.toLong ^
+                epochStart.toLong
+          val emitted = emitTopTemplates(counts, epochStart.toLong, checksum, outputCount)
+          checksum = emitted.checksum
+          outputCount = emitted.outputCount
+        }
+      }
+    } finally {
+      source.close()
+    }
+    checksumSink = checksum
+    outputSink = outputCount
+    retainedAnchorSink = retainedAnchor
+    RunOutcome(checksum, outputCount, recordsRead.toLong, source.bytesRead, 0L)
+  }
+
+  private def runCheckedRetainedStreamingBody()(using
+      stream: RiftRegion.StreamingRegion^
+  ): RunOutcome = {
+    val cfg = LogHubTopTemplatesConfig
+    val source = openStreamingInput()
+    val counts = new Array[Int](cfg.templateBuckets)
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedAnchor = 0L
+    var recordsRead = 0
+    try {
+      var done = false
+      while (!done && recordsRead < cfg.lines) {
+        val epochStart = recordsRead
+        var recordsInEpoch = 0
+        clearCounts(counts)
+
+        RiftRegion.epoch { region ?=>
+          final class CheckedRecord(
+              val lineIndex: Int,
+              val template: Int,
+              val token: Int,
+              val hash: Long
+          ) {
+            var next: CheckedRecord^{region} = null
+          }
+
+          var head: CheckedRecord^{region} = null
+          var tail: CheckedRecord^{region} = null
+          var retainedCount = 0
+
+          def append(record: CheckedRecord^{region}): Unit = {
+            record.next = head
+            if (head == null) tail = record
+            head = record
+            retainedCount += 1
+            counts(record.template) += 1
+          }
+
+          while (!done && recordsInEpoch < cfg.linesPerEpoch && recordsRead < cfg.lines) {
+            val length = readNextUsableLine(source)
+            if (length < 0) done = true
+            else {
+              val line = source.bytes
+              val template = templateBucketFor(line, length)
+              val tokenCount = templateTokensFor(line, length)
+              val hash =
+                BenchmarkInputSupport.stableHash(line, 0, length).toLong ^
+                  (template.toLong * 1099511628211L)
+              var token = 0
+              while (token < tokenCount) {
+                val record: CheckedRecord^{region} =
+                  RiftRegion.allocOpen(
+                    new CheckedRecord(
+                      recordsRead,
+                      template,
+                      token,
+                      hash ^ (token.toLong * 1315423911L)
+                    )
+                  )
+                append(record)
+                token += 1
+              }
+              if (recordsRead % cfg.sampleEvery == 0)
+                checksum =
+                  fold(checksum, 99, recordsRead, template, 0, tokenCount, hash, epochStart)
+              recordsRead += 1
+              recordsInEpoch += 1
+            }
+          }
+
+          if (head != null && tail != null)
+            retainedAnchor =
+              (retainedAnchor * 1099511628211L) ^
+                head.hash ^
+                (tail.hash << 1) ^
+                retainedCount.toLong ^
+                epochStart.toLong
+        }
+
+        if (recordsInEpoch > 0) {
+          val emitted = emitTopTemplates(counts, epochStart.toLong, checksum, outputCount)
+          checksum = emitted.checksum
+          outputCount = emitted.outputCount
+        }
+      }
+    } finally {
+      source.close()
+    }
+    checksumSink = checksum
+    outputSink = outputCount
+    retainedAnchorSink = retainedAnchor
+    RunOutcome(checksum, outputCount, recordsRead.toLong, source.bytesRead, 0L)
+  }
+
+  private def runCheckedRetainedStreamStreaming(): RunOutcome =
+    RiftRegion.streaming { stream ?=>
+      runCheckedRetainedStreamingBody()
+    }
+
+  private def runCheckedRetainedScopedStreaming(): RunOutcome =
+    RiftRegion.streamingSafeZone { stream ?=>
+      runCheckedRetainedStreamingBody()
+    }
+
+  private def runCheckedTopKStreamingBody()(using
+      stream: RiftRegion.StreamingRegion^
+  ): RunOutcome = {
+    val cfg = LogHubTopTemplatesConfig
+    val source = openStreamingInput()
+    val topK = RiftRegion.epochTopKByKey(cfg.templateBuckets, cfg.topK)
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedAnchor = 0L
+    var recordsRead = 0
+    try {
+      var done = false
+      while (!done && recordsRead < cfg.lines) {
+        val epochStart = recordsRead
+        var recordsInEpoch = 0
+        RiftRegion.beginEpochTopKByKey(stream, topK)
+
+        RiftRegion.epoch { region ?=>
+          final class CheckedRecord(
+              val lineIndex: Int,
+              val template: Int,
+              val token: Int,
+              val hash: Long
+          ) {
+            var next: CheckedRecord^{region} = null
+          }
+
+          var head: CheckedRecord^{region} = null
+          var tail: CheckedRecord^{region} = null
+          var retainedCount = 0
+
+          def append(record: CheckedRecord^{region}): Unit = {
+            record.next = head
+            if (head == null) tail = record
+            head = record
+            retainedCount += 1
+            RiftRegion.incrementEpochTopKByKey(stream, topK, record.template)
+          }
+
+          while (!done && recordsInEpoch < cfg.linesPerEpoch && recordsRead < cfg.lines) {
+            val length = readNextUsableLine(source)
+            if (length < 0) done = true
+            else {
+              val line = source.bytes
+              val template = templateBucketFor(line, length)
+              val tokenCount = templateTokensFor(line, length)
+              val hash =
+                BenchmarkInputSupport.stableHash(line, 0, length).toLong ^
+                  (template.toLong * 1099511628211L)
+              var token = 0
+              while (token < tokenCount) {
+                val record: CheckedRecord^{region} =
+                  RiftRegion.allocOpen(
+                    new CheckedRecord(
+                      recordsRead,
+                      template,
+                      token,
+                      hash ^ (token.toLong * 1315423911L)
+                    )
+                  )
+                append(record)
+                token += 1
+              }
+              if (recordsRead % cfg.sampleEvery == 0)
+                checksum =
+                  fold(checksum, 99, recordsRead, template, 0, tokenCount, hash, epochStart)
+              recordsRead += 1
+              recordsInEpoch += 1
+            }
+          }
+
+          if (head != null && tail != null)
+            retainedAnchor =
+              (retainedAnchor * 1099511628211L) ^
+                head.hash ^
+                (tail.hash << 1) ^
+                retainedCount.toLong ^
+                epochStart.toLong
+        }
+
+        if (recordsInEpoch > 0) {
+          val emitted =
+            emitTopTemplatesFromOperator(stream, topK, epochStart.toLong, checksum, outputCount)
+          checksum = emitted.checksum
+          outputCount = emitted.outputCount
+        }
+      }
+    } finally {
+      source.close()
+    }
+    checksumSink = checksum
+    outputSink = outputCount
+    retainedAnchorSink = retainedAnchor
+    RunOutcome(checksum, outputCount, recordsRead.toLong, source.bytesRead, 0L)
+  }
+
+  private def runCheckedTopKStreamStreaming(): RunOutcome =
+    RiftRegion.streaming { stream ?=>
+      runCheckedTopKStreamingBody()
+    }
+
+  private def runCheckedTopKScopedStreaming(): RunOutcome =
+    RiftRegion.streamingSafeZone { stream ?=>
+      runCheckedTopKStreamingBody()
+    }
+
   private def canonicalMode(mode: String): String =
     mode match {
       case "gc-heap" | "heap-immix" | "heap-natural" => "heap-natural"
@@ -881,28 +1342,37 @@ object LogHubTopTemplatesMatrixHelpers {
         )
     }
 
-  private def runMode(mode: String): RunOutcome =
+  private def runMode(mode: String): RunOutcome = {
+    val streaming = LogHubTopTemplatesConfig.streamingFileInput
     canonicalMode(mode) match {
-      case "heap-natural" => runHeapNatural()
-      case "heap-summary-only" => runHeapSummaryOnly()
-      case "heap-retained-drop-anchor" => runHeapRetainedDropAnchor()
+      case "heap-natural" =>
+        if (streaming) runHeapNaturalStreaming() else runHeapNatural()
+      case "heap-summary-only" =>
+        if (streaming) runHeapSummaryOnlyStreaming() else runHeapSummaryOnly()
+      case "heap-retained-drop-anchor" =>
+        if (streaming) runHeapRetainedDropAnchorStreaming()
+        else runHeapRetainedDropAnchor()
       case "checked-epoch-retained-no-traverse" =>
-        runCheckedRetainedStream()
+        if (streaming) runCheckedRetainedStreamStreaming()
+        else runCheckedRetainedStream()
       case "checked-scoped-epoch-retained-no-traverse" =>
-        runCheckedRetainedScoped()
+        if (streaming) runCheckedRetainedScopedStreaming()
+        else runCheckedRetainedScoped()
       case "checked-epoch-topk-retained-no-traverse" =>
-        runCheckedTopKStream()
+        if (streaming) runCheckedTopKStreamStreaming()
+        else runCheckedTopKStream()
       case "checked-scoped-epoch-topk-retained-no-traverse" =>
-        runCheckedTopKScoped()
+        if (streaming) runCheckedTopKScopedStreaming()
+        else runCheckedTopKScoped()
       case other =>
         throw new IllegalArgumentException(
           s"unknown LogHub top-template mode '$other'"
         )
     }
+  }
 
   def runBenchmark(mode: String): Unit = {
     val cfg = LogHubTopTemplatesConfig
-    val input = inputData
     val canonical = canonicalMode(mode)
     val usesRift = usesRiftRuntime(mode)
 
@@ -922,8 +1392,9 @@ object LogHubTopTemplatesMatrixHelpers {
       println(
         s"RESULT name=loghub-top-templates-$canonical " +
           s"measurement_level=L1 final_clean=1 mode=$canonical " +
-          s"input=${input.label} input_mode=${cfg.inputMode} " +
-          s"loaded_events=${input.lines} input_files=${input.inputFiles} " +
+          s"input=${inputLabelFor(expected)} input_mode=${cfg.inputMode} " +
+          s"loaded_events=${loadedEventsFor(expected)} input_files=${inputFilesFor(expected)} " +
+          s"bytes_read=${expected.bytesRead} parse_errors=${expected.parseErrors} " +
           s"lines_per_epoch=${cfg.linesPerEpoch} " +
           s"template_buckets=${cfg.templateBuckets} top_k=${cfg.topK} " +
           s"runs=${cfg.benchmarkRuns} checksum=${expected.checksum} " +
@@ -932,7 +1403,9 @@ object LogHubTopTemplatesMatrixHelpers {
       return
     }
 
-    val expected = runHeapNatural()
+    val expected =
+      if (cfg.streamingFileInput) runHeapNaturalStreaming()
+      else runHeapNatural()
     System.gc()
 
     var warmup = 0
@@ -1012,10 +1485,12 @@ object LogHubTopTemplatesMatrixHelpers {
 
     println(
       f"RESULT name=loghub-top-templates-$canonical " +
-        f"mode=$canonical input=${input.label} " +
+        f"mode=$canonical input=${inputLabelFor(expected)} " +
         f"input_mode=${cfg.inputMode} " +
-        f"loaded_events=${input.lines}%d " +
-        f"input_files=${input.inputFiles}%d " +
+        f"loaded_events=${loadedEventsFor(expected)}%d " +
+        f"input_files=${inputFilesFor(expected)}%d " +
+        f"bytes_read=${expected.bytesRead}%d " +
+        f"parse_errors=${expected.parseErrors}%d " +
         f"lines_per_epoch=${cfg.linesPerEpoch}%d " +
         f"template_buckets=${cfg.templateBuckets}%d " +
         f"top_k=${cfg.topK}%d " +
@@ -1036,15 +1511,20 @@ object LogHubTopTemplatesMatrixHelpers {
 
   def printConfig(mode: String): Unit = {
     val cfg = LogHubTopTemplatesConfig
-    val input = inputData
+    val label =
+      if (cfg.streamingFileInput) streamingInputLabel
+      else inputData.label
+    val lines =
+      if (cfg.streamingFileInput) -1L
+      else inputData.lines.toLong
     println(
       s"CONFIG mode=$mode canonical_mode=${canonicalMode(mode)} " +
-        s"lines=${input.lines} configured_lines=${cfg.lines} " +
+        s"lines=$lines configured_lines=${cfg.lines} " +
         s"lines_per_epoch=${cfg.linesPerEpoch} " +
         s"template_buckets=${cfg.templateBuckets} " +
         s"template_token_limit=${cfg.templateTokenLimit} top_k=${cfg.topK} " +
         s"sample_every=${cfg.sampleEvery} warmups=${cfg.warmupRuns} " +
-        s"runs=${cfg.benchmarkRuns} input=${input.label} " +
+        s"runs=${cfg.benchmarkRuns} input=$label " +
         s"input_mode=${cfg.inputMode} input_path=${cfg.inputPath}"
     )
   }

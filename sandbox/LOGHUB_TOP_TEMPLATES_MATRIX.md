@@ -1,7 +1,7 @@
 # LogHub Top Templates Matrix
 
 Date: 2026-05-09
-Last updated: 2026-05-10 22:49 CEST
+Last updated: 2026-05-11 23:49 CEST
 
 Status: focused top-k/rank candidate matrix with retained-object controls and
 the first reusable `EpochTopKByKey` checked API gate. L1 final-clean support
@@ -38,10 +38,16 @@ The key comparison is retained heap versus retained checked epoch:
 - `checked-scoped-epoch-topk-retained-no-traverse`: same retained shape using
   `EpochTopKByKey` over the SafeZone-backed scoped checked backend.
 
-For file-backed rows, the input is preloaded into primitive arrays before the
+For `file-backed` rows, the input is preloaded into primitive arrays before the
 timed section. Treat those rows as preloaded real-input memory-management
 probes: parsing/file I/O is not the measured work, but the original data
 provenance is real HDFS.
+
+`streaming-file` is the true streaming-input mode. It reopens the configured
+real files for each benchmark run, reads line records through
+`BenchmarkInputSupport.StreamingByteLineSource`, and does not retain parsed
+arrays proportional to the full input. It reports `bytes_read` and
+`parse_errors` and is classified as `real-streaming-input`.
 
 ## Implementation
 
@@ -123,6 +129,27 @@ LOGHUB_TOP_OUTPUT_DIR=/tmp/loghub-top-templates-real-smoke \
 
 All real-smoke modes matched checksum `8243024414237720723` and output count
 `128`.
+
+Real HDFS streaming-file 20k smoke:
+
+```sh
+LOGHUB_TOP_BUILD=1 \
+LOGHUB_TOP_INPUT_MODE=streaming-file \
+LOGHUB_TOP_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/loghub/HDFS_1/HDFS.log \
+LOGHUB_TOP_LINES=20000 \
+LOGHUB_TOP_LINES_PER_EPOCH=5000 \
+LOGHUB_TOP_BENCHMARK_RUNS=1 \
+LOGHUB_TOP_WARMUPS=0 \
+LOGHUB_TOP_MODES="heap-natural heap-retained-drop-anchor checked-scoped-epoch-retained-no-traverse checked-scoped-epoch-topk-retained-no-traverse" \
+LOGHUB_TOP_OUTPUT_DIR=/tmp/rift-loghub-streaming-smoke \
+  zsh sandbox/run_loghub_top_templates_matrix.sh
+```
+
+All streaming smoke modes matched checksum `8243024414237720723`, output count
+`128`, loaded `20000` real HDFS log lines, and read `3145728` buffered source
+bytes from one input file. The checked scoped top-k row used about `10.4 MB`
+max RSS versus heap retained at about `11.7 MB`; this is validation only, not
+a headline row.
 
 Reusable top-k generated 20k smoke:
 
@@ -454,6 +481,63 @@ report-facing API overhead versus the benchmark-local checked retained lower
 bound is now about `1.7%` (`4.88 s` versus `4.80 s`), so the previous overhead
 caveat is materially reduced.
 
+## Real HDFS Streaming-File 1M Gate
+
+Command:
+
+```sh
+LOGHUB_TOP_BUILD=0 \
+LOGHUB_TOP_INPUT_MODE=streaming-file \
+LOGHUB_TOP_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/loghub/HDFS_1/HDFS.log \
+LOGHUB_TOP_LINES=1000000 \
+LOGHUB_TOP_LINES_PER_EPOCH=25000 \
+LOGHUB_TOP_BENCHMARK_RUNS=3 \
+LOGHUB_TOP_WARMUPS=1 \
+LOGHUB_TOP_MODES="heap-retained-drop-anchor checked-scoped-epoch-retained-no-traverse checked-scoped-epoch-topk-retained-no-traverse" \
+LOGHUB_TOP_OUTPUT_DIR=/tmp/rift-loghub-streaming-hdfs-1m-l2 \
+  zsh sandbox/run_loghub_top_templates_matrix.sh
+```
+
+L1 command:
+
+```sh
+RIFT_FINAL_CLEAN=1 \
+LOGHUB_TOP_BUILD=0 \
+LOGHUB_TOP_INPUT_MODE=streaming-file \
+LOGHUB_TOP_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/loghub/HDFS_1/HDFS.log \
+LOGHUB_TOP_LINES=1000000 \
+LOGHUB_TOP_LINES_PER_EPOCH=25000 \
+LOGHUB_TOP_BENCHMARK_RUNS=3 \
+LOGHUB_TOP_WARMUPS=0 \
+LOGHUB_TOP_MODES="heap-retained-drop-anchor checked-scoped-epoch-retained-no-traverse checked-scoped-epoch-topk-retained-no-traverse" \
+LOGHUB_TOP_OUTPUT_DIR=/tmp/rift-loghub-streaming-hdfs-1m-l1 \
+  zsh sandbox/run_loghub_top_templates_matrix.sh
+```
+
+All modes matched checksum `4142347521733569598`, output count `1280`,
+loaded `1000000` real HDFS log lines, and read `141557760` buffered source
+bytes from one input file.
+
+| Mode | Class | L1 external s | L1 RSS bytes | L2 median ms | Median GC ms | Runs with GC |
+|---|---|---:|---:|---:|---:|---:|
+| `heap-retained-drop-anchor` | retained heap streaming control | `8.10` | `75595776` | `2765.068` | `32.681` | `3/3` |
+| `checked-scoped-epoch-retained-no-traverse` | checked retained scoped streaming | `8.02` | `12189696` | `2672.825` | `0.000` | `0/3` |
+| `checked-scoped-epoch-topk-retained-no-traverse` | reusable checked top-k scoped streaming | `8.06` | `12173312` | `2697.653` | `0.000` | `0/3` |
+
+Interpretation:
+
+- This is the first `real-streaming-input` LogHub row: the HDFS file is read
+  inside each benchmark run through the streaming source and is not preloaded
+  into parsed arrays.
+- The reusable checked scoped top-k row is a near-tie/slight L1 throughput win
+  over retained heap and cuts RSS sharply while removing timed heap GC.
+- The benchmark-local checked scoped retained row is slightly faster than the
+  reusable top-k row, so the existing API-overhead caveat still applies in the
+  full streaming loop.
+- Heap GC is still modest relative to the full streaming parse/query loop, so
+  this is retained-object/RSS streaming evidence rather than the missing
+  flagship GC-heavy streaming result.
+
 ## Decision
 
 LogHub top templates advances from "candidate" to a passed reusable checked
@@ -461,4 +545,6 @@ top-k API gate with an overhead caveat. `EpochTopKByKey` beats retained heap on
 generated and real-preloaded HDFS rows while preserving the retained-object
 comparison. After the increment hot-path follow-up, the benchmark-local manual
 path remains slightly faster, but the L1 API overhead on real HDFS is down to
-about `1.7%`. DEBS ranking and generic mutable rank remain gated.
+about `1.7%`. The new `streaming-file` row moves the same retained/top-k shape
+into true streaming-input evidence. DEBS ranking and generic mutable rank
+remain gated.
