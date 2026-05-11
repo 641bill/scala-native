@@ -44,6 +44,12 @@ object ReMLRegionConfig {
   val lifeSteps: Int = envInt("REML_LIFE_STEPS", 32)
   val fftSize: Int = envInt("REML_FFT_SIZE", 16384)
   val ratioCount: Int = envInt("REML_RATIO_COUNT", 500000)
+  val logicDepth: Int = envInt("REML_LOGIC_DEPTH", 11)
+  val logicIterations: Int = envInt("REML_LOGIC_ITERATIONS", 256)
+  val raySpheres: Int = envInt("REML_RAY_SPHERES", 128)
+  val rayRays: Int = envInt("REML_RAY_RAYS", 10000)
+  val tspPoints: Int = envInt("REML_TSP_POINTS", 384)
+  val tspStarts: Int = envInt("REML_TSP_STARTS", 192)
   val warmupRuns: Int = envNonNegativeInt("REML_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("REML_BENCHMARK_RUNS", 3)
 
@@ -132,6 +138,52 @@ object ReMLRegionMatrixHelpers {
   private final class TrustedComplex(val re: Double, val im: Double)
   private final class HeapRatio(val n: Int, val d: Int)
   private final class TrustedRatio(val n: Int, val d: Int)
+  private final class HeapLogicNode(
+      val kind: Int,
+      val value: Int,
+      val left: HeapLogicNode,
+      val right: HeapLogicNode
+  )
+  private final class TrustedLogicNode(
+      val kind: Int,
+      val value: Int,
+      val left: TrustedLogicNode,
+      val right: TrustedLogicNode
+  )
+  private final class HeapSphere(
+      val x: Double,
+      val y: Double,
+      val z: Double,
+      val radius: Double
+  )
+  private final class TrustedSphere(
+      val x: Double,
+      val y: Double,
+      val z: Double,
+      val radius: Double
+  )
+  private final class HeapRay(
+      val ox: Double,
+      val oy: Double,
+      val oz: Double,
+      val dx: Double,
+      val dy: Double,
+      val dz: Double
+  )
+  private final class TrustedRay(
+      val ox: Double,
+      val oy: Double,
+      val oz: Double,
+      val dx: Double,
+      val dy: Double,
+      val dz: Double
+  )
+  private final class HeapHit(val sphere: Int, val t: Double)
+  private final class TrustedHit(val sphere: Int, val t: Double)
+  private final class HeapPoint(val x: Double, val y: Double)
+  private final class TrustedPoint(val x: Double, val y: Double)
+  private final class HeapTourNode(val point: Int, val next: HeapTourNode)
+  private final class TrustedTourNode(val point: Int, val next: TrustedTourNode)
 
   private def medianDouble(values: Array[Double]): Double = {
     val sorted = values.clone()
@@ -628,6 +680,754 @@ object ReMLRegionMatrixHelpers {
     else RiftRegion.streaming { stream ?=> body() }
   }
 
+  private def evalHeapLogic(node: HeapLogicNode): Long =
+    if (node.kind == 0) node.value.toLong
+    else {
+      val child = evalHeapLogic(node.left)
+      node.kind match {
+        case 1 => child ^ node.value.toLong
+        case 2 => (child & 0xffffL) + node.value.toLong
+        case 3 => (child | node.value.toLong) ^ (node.value.toLong << 1)
+        case _ => child + node.value.toLong
+      }
+    }
+
+  private def evalTrustedLogic(node: TrustedLogicNode): Long =
+    if (node.kind == 0) node.value.toLong
+    else {
+      val child = evalTrustedLogic(node.left)
+      node.kind match {
+        case 1 => child ^ node.value.toLong
+        case 2 => (child & 0xffffL) + node.value.toLong
+        case 3 => (child | node.value.toLong) ^ (node.value.toLong << 1)
+        case _ => child + node.value.toLong
+      }
+    }
+
+  private def buildHeapLogic(depth: Int, seed: Int): HeapLogicNode =
+    {
+      val seeds = new Array[Int](depth + 1)
+      seeds(0) = seed
+      var d = 1
+      while (d <= depth) {
+        seeds(d) = seeds(d - 1) * 1664525 + 1013904223
+        d += 1
+      }
+      var node = new HeapLogicNode(0, mix(seeds(depth)) & 0x7fff, null, null)
+      d = depth
+      while (d > 0) {
+        val currentSeed = seeds(d - 1)
+        node = new HeapLogicNode(
+          1 + (mix(currentSeed) & 3),
+          mix(currentSeed ^ d),
+          node,
+          null
+        )
+        d -= 1
+      }
+      node
+    }
+
+  private def buildTrustedLogic(
+      region: RiftRegion,
+      depth: Int,
+      seed: Int
+  ): TrustedLogicNode =
+    {
+      val seeds = new Array[Int](depth + 1)
+      seeds(0) = seed
+      var d = 1
+      while (d <= depth) {
+        seeds(d) = seeds(d - 1) * 1664525 + 1013904223
+        d += 1
+      }
+      var node =
+        region.alloc(new TrustedLogicNode(0, mix(seeds(depth)) & 0x7fff, null, null))
+      d = depth
+      while (d > 0) {
+        val currentSeed = seeds(d - 1)
+        node = region.alloc(
+          new TrustedLogicNode(
+            1 + (mix(currentSeed) & 3),
+            mix(currentSeed ^ d),
+            node,
+            null
+          )
+        )
+        d -= 1
+      }
+      node
+    }
+
+  private def runHeapLogic(): Long = {
+    val cfg = ReMLRegionConfig
+    var checksum = 0L
+    var i = 0
+    while (i < cfg.logicIterations) {
+      val root = buildHeapLogic(cfg.logicDepth, i + 17)
+      checksum = fold(checksum, evalHeapLogic(root))
+      i += 1
+    }
+    checksum
+  }
+
+  private def runTrustedLogic(kind: Int): Long = {
+    val cfg = ReMLRegionConfig
+    val region = RiftRegion.open(kind)
+    var checksum = 0L
+    var i = 0
+    try {
+      while (i < cfg.logicIterations) {
+        val root = buildTrustedLogic(region, cfg.logicDepth, i + 17)
+        checksum = fold(checksum, evalTrustedLogic(root))
+        i += 1
+      }
+      checksum
+    } finally region.close()
+  }
+
+  private def runSafeZoneLogic(): Long =
+    SafeZone { sz ?=>
+      final class SZLogicNode(
+          val kind: Int,
+          val value: Int,
+          val left: SZLogicNode^{sz},
+          val right: SZLogicNode^{sz}
+      )
+      def build(depth: Int, seed: Int): SZLogicNode^{sz} =
+        {
+          val seeds = new Array[Int](depth + 1)
+          seeds(0) = seed
+          var d = 1
+          while (d <= depth) {
+            seeds(d) = seeds(d - 1) * 1664525 + 1013904223
+            d += 1
+          }
+          var node: SZLogicNode^{sz} = SafeZoneAllocator.allocate(
+            sz,
+            new SZLogicNode(0, mix(seeds(depth)) & 0x7fff, null, null)
+          )
+          d = depth
+          while (d > 0) {
+            val currentSeed = seeds(d - 1)
+            node = SafeZoneAllocator.allocate(
+              sz,
+              new SZLogicNode(
+                1 + (mix(currentSeed) & 3),
+                mix(currentSeed ^ d),
+                node,
+                null
+              )
+            )
+            d -= 1
+          }
+          node
+        }
+      def eval(node: SZLogicNode^{sz}): Long =
+        if (node.kind == 0) node.value.toLong
+        else {
+          val child = eval(node.left)
+          node.kind match {
+            case 1 => child ^ node.value.toLong
+            case 2 => (child & 0xffffL) + node.value.toLong
+            case 3 => (child | node.value.toLong) ^ (node.value.toLong << 1)
+            case _ => child + node.value.toLong
+          }
+        }
+      val cfg = ReMLRegionConfig
+      var checksum = 0L
+      var i = 0
+      while (i < cfg.logicIterations) {
+        checksum = fold(checksum, eval(build(cfg.logicDepth, i + 17)))
+        i += 1
+      }
+      checksum
+    }
+
+  private def runCheckedLogic(safeZoneBackend: Boolean): Long = {
+    def body()(using region: RiftRegion.StreamingRegion^): Long = {
+      final class LogicNode(
+          val kind: Int,
+          val value: Int,
+          val left: LogicNode^{region},
+          val right: LogicNode^{region}
+      )
+      def build(depth: Int, seed: Int): LogicNode^{region} = {
+        val seeds = new Array[Int](depth + 1)
+        seeds(0) = seed
+        var d = 1
+        while (d <= depth) {
+          seeds(d) = seeds(d - 1) * 1664525 + 1013904223
+          d += 1
+        }
+        var node: LogicNode^{region} =
+          RiftRegion.alloc(new LogicNode(0, mix(seeds(depth)) & 0x7fff, null, null))
+        d = depth
+        while (d > 0) {
+          val currentSeed = seeds(d - 1)
+          node = RiftRegion.alloc(
+            new LogicNode(
+              1 + (mix(currentSeed) & 3),
+              mix(currentSeed ^ d),
+              node,
+              null
+            )
+          )
+          d -= 1
+        }
+        node
+      }
+      def eval(node: LogicNode^{region}): Long =
+        if (node.kind == 0) node.value.toLong
+        else {
+          val child = eval(node.left)
+          node.kind match {
+            case 1 => child ^ node.value.toLong
+            case 2 => (child & 0xffffL) + node.value.toLong
+            case 3 => (child | node.value.toLong) ^ (node.value.toLong << 1)
+            case _ => child + node.value.toLong
+          }
+        }
+      val cfg = ReMLRegionConfig
+      var checksum = 0L
+      var i = 0
+      while (i < cfg.logicIterations) {
+        checksum = fold(checksum, eval(build(cfg.logicDepth, i + 17)))
+        i += 1
+      }
+      checksum
+    }
+    if (safeZoneBackend) RiftRegion.streamingSafeZone { stream ?=> body() }
+    else RiftRegion.streaming { stream ?=> body() }
+  }
+
+  private def runHeapRay(): Long = {
+    val cfg = ReMLRegionConfig
+    val spheres = new Array[HeapSphere](cfg.raySpheres)
+    var i = 0
+    while (i < spheres.length) {
+      spheres(i) = new HeapSphere(
+        ((mix(i) % 2000).toDouble - 1000.0) / 100.0,
+        ((mix(i + 7) % 2000).toDouble - 1000.0) / 100.0,
+        4.0 + (mix(i + 13) % 900).toDouble / 100.0,
+        0.25 + (mix(i + 19) % 75).toDouble / 100.0
+      )
+      i += 1
+    }
+    var checksum = 0L
+    i = 0
+    while (i < cfg.rayRays) {
+      val ray = new HeapRay(
+        0.0,
+        0.0,
+        -2.0,
+        ((mix(i) % 2000).toDouble - 1000.0) / 2000.0,
+        ((mix(i + 3) % 2000).toDouble - 1000.0) / 2000.0,
+        1.0
+      )
+      var bestT = Double.PositiveInfinity
+      var bestSphere = -1
+      var j = 0
+      while (j < spheres.length) {
+        val s = spheres(j)
+        val ox = ray.ox - s.x
+        val oy = ray.oy - s.y
+        val oz = ray.oz - s.z
+        val b = ox * ray.dx + oy * ray.dy + oz * ray.dz
+        val c = ox * ox + oy * oy + oz * oz - s.radius * s.radius
+        val disc = b * b - c
+        if (disc > 0.0) {
+          val t = -b - math.sqrt(disc)
+          if (t > 0.0 && t < bestT) {
+            bestT = t
+            bestSphere = j
+          }
+        }
+        j += 1
+      }
+      if (bestSphere >= 0) {
+        val hit = new HeapHit(bestSphere, bestT)
+        checksum =
+          fold(checksum, hit.sphere.toLong * 65537L + hit.t.toLong)
+      } else checksum = fold(checksum, i.toLong)
+      i += 1
+    }
+    checksum
+  }
+
+  private def runTrustedRay(kind: Int): Long = {
+    val cfg = ReMLRegionConfig
+    val region = RiftRegion.open(kind)
+    val spheres = new Array[TrustedSphere](cfg.raySpheres)
+    var i = 0
+    try {
+      while (i < spheres.length) {
+        spheres(i) = region.alloc(
+          new TrustedSphere(
+            ((mix(i) % 2000).toDouble - 1000.0) / 100.0,
+            ((mix(i + 7) % 2000).toDouble - 1000.0) / 100.0,
+            4.0 + (mix(i + 13) % 900).toDouble / 100.0,
+            0.25 + (mix(i + 19) % 75).toDouble / 100.0
+          )
+        )
+        i += 1
+      }
+      var checksum = 0L
+      i = 0
+      while (i < cfg.rayRays) {
+        val ray = region.alloc(
+          new TrustedRay(
+            0.0,
+            0.0,
+            -2.0,
+            ((mix(i) % 2000).toDouble - 1000.0) / 2000.0,
+            ((mix(i + 3) % 2000).toDouble - 1000.0) / 2000.0,
+            1.0
+          )
+        )
+        var bestT = Double.PositiveInfinity
+        var bestSphere = -1
+        var j = 0
+        while (j < spheres.length) {
+          val s = spheres(j)
+          val ox = ray.ox - s.x
+          val oy = ray.oy - s.y
+          val oz = ray.oz - s.z
+          val b = ox * ray.dx + oy * ray.dy + oz * ray.dz
+          val c = ox * ox + oy * oy + oz * oz - s.radius * s.radius
+          val disc = b * b - c
+          if (disc > 0.0) {
+            val t = -b - math.sqrt(disc)
+            if (t > 0.0 && t < bestT) {
+              bestT = t
+              bestSphere = j
+            }
+          }
+          j += 1
+        }
+        if (bestSphere >= 0) {
+          val hit = region.alloc(new TrustedHit(bestSphere, bestT))
+          checksum =
+            fold(checksum, hit.sphere.toLong * 65537L + hit.t.toLong)
+        } else checksum = fold(checksum, i.toLong)
+        i += 1
+      }
+      checksum
+    } finally region.close()
+  }
+
+  private def runSafeZoneRay(): Long =
+    SafeZone { sz ?=>
+      final class SZSphere(
+          val x: Double,
+          val y: Double,
+          val z: Double,
+          val radius: Double
+      )
+      final class SZRay(
+          val ox: Double,
+          val oy: Double,
+          val oz: Double,
+          val dx: Double,
+          val dy: Double,
+          val dz: Double
+      )
+      final class SZHit(val sphere: Int, val t: Double)
+      val cfg = ReMLRegionConfig
+      val spheres = new Array[SZSphere^{sz}](cfg.raySpheres)
+      var i = 0
+      while (i < spheres.length) {
+        spheres(i) = SafeZoneAllocator.allocate(
+          sz,
+          new SZSphere(
+            ((mix(i) % 2000).toDouble - 1000.0) / 100.0,
+            ((mix(i + 7) % 2000).toDouble - 1000.0) / 100.0,
+            4.0 + (mix(i + 13) % 900).toDouble / 100.0,
+            0.25 + (mix(i + 19) % 75).toDouble / 100.0
+          )
+        )
+        i += 1
+      }
+      var checksum = 0L
+      i = 0
+      while (i < cfg.rayRays) {
+        val ray = SafeZoneAllocator.allocate(
+          sz,
+          new SZRay(
+            0.0,
+            0.0,
+            -2.0,
+            ((mix(i) % 2000).toDouble - 1000.0) / 2000.0,
+            ((mix(i + 3) % 2000).toDouble - 1000.0) / 2000.0,
+            1.0
+          )
+        )
+        var bestT = Double.PositiveInfinity
+        var bestSphere = -1
+        var j = 0
+        while (j < spheres.length) {
+          val s = spheres(j)
+          val ox = ray.ox - s.x
+          val oy = ray.oy - s.y
+          val oz = ray.oz - s.z
+          val b = ox * ray.dx + oy * ray.dy + oz * ray.dz
+          val c = ox * ox + oy * oy + oz * oz - s.radius * s.radius
+          val disc = b * b - c
+          if (disc > 0.0) {
+            val t = -b - math.sqrt(disc)
+            if (t > 0.0 && t < bestT) {
+              bestT = t
+              bestSphere = j
+            }
+          }
+          j += 1
+        }
+        if (bestSphere >= 0) {
+          val hit = SafeZoneAllocator.allocate(sz, new SZHit(bestSphere, bestT))
+          checksum =
+            fold(checksum, hit.sphere.toLong * 65537L + hit.t.toLong)
+        } else checksum = fold(checksum, i.toLong)
+        i += 1
+      }
+      checksum
+    }
+
+  private def runCheckedRay(safeZoneBackend: Boolean): Long = {
+    def body()(using region: RiftRegion.StreamingRegion^): Long = {
+      final class Sphere(
+          val x: Double,
+          val y: Double,
+          val z: Double,
+          val radius: Double
+      )
+      final class Ray(
+          val ox: Double,
+          val oy: Double,
+          val oz: Double,
+          val dx: Double,
+          val dy: Double,
+          val dz: Double
+      )
+      final class Hit(val sphere: Int, val t: Double)
+      val cfg = ReMLRegionConfig
+      val spheres: Array[Sphere^{region}]^{region} =
+        RiftRegion.alloc(new Array[Sphere^{region}](cfg.raySpheres))
+      var i = 0
+      while (i < spheres.length) {
+        spheres(i) = RiftRegion.alloc(
+          new Sphere(
+            ((mix(i) % 2000).toDouble - 1000.0) / 100.0,
+            ((mix(i + 7) % 2000).toDouble - 1000.0) / 100.0,
+            4.0 + (mix(i + 13) % 900).toDouble / 100.0,
+            0.25 + (mix(i + 19) % 75).toDouble / 100.0
+          )
+        )
+        i += 1
+      }
+      var checksum = 0L
+      i = 0
+      while (i < cfg.rayRays) {
+        val ray = RiftRegion.alloc(
+          new Ray(
+            0.0,
+            0.0,
+            -2.0,
+            ((mix(i) % 2000).toDouble - 1000.0) / 2000.0,
+            ((mix(i + 3) % 2000).toDouble - 1000.0) / 2000.0,
+            1.0
+          )
+        )
+        var bestT = Double.PositiveInfinity
+        var bestSphere = -1
+        var j = 0
+        while (j < spheres.length) {
+          val s = spheres(j)
+          val ox = ray.ox - s.x
+          val oy = ray.oy - s.y
+          val oz = ray.oz - s.z
+          val b = ox * ray.dx + oy * ray.dy + oz * ray.dz
+          val c = ox * ox + oy * oy + oz * oz - s.radius * s.radius
+          val disc = b * b - c
+          if (disc > 0.0) {
+            val t = -b - math.sqrt(disc)
+            if (t > 0.0 && t < bestT) {
+              bestT = t
+              bestSphere = j
+            }
+          }
+          j += 1
+        }
+        if (bestSphere >= 0) {
+          val hit = RiftRegion.alloc(new Hit(bestSphere, bestT))
+          checksum =
+            fold(checksum, hit.sphere.toLong * 65537L + hit.t.toLong)
+        } else checksum = fold(checksum, i.toLong)
+        i += 1
+      }
+      checksum
+    }
+    if (safeZoneBackend) RiftRegion.streamingSafeZone { stream ?=> body() }
+    else RiftRegion.streaming { stream ?=> body() }
+  }
+
+  private def pointDistance2Heap(a: HeapPoint, b: HeapPoint): Double = {
+    val dx = a.x - b.x
+    val dy = a.y - b.y
+    dx * dx + dy * dy
+  }
+
+  private def pointDistance2Trusted(a: TrustedPoint, b: TrustedPoint): Double = {
+    val dx = a.x - b.x
+    val dy = a.y - b.y
+    dx * dx + dy * dy
+  }
+
+  private def runHeapTsp(): Long = {
+    val cfg = ReMLRegionConfig
+    val points = new Array[HeapPoint](cfg.tspPoints)
+    var i = 0
+    while (i < points.length) {
+      points(i) = new HeapPoint(
+        (mix(i) % 10000).toDouble / 100.0,
+        (mix(i + 11) % 10000).toDouble / 100.0
+      )
+      i += 1
+    }
+    val visited = new Array[Boolean](cfg.tspPoints)
+    var checksum = 0L
+    var start = 0
+    while (start < cfg.tspStarts) {
+      java.util.Arrays.fill(visited, false)
+      var current = start % cfg.tspPoints
+      var tour: HeapTourNode = null
+      var step = 0
+      var total = 0.0
+      while (step < cfg.tspPoints) {
+        visited(current) = true
+        tour = new HeapTourNode(current, tour)
+        var best = -1
+        var bestD = Double.PositiveInfinity
+        var j = 0
+        while (j < cfg.tspPoints) {
+          if (!visited(j)) {
+            val distance = pointDistance2Heap(points(current), points(j))
+            if (distance < bestD) {
+              bestD = distance
+              best = j
+            }
+          }
+          j += 1
+        }
+        if (best >= 0) {
+          total += math.sqrt(bestD)
+          current = best
+        }
+        step += 1
+      }
+      var cursor = tour
+      var tourChecksum = 0L
+      while (cursor != null) {
+        tourChecksum = fold(tourChecksum, cursor.point.toLong)
+        cursor = cursor.next
+      }
+      checksum = fold(checksum, tourChecksum ^ total.toLong)
+      start += 1
+    }
+    checksum
+  }
+
+  private def runTrustedTsp(kind: Int): Long = {
+    val cfg = ReMLRegionConfig
+    val region = RiftRegion.open(kind)
+    val points = new Array[TrustedPoint](cfg.tspPoints)
+    var i = 0
+    try {
+      while (i < points.length) {
+        points(i) = region.alloc(
+          new TrustedPoint(
+            (mix(i) % 10000).toDouble / 100.0,
+            (mix(i + 11) % 10000).toDouble / 100.0
+          )
+        )
+        i += 1
+      }
+      val visited = new Array[Boolean](cfg.tspPoints)
+      var checksum = 0L
+      var start = 0
+      while (start < cfg.tspStarts) {
+        java.util.Arrays.fill(visited, false)
+        var current = start % cfg.tspPoints
+        var tour: TrustedTourNode = null
+        var step = 0
+        var total = 0.0
+        while (step < cfg.tspPoints) {
+          visited(current) = true
+          tour = region.alloc(new TrustedTourNode(current, tour))
+          var best = -1
+          var bestD = Double.PositiveInfinity
+          var j = 0
+          while (j < cfg.tspPoints) {
+            if (!visited(j)) {
+              val distance = pointDistance2Trusted(points(current), points(j))
+              if (distance < bestD) {
+                bestD = distance
+                best = j
+              }
+            }
+            j += 1
+          }
+          if (best >= 0) {
+            total += math.sqrt(bestD)
+            current = best
+          }
+          step += 1
+        }
+        var cursor = tour
+        var tourChecksum = 0L
+        while (cursor != null) {
+          tourChecksum = fold(tourChecksum, cursor.point.toLong)
+          cursor = cursor.next
+        }
+        checksum = fold(checksum, tourChecksum ^ total.toLong)
+        start += 1
+      }
+      checksum
+    } finally region.close()
+  }
+
+  private def runSafeZoneTsp(): Long =
+    SafeZone { sz ?=>
+      final class SZPoint(val x: Double, val y: Double)
+      final class SZTourNode(val point: Int, val next: SZTourNode^{sz})
+      def distance2(a: SZPoint^{sz}, b: SZPoint^{sz}): Double = {
+        val dx = a.x - b.x
+        val dy = a.y - b.y
+        dx * dx + dy * dy
+      }
+      val cfg = ReMLRegionConfig
+      val points = new Array[SZPoint^{sz}](cfg.tspPoints)
+      var i = 0
+      while (i < points.length) {
+        points(i) = SafeZoneAllocator.allocate(
+          sz,
+          new SZPoint(
+            (mix(i) % 10000).toDouble / 100.0,
+            (mix(i + 11) % 10000).toDouble / 100.0
+          )
+        )
+        i += 1
+      }
+      val visited = new Array[Boolean](cfg.tspPoints)
+      var checksum = 0L
+      var start = 0
+      while (start < cfg.tspStarts) {
+        java.util.Arrays.fill(visited, false)
+        var current = start % cfg.tspPoints
+        var tour: SZTourNode^{sz} = null
+        var step = 0
+        var total = 0.0
+        while (step < cfg.tspPoints) {
+          visited(current) = true
+          tour = SafeZoneAllocator.allocate(sz, new SZTourNode(current, tour))
+          var best = -1
+          var bestD = Double.PositiveInfinity
+          var j = 0
+          while (j < cfg.tspPoints) {
+            if (!visited(j)) {
+              val d = distance2(points(current), points(j))
+              if (d < bestD) {
+                bestD = d
+                best = j
+              }
+            }
+            j += 1
+          }
+          if (best >= 0) {
+            total += math.sqrt(bestD)
+            current = best
+          }
+          step += 1
+        }
+        var cursor = tour
+        var tourChecksum = 0L
+        while (cursor != null) {
+          tourChecksum = fold(tourChecksum, cursor.point.toLong)
+          cursor = cursor.next
+        }
+        checksum = fold(checksum, tourChecksum ^ total.toLong)
+        start += 1
+      }
+      checksum
+    }
+
+  private def runCheckedTsp(safeZoneBackend: Boolean): Long = {
+    def body()(using region: RiftRegion.StreamingRegion^): Long = {
+      final class Point(val x: Double, val y: Double)
+      final class TourNode(val point: Int, val next: TourNode^{region})
+      def distance2(a: Point^{region}, b: Point^{region}): Double = {
+        val dx = a.x - b.x
+        val dy = a.y - b.y
+        dx * dx + dy * dy
+      }
+      val cfg = ReMLRegionConfig
+      val points: Array[Point^{region}]^{region} =
+        RiftRegion.alloc(new Array[Point^{region}](cfg.tspPoints))
+      var i = 0
+      while (i < points.length) {
+        points(i) = RiftRegion.alloc(
+          new Point(
+            (mix(i) % 10000).toDouble / 100.0,
+            (mix(i + 11) % 10000).toDouble / 100.0
+          )
+        )
+        i += 1
+      }
+      val visited = new Array[Boolean](cfg.tspPoints)
+      var checksum = 0L
+      var start = 0
+      while (start < cfg.tspStarts) {
+        java.util.Arrays.fill(visited, false)
+        var current = start % cfg.tspPoints
+        var tour: TourNode^{region} = null
+        var step = 0
+        var total = 0.0
+        while (step < cfg.tspPoints) {
+          visited(current) = true
+          tour = RiftRegion.alloc(new TourNode(current, tour))
+          var best = -1
+          var bestD = Double.PositiveInfinity
+          var j = 0
+          while (j < cfg.tspPoints) {
+            if (!visited(j)) {
+              val d = distance2(points(current), points(j))
+              if (d < bestD) {
+                bestD = d
+                best = j
+              }
+            }
+            j += 1
+          }
+          if (best >= 0) {
+            total += math.sqrt(bestD)
+            current = best
+          }
+          step += 1
+        }
+        var cursor = tour
+        var tourChecksum = 0L
+        while (cursor != null) {
+          tourChecksum = fold(tourChecksum, cursor.point.toLong)
+          cursor = cursor.next
+        }
+        checksum = fold(checksum, tourChecksum ^ total.toLong)
+        start += 1
+      }
+      checksum
+    }
+    if (safeZoneBackend) RiftRegion.streamingSafeZone { stream ?=> body() }
+    else RiftRegion.streaming { stream ?=> body() }
+  }
+
   private def canonicalMode(mode: String): String =
     mode match {
       case "heap" | "heap-immix" | "gc-heap" => "gc-heap"
@@ -702,6 +1502,36 @@ object ReMLRegionMatrixHelpers {
           case "region-stream-rootless" => runTrustedRatio(RiftRegion.Streaming)
           case "checked-region-stream" => runCheckedRatio(false)
           case "checked-region-scoped" => runCheckedRatio(true)
+        }
+      case "logic" =>
+        mode match {
+          case "gc-heap" => runHeapLogic()
+          case "region-scoped-rooted" | "region-scoped-rootless" =>
+            runSafeZoneLogic()
+          case "region-hp-rootless" => runTrustedLogic(RiftRegion.HPZone)
+          case "region-stream-rootless" => runTrustedLogic(RiftRegion.Streaming)
+          case "checked-region-stream" => runCheckedLogic(false)
+          case "checked-region-scoped" => runCheckedLogic(true)
+        }
+      case "ray" =>
+        mode match {
+          case "gc-heap" => runHeapRay()
+          case "region-scoped-rooted" | "region-scoped-rootless" =>
+            runSafeZoneRay()
+          case "region-hp-rootless" => runTrustedRay(RiftRegion.HPZone)
+          case "region-stream-rootless" => runTrustedRay(RiftRegion.Streaming)
+          case "checked-region-stream" => runCheckedRay(false)
+          case "checked-region-scoped" => runCheckedRay(true)
+        }
+      case "tsp" =>
+        mode match {
+          case "gc-heap" => runHeapTsp()
+          case "region-scoped-rooted" | "region-scoped-rootless" =>
+            runSafeZoneTsp()
+          case "region-hp-rootless" => runTrustedTsp(RiftRegion.HPZone)
+          case "region-stream-rootless" => runTrustedTsp(RiftRegion.Streaming)
+          case "checked-region-stream" => runCheckedTsp(false)
+          case "checked-region-scoped" => runCheckedTsp(true)
         }
       case other =>
         throw new IllegalArgumentException(s"unknown ReML workload '$other'")
