@@ -1,7 +1,7 @@
 # Yak Region Matrix
 
 Date: 2026-04-25
-Last updated: 2026-05-11 12:43 CEST
+Last updated: 2026-05-11 15:44 CEST
 
 Status: Yak-style methodology reproduction harness with validated smoke,
 default median, pressure median, external-sort-shaped median, top-word/filter
@@ -651,6 +651,45 @@ Interpretation:
   That means append-time top-k maintenance is not automatically a topology win
   for this real text shape; the direct checked epoch path remains the simpler
   fair comparison.
+
+Scale-up row, 20M tokens:
+
+Raw summaries:
+`/tmp/rift-yak-askubuntu-topwordreal-20m-l2/summary.tsv` and
+`/tmp/rift-yak-askubuntu-topwordreal-20m-l1/summary.tsv`.
+
+L2 standard-stats row, 20M tokens x 3 runs:
+
+| Workload | Mode | Topology/operator | Median elapsed ms | Median GC ms | Median Rift op ms | Logical objects | Peak RSS bytes |
+|---|---|---|---:|---:|---:|---:|---:|
+| `topwordreal` | `gc-heap` | retained + close traversal | `511.485` | `33.471` | `0.000` | `20000000` | `986464256` |
+| `topwordreal` | `region-scoped-rooted` | retained + close traversal | `465.947` | `0.000` | `0.000` | `20000000` | `555696128` |
+| `topwordreal` | `heap-topk-retained-no-traverse` | retained + append-time top-k | `613.136` | `49.558` | `0.000` | `20000000` | `986431488` |
+| `topwordreal` | `checked-epoch-scoped` | `RiftRegion.epoch` retained + close traversal | `432.824` | `0.000` | `0.000` | `20000000` | `555696128` |
+| `topwordreal` | `checked-epoch-topk-scoped` | reusable `EpochTopKByKey` | `608.492` | `0.000` | `0.000` | `20000000` | `556482560` |
+
+L1 final-clean row, 20M tokens x 5 internal iterations, one external process:
+
+| Workload | Mode | Topology/operator | Real s | User s | Sys s | Max RSS bytes | Checksum |
+|---|---|---|---:|---:|---:|---:|---:|
+| `topwordreal` | `gc-heap` | retained + close traversal | `7.77` | `7.67` | `0.08` | `986415104` | `-6326401111935532007` |
+| `topwordreal` | `region-scoped-rooted` | retained + close traversal | `7.42` | `7.38` | `0.04` | `174342144` | `-6326401111935532007` |
+| `topwordreal` | `heap-topk-retained-no-traverse` | retained + append-time top-k | `8.16` | `8.05` | `0.09` | `985743360` | `-6326401111935532007` |
+| `topwordreal` | `checked-epoch-scoped` | `RiftRegion.epoch` retained + close traversal | `7.16` | `7.12` | `0.03` | `174374912` | `-6326401111935532007` |
+| `topwordreal` | `checked-epoch-topk-scoped` | reusable `EpochTopKByKey` | `7.86` | `7.80` | `0.05` | `173621248` | `-6326401111935532007` |
+
+20M interpretation:
+
+- Scaling AskUbuntu from 10M to 20M strengthens the direct checked epoch story:
+  the L2 loop is `15.4%` faster than heap (`432.824 ms` vs `511.485 ms`) and
+  removes `33.471 ms` median timed heap GC; the L1 process row is `7.9%`
+  faster (`7.16 s` vs `7.77 s`) and cuts RSS by about `82%`.
+- The rooted scoped SafeZone baseline is also strong (`7.42 s` L1), but direct
+  checked epoch remains the best safe row in this run.
+- Reusable `EpochTopKByKey` remains an RSS win but loses elapsed to natural heap
+  at 20M (`7.86 s` vs `7.77 s` L1), so it should not be promoted as a
+  top-word headline operator yet. The direct epoch topology is the reportable
+  safe framework win.
 
 Interpretation:
 
