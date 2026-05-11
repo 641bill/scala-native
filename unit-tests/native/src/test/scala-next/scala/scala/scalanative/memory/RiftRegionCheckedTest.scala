@@ -1835,6 +1835,82 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def pageTokenAppendRegionRejectsAllocationAfterCloseAll(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val window = RiftRegion.streamPageTokenAppendWindow[Event](10)
+        def consume(
+            bucket: RiftRegion.StreamBucket^{stream},
+            cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+        ): Unit = ()
+
+        val region =
+          RiftRegion.pageTokenAppendRegionFor(stream, window, 7L, Long.MinValue)(
+            consume
+          )
+        val event: Event^{stream} =
+          RiftRegion.alloc(new Event(41))(using region)
+        RiftRegion.appendPageToken(stream, window, event)
+        RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
+          consume
+        )
+
+        assertThrows(
+          classOf[IllegalStateException],
+          () => {
+            val afterClose = RiftRegion.alloc(new Event(1))(using region)
+            java.lang.System.identityHashCode(afterClose)
+            ()
+          }
+        )
+        42
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def safeZoneBackedPageTokenAppendRegionRejectsAllocationAfterCloseAll()
+      : Unit = {
+    val total = RiftRegion.streamingSafeZone { stream ?=>
+      final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+      val window = RiftRegion.streamPageTokenAppendWindow[Event](10)
+      def consume(
+          bucket: RiftRegion.StreamBucket^{stream},
+          cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+      ): Unit = ()
+
+      val region =
+        RiftRegion.pageTokenAppendRegionFor(stream, window, 7L, Long.MinValue)(
+          consume
+        )
+      val event: Event^{stream} =
+        RiftRegion.alloc(new Event(41))(using region)
+      RiftRegion.appendPageToken(stream, window, event)
+      RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
+        consume
+      )
+
+      assertThrows(
+        classOf[IllegalStateException],
+        () => {
+          val afterClose = RiftRegion.alloc(new Event(1))(using region)
+          java.lang.System.identityHashCode(afterClose)
+          ()
+        }
+      )
+      42
+    }
+
+    assertEquals(42, total)
+  }
+
   @Test def pageTokenMapFilterAllocatesAndDrainsRecords(): Unit = {
     RiftRegion.init(1)
     try {

@@ -1735,6 +1735,22 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def streamingEpochOpenRegionHandleCannotEscapeEpoch(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    var leaked: RiftRegion.OpenStreamingRegion^{stream} = null
+      |    RiftRegion.epoch { epoch ?=>
+      |      leaked = epoch
+      |    }
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set {stream}"
+    )
+
   @Test def streamingEpochValueCannotEscapeParent(): Unit =
     assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
@@ -2002,6 +2018,94 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked object buffer cannot store an unrooted heap object"
     )
 
+  @Test def pageTokenOpenRegionAllowsStaticMetadata(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |object MetadataStore:
+      |  val stable: Metadata = new Metadata(7)
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    final class Event(val metadata: Metadata^{stream})
+      |        extends RiftRegion.StreamAppendNode
+      |    val window = RiftRegion.streamPageTokenAppendWindow[Event](10)
+      |    def consume(
+      |        bucket: RiftRegion.StreamBucket^{stream},
+      |        cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+      |    ): Unit = ()
+      |    val region =
+      |      RiftRegion.pageTokenAppendOpenRegionFor(stream, window, 7L, 0L)(consume)
+      |    val event: Event^{stream} =
+      |      RiftRegion.allocOpen(new Event(MetadataStore.stable))(using region)
+      |    RiftRegion.appendPageToken(stream, window, event)
+      |    RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
+      |      consume
+      |    )
+      |    event.metadata.value
+      |  }
+      |""".stripMargin)
+
+  @Test def pageTokenOpenRegionAllowsHeapRootBridge(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    final class Event(
+      |        val metadata: RiftRegion.HeapRoot[Metadata]^{stream}
+      |    ) extends RiftRegion.StreamAppendNode
+      |    val window = RiftRegion.streamPageTokenAppendWindow[Event](10)
+      |    def consume(
+      |        bucket: RiftRegion.StreamBucket^{stream},
+      |        cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+      |    ): Unit = ()
+      |    val region =
+      |      RiftRegion.pageTokenAppendOpenRegionFor(stream, window, 7L, 0L)(consume)
+      |    val rooted: RiftRegion.HeapRoot[Metadata]^{region} =
+      |      RiftRegion.root(new Metadata(7))(using region)
+      |    val event: Event^{stream} =
+      |      RiftRegion.allocOpen(new Event(rooted))(using region)
+      |    RiftRegion.appendPageToken(stream, window, event)
+      |    RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
+      |      consume
+      |    )
+      |    event.metadata.value.value
+      |  }
+      |""".stripMargin)
+
+  @Test def pageTokenOpenRegionRejectsUnrootedDynamicHeapMetadata(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    final class Event(val metadata: Metadata^{stream})
+      |        extends RiftRegion.StreamAppendNode
+      |    val window = RiftRegion.streamPageTokenAppendWindow[Event](10)
+      |    def consume(
+      |        bucket: RiftRegion.StreamBucket^{stream},
+      |        cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+      |    ): Unit = ()
+      |    val metadata = new Metadata(7)
+      |    val region =
+      |      RiftRegion.pageTokenAppendOpenRegionFor(stream, window, 7L, 0L)(consume)
+      |    val event: Event^{stream} =
+      |      RiftRegion.allocOpen(new Event(metadata))(using region)
+      |    RiftRegion.appendPageToken(stream, window, event)
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
   @Test def pageTokenMapFilterStoresChildBucketRecords(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking
@@ -2048,6 +2152,103 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin,
       "Rift checked object buffer cannot store an unrooted heap object"
+    )
+
+  @Test def pageTokenMapFilterOpenRegionAllowsStaticMetadata(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |object MetadataStore:
+      |  val stable: Metadata = new Metadata(7)
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    final class Event(val metadata: Metadata^{stream})
+      |        extends RiftRegion.StreamAppendNode
+      |    val operator = RiftRegion.pageTokenMapFilter[Event](10)
+      |    def consume(
+      |        bucket: RiftRegion.StreamBucket^{stream},
+      |        cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+      |    ): Unit = ()
+      |    val region =
+      |      RiftRegion.pageTokenMapFilterOpenRegionFor(
+      |        stream,
+      |        operator,
+      |        7L,
+      |        0L
+      |      )(consume)
+      |    val event: Event^{stream} =
+      |      RiftRegion.allocOpen(new Event(MetadataStore.stable))(using region)
+      |    RiftRegion.emitPageTokenMapFilter(stream, operator, event)
+      |    event.metadata.value
+      |  }
+      |""".stripMargin)
+
+  @Test def pageTokenMapFilterOpenRegionAllowsHeapRootBridge(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    final class Event(
+      |        val metadata: RiftRegion.HeapRoot[Metadata]^{stream}
+      |    ) extends RiftRegion.StreamAppendNode
+      |    val operator = RiftRegion.pageTokenMapFilter[Event](10)
+      |    def consume(
+      |        bucket: RiftRegion.StreamBucket^{stream},
+      |        cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+      |    ): Unit = ()
+      |    val region =
+      |      RiftRegion.pageTokenMapFilterOpenRegionFor(
+      |        stream,
+      |        operator,
+      |        7L,
+      |        0L
+      |      )(consume)
+      |    val root: RiftRegion.HeapRoot[Metadata]^{region} =
+      |      RiftRegion.root(new Metadata(7))(using region)
+      |    val event: Event^{stream} =
+      |      RiftRegion.allocOpen(new Event(root))(using region)
+      |    RiftRegion.emitPageTokenMapFilter(stream, operator, event)
+      |    event.metadata.value.value
+      |  }
+      |""".stripMargin)
+
+  @Test def pageTokenMapFilterOpenRegionRejectsUnrootedDynamicMetadata(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    final class Event(val metadata: Metadata^{stream})
+      |        extends RiftRegion.StreamAppendNode
+      |    val operator = RiftRegion.pageTokenMapFilter[Event](10)
+      |    def consume(
+      |        bucket: RiftRegion.StreamBucket^{stream},
+      |        cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+      |    ): Unit = ()
+      |    val metadata = new Metadata(7)
+      |    val region =
+      |      RiftRegion.pageTokenMapFilterOpenRegionFor(
+      |        stream,
+      |        operator,
+      |        7L,
+      |        0L
+      |      )(consume)
+      |    val event: Event^{stream} =
+      |      RiftRegion.allocOpen(new Event(metadata))(using region)
+      |    RiftRegion.emitPageTokenMapFilter(stream, operator, event)
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
     )
 
   @Test def pageTokenCountByKeyStoresChildBucketRecords(): Unit =
@@ -2116,6 +2317,137 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked object buffer cannot store an unrooted heap object"
     )
 
+  @Test def pageTokenCountByKeyOpenRegionAllowsStaticMetadata(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |object MetadataStore:
+      |  val stable: Metadata = new Metadata(7)
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    final class Event(
+      |        val key: Int,
+      |        val value: Int,
+      |        val metadata: Metadata^{stream}
+      |    ) extends RiftRegion.StreamAppendNode
+      |    val operator = RiftRegion.pageTokenCountByKey[Event](10, 8, 2)
+      |    def consume(
+      |        bucket: RiftRegion.StreamBucket^{stream},
+      |        key: Int,
+      |        count: Int,
+      |        valueSum: Long
+      |    ): Unit = ()
+      |    val region =
+      |      RiftRegion.pageTokenCountByKeyOpenRegionFor(
+      |        stream,
+      |        operator,
+      |        7L,
+      |        0L
+      |      )(consume)
+      |    val event: Event^{stream} =
+      |      RiftRegion.allocOpen(new Event(1, 2, MetadataStore.stable))(
+      |        using region
+      |      )
+      |    RiftRegion.appendPageTokenCountByKey(
+      |      stream,
+      |      operator,
+      |      event,
+      |      event.key,
+      |      event.value.toLong
+      |    )
+      |    event.metadata.value
+      |  }
+      |""".stripMargin)
+
+  @Test def pageTokenCountByKeyOpenRegionAllowsHeapRootBridge(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    final class Event(
+      |        val key: Int,
+      |        val value: Int,
+      |        val metadata: RiftRegion.HeapRoot[Metadata]^{stream}
+      |    ) extends RiftRegion.StreamAppendNode
+      |    val operator = RiftRegion.pageTokenCountByKey[Event](10, 8, 2)
+      |    def consume(
+      |        bucket: RiftRegion.StreamBucket^{stream},
+      |        key: Int,
+      |        count: Int,
+      |        valueSum: Long
+      |    ): Unit = ()
+      |    val region =
+      |      RiftRegion.pageTokenCountByKeyOpenRegionFor(
+      |        stream,
+      |        operator,
+      |        7L,
+      |        0L
+      |      )(consume)
+      |    val root: RiftRegion.HeapRoot[Metadata]^{region} =
+      |      RiftRegion.root(new Metadata(7))(using region)
+      |    val event: Event^{stream} =
+      |      RiftRegion.allocOpen(new Event(1, 2, root))(using region)
+      |    RiftRegion.appendPageTokenCountByKey(
+      |      stream,
+      |      operator,
+      |      event,
+      |      event.key,
+      |      event.value.toLong
+      |    )
+      |    event.metadata.value.value
+      |  }
+      |""".stripMargin)
+
+  @Test def pageTokenCountByKeyOpenRegionRejectsUnrootedDynamicMetadata(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    final class Event(
+      |        val key: Int,
+      |        val value: Int,
+      |        val metadata: Metadata^{stream}
+      |    ) extends RiftRegion.StreamAppendNode
+      |    val operator = RiftRegion.pageTokenCountByKey[Event](10, 8, 2)
+      |    def consume(
+      |        bucket: RiftRegion.StreamBucket^{stream},
+      |        key: Int,
+      |        count: Int,
+      |        valueSum: Long
+      |    ): Unit = ()
+      |    val metadata = new Metadata(7)
+      |    val region =
+      |      RiftRegion.pageTokenCountByKeyOpenRegionFor(
+      |        stream,
+      |        operator,
+      |        7L,
+      |        0L
+      |      )(consume)
+      |    val event: Event^{stream} =
+      |      RiftRegion.allocOpen(new Event(1, 2, metadata))(using region)
+      |    RiftRegion.appendPageTokenCountByKey(
+      |      stream,
+      |      operator,
+      |      event,
+      |      event.key,
+      |      event.value.toLong
+      |    )
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
   @Test def epochBufferStoresChildEpochRecords(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking
@@ -2170,6 +2502,73 @@ class RiftRegionCheckedCompilerTest {
       |    total + RiftRegion.epochBufferLength(stream, buffer)
       |  }
       |""".stripMargin)
+
+  @Test def epochBufferOpenRegionAllowsStaticMetadata(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |object MetadataStore:
+      |  val stable: Metadata = new Metadata(7)
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    final class Event(val metadata: Metadata^{stream})
+      |        extends RiftRegion.StreamAppendNode
+      |    val buffer = RiftRegion.epochBuffer[Event]()
+      |    val region = RiftRegion.epochBufferOpenRegionFor(stream, buffer)
+      |    val event: Event^{stream} =
+      |      RiftRegion.allocOpen(new Event(MetadataStore.stable))(using region)
+      |    RiftRegion.appendEpochBuffer(stream, buffer, event)
+      |    event.metadata.value
+      |  }
+      |""".stripMargin)
+
+  @Test def epochBufferOpenRegionAllowsHeapRootBridge(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    final class Event(
+      |        val metadata: RiftRegion.HeapRoot[Metadata]^{stream}
+      |    ) extends RiftRegion.StreamAppendNode
+      |    val buffer = RiftRegion.epochBuffer[Event]()
+      |    val region = RiftRegion.epochBufferOpenRegionFor(stream, buffer)
+      |    val root: RiftRegion.HeapRoot[Metadata]^{region} =
+      |      RiftRegion.root(new Metadata(7))(using region)
+      |    val event: Event^{stream} =
+      |      RiftRegion.allocOpen(new Event(root))(using region)
+      |    RiftRegion.appendEpochBuffer(stream, buffer, event)
+      |    event.metadata.value.value
+      |  }
+      |""".stripMargin)
+
+  @Test def epochBufferOpenRegionRejectsUnrootedDynamicMetadata(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    final class Event(val metadata: Metadata^{stream})
+      |        extends RiftRegion.StreamAppendNode
+      |    val buffer = RiftRegion.epochBuffer[Event]()
+      |    val metadata = new Metadata(7)
+      |    val region = RiftRegion.epochBufferOpenRegionFor(stream, buffer)
+      |    val event: Event^{stream} =
+      |      RiftRegion.allocOpen(new Event(metadata))(using region)
+      |    RiftRegion.appendEpochBuffer(stream, buffer, event)
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
 
   @Test def epochBufferRejectsDirectHeapRecord(): Unit =
     assertDoesNotCompileWith("""
