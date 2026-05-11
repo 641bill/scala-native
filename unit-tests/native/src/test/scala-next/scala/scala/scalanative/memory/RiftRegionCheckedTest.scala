@@ -1556,6 +1556,51 @@ class RiftRegionCheckedTest {
     assertEquals(36, total)
   }
 
+  @Test def closedChildStreamingRejectsLaterAllocation(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int)
+
+        val child = RiftRegion.childStreaming
+        child.close()
+        assertThrows(
+          classOf[IllegalStateException],
+          () => {
+            val event = RiftRegion.alloc(new Event(1))(using child)
+            java.lang.System.identityHashCode(event)
+            ()
+          }
+        )
+        42
+      }
+
+      assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def safeZoneBackedClosedChildStreamingRejectsLaterAllocation(): Unit = {
+    val total = RiftRegion.streamingSafeZone { stream ?=>
+      final class Event(val value: Int)
+
+      val child = RiftRegion.childStreaming
+      child.close()
+      assertThrows(
+        classOf[IllegalStateException],
+        () => {
+          val event = RiftRegion.alloc(new Event(1))(using child)
+          java.lang.System.identityHashCode(event)
+          ()
+        }
+      )
+      42
+    }
+
+    assertEquals(42, total)
+  }
+
   @Test def epochTopKByKeyRanksAndClearsEpochs(): Unit = {
     RiftRegion.init(1)
     try {

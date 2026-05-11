@@ -108,6 +108,32 @@ trait NirGenExpr(using Context) {
         )
     }
 
+    private def isRiftOpenStreamingRegionType(tpe: Type): Boolean = {
+      val openRegionName =
+        "scala.scalanative.memory.RiftRegion.OpenStreamingRegion"
+      val widened = tpe.widenDealias
+      widened.typeSymbol.fullName.toString == openRegionName ||
+        tpe.show.contains(openRegionName) ||
+        widened.show.contains(openRegionName)
+    }
+
+    private def isRiftOpenStreamingLifecycleCall(
+        sym: Symbol,
+        receiver: Tree
+    ): Boolean = {
+      val name = sym.name.toString
+      (name == "close" || name == "reset") &&
+        isRiftOpenStreamingRegionType(receiver.tpe)
+    }
+
+    private def isInsideRiftRegionImplementation(sym: Symbol): Boolean =
+      sym != NoSymbol && {
+        val fullName = sym.fullName.toString.stripSuffix("$")
+        fullName == "scala.scalanative.memory.RiftRegion" ||
+          fullName.startsWith("scala.scalanative.memory.RiftRegion.") ||
+          isInsideRiftRegionImplementation(sym.owner)
+      }
+
     private def isRiftHeapRootTree(tree: Tree): Boolean = {
       val heapRootName = "scala.scalanative.memory.RiftRegion.HeapRoot"
       tree.tpe.show.contains(heapRootName) ||
@@ -472,6 +498,14 @@ trait NirGenExpr(using Context) {
       fun match {
         case _ if sym == defnNir.UnsafePackage_extern =>
           fail(s"extern can be used only from non-inlined extern methods")
+
+        case _
+            if isRiftOpenStreamingLifecycleCall(sym, qualifier) &&
+              !isInsideRiftRegionImplementation(curMethodSym.get) =>
+          fail(
+            "Rift OpenStreamingRegion handles cannot be closed or reset " +
+              "directly; let the owning epoch/page/window operator close them"
+          )
 
         case _
             if isHeapSetterApply(app) && args.nonEmpty &&

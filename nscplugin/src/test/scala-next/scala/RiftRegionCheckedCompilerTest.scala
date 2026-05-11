@@ -1650,6 +1650,91 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def streamingEpochOpenRegionCannotBeClosedManually(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    RiftRegion.epoch { epoch ?=>
+      |      epoch.close()
+      |    }
+      |  }
+      |""".stripMargin,
+      "OpenStreamingRegion handles cannot be closed or reset"
+    )
+
+  @Test def streamingEpochOpenRegionCannotBeResetManually(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |def bad(): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    RiftRegion.epoch { epoch ?=>
+      |      epoch.reset()
+      |    }
+      |  }
+      |""".stripMargin,
+      "OpenStreamingRegion handles cannot be closed or reset"
+    )
+
+  @Test def allocOpenRequiresOpenStreamingRegion(): Unit =
+    assertDoesNotCompile("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Record(val value: Int)
+      |
+      |def bad(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    val record: Record^{stream} =
+      |      RiftRegion.allocOpen(new Record(42))(using stream)
+      |    record.value
+      |  }
+      |""".stripMargin)
+
+  @Test def streamingEpochAllowsStaticMetadataWithAllocOpen(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |object MetadataStore:
+      |  val stable: Metadata = new Metadata(41)
+      |final class Entry(val metadata: Metadata^)
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    RiftRegion.epoch { epoch ?=>
+      |      val entry: Entry^{epoch} =
+      |        RiftRegion.allocOpen(new Entry(MetadataStore.stable))
+      |      entry.metadata.value + 1
+      |    }
+      |  }
+      |""".stripMargin)
+
+  @Test def streamingEpochAllowsHeapRootBridgeWithAllocOpen(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: RiftRegion.HeapRoot[Metadata]^)
+      |
+      |def ok(): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    RiftRegion.epoch { epoch ?=>
+      |      val root: RiftRegion.HeapRoot[Metadata]^{epoch} =
+      |        RiftRegion.root(new Metadata(41))
+      |      val entry: Entry^{epoch} =
+      |        RiftRegion.allocOpen(new Entry(root))
+      |      entry.metadata.value.value + 1
+      |    }
+      |  }
+      |""".stripMargin)
+
   @Test def streamingEpochValueCannotEscapeParent(): Unit =
     assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
