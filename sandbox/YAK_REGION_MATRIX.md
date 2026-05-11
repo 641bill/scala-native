@@ -1,7 +1,7 @@
 # Yak Region Matrix
 
 Date: 2026-04-25
-Last updated: 2026-05-10 23:41 CEST
+Last updated: 2026-05-11 12:43 CEST
 
 Status: Yak-style methodology reproduction harness with validated smoke,
 default median, pressure median, external-sort-shaped median, top-word/filter
@@ -25,7 +25,10 @@ should use the canonical names from `docs/MEMORY_MODE_TAXONOMY.md`:
 `gc-heap`, `region-scoped-rooted`, `region-hp-rootless`,
 `region-stream-rootless`, `checked-region-stream`, `checked-region-scoped`,
 and `checked-page-token`. Older historical tables in this source pack may still
-quote legacy labels as provenance; new rollups should not.
+quote legacy labels as provenance; new rollups should not. The latest
+real-input text follow-up adds `topwordreal` over the Stack Exchange
+AskUbuntu `Posts.xml` dump. It is a local Yak/Hadoop top-word-shaped row, not
+an exact Yak artifact reproduction.
 
 ## Benchmark Intent
 
@@ -51,6 +54,10 @@ The current local workloads are:
   heap counters and reusable combiner arrays remain control state; each epoch
   allocates ordinary word records, filters them, combines counts, and records
   the top word for the task.
+- `topwordreal`: real Stack Exchange AskUbuntu text replay. The input
+  `Posts.xml` title/body text is tokenized once into primitive key/weight
+  control arrays, then real tokens are replayed as epoch-local `WordRecord`
+  objects for the same top-word shape.
 - `graphchi`: GraphChi-like subinterval update shape. Durable vertex values
   stay on the heap; each subinterval allocates ordinary edge-update objects,
   applies them to the current vertex interval, and releases the subinterval
@@ -91,13 +98,16 @@ or a distributed runtime.
 | `YAK_GRAPH_INPUT_EDGES` | `1000000` |
 | `YAK_GRAPH_INPUT_VERTICES` | `YAK_VERTICES` |
 | `YAK_GRAPH_INPUT_EDGES_PER_EPOCH` | `YAK_MESSAGES_PER_EPOCH` |
+| `YAK_TEXT_INPUT` | empty |
+| `YAK_TEXT_INPUT_TOKENS` | `1000000` |
+| `YAK_TEXT_TOKENS_PER_EPOCH` | `YAK_RECORDS_PER_EPOCH` |
 | `YAK_ESCAPE_MODULO` | `1000` |
 | `YAK_SCRATCH_SLOTS` | `128` |
 | `YAK_WARMUPS` | `1` |
 | `YAK_BENCHMARK_RUNS` | `3` |
 
-Use `YAK_WORKLOAD=wordcount`, `graphstep`, `sort`, `topword`, `graphchi`,
-`graphreal`, `promotion`, or `all`.
+Use `YAK_WORKLOAD=wordcount`, `graphstep`, `sort`, `topword`, `topwordreal`,
+`graphchi`, `graphreal`, `promotion`, or `all`.
 
 ## Commands
 
@@ -567,6 +577,80 @@ L1 interpretation:
 - Direct `checked-epoch-scoped` remains the best Yak topword topology
   (`4.61 s`), so the reusable top-k operator is validated but not the default
   Yak topword implementation choice.
+
+## Stack Exchange AskUbuntu `topwordreal` Rows
+
+Input:
+`/Users/siyaoliu/rift/cache/benchmark-data/yak/stackexchange/askubuntu-Posts.xml`.
+This file was extracted from the public Stack Exchange data dump
+`askubuntu.com.7z`. The extracted XML is `1,400,891,844` bytes with `945,113`
+lines. The local loader scans `Title` and `Body` attributes, tokenizes ASCII
+alphanumeric words of length at least three, hashes them into the Yak key
+space, and stores token keys/weights in primitive control arrays. The benchmark
+then replays those real tokens as ordinary epoch-local `WordRecord` objects.
+
+This is real-input Yak/Hadoop top-word-shaped evidence. It is not exact Yak:
+there is no Hadoop/Hyracks runtime, distributed scheduling, or Yak JVM
+promotion/barrier mechanism.
+
+L2 standard-stats row, 1M tokens x 3 runs:
+
+Raw summary: `/tmp/rift-yak-askubuntu-topwordreal-1m/summary.tsv`.
+
+| Workload | Mode | Topology/operator | Median elapsed ms | Median GC ms | Median Rift op ms | Logical objects | Peak RSS bytes |
+|---|---|---|---:|---:|---:|---:|---:|
+| `topwordreal` | `gc-heap` | retained + close traversal | `32.580` | `4.938` | `0.000` | `1000000` | `74858496` |
+| `topwordreal` | `region-scoped-rooted` | retained + close traversal | `25.485` | `0.000` | `0.000` | `1000000` | `39698432` |
+| `topwordreal` | `heap-topk-retained-no-traverse` | retained + append-time top-k | `51.229` | `5.000` | `0.000` | `1000000` | `74858496` |
+| `topwordreal` | `checked-epoch-scoped` | `RiftRegion.epoch` retained + close traversal | `22.333` | `0.000` | `0.000` | `1000000` | `39714816` |
+| `topwordreal` | `checked-epoch-topk-scoped` | reusable `EpochTopKByKey` | `44.421` | `0.000` | `0.000` | `1000000` | `39895040` |
+| `topwordreal` | `checked-epoch-topk-stream` | reusable `EpochTopKByKey` | `45.612` | `0.000` | `0.051` | `1000000` | `39895040` |
+
+L2 standard-stats row, 10M tokens x 3 runs:
+
+Raw summary: `/tmp/rift-yak-askubuntu-topwordreal-10m/summary.tsv`.
+
+| Workload | Mode | Topology/operator | Median elapsed ms | Median GC ms | Median Rift op ms | Logical objects | Peak RSS bytes |
+|---|---|---|---:|---:|---:|---:|---:|
+| `topwordreal` | `gc-heap` | retained + close traversal | `269.491` | `23.715` | `0.000` | `10000000` | `427769856` |
+| `topwordreal` | `region-scoped-rooted` | retained + close traversal | `235.350` | `0.000` | `0.000` | `10000000` | `245678080` |
+| `topwordreal` | `heap-topk-retained-no-traverse` | retained + append-time top-k | `309.949` | `28.141` | `0.000` | `10000000` | `427786240` |
+| `topwordreal` | `checked-epoch-scoped` | `RiftRegion.epoch` retained + close traversal | `207.490` | `0.000` | `0.000` | `10000000` | `245678080` |
+| `topwordreal` | `checked-epoch-topk-scoped` | reusable `EpochTopKByKey` | `279.793` | `0.000` | `0.000` | `10000000` | `245301248` |
+
+L1 final-clean row, 10M tokens x 5 internal iterations, three external
+process repeats:
+
+Raw summaries:
+`/tmp/rift-yak-askubuntu-topwordreal-l1-10m-x5-r1/summary.tsv`,
+`/tmp/rift-yak-askubuntu-topwordreal-l1-10m-x5-r2/summary.tsv`, and
+`/tmp/rift-yak-askubuntu-topwordreal-l1-10m-x5-r3/summary.tsv`.
+
+| Workload | Mode | Topology/operator | Median real s | Min real s | Max real s | Max RSS bytes | Checksum |
+|---|---|---|---:|---:|---:|---:|---:|
+| `topwordreal` | `gc-heap` | retained + close traversal | `4.19` | `4.05` | `4.27` | `427720704` | `-4151722340504273532` |
+| `topwordreal` | `region-scoped-rooted` | retained + close traversal | `3.97` | `3.86` | `3.97` | `94306304` | `-4151722340504273532` |
+| `topwordreal` | `heap-topk-retained-no-traverse` | retained + append-time top-k | `4.40` | `4.29` | `4.41` | `427737088` | `-4151722340504273532` |
+| `topwordreal` | `checked-epoch-scoped` | `RiftRegion.epoch` retained + close traversal | `3.86` | `3.76` | `4.01` | `94306304` | `-4151722340504273532` |
+| `topwordreal` | `checked-epoch-topk-scoped` | reusable `EpochTopKByKey` | `4.12` | `4.12` | `4.31` | `93536256` | `-4151722340504273532` |
+
+Interpretation:
+
+- `topwordreal` is the first real text/top-word row in the Yak harness. It
+  complements LiveJournal graph replay with another public prior-work-adjacent
+  input family.
+- The direct checked epoch topology is the current best safe row: L1
+  `checked-epoch-scoped` is `7.9%` faster than natural heap and cuts RSS by
+  about `78%`; L2 removes `23.715 ms` of median timed heap GC.
+- The reusable `EpochTopKByKey` row is an RSS win but not yet an elapsed win
+  against natural heap at L1 (`4.12 s` vs `4.19 s`, about `1.7%` faster) and
+  loses to the direct epoch close-traversal topology. This keeps top-k as a
+  useful reusable API candidate, but not the fastest AskUbuntu implementation
+  yet.
+- The same-shape heap top-k/drop-anchor control is slower and high-RSS here.
+  That means append-time top-k maintenance is not automatically a topology win
+  for this real text shape; the direct checked epoch path remains the simpler
+  fair comparison.
 
 Interpretation:
 
