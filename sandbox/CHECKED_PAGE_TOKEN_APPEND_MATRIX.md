@@ -1,7 +1,7 @@
 # Checked Page/Token Append Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-12 15:01 CEST
+Last updated: 2026-05-12 15:58 CEST
 
 Status: focused checked page/token gate passed, generated Common Crawl-shaped
 q1/q2 application gate passed, the fixed-chunk append control failed to beat
@@ -220,12 +220,15 @@ Validation passed:
 - `RiftRegionCheckedCompilerTest`: `141/141`
 - `RiftRegionCheckedTest`: `64/64`
 
-Focused 1M page-token gate, final-clean, 5 measured runs:
+Focused 1M page-token gate, final-clean, 5 measured runs.
+Clean rerun source:
+`/Users/siyaoliu/rift/cache/clean-rerun-20260512-page-token-focused`.
 
 | Mode | Median ms | GC ms | Rift op ms | Region objects | RSS bytes |
 |---|---:|---:|---:|---:|---:|
-| `rift-checked-page-token` | `24.665` | `0.000` | `0.069` | `0` | `47579136` |
-| `rift-checked-safezone-page-token` | `24.816` | `0.000` | `0.000` | `0` | `47480832` |
+| `heap-immix` | `38.378` | `11.513` | `0.000` | `0` | `75137024` |
+| `rift-checked-page-token` | `25.007` | `0.000` | `0.079` | `0` | `47579136` |
+| `rift-checked-safezone-page-token` | `25.591` | `0.000` | `0.000` | `0` | `47480832` |
 
 Single-run application sanity gates:
 

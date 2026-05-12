@@ -7,7 +7,7 @@ checked page/token operator follow-up recorded and clears the generated
 application-shaped gate.
 
 Date: 2026-05-03
-Last updated: 2026-05-07 18:14 CEST
+Last updated: 2026-05-12 15:58 CEST
 
 ## Purpose
 
@@ -78,6 +78,33 @@ zsh sandbox/run_common_crawl_wet_matrix.sh
 ## Checked SafeZone-Backed Backend Follow-Up
 
 Detailed source: `evidence/CHECKED_SAFEZONE_BACKEND_MATRIX.md`.
+
+## Final-Clean Page-Token Rerun After Open Allocation Cleanup
+
+Date/time: 2026-05-12 15:55 CEST.
+
+This is an L1 final-clean rerun from child `c22c78d57`, after the
+operator-owned open-allocation wrapper cleanup. Each process executes three
+benchmark runs under external `/usr/bin/time -l`; no diagnostic timers,
+allocation attribution, or region/stat reads are used in the timed section.
+
+Source:
+`/Users/siyaoliu/rift/cache/clean-rerun-20260512-commoncrawl-page-token`.
+
+| Query | Mode | External real s | External user s | RSS bytes | Checksum | Output count |
+|---|---|---:|---:|---:|---:|---:|
+| q1-tokenize | `heap-immix` | 17.49 | 16.86 | 408518656 | `-3166891223384968696` | 137000000 |
+| q1-tokenize | `rift-checked-page-token` | 10.88 | 10.69 | 63242240 | `-3166891223384968696` | 137000000 |
+| q1-tokenize | `rift-checked-safezone-page-token` | 13.29 | 13.04 | 63373312 | `-3166891223384968696` | 137000000 |
+| q2-domain-window | `heap-immix` | 16.73 | 16.32 | 408518656 | `1076064953308107199` | 929230 |
+| q2-domain-window | `rift-checked-page-token` | 11.49 | 11.24 | 63258624 | `1076064953308107199` | 929230 |
+| q2-domain-window | `rift-checked-safezone-page-token` | 14.84 | 14.20 | 63340544 | `1076064953308107199` | 929230 |
+
+Interpretation: this is generated WET-shaped stream-object pressure evidence.
+Checked Rift page-token is the fastest row in both q1 and q2 in this L1 rerun,
+and both checked page-token rows cut RSS substantially versus heap. Because the
+input is generated, report it as a methodology/stressor win, not real-input
+proof.
 
 The 2026-05-03 follow-up adds `rift-checked-safezone-32k`, a benchmark-only
 checked backend that runs the existing checked `StreamAppendWindow` q1/q2 path

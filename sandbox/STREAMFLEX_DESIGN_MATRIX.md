@@ -1,6 +1,6 @@
 # StreamFlex Design Matrix
 
-Last updated: 2026-05-12 01:03 CEST
+Last updated: 2026-05-12 15:58 CEST
 
 Status: first Rift-native StreamFlex system-design reproduction. This is a
 methodology benchmark for the StreamFlex axes: stable state, transient scoped
@@ -135,6 +135,28 @@ timed section. Each process executes three full benchmark runs.
 Interpretation: this is a StreamFlex-design throughput win for the reusable
 checked epoch topology. `checked-epoch-scoped` is `16.4%` faster than
 `gc-heap`/`heap-same-shape` in L1 and uses about `36%` less RSS.
+
+### L1 Final-Clean Throughput Rerun, 20M Events x 3 Runs
+
+Date/time: 2026-05-12 15:53 CEST.
+
+This rerun follows the open-allocation wrapper cleanup in child `c22c78d57`.
+Each process executes three full benchmark runs; use the external process time
+and RSS as L1 headline data.
+
+Source: `/Users/siyaoliu/rift/cache/clean-rerun-20260512-streamflex-throughput`.
+
+| Mode | External real s | External user s | RSS bytes | Checksum | Output count |
+|---|---:|---:|---:|---:|---:|
+| `gc-heap` | 31.26 | 30.24 | 12402688 | `5305809911915216923` | 19999119 |
+| `checked-epoch-scoped` | 24.39 | 23.65 | 12615680 | `5305809911915216923` | 19999119 |
+| `checked-epoch-stream` | 22.81 | 22.39 | 12566528 | `5305809911915216923` | 19999119 |
+
+Interpretation: at the larger StreamFlex-design throughput scale, checked
+stream is the fastest checked row in this L1 rerun (`27.0%` lower external real
+time than heap), while checked scoped is `22.0%` lower than heap. RSS is close
+across these three rows; this is a throughput/GC-avoidance case rather than an
+RSS claim.
 
 ## L2 Throughput, 1M Events x 3 Runs
 
