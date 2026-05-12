@@ -1,7 +1,7 @@
 # Object Allocation Lowering Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-12 13:35 CEST
+Last updated: 2026-05-12 14:12 CEST
 
 Status: refined retained-region-array matrix validated at 20k smoke, 100k, 1M,
 and 10M, plus a 2026-05-12 focused final-clean allocator-counter gate. This
@@ -145,6 +145,26 @@ this focused checked Rift allocation path by about `13%` without changing the
 object graph or checksum. This is a measurement-clean/headline-mode
 optimization; L2 rows should keep allocation stats enabled when object/open/
 close counts are needed for interpretation.
+
+Application impact gate, 2026-05-12:
+
+These rows compare `RIFT_FINAL_CLEAN=1` against
+`RIFT_FINAL_CLEAN=1 RIFT_ALLOC_STATS=1` on selected Rift-native checked
+application shapes. They are single external-process gates, intended to check
+whether the focused allocation-counter result is visible outside the allocation
+matrix.
+
+| Benchmark row | Counters disabled | Counters forced on | Result |
+|---|---:|---:|---|
+| Dataflow AGGREGATE `checked-epoch-stream`, 20 x 500k docs | `1.06 s`, RSS `23560192` | `0.90 s`, RSS `23576576` | Process-level timing noise dominates; no claim. |
+| Yak `graphstep` `checked-epoch-stream`, 50M messages | `1.98 s`, user `1.66 s`, RSS `204800000` | `1.81 s`, user `1.76 s`, RSS `204800000` | User time moves in the expected direction, but real time is noisy; no headline claim. |
+| StreamFlex-design throughput `checked-epoch-stream`, 20M events | `8.57 s`, user `8.26 s`, RSS `10305536` | `9.18 s`, user `9.15 s`, RSS `10338304` | Application-level confirmation for Rift-native checked stream allocation. |
+| Common Crawl-shaped q2 `rift-checked-page-token`, 1M pages | `4.23 s`, user `3.95 s`, RSS `63176704` | `4.33 s`, user `4.26 s`, RSS `63193088` | Modest page/window confirmation; query/traversal work still dominates. |
+
+Interpretation: this cleanup is real and visible on allocation-heavy
+Rift-native stream rows, but it is not a universal application-speedup knob.
+Use it as part of the final-clean measurement-cleaning story and continue to
+treat L2 allocation counters as interpretation-only.
 
 Validation note: an initial 20k construct-only smoke linked and emitted rows,
 but was rejected as evidence because checked allocations could be optimized

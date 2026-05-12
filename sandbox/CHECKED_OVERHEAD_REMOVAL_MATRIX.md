@@ -1,7 +1,7 @@
 # Checked Overhead Removal Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-12 13:35 CEST
+Last updated: 2026-05-12 14:12 CEST
 
 Status: overhead-removal contract plus implementation checkpoint. This matrix
 separates three states:
@@ -36,7 +36,7 @@ separates three states:
 | Direct user close/reset on open allocation handles | `OpenStreamingRegion` is the internal allocation-capable handle; lifecycle must be owned by `epoch`, page-token, or window operators. | Compiler probes now reject `epoch.close()` and `epoch.reset()` through an open handle, while the Rift runtime implementation remains allowed to close the child in its owning boundary. This closes the first active/closed typestate gap behind the existing `allocOpen` fast path. |
 | Missing mixed-reference probes on operator-owned open paths | Static/immutable metadata and explicit `HeapRoot` bridge handles need to work through the same open allocation paths used by page/window and epoch-buffer operators. | Compiler probes now cover static metadata, `HeapRoot`, and unrooted dynamic metadata rejection for page-token append, page-token map/filter, page-token count-by-key, and epoch-buffer `allocOpen` paths. |
 | Public stale page-token child allocation after close | Public defensive region handles must still reject use-after-close even when operator-owned fast paths skip checks. | Runtime probes now reject allocation through a public page-token child region after `closeAllPageTokenAppendBucketsWithCursor` for both Rift and SafeZone-backed checked regions. |
-| Rift allocation counters in L1 final-clean runs | `RIFT_FINAL_CLEAN=1` now disables Rift raw/object/byte allocation counters by default; `RIFT_ALLOC_STATS=1` forces them back on for diagnostics. | Focused 5M `ObjectAllocationLoweringMatrix` `rift-checked-rift` improves from `87.999 ms` with counters forced on to `76.345 ms` with counters disabled, same checksum and zero GC. L2/stat rows keep counters enabled by default. |
+| Rift allocation counters in L1 final-clean runs | `RIFT_FINAL_CLEAN=1` now disables Rift raw/object/byte allocation counters by default; `RIFT_ALLOC_STATS=1` forces them back on for diagnostics. | Focused 5M `ObjectAllocationLoweringMatrix` `rift-checked-rift` improves from `87.999 ms` with counters forced on to `76.345 ms` with counters disabled, same checksum and zero GC. Application gates are workload-sensitive: StreamFlex-design checked stream improves from `9.18 s` to `8.57 s`, Common Crawl-shaped checked page-token improves from `4.33 s` to `4.23 s`, while Dataflow/Yak process-level gates are noisy. L2/stat rows keep counters enabled by default. |
 | SafeZone root tracking in unsafe lower-bound mode | `safezone-rootless-32k` disables root add/remove. | Useful lower bound only; not a safety result. |
 
 ## Safe But Not Yet Removed
