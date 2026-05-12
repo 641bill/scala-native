@@ -1,7 +1,7 @@
 # Object Allocation Lowering Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-12 14:35 CEST
+Last updated: 2026-05-12 15:01 CEST
 
 Status: refined retained-region-array matrix validated at 20k smoke, 100k, 1M,
 and 10M, plus a 2026-05-12 focused final-clean allocator-counter gate. This
@@ -191,6 +191,14 @@ Interpretation: this is a real allocation-lowering improvement on the
 Rift-native checked backend. It does not affect SafeZone-backed checked rows
 directly. The stats-forced row stays slower because L2 allocation accounting is
 still per-object by design; use it for interpretation, not headline timing.
+
+Rejected zeroing follow-up, 2026-05-12: bulk-zeroing dirty slabs when they are
+attached to a region was tested and reverted. It preserved zero-initialization
+semantics, but the focused 5M `rift-checked-rift` final-clean row was slightly
+worse (`70.044 ms`) than the committed object fast-path baseline (`69.912 ms`),
+with slow-allocation/attach time rising to `3.277 ms`. Keep the current
+per-object zeroing policy for dirty reused slabs until a better measured policy
+exists.
 
 Validation note: an initial 20k construct-only smoke linked and emitted rows,
 but was rejected as evidence because checked allocations could be optimized

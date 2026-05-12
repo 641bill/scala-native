@@ -1,7 +1,7 @@
 # Checked Page/Token Append Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-07 16:20 CEST
+Last updated: 2026-05-12 15:01 CEST
 
 Status: focused checked page/token gate passed, generated Common Crawl-shaped
 q1/q2 application gate passed, the fixed-chunk append control failed to beat
@@ -206,6 +206,37 @@ All rows matched checksum.
 
 This is the current focused safe-fast-path page-token gate. It confirms the
 headline page-token path did not regress.
+
+Open-allocation wrapper cleanup, 2026-05-12:
+
+The final `OpenStreamingRegion` implementations now call the Rift/SafeZone
+backend allocators directly in `allocUncheckedImpl` instead of routing through
+the superclass wrapper. Public defensive `allocImpl` is unchanged; this only
+shortens the operator-owned `allocOpen` path.
+
+Validation passed:
+
+- `sandbox3_next/compile`
+- `RiftRegionCheckedCompilerTest`: `141/141`
+- `RiftRegionCheckedTest`: `64/64`
+
+Focused 1M page-token gate, final-clean, 5 measured runs:
+
+| Mode | Median ms | GC ms | Rift op ms | Region objects | RSS bytes |
+|---|---:|---:|---:|---:|---:|
+| `rift-checked-page-token` | `24.665` | `0.000` | `0.069` | `0` | `47579136` |
+| `rift-checked-safezone-page-token` | `24.816` | `0.000` | `0.000` | `0` | `47480832` |
+
+Single-run application sanity gates:
+
+| Benchmark row | Previous object-fast gate | Open-wrapper gate | Result |
+|---|---:|---:|---|
+| StreamFlex-design throughput `checked-epoch-stream`, 20M events | `8.07 s`, user `7.67 s`, RSS `10289152` | `7.72 s`, user `7.43 s`, RSS `10289152` | Positive single-run confirmation on an allocation-heavy checked stream row. |
+| Common Crawl-shaped q2 `rift-checked-page-token`, 1M pages | `3.98 s`, user `3.68 s`, RSS `63193088` | `4.00 s`, user `3.69 s`, RSS `63193088` | Essentially flat; parser/query/traversal work dominates this row. |
+
+Interpretation: the focused page-token path remains strong in final-clean mode,
+and the wrapper cleanup is safe, but application impact is workload-sensitive.
+Treat it as backend-lowering cleanup rather than a broad application claim.
 
 Focused cost-decomposition follow-up:
 

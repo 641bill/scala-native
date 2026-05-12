@@ -7410,7 +7410,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
         cls: RawPtr,
         size: RawSize
     ): RawPtr =
-      super.allocUncheckedImpl(cls, size)
+      RiftAllocator.Impl.alloc(handle, cls, size)
   }
 
   private class MemorySafeZoneBackedRiftRegion(
@@ -7484,7 +7484,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
         cls: RawPtr,
         size: RawSize
     ): RawPtr =
-      super.allocUncheckedImpl(cls, size)
+      SafeZoneAllocator.Impl.alloc(handle, cls, size)
   }
 
   private sealed trait SafeZoneBackedRiftRegion extends RiftRegion

@@ -1,7 +1,7 @@
 # Checked Overhead Removal Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-12 14:35 CEST
+Last updated: 2026-05-12 15:01 CEST
 
 Status: overhead-removal contract plus implementation checkpoint. This matrix
 separates three states:
@@ -38,6 +38,7 @@ separates three states:
 | Public stale page-token child allocation after close | Public defensive region handles must still reject use-after-close even when operator-owned fast paths skip checks. | Runtime probes now reject allocation through a public page-token child region after `closeAllPageTokenAppendBucketsWithCursor` for both Rift and SafeZone-backed checked regions. |
 | Rift allocation counters in L1 final-clean runs | `RIFT_FINAL_CLEAN=1` now disables Rift raw/object/byte allocation counters by default; `RIFT_ALLOC_STATS=1` forces them back on for diagnostics. | Focused 5M `ObjectAllocationLoweringMatrix` `rift-checked-rift` improves from `87.999 ms` with counters forced on to `76.345 ms` with counters disabled, same checksum and zero GC. Application gates are workload-sensitive: StreamFlex-design checked stream improves from `9.18 s` to `8.57 s`, Common Crawl-shaped checked page-token improves from `4.33 s` to `4.23 s`, while Dataflow/Yak process-level gates are noisy. L2/stat rows keep counters enabled by default. |
 | Generic raw-allocation path in Rift managed-object allocation | Managed object allocation always needs pointer alignment, so the checked Rift object path no longer needs the generic raw-allocation alignment normalizer in the hot path. | Focused 5M `ObjectAllocationLoweringMatrix` `rift-checked-rift` improves from the previous final-clean `76.345 ms` to `69.912 ms`, same checksum and zero GC. Single-run application gates also move: StreamFlex-design checked stream `8.57 s -> 8.07 s`, Common Crawl-shaped checked page-token `4.23 s -> 3.98 s`. Object zero/init and header setup are unchanged. |
+| Extra superclass hop in final open-region `allocUncheckedImpl` | Final `OpenStreamingRegion` implementations call the Rift/SafeZone allocator directly for operator-owned `allocOpen`, while public defensive `allocImpl` stays unchanged. | Validation passes. Focused final-clean 1M page-token rows are `24.665 ms` for checked Rift and `24.816 ms` for checked SafeZone-backed. Single-run StreamFlex-design checked stream moves `8.07 s -> 7.72 s`; generated Common Crawl-shaped q2 is flat at `3.98 s -> 4.00 s`. |
 | SafeZone root tracking in unsafe lower-bound mode | `safezone-rootless-32k` disables root add/remove. | Useful lower bound only; not a safety result. |
 
 ## Safe But Not Yet Removed
@@ -64,6 +65,7 @@ These should not be removed by safety claims alone:
 | Heap maintenance in rank/TableRank | This is ranking semantics, not region safety. |
 | Object field access, token parsing, string/decimal formatting | CPU/application work. Regions only help if allocation/reclaim is material. |
 | Object construction and remaining allocation lowering | Regions remove tracing/reclaim, but every object still needs header/RTTI setup, constructor work, and field stores. The page-token `allocOpen` path removes one checked branch, but it does not remove object construction or append/linking work. |
+| Bulk zeroing dirty slabs on attach | Safe for zero-initialization, but not accepted as an optimization. | A 2026-05-12 focused 5M object-allocation trial was slightly worse (`70.044 ms`) than the committed object-fast baseline (`69.912 ms`) and moved time into slow slab attach (`3.277 ms`). Keep per-object zeroing for dirty reused slabs until a better zeroing policy is measured. |
 | SafeZone close/reclaim bookkeeping | Required by SafeZone lifecycle unless a new reset-capable backend is designed. |
 
 ## Current Bottlenecks
