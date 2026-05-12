@@ -57,6 +57,7 @@ typedef struct scalanative_rift_region {
     uint32_t family;
     uint32_t slab_count;
     uint32_t alloc_stats_enabled;
+    uint32_t current_slab_zeroed;
 } scalanative_rift_region;
 
 #define SCALANATIVE_RIFT_SLAB_DATA_SIZE                                         \
@@ -611,6 +612,8 @@ static void scalanative_rift_region_append_slab(
     region->bump = slab->data;
     region->end = slab->data + scalanative_rift_slab_usable_size(slab);
     region->slab_count++;
+    region->current_slab_zeroed =
+        scalanative_rift_slab_is_zeroed(slab) ? 1u : 0u;
     scalanative_rift_stats_record_active_acquire(region, slab->mapped_size);
 }
 
@@ -828,6 +831,8 @@ void *scalanative_rift_region_open(uint32_t kind) {
     region->slab_count = 1;
     region->alloc_stats_enabled =
         scalanative_rift_alloc_stats_enabled() ? 1u : 0u;
+    region->current_slab_zeroed =
+        scalanative_rift_slab_is_zeroed(slab) ? 1u : 0u;
     scalanative_rift_stats_record_active_acquire(region, slab->mapped_size);
     scalanative_rift_stats_add(&scalanative_rift_stats_region_open_total_value,
                                1);
@@ -922,6 +927,7 @@ void scalanative_rift_region_reset(void *rawregion) {
     region->end = first->data + scalanative_rift_slab_usable_size(first);
     region->current = first;
     region->slab_count = 1;
+    region->current_slab_zeroed = 0u;
     scalanative_rift_stats_add(&scalanative_rift_stats_region_reset_total_value,
                                1);
     {
@@ -1000,7 +1006,7 @@ void *scalanative_rift_region_alloc(void *rawregion, void *info, size_t size) {
     if (current == NULL) return NULL;
 
     if (stats_enabled) region->alloc_object_count++;
-    if (!scalanative_rift_slab_is_zeroed(region->current)) {
+    if (!region->current_slab_zeroed) {
         memset(current, 0, size);
     }
     *((void **)current) = info;

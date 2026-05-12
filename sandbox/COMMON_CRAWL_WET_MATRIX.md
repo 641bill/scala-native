@@ -1,7 +1,7 @@
 # Common Crawl WET Matrix
 
 Date: 2026-05-01
-Last updated: 2026-05-12 17:22 CEST
+Last updated: 2026-05-13 00:33 CEST
 
 Status: generated WET-shaped detector plus first real Common Crawl WET input
 wiring. Real WET input is currently preloaded before timing so parser and
@@ -350,6 +350,26 @@ Interpretation: this is a small improvement over the clean 1M q2 final-clean
 row (`11.49 s`). It confirms the cached-stats cleanup on a generated
 page/window stream, but Common Crawl-shaped q2 remains dominated by allocation,
 append/linking, token/query work, and required cursor traversal.
+
+## Generated Q2 Follow-Up After Current-Slab Zeroed Cache
+
+Date/time: 2026-05-13 00:33 CEST.
+
+After the Rift runtime cached current-slab zeroed state on each region, the
+same generated WET-shaped q2 checked Rift page-token row was rerun at 1M pages
+with three final-clean process runs.
+
+Source:
+`/Users/siyaoliu/rift/cache/common-crawl-q2-current-slab-zeroed-cache-20260513`.
+
+| Query | Mode | External real s | External user s | RSS bytes | Checksum | Outputs |
+|---|---|---:|---:|---:|---:|---:|
+| q2-domain-window | `rift-checked-page-token` | 11.17 | 10.84 | 63258624 | 1076064953308107199 | 929230 |
+
+Interpretation: this is a small generated page/window application improvement
+over both the clean q2 row (`11.49 s`) and the region-cached stats gate
+(`11.39 s`). It is still generated stressor evidence; real-input stream claims
+require separate streaming-input rows.
 
 ## Current Conclusion
 

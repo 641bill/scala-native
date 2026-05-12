@@ -1,6 +1,6 @@
 # StreamFlex Design Matrix
 
-Last updated: 2026-05-12 17:22 CEST
+Last updated: 2026-05-13 00:33 CEST
 
 Status: first Rift-native StreamFlex system-design reproduction. This is a
 methodology benchmark for the StreamFlex axes: stable state, transient scoped
@@ -176,6 +176,25 @@ Interpretation: this is a modest application-level improvement over the clean
 rerun (`22.81 s`). The post-change L4 profile no longer samples
 `scalanative_rift_alloc_stats_enabled`; remaining samples are allocation body,
 zeroing, stable-state query work, and capsule add/drain.
+
+### L1 Follow-Up After Current-Slab Zeroed Cache
+
+Date/time: 2026-05-13 00:32 CEST.
+
+After the Rift runtime cached current-slab zeroed state on each region, the
+fastest checked stream row was rerun at the same 20M-event scale.
+
+Source:
+`/Users/siyaoliu/rift/cache/streamflex-design-current-slab-zeroed-cache-20260513`.
+
+| Mode | External real s | External user s | RSS bytes | Checksum | Output count |
+|---|---:|---:|---:|---:|---:|
+| `checked-epoch-stream` | 22.31 | 21.90 | 12550144 | `5305809911915216923` | 19999119 |
+
+Interpretation: this is a small but consistent application-level improvement
+over the region-cached stats gate (`22.55 s`) and the clean rerun (`22.81 s`).
+The row still measures throughput/GC avoidance rather than RSS: RSS remains
+close to the previous checked stream rows.
 
 ## L2 Throughput, 1M Events x 3 Runs
 

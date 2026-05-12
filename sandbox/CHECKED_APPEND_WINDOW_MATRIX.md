@@ -1,6 +1,6 @@
 # Checked Append Window Matrix
 
-Last updated: 2026-05-12 17:22 CEST
+Last updated: 2026-05-13 00:33 CEST
 
 Status: focused cheap checked-operator benchmark. This is framework evidence,
 not DEBS application evidence.
@@ -37,6 +37,27 @@ open-region gate (`25.007 ms` checked Rift, `25.591 ms` checked SafeZone-backed)
 It supports the allocation-stats profile cleanup but does not change the larger
 conclusion: remaining cost is allocation/object construction, append/linking,
 and query/traversal work.
+
+## Current-Slab Zeroed-Cache Follow-Up
+
+Date/time: 2026-05-13 00:31 CEST.
+
+After the Rift runtime cached current-slab zeroed state on each region, the
+same 1M page-token gate was rerun with five measured runs. All rows matched the
+existing checksum.
+
+Source:
+`/Users/siyaoliu/rift/cache/checked-append-current-slab-zeroed-cache-20260513`.
+
+| Mode | Median ms | Median GC ms | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|
+| `rift-checked-page-token` | 23.930 | 0.000 | 47595520 | -2507118467295660905 |
+| `rift-checked-safezone-page-token` | 24.823 | 0.000 | 47464448 | -2507118467295660905 |
+
+Interpretation: this is a focused page-token improvement over both the clean
+open-region gate (`25.007 ms`) and the region-cached stats gate (`24.618 ms`)
+for the Rift-backed checked row. The SafeZone-backed row changes only within
+normal noise because the code change targets the Rift allocator.
 
 ## Intent
 

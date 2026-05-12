@@ -1,11 +1,11 @@
 # Object Allocation Lowering Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-12 17:22 CEST
+Last updated: 2026-05-13 00:33 CEST
 
 Status: refined retained-region-array matrix validated at 20k smoke, 100k, 1M,
-and 10M, plus 2026-05-12 focused final-clean allocator-counter and cached-stats
-gates. This
+and 10M, plus focused final-clean allocator-counter, cached-stats, and
+current-slab zeroed-cache gates. This
 benchmark isolates ordinary Scala object construction through heap, trusted
 Rift, checked Rift, and checked SafeZone-backed allocation paths without
 stream-window, ranking, aggregation, or output work.
@@ -221,6 +221,25 @@ profiles and preserves opt-in allocation accounting, but it does not improve
 the focused allocation-lowering row relative to the earlier object fast-path
 baseline. Treat this as a profile cleanup with modest application benefit, not
 as a focused object-allocation speedup.
+
+Current-slab zeroed-cache follow-up, 2026-05-13: object allocation previously
+read the current slab's flags on every object to decide whether dirty reused
+slabs needed `_platform_memset`. The Rift region now caches that current-slab
+zeroed state when a slab is opened, appended, or reset. This keeps the same
+zeroing policy; it only removes one allocation-body flag load.
+
+Focused 5M checked Rift zeroed-cache gate, 5 measured runs:
+
+| Mode / env | Median ms | GC median ms | Region objects | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|
+| `rift-checked-rift`, object fast-path baseline | 69.912 | 0.000 | 0 | 203669504 | -1183547843768457859 |
+| region-cached stats | 71.702 | 0.000 | 0 | 203669504 | -1183547843768457859 |
+| current-slab zeroed cache, `RIFT_FINAL_CLEAN=1` | 68.998 | 0.000 | 0 | 203669504 | -1183547843768457859 |
+
+Interpretation: unlike the cached-stats-only row, the current-slab zeroed
+cache beats the prior object-fast baseline in the focused allocation matrix.
+It is still a narrow allocation-body optimization: object construction,
+mandatory zeroing on dirty slabs, and field stores remain.
 
 Validation note: an initial 20k construct-only smoke linked and emitted rows,
 but was rejected as evidence because checked allocations could be optimized
