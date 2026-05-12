@@ -1,7 +1,7 @@
 # Object Allocation Lowering Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-12 14:12 CEST
+Last updated: 2026-05-12 14:35 CEST
 
 Status: refined retained-region-array matrix validated at 20k smoke, 100k, 1M,
 and 10M, plus a 2026-05-12 focused final-clean allocator-counter gate. This
@@ -165,6 +165,32 @@ Interpretation: this cleanup is real and visible on allocation-heavy
 Rift-native stream rows, but it is not a universal application-speedup knob.
 Use it as part of the final-clean measurement-cleaning story and continue to
 treat L2 allocation counters as interpretation-only.
+
+Third implementation change, 2026-05-12: Rift managed-object allocation now has
+a dedicated pointer-aligned fast path instead of routing every object through
+the generic raw-allocation helper. Object zero/init and header setup are
+unchanged; the specialization only removes generic alignment normalization and
+keeps the slow path for slab refill.
+
+Focused 5M checked Rift managed-object fast-path gate, 5 measured runs:
+
+| Mode / env | Median ms | GC median ms | Region objects | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|
+| `rift-checked-rift`, previous final-clean baseline | 76.345 | 0.000 | 0 | 203669504 | -1183547843768457859 |
+| `rift-checked-rift`, object fast path, `RIFT_FINAL_CLEAN=1` | 69.912 | 0.000 | 0 | 203669504 | -1183547843768457859 |
+| `rift-checked-rift`, object fast path, `RIFT_FINAL_CLEAN=1 RIFT_ALLOC_STATS=1` | 89.081 | 0.000 | 5000001 | 203653120 | -1183547843768457859 |
+
+Application impact gate, object fast path, 2026-05-12:
+
+| Benchmark row | Previous final-clean gate | Object fast-path gate | Result |
+|---|---:|---:|---|
+| StreamFlex-design throughput `checked-epoch-stream`, 20M events | `8.57 s`, user `8.26 s`, RSS `10305536` | `8.07 s`, user `7.67 s`, RSS `10289152` | Single-run application confirmation for Rift-native checked stream allocation. |
+| Common Crawl-shaped q2 `rift-checked-page-token`, 1M pages | `4.23 s`, user `3.95 s`, RSS `63176704` | `3.98 s`, user `3.68 s`, RSS `63193088` | Single-run page/window confirmation; query/traversal work still dominates. |
+
+Interpretation: this is a real allocation-lowering improvement on the
+Rift-native checked backend. It does not affect SafeZone-backed checked rows
+directly. The stats-forced row stays slower because L2 allocation accounting is
+still per-object by design; use it for interpretation, not headline timing.
 
 Validation note: an initial 20k construct-only smoke linked and emitted rows,
 but was rejected as evidence because checked allocations could be optimized

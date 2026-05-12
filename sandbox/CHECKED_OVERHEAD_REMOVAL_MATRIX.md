@@ -1,7 +1,7 @@
 # Checked Overhead Removal Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-12 14:12 CEST
+Last updated: 2026-05-12 14:35 CEST
 
 Status: overhead-removal contract plus implementation checkpoint. This matrix
 separates three states:
@@ -37,6 +37,7 @@ separates three states:
 | Missing mixed-reference probes on operator-owned open paths | Static/immutable metadata and explicit `HeapRoot` bridge handles need to work through the same open allocation paths used by page/window and epoch-buffer operators. | Compiler probes now cover static metadata, `HeapRoot`, and unrooted dynamic metadata rejection for page-token append, page-token map/filter, page-token count-by-key, and epoch-buffer `allocOpen` paths. |
 | Public stale page-token child allocation after close | Public defensive region handles must still reject use-after-close even when operator-owned fast paths skip checks. | Runtime probes now reject allocation through a public page-token child region after `closeAllPageTokenAppendBucketsWithCursor` for both Rift and SafeZone-backed checked regions. |
 | Rift allocation counters in L1 final-clean runs | `RIFT_FINAL_CLEAN=1` now disables Rift raw/object/byte allocation counters by default; `RIFT_ALLOC_STATS=1` forces them back on for diagnostics. | Focused 5M `ObjectAllocationLoweringMatrix` `rift-checked-rift` improves from `87.999 ms` with counters forced on to `76.345 ms` with counters disabled, same checksum and zero GC. Application gates are workload-sensitive: StreamFlex-design checked stream improves from `9.18 s` to `8.57 s`, Common Crawl-shaped checked page-token improves from `4.33 s` to `4.23 s`, while Dataflow/Yak process-level gates are noisy. L2/stat rows keep counters enabled by default. |
+| Generic raw-allocation path in Rift managed-object allocation | Managed object allocation always needs pointer alignment, so the checked Rift object path no longer needs the generic raw-allocation alignment normalizer in the hot path. | Focused 5M `ObjectAllocationLoweringMatrix` `rift-checked-rift` improves from the previous final-clean `76.345 ms` to `69.912 ms`, same checksum and zero GC. Single-run application gates also move: StreamFlex-design checked stream `8.57 s -> 8.07 s`, Common Crawl-shaped checked page-token `4.23 s -> 3.98 s`. Object zero/init and header setup are unchanged. |
 | SafeZone root tracking in unsafe lower-bound mode | `safezone-rootless-32k` disables root add/remove. | Useful lower bound only; not a safety result. |
 
 ## Safe But Not Yet Removed
