@@ -34,6 +34,8 @@ default_cases=(
   streamit-beamformer-heap
   yak-graphreal-checked-scoped
   yak-graphreal-heap
+  yak-graphstep-checked-scoped
+  yak-graphstep-heap
   dataflow-aggregate-checked-scoped
   dataflow-aggregate-epoch-fold
   dataflow-aggregate-heap
@@ -157,6 +159,16 @@ case_config() {
       main_class="YakRegionMatrix"
       args="heap graphreal"
       env_spec="RIFT_FINAL_CLEAN=1 YAK_GRAPH_INPUT=${RIFT_PROFILE_YAK_GRAPH_INPUT:-${parent_dir}/cache/benchmark-data/yak/snap/soc-LiveJournal1.txt.gz} YAK_GRAPH_INPUT_EDGES=${RIFT_PROFILE_YAK_GRAPH_INPUT_EDGES:-50000000} YAK_GRAPH_INPUT_EDGES_PER_EPOCH=${RIFT_PROFILE_YAK_GRAPH_INPUT_EDGES_PER_EPOCH:-5000000} YAK_GRAPH_INPUT_VERTICES=${RIFT_PROFILE_YAK_GRAPH_INPUT_VERTICES:-5000000} YAK_BENCHMARK_RUNS=1 YAK_WARMUPS=0"
+      ;;
+    yak-graphstep-checked-scoped)
+      main_class="YakRegionMatrix"
+      args="checked-epoch-scoped graphstep"
+      env_spec="RIFT_FINAL_CLEAN=1 YAK_EPOCHS=${RIFT_PROFILE_YAK_EPOCHS:-10} YAK_MESSAGES_PER_EPOCH=${RIFT_PROFILE_YAK_MESSAGES_PER_EPOCH:-5000000} YAK_VERTICES=${RIFT_PROFILE_YAK_VERTICES:-5000000} YAK_BENCHMARK_RUNS=1 YAK_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    yak-graphstep-heap)
+      main_class="YakRegionMatrix"
+      args="heap graphstep"
+      env_spec="RIFT_FINAL_CLEAN=1 YAK_EPOCHS=${RIFT_PROFILE_YAK_EPOCHS:-10} YAK_MESSAGES_PER_EPOCH=${RIFT_PROFILE_YAK_MESSAGES_PER_EPOCH:-5000000} YAK_VERTICES=${RIFT_PROFILE_YAK_VERTICES:-5000000} YAK_BENCHMARK_RUNS=1 YAK_WARMUPS=0"
       ;;
     dataflow-aggregate-checked-scoped)
       main_class="DataflowRegionMatrix"
