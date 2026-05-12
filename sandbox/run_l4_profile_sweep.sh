@@ -28,6 +28,8 @@ default_cases=(
   dspbench-fraud-q2-heap
   loghub-hdfs-stream-topk-checked
   loghub-hdfs-stream-topk-heap
+  streamit-filterbank-checked
+  streamit-filterbank-heap
   streamit-beamformer-checked
   streamit-beamformer-heap
 )
@@ -98,12 +100,12 @@ case_config() {
     dspbench-fraud-q2-checked-scoped)
       main_class="DSPBenchRegionMatrix"
       args="rift-checked-safezone-page-token fraud-q2-alert-window"
-      env_spec="RIFT_FINAL_CLEAN=1 DSPBENCH_INPUT_MODE=${RIFT_PROFILE_DSPBENCH_INPUT_MODE:-file-backed} DSPBENCH_EVENTS=${RIFT_PROFILE_DSPBENCH_EVENTS:-5000000} DSPBENCH_BENCHMARK_RUNS=1 DSPBENCH_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      env_spec="RIFT_FINAL_CLEAN=1 DSPBENCH_INPUT_MODE=${RIFT_PROFILE_DSPBENCH_INPUT_MODE:-file-backed} DSPBENCH_INPUT=${RIFT_PROFILE_DSPBENCH_INPUT:-${parent_dir}/cache/benchmark-data/dspbench/source/dspbench-threads/data/credit-card.dat} DSPBENCH_EVENTS=${RIFT_PROFILE_DSPBENCH_EVENTS:-5000000} DSPBENCH_BENCHMARK_RUNS=1 DSPBENCH_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
       ;;
     dspbench-fraud-q2-heap)
       main_class="DSPBenchRegionMatrix"
       args="heap fraud-q2-alert-window"
-      env_spec="RIFT_FINAL_CLEAN=1 DSPBENCH_INPUT_MODE=${RIFT_PROFILE_DSPBENCH_INPUT_MODE:-file-backed} DSPBENCH_EVENTS=${RIFT_PROFILE_DSPBENCH_EVENTS:-5000000} DSPBENCH_BENCHMARK_RUNS=1 DSPBENCH_WARMUPS=0"
+      env_spec="RIFT_FINAL_CLEAN=1 DSPBENCH_INPUT_MODE=${RIFT_PROFILE_DSPBENCH_INPUT_MODE:-file-backed} DSPBENCH_INPUT=${RIFT_PROFILE_DSPBENCH_INPUT:-${parent_dir}/cache/benchmark-data/dspbench/source/dspbench-threads/data/credit-card.dat} DSPBENCH_EVENTS=${RIFT_PROFILE_DSPBENCH_EVENTS:-5000000} DSPBENCH_BENCHMARK_RUNS=1 DSPBENCH_WARMUPS=0"
       ;;
     loghub-hdfs-stream-topk-checked)
       main_class="LogHubTopTemplatesMatrix"
@@ -115,15 +117,25 @@ case_config() {
       args="heap-retained-drop-anchor"
       env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_TOP_INPUT_MODE=streaming-file LOGHUB_TOP_INPUT=${RIFT_PROFILE_LOGHUB_HDFS_INPUT:-${parent_dir}/cache/benchmark-data/loghub/HDFS_1/HDFS.log} LOGHUB_TOP_LINES=${RIFT_PROFILE_LOGHUB_LINES:-5000000} LOGHUB_TOP_LINES_PER_EPOCH=${RIFT_PROFILE_LOGHUB_LINES_PER_EPOCH:-100000} LOGHUB_TOP_BENCHMARK_RUNS=1 LOGHUB_TOP_WARMUPS=0"
       ;;
+    streamit-filterbank-checked)
+      main_class="StreamItKernelMatrix"
+      args="checked-epoch-scoped filterbank throughput"
+      env_spec="RIFT_FINAL_CLEAN=1 STREAMIT_FILTERBANK_ITERATIONS=${RIFT_PROFILE_STREAMIT_FILTERBANK_ITERATIONS:-4096} STREAMIT_BENCHMARK_RUNS=1 STREAMIT_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    streamit-filterbank-heap)
+      main_class="StreamItKernelMatrix"
+      args="heap filterbank throughput"
+      env_spec="RIFT_FINAL_CLEAN=1 STREAMIT_FILTERBANK_ITERATIONS=${RIFT_PROFILE_STREAMIT_FILTERBANK_ITERATIONS:-4096} STREAMIT_BENCHMARK_RUNS=1 STREAMIT_WARMUPS=0"
+      ;;
     streamit-beamformer-checked)
       main_class="StreamItKernelMatrix"
       args="checked-epoch-scoped beamformer throughput"
-      env_spec="RIFT_FINAL_CLEAN=1 STREAMIT_BEAMFORMER_FRAMES=${RIFT_PROFILE_STREAMIT_BEAMFORMER_FRAMES:-3000000} STREAMIT_BENCHMARK_RUNS=1 STREAMIT_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      env_spec="RIFT_FINAL_CLEAN=1 STREAMIT_BEAMFORMER_FRAMES=${RIFT_PROFILE_STREAMIT_BEAMFORMER_FRAMES:-256} STREAMIT_BENCHMARK_RUNS=1 STREAMIT_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
       ;;
     streamit-beamformer-heap)
       main_class="StreamItKernelMatrix"
       args="heap beamformer throughput"
-      env_spec="RIFT_FINAL_CLEAN=1 STREAMIT_BEAMFORMER_FRAMES=${RIFT_PROFILE_STREAMIT_BEAMFORMER_FRAMES:-3000000} STREAMIT_BENCHMARK_RUNS=1 STREAMIT_WARMUPS=0"
+      env_spec="RIFT_FINAL_CLEAN=1 STREAMIT_BEAMFORMER_FRAMES=${RIFT_PROFILE_STREAMIT_BEAMFORMER_FRAMES:-256} STREAMIT_BENCHMARK_RUNS=1 STREAMIT_WARMUPS=0"
       ;;
     *)
       echo "unknown RIFT_PROFILE_CASES entry: ${case_name}" >&2
