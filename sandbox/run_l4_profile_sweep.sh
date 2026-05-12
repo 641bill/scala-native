@@ -21,7 +21,9 @@ cd "${repo_dir}"
 
 default_cases=(
   streamflex-design-checked
+  streamflex-design-checked-stream
   streamflex-design-heap
+  commoncrawl-q2-checked-rift
   commoncrawl-q2-checked-scoped
   commoncrawl-q2-heap
   dspbench-fraud-q2-checked-scoped
@@ -117,10 +119,20 @@ case_config() {
       args="checked-epoch-scoped throughput"
       env_spec="RIFT_FINAL_CLEAN=1 STREAMFLEX_DESIGN_EVENTS=${RIFT_PROFILE_STREAMFLEX_EVENTS:-20000000} STREAMFLEX_DESIGN_BENCHMARK_RUNS=1 STREAMFLEX_DESIGN_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
       ;;
+    streamflex-design-checked-stream)
+      main_class="StreamFlexDesignMatrix"
+      args="checked-epoch-stream throughput"
+      env_spec="RIFT_FINAL_CLEAN=1 STREAMFLEX_DESIGN_EVENTS=${RIFT_PROFILE_STREAMFLEX_EVENTS:-20000000} STREAMFLEX_DESIGN_BENCHMARK_RUNS=1 STREAMFLEX_DESIGN_WARMUPS=0"
+      ;;
     streamflex-design-heap)
       main_class="StreamFlexDesignMatrix"
       args="gc-heap throughput"
       env_spec="RIFT_FINAL_CLEAN=1 STREAMFLEX_DESIGN_EVENTS=${RIFT_PROFILE_STREAMFLEX_EVENTS:-20000000} STREAMFLEX_DESIGN_BENCHMARK_RUNS=1 STREAMFLEX_DESIGN_WARMUPS=0"
+      ;;
+    commoncrawl-q2-checked-rift)
+      main_class="CommonCrawlWetMatrix"
+      args="rift-checked-page-token q2-domain-window"
+      env_spec="RIFT_FINAL_CLEAN=1 COMMON_CRAWL_WET_PAGES=${RIFT_PROFILE_COMMON_CRAWL_PAGES:-2000000} COMMON_CRAWL_WET_BENCHMARK_RUNS=1 COMMON_CRAWL_WET_WARMUPS=0"
       ;;
     commoncrawl-q2-checked-scoped)
       main_class="CommonCrawlWetMatrix"
