@@ -32,6 +32,17 @@ default_cases=(
   streamit-filterbank-heap
   streamit-beamformer-checked
   streamit-beamformer-heap
+  yak-graphreal-checked-scoped
+  yak-graphreal-heap
+  dataflow-aggregate-checked-scoped
+  dataflow-aggregate-epoch-fold
+  dataflow-aggregate-heap
+  specjbb-checked-scoped
+  specjbb-heap
+  reml-msort-checked-scoped
+  reml-msort-heap
+  reml-ratio-checked-scoped
+  reml-ratio-heap
 )
 
 cases=(${(z)${RIFT_PROFILE_CASES:-"streamflex-design-checked streamflex-design-heap"}})
@@ -136,6 +147,61 @@ case_config() {
       main_class="StreamItKernelMatrix"
       args="heap beamformer throughput"
       env_spec="RIFT_FINAL_CLEAN=1 STREAMIT_BEAMFORMER_FRAMES=${RIFT_PROFILE_STREAMIT_BEAMFORMER_FRAMES:-256} STREAMIT_BENCHMARK_RUNS=1 STREAMIT_WARMUPS=0"
+      ;;
+    yak-graphreal-checked-scoped)
+      main_class="YakRegionMatrix"
+      args="checked-epoch-scoped graphreal"
+      env_spec="RIFT_FINAL_CLEAN=1 YAK_GRAPH_INPUT=${RIFT_PROFILE_YAK_GRAPH_INPUT:-${parent_dir}/cache/benchmark-data/yak/snap/soc-LiveJournal1.txt.gz} YAK_GRAPH_INPUT_EDGES=${RIFT_PROFILE_YAK_GRAPH_INPUT_EDGES:-50000000} YAK_GRAPH_INPUT_EDGES_PER_EPOCH=${RIFT_PROFILE_YAK_GRAPH_INPUT_EDGES_PER_EPOCH:-5000000} YAK_GRAPH_INPUT_VERTICES=${RIFT_PROFILE_YAK_GRAPH_INPUT_VERTICES:-5000000} YAK_BENCHMARK_RUNS=1 YAK_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    yak-graphreal-heap)
+      main_class="YakRegionMatrix"
+      args="heap graphreal"
+      env_spec="RIFT_FINAL_CLEAN=1 YAK_GRAPH_INPUT=${RIFT_PROFILE_YAK_GRAPH_INPUT:-${parent_dir}/cache/benchmark-data/yak/snap/soc-LiveJournal1.txt.gz} YAK_GRAPH_INPUT_EDGES=${RIFT_PROFILE_YAK_GRAPH_INPUT_EDGES:-50000000} YAK_GRAPH_INPUT_EDGES_PER_EPOCH=${RIFT_PROFILE_YAK_GRAPH_INPUT_EDGES_PER_EPOCH:-5000000} YAK_GRAPH_INPUT_VERTICES=${RIFT_PROFILE_YAK_GRAPH_INPUT_VERTICES:-5000000} YAK_BENCHMARK_RUNS=1 YAK_WARMUPS=0"
+      ;;
+    dataflow-aggregate-checked-scoped)
+      main_class="DataflowRegionMatrix"
+      args="rift-checked-safezone-direct-epoch aggregate"
+      env_spec="RIFT_FINAL_CLEAN=1 DATAFLOW_EPOCHS=${RIFT_PROFILE_DATAFLOW_EPOCHS:-20} DATAFLOW_DOCS_PER_EPOCH=${RIFT_PROFILE_DATAFLOW_DOCS_PER_EPOCH:-500000} DATAFLOW_BENCHMARK_RUNS=1 DATAFLOW_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    dataflow-aggregate-epoch-fold)
+      main_class="DataflowRegionMatrix"
+      args="rift-checked-epoch-fold aggregate"
+      env_spec="RIFT_FINAL_CLEAN=1 DATAFLOW_EPOCHS=${RIFT_PROFILE_DATAFLOW_EPOCHS:-20} DATAFLOW_DOCS_PER_EPOCH=${RIFT_PROFILE_DATAFLOW_DOCS_PER_EPOCH:-500000} DATAFLOW_BENCHMARK_RUNS=1 DATAFLOW_WARMUPS=0"
+      ;;
+    dataflow-aggregate-heap)
+      main_class="DataflowRegionMatrix"
+      args="heap aggregate"
+      env_spec="RIFT_FINAL_CLEAN=1 DATAFLOW_EPOCHS=${RIFT_PROFILE_DATAFLOW_EPOCHS:-20} DATAFLOW_DOCS_PER_EPOCH=${RIFT_PROFILE_DATAFLOW_DOCS_PER_EPOCH:-500000} DATAFLOW_BENCHMARK_RUNS=1 DATAFLOW_WARMUPS=0"
+      ;;
+    specjbb-checked-scoped)
+      main_class="SpecJbb2005PortMatrix"
+      args="rift-checked-safezone-direct-epoch"
+      env_spec="RIFT_FINAL_CLEAN=1 SPECJBB_WAREHOUSES=${RIFT_PROFILE_SPECJBB_WAREHOUSES:-4} SPECJBB_ITERATIONS_PER_WAREHOUSE=${RIFT_PROFILE_SPECJBB_ITERATIONS_PER_WAREHOUSE:-250000} SPECJBB_BENCHMARK_RUNS=1 SPECJBB_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    specjbb-heap)
+      main_class="SpecJbb2005PortMatrix"
+      args="heap"
+      env_spec="RIFT_FINAL_CLEAN=1 SPECJBB_WAREHOUSES=${RIFT_PROFILE_SPECJBB_WAREHOUSES:-4} SPECJBB_ITERATIONS_PER_WAREHOUSE=${RIFT_PROFILE_SPECJBB_ITERATIONS_PER_WAREHOUSE:-250000} SPECJBB_BENCHMARK_RUNS=1 SPECJBB_WARMUPS=0"
+      ;;
+    reml-msort-checked-scoped)
+      main_class="ReMLRegionMatrix"
+      args="msort checked-region-scoped"
+      env_spec="RIFT_FINAL_CLEAN=1 REML_LIST_SIZE=${RIFT_PROFILE_REML_LIST_SIZE:-1000000} REML_BENCHMARK_RUNS=1 REML_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    reml-msort-heap)
+      main_class="ReMLRegionMatrix"
+      args="msort gc-heap"
+      env_spec="RIFT_FINAL_CLEAN=1 REML_LIST_SIZE=${RIFT_PROFILE_REML_LIST_SIZE:-1000000} REML_BENCHMARK_RUNS=1 REML_WARMUPS=0"
+      ;;
+    reml-ratio-checked-scoped)
+      main_class="ReMLRegionMatrix"
+      args="ratio checked-region-scoped"
+      env_spec="RIFT_FINAL_CLEAN=1 REML_RATIO_COUNT=${RIFT_PROFILE_REML_RATIO_COUNT:-2000000} REML_BENCHMARK_RUNS=1 REML_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    reml-ratio-heap)
+      main_class="ReMLRegionMatrix"
+      args="ratio gc-heap"
+      env_spec="RIFT_FINAL_CLEAN=1 REML_RATIO_COUNT=${RIFT_PROFILE_REML_RATIO_COUNT:-2000000} REML_BENCHMARK_RUNS=1 REML_WARMUPS=0"
       ;;
     *)
       echo "unknown RIFT_PROFILE_CASES entry: ${case_name}" >&2
