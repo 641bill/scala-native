@@ -1,7 +1,7 @@
 # Common Crawl WET Matrix
 
 Date: 2026-05-01
-Last updated: 2026-05-07 18:53 CEST
+Last updated: 2026-05-12 17:22 CEST
 
 Status: generated WET-shaped detector plus first real Common Crawl WET input
 wiring. Real WET input is currently preloaded before timing so parser and
@@ -330,6 +330,26 @@ Interpretation:
   operator-owned page-token shape plus scoped backend.
 - RSS is higher than heap in this generated row, so report it as an uncapped
   throughput/GC win, not an RSS win.
+
+## Generated Q2 Follow-Up After Region-Cached Allocation Stats
+
+Date/time: 2026-05-12 17:09 CEST.
+
+After the Rift runtime cached allocation-stats mode on each region, the
+generated WET-shaped q2 checked Rift page-token row was rerun at 1M pages with
+three final-clean process runs.
+
+Source:
+`/Users/siyaoliu/rift/cache/common-crawl-q2-region-cached-stats-20260512`.
+
+| Query | Mode | External real s | External user s | RSS bytes | Checksum | Outputs |
+|---|---|---:|---:|---:|---:|---:|
+| q2-domain-window | `rift-checked-page-token` | 11.39 | 10.75 | 63242240 | 1076064953308107199 | 929230 |
+
+Interpretation: this is a small improvement over the clean 1M q2 final-clean
+row (`11.49 s`). It confirms the cached-stats cleanup on a generated
+page/window stream, but Common Crawl-shaped q2 remains dominated by allocation,
+append/linking, token/query work, and required cursor traversal.
 
 ## Current Conclusion
 

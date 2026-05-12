@@ -1,6 +1,6 @@
 # Checked Append Window Matrix
 
-Last updated: 2026-05-05 20:52:18 CEST
+Last updated: 2026-05-12 17:22 CEST
 
 Status: focused cheap checked-operator benchmark. This is framework evidence,
 not DEBS application evidence.
@@ -8,6 +8,35 @@ not DEBS application evidence.
 The harness is implemented in
 `sandbox/src/main/scala-next/CheckedAppendWindowMatrix.scala` and run with
 `sandbox/run_checked_append_window_matrix.sh`.
+
+## Latest Final-Clean Page-Token Gate
+
+Date/time: 2026-05-12 17:02 CEST.
+
+After the Rift runtime cached allocation-stats mode on each region at open, the
+operator-owned page-token rows were rerun at 1M records with five measured
+runs. All rows matched the existing checksum.
+
+```sh
+RIFT_FINAL_CLEAN=1 \
+CHECKED_APPEND_RECORDS=1000000 \
+CHECKED_APPEND_BENCHMARK_RUNS=5 \
+CHECKED_APPEND_WARMUPS=1 \
+CHECKED_APPEND_MODES="rift-checked-page-token rift-checked-safezone-page-token" \
+CHECKED_APPEND_OUTPUT_DIR=/Users/siyaoliu/rift/cache/checked-append-region-cached-stats-20260512 \
+zsh sandbox/run_checked_append_window_matrix.sh
+```
+
+| Mode | Median ms | Median GC ms | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|
+| `rift-checked-page-token` | 24.618 | 0.000 | 47595520 | -2507118467295660905 |
+| `rift-checked-safezone-page-token` | 25.255 | 0.000 | 47480832 | -2507118467295660905 |
+
+Interpretation: this is a modest focused page-token improvement over the clean
+open-region gate (`25.007 ms` checked Rift, `25.591 ms` checked SafeZone-backed).
+It supports the allocation-stats profile cleanup but does not change the larger
+conclusion: remaining cost is allocation/object construction, append/linking,
+and query/traversal work.
 
 ## Intent
 
