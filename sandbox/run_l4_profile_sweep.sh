@@ -28,6 +28,20 @@ default_cases=(
   dspbench-fraud-q2-heap
   loghub-hdfs-stream-topk-checked
   loghub-hdfs-stream-topk-heap
+  yak-topwordreal-checked-scoped
+  yak-topwordreal-topk-scoped
+  yak-topwordreal-heap
+  yak-topwordreal-heap-topk
+  loghub-spark-topk-checked
+  loghub-spark-topk-heap
+  loghub-windows-topk-checked
+  loghub-windows-topk-heap
+  theodolite-power-q2-checked-scoped
+  theodolite-power-q2-heap
+  nexmark-q8-checked
+  nexmark-q8-heap
+  nexmark-q9-checked
+  nexmark-q9-heap
   streamit-filterbank-checked
   streamit-filterbank-heap
   streamit-beamformer-checked
@@ -41,10 +55,18 @@ default_cases=(
   dataflow-aggregate-heap
   specjbb-checked-scoped
   specjbb-heap
+  specjbb-large-checked-scoped
+  specjbb-large-heap
   reml-msort-checked-scoped
   reml-msort-heap
   reml-ratio-checked-scoped
   reml-ratio-heap
+  reml-logic-checked-scoped
+  reml-logic-heap
+  reml-ray-checked-scoped
+  reml-ray-heap
+  reml-tsp-checked-scoped
+  reml-tsp-heap
 )
 
 cases=(${(z)${RIFT_PROFILE_CASES:-"streamflex-design-checked streamflex-design-heap"}})
@@ -130,6 +152,76 @@ case_config() {
       args="heap-retained-drop-anchor"
       env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_TOP_INPUT_MODE=streaming-file LOGHUB_TOP_INPUT=${RIFT_PROFILE_LOGHUB_HDFS_INPUT:-${parent_dir}/cache/benchmark-data/loghub/HDFS_1/HDFS.log} LOGHUB_TOP_LINES=${RIFT_PROFILE_LOGHUB_LINES:-5000000} LOGHUB_TOP_LINES_PER_EPOCH=${RIFT_PROFILE_LOGHUB_LINES_PER_EPOCH:-100000} LOGHUB_TOP_BENCHMARK_RUNS=1 LOGHUB_TOP_WARMUPS=0"
       ;;
+    yak-topwordreal-checked-scoped)
+      main_class="YakRegionMatrix"
+      args="checked-epoch-scoped topwordreal"
+      env_spec="RIFT_FINAL_CLEAN=1 YAK_TEXT_INPUT=${RIFT_PROFILE_YAK_TEXT_INPUT:-${parent_dir}/cache/benchmark-data/yak/stackexchange/askubuntu-Posts.xml} YAK_TEXT_INPUT_TOKENS=${RIFT_PROFILE_YAK_TEXT_INPUT_TOKENS:-20000000} YAK_TEXT_TOKENS_PER_EPOCH=${RIFT_PROFILE_YAK_TEXT_TOKENS_PER_EPOCH:-100000} YAK_BENCHMARK_RUNS=1 YAK_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    yak-topwordreal-topk-scoped)
+      main_class="YakRegionMatrix"
+      args="checked-epoch-topk-scoped topwordreal"
+      env_spec="RIFT_FINAL_CLEAN=1 YAK_TEXT_INPUT=${RIFT_PROFILE_YAK_TEXT_INPUT:-${parent_dir}/cache/benchmark-data/yak/stackexchange/askubuntu-Posts.xml} YAK_TEXT_INPUT_TOKENS=${RIFT_PROFILE_YAK_TEXT_INPUT_TOKENS:-20000000} YAK_TEXT_TOKENS_PER_EPOCH=${RIFT_PROFILE_YAK_TEXT_TOKENS_PER_EPOCH:-100000} YAK_BENCHMARK_RUNS=1 YAK_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    yak-topwordreal-heap)
+      main_class="YakRegionMatrix"
+      args="heap topwordreal"
+      env_spec="RIFT_FINAL_CLEAN=1 YAK_TEXT_INPUT=${RIFT_PROFILE_YAK_TEXT_INPUT:-${parent_dir}/cache/benchmark-data/yak/stackexchange/askubuntu-Posts.xml} YAK_TEXT_INPUT_TOKENS=${RIFT_PROFILE_YAK_TEXT_INPUT_TOKENS:-20000000} YAK_TEXT_TOKENS_PER_EPOCH=${RIFT_PROFILE_YAK_TEXT_TOKENS_PER_EPOCH:-100000} YAK_BENCHMARK_RUNS=1 YAK_WARMUPS=0"
+      ;;
+    yak-topwordreal-heap-topk)
+      main_class="YakRegionMatrix"
+      args="heap-epoch-topk topwordreal"
+      env_spec="RIFT_FINAL_CLEAN=1 YAK_TEXT_INPUT=${RIFT_PROFILE_YAK_TEXT_INPUT:-${parent_dir}/cache/benchmark-data/yak/stackexchange/askubuntu-Posts.xml} YAK_TEXT_INPUT_TOKENS=${RIFT_PROFILE_YAK_TEXT_INPUT_TOKENS:-20000000} YAK_TEXT_TOKENS_PER_EPOCH=${RIFT_PROFILE_YAK_TEXT_TOKENS_PER_EPOCH:-100000} YAK_BENCHMARK_RUNS=1 YAK_WARMUPS=0"
+      ;;
+    loghub-spark-topk-checked)
+      main_class="LogHubTopTemplatesMatrix"
+      args="checked-scoped-epoch-topk-retained-no-traverse"
+      env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_TOP_INPUT_MODE=file-backed LOGHUB_TOP_INPUTS=${RIFT_PROFILE_LOGHUB_SPARK_INPUTS:-${parent_dir}/cache/benchmark-data/loghub/Spark/application_1485248649253_0132/container_1485248649253_0132_01_000032.log,${parent_dir}/cache/benchmark-data/loghub/Spark/application_1485248649253_0132/container_1485248649253_0132_01_000006.log,${parent_dir}/cache/benchmark-data/loghub/Spark/application_1485248649253_0132/container_1485248649253_0132_01_000057.log} LOGHUB_TOP_LINES=${RIFT_PROFILE_LOGHUB_SPARK_LINES:-2000000} LOGHUB_TOP_LINES_PER_EPOCH=${RIFT_PROFILE_LOGHUB_LINES_PER_EPOCH:-100000} LOGHUB_TOP_BENCHMARK_RUNS=1 LOGHUB_TOP_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    loghub-spark-topk-heap)
+      main_class="LogHubTopTemplatesMatrix"
+      args="heap-retained-drop-anchor"
+      env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_TOP_INPUT_MODE=file-backed LOGHUB_TOP_INPUTS=${RIFT_PROFILE_LOGHUB_SPARK_INPUTS:-${parent_dir}/cache/benchmark-data/loghub/Spark/application_1485248649253_0132/container_1485248649253_0132_01_000032.log,${parent_dir}/cache/benchmark-data/loghub/Spark/application_1485248649253_0132/container_1485248649253_0132_01_000006.log,${parent_dir}/cache/benchmark-data/loghub/Spark/application_1485248649253_0132/container_1485248649253_0132_01_000057.log} LOGHUB_TOP_LINES=${RIFT_PROFILE_LOGHUB_SPARK_LINES:-2000000} LOGHUB_TOP_LINES_PER_EPOCH=${RIFT_PROFILE_LOGHUB_LINES_PER_EPOCH:-100000} LOGHUB_TOP_BENCHMARK_RUNS=1 LOGHUB_TOP_WARMUPS=0"
+      ;;
+    loghub-windows-topk-checked)
+      main_class="LogHubTopTemplatesMatrix"
+      args="checked-scoped-epoch-topk-retained-no-traverse"
+      env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_TOP_INPUT_MODE=streaming-file LOGHUB_TOP_INPUT=${RIFT_PROFILE_LOGHUB_WINDOWS_INPUT:-${parent_dir}/cache/benchmark-data/loghub/Windows/Windows.log} LOGHUB_TOP_LINES=${RIFT_PROFILE_LOGHUB_WINDOWS_LINES:-5000000} LOGHUB_TOP_LINES_PER_EPOCH=${RIFT_PROFILE_LOGHUB_LINES_PER_EPOCH:-100000} LOGHUB_TOP_BENCHMARK_RUNS=1 LOGHUB_TOP_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    loghub-windows-topk-heap)
+      main_class="LogHubTopTemplatesMatrix"
+      args="heap-retained-drop-anchor"
+      env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_TOP_INPUT_MODE=streaming-file LOGHUB_TOP_INPUT=${RIFT_PROFILE_LOGHUB_WINDOWS_INPUT:-${parent_dir}/cache/benchmark-data/loghub/Windows/Windows.log} LOGHUB_TOP_LINES=${RIFT_PROFILE_LOGHUB_WINDOWS_LINES:-5000000} LOGHUB_TOP_LINES_PER_EPOCH=${RIFT_PROFILE_LOGHUB_LINES_PER_EPOCH:-100000} LOGHUB_TOP_BENCHMARK_RUNS=1 LOGHUB_TOP_WARMUPS=0"
+      ;;
+    theodolite-power-q2-checked-scoped)
+      main_class="TheodolitePowerRegionMatrix"
+      args="checked-epoch-scoped q2-hierarchical"
+      env_spec="RIFT_FINAL_CLEAN=1 THEODOLITE_POWER_INPUT=${RIFT_PROFILE_THEODOLITE_POWER_INPUT:-${parent_dir}/cache/benchmark-data/theodolite/real-power/household_power_consumption.txt} THEODOLITE_POWER_RECORDS=${RIFT_PROFILE_THEODOLITE_POWER_RECORDS:-2000000} THEODOLITE_POWER_RECORDS_PER_EPOCH=${RIFT_PROFILE_THEODOLITE_POWER_RECORDS_PER_EPOCH:-25000} THEODOLITE_POWER_BENCHMARK_RUNS=${RIFT_PROFILE_THEODOLITE_POWER_RUNS:-20} THEODOLITE_POWER_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    theodolite-power-q2-heap)
+      main_class="TheodolitePowerRegionMatrix"
+      args="heap q2-hierarchical"
+      env_spec="RIFT_FINAL_CLEAN=1 THEODOLITE_POWER_INPUT=${RIFT_PROFILE_THEODOLITE_POWER_INPUT:-${parent_dir}/cache/benchmark-data/theodolite/real-power/household_power_consumption.txt} THEODOLITE_POWER_RECORDS=${RIFT_PROFILE_THEODOLITE_POWER_RECORDS:-2000000} THEODOLITE_POWER_RECORDS_PER_EPOCH=${RIFT_PROFILE_THEODOLITE_POWER_RECORDS_PER_EPOCH:-25000} THEODOLITE_POWER_BENCHMARK_RUNS=${RIFT_PROFILE_THEODOLITE_POWER_RUNS:-20} THEODOLITE_POWER_WARMUPS=0"
+      ;;
+    nexmark-q8-checked)
+      main_class="NexmarkRegionMatrix"
+      args="rift-checked-join-api q8"
+      env_spec="RIFT_FINAL_CLEAN=1 NEXMARK_EVENTS=${RIFT_PROFILE_NEXMARK_EVENTS:-5000000} NEXMARK_EVENTS_PER_BUCKET=${RIFT_PROFILE_NEXMARK_EVENTS_PER_BUCKET:-25000} NEXMARK_BENCHMARK_RUNS=1 NEXMARK_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    nexmark-q8-heap)
+      main_class="NexmarkRegionMatrix"
+      args="heap-join-api q8"
+      env_spec="RIFT_FINAL_CLEAN=1 NEXMARK_EVENTS=${RIFT_PROFILE_NEXMARK_EVENTS:-5000000} NEXMARK_EVENTS_PER_BUCKET=${RIFT_PROFILE_NEXMARK_EVENTS_PER_BUCKET:-25000} NEXMARK_BENCHMARK_RUNS=1 NEXMARK_WARMUPS=0"
+      ;;
+    nexmark-q9-checked)
+      main_class="NexmarkRegionMatrix"
+      args="rift-checked q9"
+      env_spec="RIFT_FINAL_CLEAN=1 NEXMARK_EVENTS=${RIFT_PROFILE_NEXMARK_EVENTS:-5000000} NEXMARK_EVENTS_PER_BUCKET=${RIFT_PROFILE_NEXMARK_EVENTS_PER_BUCKET:-25000} NEXMARK_BENCHMARK_RUNS=1 NEXMARK_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    nexmark-q9-heap)
+      main_class="NexmarkRegionMatrix"
+      args="heap q9"
+      env_spec="RIFT_FINAL_CLEAN=1 NEXMARK_EVENTS=${RIFT_PROFILE_NEXMARK_EVENTS:-5000000} NEXMARK_EVENTS_PER_BUCKET=${RIFT_PROFILE_NEXMARK_EVENTS_PER_BUCKET:-25000} NEXMARK_BENCHMARK_RUNS=1 NEXMARK_WARMUPS=0"
+      ;;
     streamit-filterbank-checked)
       main_class="StreamItKernelMatrix"
       args="checked-epoch-scoped filterbank throughput"
@@ -195,6 +287,16 @@ case_config() {
       args="heap"
       env_spec="RIFT_FINAL_CLEAN=1 SPECJBB_WAREHOUSES=${RIFT_PROFILE_SPECJBB_WAREHOUSES:-4} SPECJBB_ITERATIONS_PER_WAREHOUSE=${RIFT_PROFILE_SPECJBB_ITERATIONS_PER_WAREHOUSE:-250000} SPECJBB_BENCHMARK_RUNS=1 SPECJBB_WARMUPS=0"
       ;;
+    specjbb-large-checked-scoped)
+      main_class="SpecJbb2005PortMatrix"
+      args="rift-checked-safezone-direct-epoch"
+      env_spec="RIFT_FINAL_CLEAN=1 SPECJBB_WAREHOUSES=${RIFT_PROFILE_SPECJBB_LARGE_WAREHOUSES:-8} SPECJBB_ITERATIONS_PER_WAREHOUSE=${RIFT_PROFILE_SPECJBB_LARGE_ITERATIONS_PER_WAREHOUSE:-1000000} SPECJBB_BENCHMARK_RUNS=1 SPECJBB_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    specjbb-large-heap)
+      main_class="SpecJbb2005PortMatrix"
+      args="heap"
+      env_spec="RIFT_FINAL_CLEAN=1 SPECJBB_WAREHOUSES=${RIFT_PROFILE_SPECJBB_LARGE_WAREHOUSES:-8} SPECJBB_ITERATIONS_PER_WAREHOUSE=${RIFT_PROFILE_SPECJBB_LARGE_ITERATIONS_PER_WAREHOUSE:-1000000} SPECJBB_BENCHMARK_RUNS=1 SPECJBB_WARMUPS=0"
+      ;;
     reml-msort-checked-scoped)
       main_class="ReMLRegionMatrix"
       args="msort checked-region-scoped"
@@ -214,6 +316,36 @@ case_config() {
       main_class="ReMLRegionMatrix"
       args="ratio gc-heap"
       env_spec="RIFT_FINAL_CLEAN=1 REML_RATIO_COUNT=${RIFT_PROFILE_REML_RATIO_COUNT:-2000000} REML_BENCHMARK_RUNS=1 REML_WARMUPS=0"
+      ;;
+    reml-logic-checked-scoped)
+      main_class="ReMLRegionMatrix"
+      args="logic checked-region-scoped"
+      env_spec="RIFT_FINAL_CLEAN=1 REML_LOGIC_DEPTH=${RIFT_PROFILE_REML_LOGIC_DEPTH:-13} REML_LOGIC_ITERATIONS=${RIFT_PROFILE_REML_LOGIC_ITERATIONS:-4096} REML_BENCHMARK_RUNS=1 REML_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    reml-logic-heap)
+      main_class="ReMLRegionMatrix"
+      args="logic gc-heap"
+      env_spec="RIFT_FINAL_CLEAN=1 REML_LOGIC_DEPTH=${RIFT_PROFILE_REML_LOGIC_DEPTH:-13} REML_LOGIC_ITERATIONS=${RIFT_PROFILE_REML_LOGIC_ITERATIONS:-4096} REML_BENCHMARK_RUNS=1 REML_WARMUPS=0"
+      ;;
+    reml-ray-checked-scoped)
+      main_class="ReMLRegionMatrix"
+      args="ray checked-region-scoped"
+      env_spec="RIFT_FINAL_CLEAN=1 REML_RAY_SPHERES=${RIFT_PROFILE_REML_RAY_SPHERES:-256} REML_RAY_RAYS=${RIFT_PROFILE_REML_RAY_RAYS:-100000} REML_BENCHMARK_RUNS=1 REML_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    reml-ray-heap)
+      main_class="ReMLRegionMatrix"
+      args="ray gc-heap"
+      env_spec="RIFT_FINAL_CLEAN=1 REML_RAY_SPHERES=${RIFT_PROFILE_REML_RAY_SPHERES:-256} REML_RAY_RAYS=${RIFT_PROFILE_REML_RAY_RAYS:-100000} REML_BENCHMARK_RUNS=1 REML_WARMUPS=0"
+      ;;
+    reml-tsp-checked-scoped)
+      main_class="ReMLRegionMatrix"
+      args="tsp checked-region-scoped"
+      env_spec="RIFT_FINAL_CLEAN=1 REML_TSP_POINTS=${RIFT_PROFILE_REML_TSP_POINTS:-1024} REML_TSP_STARTS=${RIFT_PROFILE_REML_TSP_STARTS:-1024} REML_BENCHMARK_RUNS=1 REML_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    reml-tsp-heap)
+      main_class="ReMLRegionMatrix"
+      args="tsp gc-heap"
+      env_spec="RIFT_FINAL_CLEAN=1 REML_TSP_POINTS=${RIFT_PROFILE_REML_TSP_POINTS:-1024} REML_TSP_STARTS=${RIFT_PROFILE_REML_TSP_STARTS:-1024} REML_BENCHMARK_RUNS=1 REML_WARMUPS=0"
       ;;
     *)
       echo "unknown RIFT_PROFILE_CASES entry: ${case_name}" >&2
