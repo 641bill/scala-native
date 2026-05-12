@@ -108,6 +108,8 @@ static _Atomic(size_t) scalanative_rift_stats_slow_alloc_ns_value = 0;
 
 static bool scalanative_rift_precise_alloc_stats_initialized = false;
 static bool scalanative_rift_precise_alloc_stats_value = false;
+static bool scalanative_rift_alloc_stats_initialized = false;
+static bool scalanative_rift_alloc_stats_value = true;
 
 static __thread scalanative_rift_slab *
     scalanative_rift_tls_cache[SCALANATIVE_RIFT_TLS_SLAB_CACHE_MAX];
@@ -140,6 +142,26 @@ static inline bool scalanative_rift_precise_alloc_stats_enabled(void) {
         scalanative_rift_precise_alloc_stats_initialized = true;
     }
     return scalanative_rift_precise_alloc_stats_value;
+}
+
+static inline bool scalanative_rift_truthy_env(const char *value) {
+    return value != NULL && value[0] != '\0' &&
+           !(value[0] == '0' && value[1] == '\0');
+}
+
+static inline bool scalanative_rift_alloc_stats_enabled(void) {
+    if (!scalanative_rift_alloc_stats_initialized) {
+        const char *explicit_value = getenv("RIFT_ALLOC_STATS");
+        if (explicit_value != NULL && explicit_value[0] != '\0') {
+            scalanative_rift_alloc_stats_value =
+                scalanative_rift_truthy_env(explicit_value);
+        } else {
+            scalanative_rift_alloc_stats_value =
+                !scalanative_rift_truthy_env(getenv("RIFT_FINAL_CLEAN"));
+        }
+        scalanative_rift_alloc_stats_initialized = true;
+    }
+    return scalanative_rift_alloc_stats_value;
 }
 
 static inline void scalanative_rift_stats_update_peak(
@@ -262,6 +284,7 @@ static inline void scalanative_rift_stats_record_alloc_bytes(
     size_t current;
 
     if (region == NULL) return;
+    if (!scalanative_rift_alloc_stats_enabled()) return;
     region->alloc_raw_bytes += bytes;
     if (bytes == 0 || !scalanative_rift_precise_alloc_stats_enabled()) return;
 
@@ -688,7 +711,7 @@ static void *scalanative_rift_region_alloc_slow(
     uintptr_t n;
     uint64_t start_ns = scalanative_rift_now_ns();
 
-    region->alloc_slow_count++;
+    if (scalanative_rift_alloc_stats_enabled()) region->alloc_slow_count++;
     align = scalanative_rift_normalize_align(align);
     if (size > SCALANATIVE_RIFT_SLAB_DATA_SIZE) {
         slab = scalanative_rift_mmap_huge_slab(size + align);
@@ -906,15 +929,15 @@ void scalanative_rift_region_reset(void *rawregion) {
     }
 }
 
-void *scalanative_rift_region_alloc_raw(void *rawregion, size_t size,
-                                        size_t align) {
-    scalanative_rift_region *region = (scalanative_rift_region *)rawregion;
+static inline void *scalanative_rift_region_alloc_raw_impl(
+    scalanative_rift_region *region, size_t size, size_t align,
+    bool stats_enabled) {
     uintptr_t mask;
     uintptr_t p;
     uintptr_t n;
 
     if (region == NULL) return NULL;
-    region->alloc_raw_count++;
+    if (stats_enabled) region->alloc_raw_count++;
 
     align = scalanative_rift_normalize_align(align);
     mask = (uintptr_t)align - 1u;
@@ -926,17 +949,25 @@ void *scalanative_rift_region_alloc_raw(void *rawregion, size_t size,
     }
 
     region->bump = (uint8_t *)n;
-    scalanative_rift_stats_record_alloc_bytes(region, size);
+    if (stats_enabled) scalanative_rift_stats_record_alloc_bytes(region, size);
     return (void *)p;
+}
+
+void *scalanative_rift_region_alloc_raw(void *rawregion, size_t size,
+                                        size_t align) {
+    scalanative_rift_region *region = (scalanative_rift_region *)rawregion;
+    return scalanative_rift_region_alloc_raw_impl(
+        region, size, align, scalanative_rift_alloc_stats_enabled());
 }
 
 void *scalanative_rift_region_alloc(void *rawregion, void *info, size_t size) {
     scalanative_rift_region *region = (scalanative_rift_region *)rawregion;
-    void *current = scalanative_rift_region_alloc_raw(
-        rawregion, size, sizeof(void *));
+    const bool stats_enabled = scalanative_rift_alloc_stats_enabled();
+    void *current = scalanative_rift_region_alloc_raw_impl(
+        region, size, sizeof(void *), stats_enabled);
     if (current == NULL) return NULL;
 
-    region->alloc_object_count++;
+    if (stats_enabled) region->alloc_object_count++;
     if (region == NULL || region->current == NULL ||
         !scalanative_rift_slab_is_zeroed(region->current)) {
         memset(current, 0, size);

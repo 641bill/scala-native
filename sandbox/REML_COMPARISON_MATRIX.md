@@ -1,13 +1,13 @@
 # ReML / MLKit Lineage Comparison Matrix
 
-Last updated: 2026-05-10 01:04 CEST
+Last updated: 2026-05-11 14:32 CEST
 
 Status: new Phase 6c evidence track. This file separates three evidence
 classes:
 
 - **paper-reported ReML/MLKit numbers** from Elsman 2023, not rerun locally;
-- **exact artifact reproduction**, still open pending clean source/tool
-  provenance;
+- **exact artifact reproduction**, gated/low-priority pending a need for raw
+  same-machine timing;
 - **Scala Native ReML-shaped ports**, newly scaffolded in
 `sandbox/src/main/scala-next/ReMLRegionMatrix.scala`.
 
@@ -324,8 +324,8 @@ Interpretation:
 - `ratio` is a modest elapsed win but a strong RSS/GC row.
 - Compute-heavy rows (`fib37`, `tak`, `mandel`, `life`) should remain controls,
   even when a checked mode is slightly faster.
-- Exact MLKit/ReML artifact reruns remain optional validation for this table,
-  not a prerequisite for reporting local Scala Native ratios.
+- Exact MLKit/ReML artifact reruns are gated/low-priority optional validation
+  for this table, not a prerequisite for reporting local Scala Native ratios.
 
 | Workload | Mode | Median ms | GC ms | Max GC ms | Runs with GC | RSS bytes | Rift objects |
 |---|---|---:|---:|---:|---:|---:|---:|

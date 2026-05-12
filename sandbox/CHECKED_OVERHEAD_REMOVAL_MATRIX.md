@@ -1,7 +1,7 @@
 # Checked Overhead Removal Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-07 18:53 CEST
+Last updated: 2026-05-12 13:35 CEST
 
 Status: overhead-removal contract plus implementation checkpoint. This matrix
 separates three states:
@@ -20,7 +20,7 @@ separates three states:
 | Region-to-heap references require immutable/static metadata or explicit `HeapRoot`. | No blanket per-page root registration for checked Rift regions. | Partially satisfied; root-free SafeZone-backed lowering is not a safety claim yet. |
 | Outer-to-inner region references are rejected unless lifetimes are equal/proven. | No close-time scan to discover illegal outer references. | Partially satisfied by owner-token APIs and negative probes. |
 | Escaping closures cannot capture region values. | No runtime closure-capture tracker. | Satisfied by current negative compiler probes. |
-| Use-after-close/reset is rejected by API/lifetime shape. | Hot paths should not rely on dynamic use-after-close checks for correctness. | Public low-level APIs remain defensive; the new operator-owned page/token append path removes selected checks after targeted stale-bucket probes. |
+| Use-after-close/reset is rejected by API/lifetime shape. | Hot paths should not rely on dynamic use-after-close checks for correctness. | Public low-level APIs remain defensive. `OpenStreamingRegion` is now compiler-guarded against direct user `close()`/`reset()`, and operator-owned page/token paths remove selected checks after stale-bucket probes. |
 | Diagnostics are opt-in. | No per-allocation global atomics for byte counters or trace stats. | Already improved for Rift allocation stats; SafeZone trace remains diagnostic-only. |
 
 ## Already Removed Or Avoided
@@ -33,6 +33,10 @@ separates three states:
 | Per-record bucket open check and child-region lookup in the page/token append path | `StreamPageTokenAppendWindow` owns bucket lookup, caches the child region once per bucket, and appends through an owned path that skips per-record `bucket.child.checkOpen()` and stale-current `isOpen` checks. | Focused 1M `rift-checked-page-token` is `27.141 ms` vs current `rift-checked-rift` `30.819 ms`; generated Common Crawl-shaped q1/q2 checked rows improve by `16.2-18.5%` versus current checked. |
 | Page-token no-drain close for append-only/aggregate-on-append shapes | `closePageTokenAppendBucketsBeforeNoDrain` and `closeAllPageTokenAppendBucketsNoDrain` clear parent bucket refs and close child regions without cursor traversal when the operator has already completed query work on append. | Safety/runtime probes pass, but the 1M cost matrix did not materially improve. Keep as an operator-owned option, not a headline speedup. |
 | Generic checked `allocImpl/checkOpen` in operator-owned page-token child buckets | `OpenStreamingRegion` plus `allocOpen(...)` lets lowering call `RiftRegion.allocUncheckedImpl(...)` only when the page-token operator owns bucket open/close order. | Validation passes. Focused 1M checked scoped page-token is `73.632/83.177/82.198 ms` on append-only/drain/aggregate versus heap `76.295/85.873/84.354 ms`; DSPBench Fraud q2 improves slightly to `797.782 ms` checked scoped versus heap `806.697 ms`. |
+| Direct user close/reset on open allocation handles | `OpenStreamingRegion` is the internal allocation-capable handle; lifecycle must be owned by `epoch`, page-token, or window operators. | Compiler probes now reject `epoch.close()` and `epoch.reset()` through an open handle, while the Rift runtime implementation remains allowed to close the child in its owning boundary. This closes the first active/closed typestate gap behind the existing `allocOpen` fast path. |
+| Missing mixed-reference probes on operator-owned open paths | Static/immutable metadata and explicit `HeapRoot` bridge handles need to work through the same open allocation paths used by page/window and epoch-buffer operators. | Compiler probes now cover static metadata, `HeapRoot`, and unrooted dynamic metadata rejection for page-token append, page-token map/filter, page-token count-by-key, and epoch-buffer `allocOpen` paths. |
+| Public stale page-token child allocation after close | Public defensive region handles must still reject use-after-close even when operator-owned fast paths skip checks. | Runtime probes now reject allocation through a public page-token child region after `closeAllPageTokenAppendBucketsWithCursor` for both Rift and SafeZone-backed checked regions. |
+| Rift allocation counters in L1 final-clean runs | `RIFT_FINAL_CLEAN=1` now disables Rift raw/object/byte allocation counters by default; `RIFT_ALLOC_STATS=1` forces them back on for diagnostics. | Focused 5M `ObjectAllocationLoweringMatrix` `rift-checked-rift` improves from `87.999 ms` with counters forced on to `76.345 ms` with counters disabled, same checksum and zero GC. L2/stat rows keep counters enabled by default. |
 | SafeZone root tracking in unsafe lower-bound mode | `safezone-rootless-32k` disables root add/remove. | Useful lower bound only; not a safety result. |
 
 ## Safe But Not Yet Removed
@@ -43,10 +47,11 @@ behavior.
 
 | Candidate overhead | Why it looks removable | Required proof/test before removal |
 |---|---|---|
-| `bucket.child.checkOpen()` in generic checked append/fold/join hot paths | Checked bucket owner tokens should prevent appending to a closed child bucket. | Removed only in the new page/token operator-owned path. Generic low-level APIs and fold/join/rank paths still need their own stale-token probes before removal. |
-| `current.isOpen` check in generic current-bucket fast paths | A closed current bucket should be impossible after structured close updates arena state. | Removed only in the new page/token operator-owned path. Other windows still need stale-current probes. |
+| `bucket.child.checkOpen()` in generic checked append/fold/join hot paths | Checked bucket owner tokens should prevent appending to a closed child bucket. | Removed only in the new page/token operator-owned path. Generic low-level APIs and fold/join/rank paths still need their own stale-token probes before removal. The open-region audit also found that page-token open handles are not yet statically linear after close, so public defensive checks stay. |
+| `current.isOpen` check in generic current-bucket fast paths | A closed current bucket should be impossible after structured close updates arena state. | Removed only in selected page/token operator-owned paths. Other windows still need stale-current probes, and open handles must become statically linear before more public checks can be removed. |
 | SafeZone roots for root-free checked rows | If region objects contain only region references or statically safe immutable/rooted heap references, the GC should not need region pages as roots. | Root-free eligibility analysis plus negative tests for unrooted region-to-heap, heap-retains-region, and outer-retains-inner. |
 | HeapRoot list maintenance for root-free regions | Root-free rows should not retain dynamic heap handles. | Separate root-free backend mode that rejects `HeapRoot` use or proves all handles are static/immutable. |
+| Remaining public `isOpen` checks | Low-level public region handles can still be used outside operator-owned helper paths. | Keep defensive checks until a public active/closed typestate API exists. The current compiler restriction only justifies internal/generated open-handle fast paths. |
 
 ## Costs That Are Not Memory-Safety Overhead
 

@@ -1,11 +1,13 @@
 # Object Allocation Lowering Matrix
 
 Date: 2026-05-05
+Last updated: 2026-05-12 13:35 CEST
 
 Status: refined retained-region-array matrix validated at 20k smoke, 100k, 1M,
-and 10M. This benchmark isolates ordinary Scala object construction through
-heap, trusted Rift, checked Rift, and checked SafeZone-backed allocation paths
-without stream-window, ranking, aggregation, or output work.
+and 10M, plus a 2026-05-12 focused final-clean allocator-counter gate. This
+benchmark isolates ordinary Scala object construction through heap, trusted
+Rift, checked Rift, and checked SafeZone-backed allocation paths without
+stream-window, ranking, aggregation, or output work.
 
 ## Purpose
 
@@ -124,6 +126,25 @@ First implementation change before measurement: explicit `@noinline` barriers
 were removed from the checked Rift and checked SafeZone-backed `allocImpl`
 backend methods. This is intentionally narrow; deeper compiler/runtime
 intrinsic lowering should wait until these rows are interpreted.
+
+Second implementation change, 2026-05-12: Rift allocation counters are now
+disabled automatically when `RIFT_FINAL_CLEAN=1`, with `RIFT_ALLOC_STATS=1`
+available to force them back on for diagnostics. This removes per-allocation
+raw/object/byte counter maintenance from L1-style headline binaries while
+leaving L2/stat runs unchanged by default.
+
+Focused 5M checked Rift allocation-counter gate, 5 measured runs:
+
+| Mode / env | Median ms | GC median ms | Region objects | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|
+| `rift-checked-rift`, `RIFT_FINAL_CLEAN=1` | 76.345 | 0.000 | 0 | 203669504 | -1183547843768457859 |
+| `rift-checked-rift`, `RIFT_FINAL_CLEAN=1 RIFT_ALLOC_STATS=1` | 87.999 | 0.000 | 5000001 | 203653120 | -1183547843768457859 |
+
+Interpretation: disabling Rift allocation counters in final-clean mode improves
+this focused checked Rift allocation path by about `13%` without changing the
+object graph or checksum. This is a measurement-clean/headline-mode
+optimization; L2 rows should keep allocation stats enabled when object/open/
+close counts are needed for interpretation.
 
 Validation note: an initial 20k construct-only smoke linked and emitted rows,
 but was rejected as evidence because checked allocations could be optimized

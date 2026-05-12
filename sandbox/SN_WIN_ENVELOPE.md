@@ -1,7 +1,7 @@
 # Scala Native Win Envelope
 
 Date: 2026-05-01
-Last updated: 2026-05-08 22:16 CEST
+Last updated: 2026-05-11 12:43 CEST
 
 Status: Phase 6/7 evidence synthesis. This note classifies where Rift currently
 wins against Scala Native Immix, where it only reduces memory pressure, and
@@ -91,6 +91,16 @@ closed with a checked region-captured array row:
 `checked-epoch-stream` `230.000 ms` and `checked-epoch-scoped` `230.799 ms`
 versus heap `235.554 ms`; it is a modest CPU-bound win because heap timed GC
 is only `3.333 ms`.
+
+The latest Yak real-text follow-up adds Stack Exchange AskUbuntu
+`topwordreal`. The input is the public AskUbuntu `Posts.xml` dump tokenized
+into real title/body word keys, then replayed as 10M epoch-local `WordRecord`
+objects. L1 10M x5 rows show `checked-epoch-scoped` at `3.86 s`, `94 MB` RSS
+versus heap `4.19 s`, `428 MB` RSS; the matching L2 row is
+`checked-epoch-scoped` `207.490 ms`, GC `0 ms`, versus heap `269.491 ms`,
+median GC `23.715 ms`. This is the first real text/top-word checked epoch row.
+`checked-epoch-topk-scoped` is still slower than direct epoch (`4.12 s` L1),
+so reusable top-k remains a useful but gated operator-cost target.
 
 UnsafeZone-HP checkpoint: `evidence/UNSAFEZONE_HP_BASELINE_MATRIX.md` adds a
 benchmark-only SafeZone no-root control (`SAFEZONE_ROOTS_MODE=3`,
@@ -185,6 +195,7 @@ live window payload still dominate.
 | Yak GraphChi-style | 40 x 16 x 15625 edges | Streaming `236.388 ms` | heap `302.599 ms` | Region-friendly vs heap, not improved SafeZone | Local methodology reproduction |
 | Yak grouped sort | 10 x 100k records | HPZone `227.393 ms` | heap `237.354 ms` | CPU/sort-bound, modest allocator win | Local methodology reproduction |
 | Yak real graph replay | 50M SNAP LiveJournal edges | API-backed direct epoch `checked-epoch-scoped` `1055.958 ms`, `checked-epoch-stream` `1101.001 ms`, RSS about `1.53 GB`; older topology rows: low-RSS epoch `1069.241/1113.261 ms`, region baselines `1256.538/1345.479 ms`; reusable `EpochBuffer` scoped `1361.752 ms`; whole-run checked scoped `1048.751 ms` but RSS `2977742848` | API-backed `gc-heap` `1604.811 ms`, GC `288.801 ms`, RSS `2759835648`; older topology heap `1618.105 ms`, GC `273.410 ms`, RSS `2761261056` | Strong real-input Yak-shaped region/RSS/GC win; checked direct epoch is now reusable API evidence; `EpochBuffer` remains a slower generic abstraction; not exact Yak/GraphChi | Local methodology reproduction over real edge list |
+| Yak real text top-word | 10M Stack Exchange AskUbuntu tokens x5 | direct checked epoch `checked-epoch-scoped` L1 `3.86 s`, RSS `94306304`; reusable top-k scoped `4.12 s`, RSS `93536256`; rooted scoped `3.97 s`, RSS `94306304` | `gc-heap` L1 `4.19 s`, RSS `427720704`; L2 heap `269.491 ms`, GC `23.715 ms` | First real text/top-word win; direct checked epoch is the best safe topology, while reusable top-k is RSS-positive but slower than direct epoch | Local Yak/Hadoop-shaped replay over real Stack Exchange text |
 | Stancu-style tx boundary | 1M transactions, 64/epoch | scoped direct checked epoch `160.198 ms`; direct checked epoch `174.137 ms` | heap `225.798 ms`; improved SafeZone `186.122 ms`; trusted Streaming `219.668 ms` | Direct checked epoch win; durable accounting arrays stay heap metadata | Local methodology reproduction, not exact Stancu/SPECjbb2005 |
 | SPECjbb2005-workload port | 8 warehouses x 100k transactions | checked epoch scoped `108.649 ms`; checked epoch stream `114.651 ms` | heap `129.674 ms`, GC `15.125 ms`; rooted scoped `122.022 ms` | Direct checked epoch win on Stancu-style warehouse range; transaction objects are region-freed | Clean-room Scala Native port, not official SPECjbb2005 |
 | Checked RegionBuffer | 1M records | checked `28.654 ms` | heap `33.825 ms` | Cheap checked container win | Focused checked API evidence |
