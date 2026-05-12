@@ -7,7 +7,6 @@
 #include <memory.h>
 #include <time.h>
 #include "Zone.h"
-#include "Util.h"
 #include "MemoryPool.h"
 
 MemoryPool *scalanative_zone_default_pool = NULL;
@@ -46,6 +45,10 @@ static unsigned long long scalanative_zone_count_pages(MemoryPage *head) {
         head = head->next;
     }
     return count;
+}
+
+static inline size_t scalanative_zone_pad8(size_t addr) {
+    return (addr + 7u) & ~(size_t)7u;
 }
 
 static void scalanative_zone_trace_report() {
@@ -105,6 +108,7 @@ void *scalanative_zone_open() {
     zone->page = NULL;
     zone->largePool = scalanative_zone_default_largepool;
     zone->largePage = NULL;
+    zone->pageSize = MemoryPool_page_size();
     if (trace) {
         scalanative_zone_trace_open_calls += 1;
     }
@@ -145,10 +149,11 @@ void scalanative_zone_close(void *_zone) {
     }
 }
 
-MemoryPage *scalanative_zone_claim(Zone *zone, size_t size) {
-    return (size <= MemoryPool_page_size())
+static MemoryPage *scalanative_zone_claim(Zone *zone, size_t size) {
+    return (size <= zone->pageSize)
                ? MemoryPool_claim(zone->pool)
-               : LargeMemoryPool_claim(zone->largePool, Util_pad(size, 8));
+               : LargeMemoryPool_claim(zone->largePool,
+                                       scalanative_zone_pad8(size));
 }
 
 void *scalanative_zone_alloc(void *_zone, void *info, size_t size) {
@@ -156,7 +161,7 @@ void *scalanative_zone_alloc(void *_zone, void *info, size_t size) {
     const bool trace = scalanative_zone_trace_enabled;
     const unsigned long long startNs =
         trace ? scalanative_zone_now_ns() : 0ULL;
-    const size_t pageSize = MemoryPool_page_size();
+    const size_t pageSize = zone->pageSize;
     const bool smallAlloc = size <= pageSize;
     bool usedSlowPath = false;
     MemoryPage *page = smallAlloc ? zone->page : zone->largePage;
@@ -171,7 +176,7 @@ void *scalanative_zone_alloc(void *_zone, void *info, size_t size) {
             }
         }
     }
-    size_t paddedOffset = Util_pad(page->offset, 8);
+    size_t paddedOffset = scalanative_zone_pad8(page->offset);
     size_t resOffset = 0;
     if (paddedOffset + size <= page->size) {
         resOffset = paddedOffset;

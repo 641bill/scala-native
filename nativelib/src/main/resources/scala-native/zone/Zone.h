@@ -10,6 +10,7 @@ typedef struct _Zone {
     LargeMemoryPool *largePool;
     MemoryPage *page;
     MemoryPage *largePage;
+    size_t pageSize;
 } Zone;
 
 /**
