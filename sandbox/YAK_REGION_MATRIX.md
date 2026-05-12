@@ -1,7 +1,7 @@
 # Yak Region Matrix
 
 Date: 2026-04-25
-Last updated: 2026-05-11 15:44 CEST
+Last updated: 2026-05-12 12:05 CEST
 
 Status: Yak-style methodology reproduction harness with validated smoke,
 default median, pressure median, external-sort-shaped median, top-word/filter
@@ -14,6 +14,9 @@ over scoped and streaming backends. Direct checked epoch now also covers the
 grouped-sort array topology. These rows are local Yak-shaped probes, not exact
 Yak/GraphChi reproduction. The latest topword follow-up adds same-shape
 retained/no-traverse heap controls and reusable `EpochTopKByKey` checked rows.
+The latest graphstep follow-up measures the profile-guided allocator cleanup:
+the checked scoped epoch row improves on the 10M graphstep baseline and remains
+the fastest safe row at the 50M graphstep profile scale.
 
 The harness is implemented in
 `sandbox/src/main/scala-next/YakRegionMatrix.scala` and run with
@@ -509,6 +512,83 @@ and
 | `graphchi` | `region-stream-rootless` | `256.171` | `0.000` | `0.496` | `10000000` | `13172736` |
 | `graphchi` | `checked-epoch-scoped` | `195.816` | `0.000` | `0.000` | `10000000` | `13221888` |
 | `graphchi` | `checked-epoch-stream` | `208.460` | `0.000` | `0.507` | `10000000` | `13172736` |
+
+## Post-Allocator-Cleanup Graphstep Timing
+
+Date: 2026-05-12
+
+Purpose:
+
+- Measure whether child `9ee340950` (`Inline zone allocation padding`) has a
+  visible timing effect after the L4 profile confirmed that
+  `MemoryPool_page_size`, `Util_pad`, and `scalanative_zone_pad8` disappeared
+  from the checked scoped Yak graphstep sample.
+- Keep this as validation of profile-guided allocator bookkeeping cleanup, not
+  as a new benchmark family.
+
+Commands:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+
+YAK_BUILD=0 \
+YAK_WORKLOAD=graphstep \
+YAK_MODES="gc-heap region-scoped-rooted checked-epoch-scoped checked-epoch-stream" \
+YAK_EPOCHS=40 \
+YAK_MESSAGES_PER_EPOCH=250000 \
+YAK_VERTICES=100000 \
+YAK_BENCHMARK_RUNS=3 \
+YAK_WARMUPS=1 \
+YAK_OUTPUT_DIR=/Users/siyaoliu/rift/cache/yak-graphstep-post-allocator-cleanup-10m-2026-05-12 \
+  zsh sandbox/run_yak_region_instrumented_matrix.sh
+
+YAK_BUILD=0 \
+YAK_WORKLOAD=graphstep \
+YAK_MODES="gc-heap region-scoped-rooted checked-epoch-scoped checked-epoch-stream" \
+YAK_EPOCHS=10 \
+YAK_MESSAGES_PER_EPOCH=5000000 \
+YAK_VERTICES=5000000 \
+YAK_BENCHMARK_RUNS=3 \
+YAK_WARMUPS=1 \
+YAK_OUTPUT_DIR=/Users/siyaoliu/rift/cache/yak-graphstep-post-allocator-cleanup-50m-2026-05-12 \
+  zsh sandbox/run_yak_region_instrumented_matrix.sh
+```
+
+Raw summaries:
+
+- `/Users/siyaoliu/rift/cache/yak-graphstep-post-allocator-cleanup-10m-2026-05-12/summary.tsv`
+- `/Users/siyaoliu/rift/cache/yak-graphstep-post-allocator-cleanup-50m-2026-05-12/summary.tsv`
+
+10M logical messages, same scale as the reusable checked epoch breadth rerun:
+
+| Mode | External real s | Median elapsed ms | Median GC ms | Median Rift op ms | Logical objects | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|
+| `gc-heap` | `1.31` | `263.051` | `40.524` | `0.000` | `10000000` | `75415552` |
+| `region-scoped-rooted` | `1.06` | `187.963` | `0.000` | `0.000` | `10000000` | `83427328` |
+| `checked-epoch-scoped` | `0.93` | `167.164` | `0.000` | `0.000` | `10000000` | `83410944` |
+| `checked-epoch-stream` | `1.02` | `186.236` | `0.000` | `0.462` | `10000000` | `83394560` |
+
+50M logical messages, same scale as the graphstep L4 profile:
+
+| Mode | External real s | Median elapsed ms | Median GC ms | Median Rift op ms | Logical objects | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|
+| `gc-heap` | `12.25` | `2276.697` | `358.012` | `0.000` | `50000000` | `1721155584` |
+| `region-scoped-rooted` | `9.76` | `1746.292` | `0.000` | `0.000` | `50000000` | `1001488384` |
+| `checked-epoch-scoped` | `9.57` | `1710.128` | `0.000` | `0.000` | `50000000` | `951566336` |
+| `checked-epoch-stream` | `11.11` | `2005.310` | `0.000` | `31.928` | `50000000` | `948404224` |
+
+Interpretation:
+
+- The 10M checked scoped row improves from the previous clean breadth rerun
+  (`181.341 ms`) to `167.164 ms`, about `7.8%` faster, while preserving the
+  same checksum. This is consistent with the L4 profile cleanup removing
+  sampled page-size and padding helper frames.
+- At 50M, checked scoped remains the fastest safe row: `1710.128 ms` L2 and
+  `9.57 s` L1 external time versus heap `2276.697 ms` / `12.25 s` and
+  rooted scoped `1746.292 ms` / `9.76 s`.
+- This is a measured allocator-bookkeeping win, not a complete solution to
+  allocation cost. The post-cleanup profile still samples allocator body,
+  mandatory zeroing, and SafeZone-backed allocation wrappers.
 
 Reusable topword top-k follow-up, 10M logical objects:
 
