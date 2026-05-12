@@ -47,9 +47,8 @@ static unsigned long long scalanative_zone_count_pages(MemoryPage *head) {
     return count;
 }
 
-static inline size_t scalanative_zone_pad8(size_t addr) {
-    return (addr + 7u) & ~(size_t)7u;
-}
+#define SCALANATIVE_ZONE_PAD8(addr)                                            \
+    (((size_t)(addr) + (size_t)7) & ~(size_t)7)
 
 static void scalanative_zone_trace_report() {
     if (!scalanative_zone_trace_enabled) {
@@ -153,7 +152,7 @@ static MemoryPage *scalanative_zone_claim(Zone *zone, size_t size) {
     return (size <= zone->pageSize)
                ? MemoryPool_claim(zone->pool)
                : LargeMemoryPool_claim(zone->largePool,
-                                       scalanative_zone_pad8(size));
+                                       SCALANATIVE_ZONE_PAD8(size));
 }
 
 void *scalanative_zone_alloc(void *_zone, void *info, size_t size) {
@@ -176,7 +175,7 @@ void *scalanative_zone_alloc(void *_zone, void *info, size_t size) {
             }
         }
     }
-    size_t paddedOffset = scalanative_zone_pad8(page->offset);
+    size_t paddedOffset = SCALANATIVE_ZONE_PAD8(page->offset);
     size_t resOffset = 0;
     if (paddedOffset + size <= page->size) {
         resOffset = paddedOffset;
