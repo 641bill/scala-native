@@ -74,13 +74,20 @@ object LogHubRegionConfig {
 
   val fileBackedInput: Boolean =
     inputMode match {
-      case "generated"   => false
-      case "file-backed" => true
+      case "generated"      => false
+      case "file-backed"    => true
+      case "streaming-file" => false
       case other =>
         throw new IllegalArgumentException(
-          s"unknown LOGHUB_INPUT_MODE '$other'; expected generated or file-backed"
+          s"unknown LOGHUB_INPUT_MODE '$other'; expected generated, file-backed, or streaming-file"
         )
     }
+
+  val streamingFileInput: Boolean =
+    inputMode == "streaming-file"
+
+  val realFileInput: Boolean =
+    fileBackedInput || streamingFileInput
 }
 
 object LogHubRegionMatrixHelpers {
@@ -364,6 +371,17 @@ object LogHubRegionMatrixHelpers {
         rows,
         cfg.inputPaths.length
       )
+    } else if (cfg.streamingFileInput) {
+      if (cfg.inputPaths.isEmpty)
+        throw new IllegalArgumentException(
+          "LOGHUB_INPUT_MODE=streaming-file requires LOGHUB_INPUT or LOGHUB_INPUTS"
+        )
+      new InputData(
+        if (cfg.inputPaths.length == 1) "real-loghub-streaming-file"
+        else s"real-loghub-streaming-file-${cfg.inputPaths.length}files",
+        cfg.lines,
+        cfg.inputPaths.length
+      )
     } else {
       new InputData("generated-loghub-shaped", cfg.lines, 0)
     }
@@ -620,7 +638,7 @@ object LogHubRegionMatrixHelpers {
   }
 
   private def foreachLine(consumer: LineConsumer^): Int =
-    if (LogHubRegionConfig.fileBackedInput) foreachFileBackedLine(consumer)
+    if (LogHubRegionConfig.realFileInput) foreachFileBackedLine(consumer)
     else foreachGeneratedLine(consumer)
 
   private def appendRecord(bucket: HeapBucket, record: HeapRecord): Unit = {
@@ -1399,9 +1417,9 @@ object LogHubRegionMatrixHelpers {
       retainRecords: Boolean = false
   ): RunOutcome = {
     val cfg = LogHubRegionConfig
-    if (cfg.fileBackedInput)
+    if (cfg.realFileInput)
       throw new IllegalArgumentException(
-        "LogHub heap direct-epoch currently requires generated/indexable input; use page-token for file-backed rows"
+        "LogHub heap direct-epoch currently requires generated/indexable input; use page-token for real file rows"
       )
     if (!windowQuery(query))
       throw new IllegalArgumentException(
@@ -1594,9 +1612,9 @@ object LogHubRegionMatrixHelpers {
       stream: RiftRegion.StreamingRegion^
   ): RunOutcome = {
     val cfg = LogHubRegionConfig
-    if (cfg.fileBackedInput)
+    if (cfg.realFileInput)
       throw new IllegalArgumentException(
-        "LogHub checked direct-epoch currently requires generated/indexable input; use page-token for file-backed rows"
+        "LogHub checked direct-epoch currently requires generated/indexable input; use page-token for real file rows"
       )
     if (!windowQuery(query))
       throw new IllegalArgumentException(

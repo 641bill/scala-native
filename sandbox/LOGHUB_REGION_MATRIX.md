@@ -1,14 +1,15 @@
 # LogHub Region Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-11 20:42 CEST
+Last updated: 2026-05-13 16:44 CEST
 
 Status: implemented real-input candidate. The matrix has a generated fallback
-for compile/smoke validation and a file-backed byte-line path for extracted
-real LogHub files. The first real BGL rows, the richer BGL q3
-template/session extension, and the HDFS v1 follow-up are correctness-valid
-and show modest throughput/RSS/fixed-memory value, but not a flagship
-GC-heavy case.
+for compile/smoke validation, a file-backed byte-line path for extracted
+real LogHub files, and an explicit `streaming-file` label for bounded replay
+that consumes real log lines during each benchmark run. The first real BGL
+rows, the richer BGL/HDFS q3 template/session extension, and the HDFS v1
+follow-ups are correctness-valid and show modest throughput/RSS/fixed-memory
+value, but not a flagship GC-heavy case.
 
 ## Goal
 
@@ -35,6 +36,14 @@ Use real extracted LogHub files once downloaded:
 ```sh
 LOGHUB_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/loghub/HDFS/HDFS.log
 LOGHUB_INPUT_MODE=file-backed
+```
+
+Use explicit streaming-input replay when the row should be classified as
+`real-streaming-input`:
+
+```sh
+LOGHUB_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/loghub/HDFS_1/HDFS.log
+LOGHUB_INPUT_MODE=streaming-file
 ```
 
 Current local real input:
@@ -81,8 +90,8 @@ page-token. Set `RIFT_BENCH_INCLUDE_CONTROLS=1` or pass `LOGHUB_MODES=...` to
 include rootless/trusted controls.
 
 The direct-epoch modes currently support generated/indexable q2/q3 rows only.
-Real file-backed LogHub rows remain page-token rows until a preloaded real-log
-path or streaming bucket iterator is added.
+Real file-backed and streaming-file LogHub rows remain page-token rows until a
+preloaded real-log path or indexable streaming bucket iterator is added.
 
 ## Commands
 
@@ -337,6 +346,93 @@ Checked scoped page-token essentially ties heap on total file-backed elapsed
 about `79 MB`. The L2 row remains the source for GC interpretation: heap q2
 spends `92.659 ms` median in timed GC while checked scoped page-token reports
 zero timed GC.
+
+### HDFS v1 q3 template/session streaming-file row
+
+`LOGHUB_INPUT_MODE=streaming-file` was added on 2026-05-13 so richer
+template/session LogHub rows can be reported as true streaming-input replay.
+The mode consumes real HDFS log lines during each benchmark run and does not
+pre-count or retain a parsed total-input array. The query is the existing
+`q3-template-session`: each line produces a base log record, template-token
+records, and a session-candidate record; each bucket/window counts session
+summaries.
+
+20k smoke command:
+
+```sh
+LOGHUB_BUILD=0 \
+LOGHUB_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/loghub/HDFS_1/HDFS.log \
+LOGHUB_INPUT_MODE=streaming-file \
+LOGHUB_LINES=20000 \
+LOGHUB_LINES_PER_BUCKET=5000 \
+LOGHUB_BENCHMARK_RUNS=1 \
+LOGHUB_WARMUPS=0 \
+LOGHUB_QUERIES="q3-template-session" \
+LOGHUB_MODES="heap-immix safezone-improved-32k rift-checked-safezone-page-token" \
+LOGHUB_OUTPUT_DIR=/tmp/rift-loghub-hdfs-q3-streaming-smoke \
+zsh sandbox/run_loghub_region_matrix.sh
+```
+
+The 20k smoke matched checksum `-1322922221986591888` and output count
+`11288` across all modes.
+
+100k and 1M L2 commands used the same source path and
+`LOGHUB_INPUT_MODE=streaming-file`, with `LOGHUB_BENCHMARK_RUNS=3` and
+`LOGHUB_WARMUPS=1`. Output directories:
+
+- `/tmp/rift-loghub-hdfs-q3-streaming-100k-l2`
+- `/tmp/rift-loghub-hdfs-q3-streaming-1m-l2`
+
+| Scale | Mode | L2 median ms | GC median ms | GC max ms | Runs with GC | RSS bytes | Checksum | Output |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 20k | `heap-immix` | `178.894` | `2.245` | `2.245` | `1/1` | `21905408` | `-1322922221986591888` | `11288` |
+| 20k | `safezone-improved-32k` | `178.781` | `0.000` | `0.000` | `0/1` | `27754496` | `-1322922221986591888` | `11288` |
+| 20k | `rift-checked-safezone-page-token` | `180.148` | `0.000` | `0.000` | `0/1` | `27770880` | `-1322922221986591888` | `11288` |
+| 100k | `heap-immix` | `866.557` | `0.000` | `38.107` | `1/3` | `187351040` | `-7896190325663806060` | `28131` |
+| 100k | `safezone-improved-32k` | `869.785` | `0.000` | `15.673` | `1/3` | `176324608` | `-7896190325663806060` | `28131` |
+| 100k | `rift-checked-safezone-page-token` | `868.792` | `0.000` | `17.880` | `1/3` | `176373760` | `-7896190325663806060` | `28131` |
+| 1M | `heap-immix` | `8546.791` | `97.322` | `131.533` | `2/3` | `1144930304` | `1444622413215935538` | `81897` |
+| 1M | `safezone-improved-32k` | `8567.481` | `53.908` | `60.798` | `2/3` | `693338112` | `1444622413215935538` | `81897` |
+| 1M | `rift-checked-safezone-page-token` | `8763.838` | `44.517` | `58.455` | `2/3` | `693305344` | `1444622413215935538` | `81897` |
+
+L1 final-clean command:
+
+```sh
+RIFT_FINAL_CLEAN=1 \
+LOGHUB_BUILD=0 \
+LOGHUB_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/loghub/HDFS_1/HDFS.log \
+LOGHUB_INPUT_MODE=streaming-file \
+LOGHUB_LINES=1000000 \
+LOGHUB_LINES_PER_BUCKET=100000 \
+LOGHUB_BENCHMARK_RUNS=3 \
+LOGHUB_WARMUPS=0 \
+LOGHUB_QUERIES="q3-template-session" \
+LOGHUB_MODES="heap-immix safezone-improved-32k rift-checked-safezone-page-token" \
+LOGHUB_OUTPUT_DIR=/tmp/rift-loghub-hdfs-q3-streaming-1m-l1 \
+zsh sandbox/run_loghub_region_matrix.sh
+```
+
+| Mode | L1 external real s | User s | Sys s | RSS bytes | Checksum | Output |
+|---|---:|---:|---:|---:|---:|---:|
+| `heap-immix` | `26.88` | `26.50` | `0.29` | `861995008` | `1444622413215935538` | `81897` |
+| `safezone-improved-32k` | `30.17` | `29.78` | `0.27` | `130220032` | `1444622413215935538` | `81897` |
+| `rift-checked-safezone-page-token` | `30.29` | `30.08` | `0.15` | `130252800` | `1444622413215935538` | `81897` |
+
+Interpretation:
+
+- This is a true `real-streaming-input` row: the HDFS file is consumed during
+  each benchmark run, and memory is bounded by active page/window buckets plus
+  durable query state.
+- The row is useful RSS/fixed-memory and GC-tail evidence, not a throughput
+  win. L1 checked scoped page-token is about `12.7%` slower than heap
+  (`30.29 s` versus `26.88 s`) but cuts max RSS from about `862 MB` to
+  `130 MB`.
+- L2 shows heap GC is present but still not dominant: `97.322 ms` median and
+  `131.533 ms` max GC on an `8546.791 ms` heap loop. Checked scoped page-token
+  lowers median/max timed GC but does not overcome parser/query CPU.
+- Decision: keep this as a richer LogHub streaming session/template control
+  and park it unless heap caps or a more naturally retained session query
+  exposes larger fixed-memory or latency pressure.
 
 ### Spark q3 template/session, 1M control row
 
