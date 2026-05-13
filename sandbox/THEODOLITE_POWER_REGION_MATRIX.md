@@ -1,7 +1,7 @@
 # Theodolite Power Region Matrix
 
 Date: 2026-05-11
-Last updated: 2026-05-13 13:35 CEST
+Last updated: 2026-05-13 15:21 CEST
 
 Status: implemented a local single-process Theodolite UC2/UC4-style real-input
 kernel over the UCI Household Electric Power Consumption trace. This is not an
@@ -13,6 +13,9 @@ overhead does not hide memory-management behavior. The matrix now also has an
 explicit `THEODOLITE_POWER_INPUT_MODE=streaming-file` path: real records are
 parsed inside each benchmark run, no parsed full-input arrays are retained, and
 active memory is bounded by the current epoch plus durable aggregate metadata.
+The streaming path now uses the shared byte-line reader and a reusable
+semicolon-delimited byte-field cursor instead of `String.split`, so the parser
+does not manufacture a `String[]` per record.
 
 ## Input
 
@@ -109,7 +112,7 @@ THEODOLITE_POWER_OUTPUT_DIR=/Users/siyaoliu/rift/cache/theodolite-power-full-q2-
 zsh sandbox/run_theodolite_power_region_matrix.sh
 ```
 
-1M q2 streaming-file L1/L2:
+1M q2 streaming-file L1/L2 with byte-field parser:
 
 ```sh
 cd /Users/siyaoliu/rift/scala-native-rift
@@ -122,7 +125,7 @@ THEODOLITE_POWER_BENCHMARK_RUNS=3 \
 THEODOLITE_POWER_WARMUPS=0 \
 THEODOLITE_POWER_QUERIES="q2-hierarchical" \
 THEODOLITE_POWER_MODES="heap-immix region-scoped-rooted checked-epoch-scoped" \
-THEODOLITE_POWER_OUTPUT_DIR=/tmp/rift-theodolite-streaming-1m-20260513 \
+THEODOLITE_POWER_OUTPUT_DIR=/tmp/rift-theodolite-bytecursor-1m-20260513 \
 zsh sandbox/run_theodolite_power_region_matrix.sh
 
 RIFT_FINAL_CLEAN=1 \
@@ -135,7 +138,7 @@ THEODOLITE_POWER_BENCHMARK_RUNS=3 \
 THEODOLITE_POWER_WARMUPS=0 \
 THEODOLITE_POWER_QUERIES="q2-hierarchical" \
 THEODOLITE_POWER_MODES="heap-immix region-scoped-rooted checked-epoch-scoped" \
-THEODOLITE_POWER_OUTPUT_DIR=/tmp/rift-theodolite-streaming-1m-l1-20260513 \
+THEODOLITE_POWER_OUTPUT_DIR=/tmp/rift-theodolite-bytecursor-1m-l1-20260513 \
 zsh sandbox/run_theodolite_power_region_matrix.sh
 ```
 
@@ -201,25 +204,25 @@ process: `3`. No internal GC/region counter reads in the timed query loop.
 
 Input mode: `THEODOLITE_POWER_INPUT_MODE=streaming-file`. The benchmark parses
 the real power trace inside each run instead of preloading parsed primitive
-arrays before timing.
+arrays before timing. The current row uses the byte-line/byte-field parser.
 
 1M L2 standard-stats row. Records: `1000000`. Epoch size: `25000`. Runs: `3`,
 warmups: `0`.
 
 | Mode | External s | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes | Output count |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `heap-immix` | `12.32` | `2479.703` | `143.088` | `143.944` | `3/3` | `147292160` | `40960` |
-| `region-scoped-rooted` | `12.46` | `2542.816` | `47.324` | `50.442` | `3/3` | `150585344` | `40960` |
-| `checked-epoch-scoped` | `12.97` | `2436.713` | `54.154` | `76.680` | `3/3` | `150585344` | `40960` |
+| `heap-immix` | `4.90` | `1007.030` | `19.932` | `20.834` | `3/3` | `75284480` | `40960` |
+| `region-scoped-rooted` | `4.79` | `977.056` | `0.000` | `0.000` | `0/3` | `78544896` | `40960` |
+| `checked-epoch-scoped` | `4.76` | `967.144` | `0.000` | `0.000` | `0/3` | `78528512` | `40960` |
 
 1M L1 final-clean row. Runs per external process: `3`. No internal
 GC/region counter reads in the timed query loop.
 
 | Mode | External real s | External user s | External sys s | RSS bytes | Output count |
 |---|---:|---:|---:|---:|---:|
-| `heap-immix` | `10.92` | `10.10` | `0.10` | `147144704` | `40960` |
-| `region-scoped-rooted` | `10.07` | `9.78` | `0.09` | `25247744` | `40960` |
-| `checked-epoch-scoped` | `10.07` | `9.78` | `0.09` | `29605888` | `40960` |
+| `heap-immix` | `3.87` | `3.80` | `0.05` | `75300864` | `40960` |
+| `region-scoped-rooted` | `3.88` | `3.81` | `0.04` | `15925248` | `40960` |
+| `checked-epoch-scoped` | `3.77` | `3.70` | `0.04` | `24854528` | `40960` |
 
 ## Interpretation
 
@@ -240,15 +243,18 @@ GC-heavy flagship:
   faster (`5.45 s` versus heap `5.46 s`) with slightly lower RSS (`304 MB`
   versus heap `307 MB`). Parser/file CPU dominates the end-to-end workload.
 
-The new streaming-file q2 row is stronger than the older preloaded/full-local
+The streaming-file q2 row is stronger than the older preloaded/full-local
 control because it keeps the input source true to stream-processing semantics.
-At 1M records, checked scoped epoch is an L1 throughput/RSS/fixed-memory win
-(`10.07 s`, `29.6 MB` RSS) versus heap (`10.92 s`, `147.1 MB` RSS). L2 shows
-heap has visible GC (`143.088 ms` median), while checked scoped still reports
-some GC (`54.154 ms`) because the file parser allocates heap strings/split
-arrays in all modes.
+The first streaming-file row used `String.split`; the byte-field parser is the
+cleaner current result. It cuts heap L2 from `2479.703 ms` and `143.088 ms`
+GC to `1007.030 ms` and `19.932 ms` GC, showing that parser allocation was
+inflating the first streaming row. With parser allocation controlled, checked
+scoped epoch remains an L1 throughput/RSS/fixed-memory win (`3.77 s`,
+`24.9 MB` RSS) versus heap (`3.87 s`, `75.3 MB` RSS), and removes timed heap
+GC in L2 (`967.144 ms`, `0 ms` GC).
 
 Decision: keep Theodolite streaming-file q2 as real-streaming-input
 throughput/RSS/fixed-memory evidence. It is still not the missing flagship
-"huge GC" stream case because parser/string work remains dominant and region
-placement does not remove all parser allocation.
+"huge GC" stream case; after parser allocation is controlled, heap GC is about
+`2%` of L2 elapsed, and the remaining work is source scanning, query CPU, and
+ordinary retained measurement/contribution objects.

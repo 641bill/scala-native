@@ -210,68 +210,65 @@ object TheodolitePowerRegionMatrixHelpers {
 
   private lazy val loadedInput: InputData = loadInput()
 
-  private def parseMilliDecimal(value: String): Int =
-    if (value == null || value.isEmpty || value == "?") -1
-    else {
-      var whole = 0
-      var frac = 0
-      var fracDigits = 0
-      var seenDot = false
-      var i = 0
-      while (i < value.length) {
-        val c = value.charAt(i)
-        if (c == '.') seenDot = true
-        else if (c >= '0' && c <= '9') {
-          val digit = c - '0'
-          if (seenDot && fracDigits < 3) {
-            frac = frac * 10 + digit
-            fracDigits += 1
-          } else if (!seenDot) {
-            whole = whole * 10 + digit
-          }
-        } else return -1
-        i += 1
-      }
-      while (fracDigits < 3) {
-        frac *= 10
-        fracDigits += 1
-      }
-      whole * 1000 + frac
-    }
-
-  private def parseIntDecimal(value: String): Int = {
-    val milli = parseMilliDecimal(value)
-    if (milli < 0) -1 else milli / 1000
-  }
-
   private var parsedTotalMilliW = 0
   private var parsedSub1Watt = 0
   private var parsedSub2Watt = 0
   private var parsedSub3Watt = 0
   private var parsedVoltageDeci = 0
+  private val fieldCursor = new BenchmarkInputSupport.DelimitedByteFields(';')
 
-  private def parseLineScratch(line: String): Boolean = {
-    val parts = line.split(";")
-    if (parts.length < 9) false
-    else {
-      val active = parseMilliDecimal(parts(2))
-      val volt = parseMilliDecimal(parts(4))
-      val s1 = parseIntDecimal(parts(6))
-      val s2 = parseIntDecimal(parts(7))
-      val s3 = parseIntDecimal(parts(8))
-      if (active >= 0 && volt >= 0 && s1 >= 0 && s2 >= 0 && s3 >= 0) {
-        parsedTotalMilliW = active
-        parsedVoltageDeci = volt / 100
-        parsedSub1Watt = s1
-        parsedSub2Watt = s2
-        parsedSub3Watt = s3
-        true
-      } else false
-    }
+  private def parseCurrentLine(
+      bytes: Array[Byte],
+      length: Int
+  ): Boolean = {
+    fieldCursor.reset(bytes, length)
+    if (!fieldCursor.advanceTo(2)) return false
+    val active = BenchmarkInputSupport.parseMilliDecimal(
+      bytes,
+      fieldCursor.offset,
+      fieldCursor.length
+    )
+    if (!fieldCursor.advanceTo(4)) return false
+    val volt = BenchmarkInputSupport.parseMilliDecimal(
+      bytes,
+      fieldCursor.offset,
+      fieldCursor.length
+    )
+    if (!fieldCursor.advanceTo(6)) return false
+    val s1 = BenchmarkInputSupport.parseIntDecimal(
+      bytes,
+      fieldCursor.offset,
+      fieldCursor.length
+    )
+    if (!fieldCursor.advanceTo(7)) return false
+    val s2 = BenchmarkInputSupport.parseIntDecimal(
+      bytes,
+      fieldCursor.offset,
+      fieldCursor.length
+    )
+    if (!fieldCursor.advanceTo(8)) return false
+    val s3 = BenchmarkInputSupport.parseIntDecimal(
+      bytes,
+      fieldCursor.offset,
+      fieldCursor.length
+    )
+    if (active >= 0 && volt >= 0 && s1 >= 0 && s2 >= 0 && s3 >= 0) {
+      parsedTotalMilliW = active
+      parsedVoltageDeci = volt / 100
+      parsedSub1Watt = s1
+      parsedSub2Watt = s2
+      parsedSub3Watt = s3
+      true
+    } else false
   }
 
-  private def parseLine(line: String, index: Int, consumer: PowerConsumer): Boolean = {
-    if (parseLineScratch(line)) {
+  private def parseLine(
+      bytes: Array[Byte],
+      length: Int,
+      index: Int,
+      consumer: PowerConsumer
+  ): Boolean = {
+    if (parseCurrentLine(bytes, length)) {
       consumer(
         index,
         parsedTotalMilliW,
@@ -288,15 +285,15 @@ object TheodolitePowerRegionMatrixHelpers {
 
   private def foreachStreamingRecord(consumer: PowerConsumer): Int = {
     val cfg = TheodolitePowerRegionConfig
-    val reader = BenchmarkInputSupport.openText(cfg.input)
+    val reader = BenchmarkInputSupport.openByteLines(cfg.input)
     var count = 0
     try {
-      var line = reader.readLine() // header
-      line = reader.readLine()
-      while (line != null && count < cfg.requestedRecords) {
-        if (parseLine(line, count, consumer))
+      reader.readLine() // header
+      var length = reader.readLine()
+      while (length >= 0 && count < cfg.requestedRecords) {
+        if (parseLine(reader.bytes, length, count, consumer))
           count += 1
-        line = reader.readLine()
+        length = reader.readLine()
       }
     } finally {
       reader.close()
@@ -346,14 +343,15 @@ object TheodolitePowerRegionMatrixHelpers {
     val sub3 = new Array[Int](cfg.requestedRecords)
     val voltage = new Array[Int](cfg.requestedRecords)
 
-    val reader = BenchmarkInputSupport.openText(cfg.input)
+    val reader = BenchmarkInputSupport.openByteLines(cfg.input)
     var count = 0
     try {
-      var line = reader.readLine() // header
-      line = reader.readLine()
-      while (line != null && count < cfg.requestedRecords) {
+      reader.readLine() // header
+      var length = reader.readLine()
+      while (length >= 0 && count < cfg.requestedRecords) {
         parseLine(
-          line,
+          reader.bytes,
+          length,
           count,
           new PowerConsumer {
             def apply(
@@ -373,7 +371,7 @@ object TheodolitePowerRegionMatrixHelpers {
             }
           }
         )
-        line = reader.readLine()
+        length = reader.readLine()
       }
     } finally {
       reader.close()
@@ -470,19 +468,19 @@ object TheodolitePowerRegionMatrixHelpers {
     val input = loadedInput
     val sums = new Array[Long](cfg.groupCount * queryOutputMultiplier(query))
     val counts = new Array[Int](sums.length)
-    val reader = BenchmarkInputSupport.openText(cfg.input)
+    val reader = BenchmarkInputSupport.openByteLines(cfg.input)
     var checksum = 0L
     var outputs = 0L
     var index = 0
     try {
-      var line = reader.readLine() // header
-      line = reader.readLine()
-      while (line != null && index < input.records) {
+      reader.readLine() // header
+      var length = reader.readLine()
+      while (length >= 0 && index < input.records) {
         var measurementHead: HeapMeasurement = null
         var contributionHead: HeapContribution = null
         var inEpoch = 0
-        while (line != null && index < input.records && inEpoch < cfg.recordsPerEpoch) {
-          if (parseLineScratch(line)) {
+        while (length >= 0 && index < input.records && inEpoch < cfg.recordsPerEpoch) {
+          if (parseCurrentLine(reader.bytes, length)) {
             val group = groupFor(index)
             val measurement = new HeapMeasurement(
               index,
@@ -538,7 +536,7 @@ object TheodolitePowerRegionMatrixHelpers {
             index += 1
             inEpoch += 1
           }
-          line = reader.readLine()
+          length = reader.readLine()
         }
         if (inEpoch > 0) {
           retainedAnchorSink ^= {
@@ -625,14 +623,14 @@ object TheodolitePowerRegionMatrixHelpers {
     val input = loadedInput
     val sums = new Array[Long](cfg.groupCount * queryOutputMultiplier(query))
     val counts = new Array[Int](sums.length)
-    val reader = BenchmarkInputSupport.openText(cfg.input)
+    val reader = BenchmarkInputSupport.openByteLines(cfg.input)
     var checksum = 0L
     var outputs = 0L
     var index = 0
     try {
-      var line = reader.readLine() // header
-      line = reader.readLine()
-      while (line != null && index < input.records) {
+      reader.readLine() // header
+      var length = reader.readLine()
+      while (length >= 0 && index < input.records) {
         var anchor = 0L
         var inEpoch = 0
         SafeZone { sz ?=>
@@ -654,8 +652,10 @@ object TheodolitePowerRegionMatrixHelpers {
 
           var measurementHead: SZMeasurement^{sz} = null
           var contributionHead: SZContribution^{sz} = null
-          while (line != null && index < input.records && inEpoch < cfg.recordsPerEpoch) {
-            if (parseLineScratch(line)) {
+          while (
+            length >= 0 && index < input.records && inEpoch < cfg.recordsPerEpoch
+          ) {
+            if (parseCurrentLine(reader.bytes, length)) {
               val group = groupFor(index)
               val measurement = SafeZoneAllocator.allocate(
                 sz,
@@ -705,7 +705,7 @@ object TheodolitePowerRegionMatrixHelpers {
               index += 1
               inEpoch += 1
             }
-            line = reader.readLine()
+            length = reader.readLine()
           }
           val a = if (measurementHead == null) 0L else measurementHead.totalMilliW.toLong
           val b = if (contributionHead == null) 0L else contributionHead.watt.toLong
@@ -909,12 +909,12 @@ object TheodolitePowerRegionMatrixHelpers {
     var outputs = 0L
 
     def run()(using stream: RiftRegion.StreamingRegion^): Unit = {
-      val reader = BenchmarkInputSupport.openText(cfg.input)
+      val reader = BenchmarkInputSupport.openByteLines(cfg.input)
       var index = 0
       try {
-        var line = reader.readLine() // header
-        line = reader.readLine()
-        while (line != null && index < input.records) {
+        reader.readLine() // header
+        var length = reader.readLine()
+        while (length >= 0 && index < input.records) {
           var anchor = 0L
           var inEpoch = 0
           RiftRegion.epoch { region ?=>
@@ -937,9 +937,9 @@ object TheodolitePowerRegionMatrixHelpers {
             var measurementHead: CheckedMeasurement^{region} = null
             var contributionHead: CheckedContribution^{region} = null
             while (
-              line != null && index < input.records && inEpoch < cfg.recordsPerEpoch
+              length >= 0 && index < input.records && inEpoch < cfg.recordsPerEpoch
             ) {
-              if (parseLineScratch(line)) {
+              if (parseCurrentLine(reader.bytes, length)) {
                 val group = groupFor(index)
                 val measurement = RiftRegion.allocOpen(
                   new CheckedMeasurement(
@@ -1009,7 +1009,7 @@ object TheodolitePowerRegionMatrixHelpers {
                 index += 1
                 inEpoch += 1
               }
-              line = reader.readLine()
+              length = reader.readLine()
             }
             val a =
               if (measurementHead == null) 0L else measurementHead.totalMilliW.toLong

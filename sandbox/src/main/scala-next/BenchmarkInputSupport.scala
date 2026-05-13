@@ -148,6 +148,89 @@ object BenchmarkInputSupport {
   def openStreamingByteLines(paths: Array[String]): StreamingByteLineSource =
     new StreamingByteLineSource(paths)
 
+  final class DelimitedByteFields(delimiter: Int) {
+    private var bytesRef: Array[Byte] = _
+    private var lineLength = 0
+    private var currentIndex = 0
+    private var currentStart = 0
+    private var currentEnd = 0
+    private var nextOffset = 0
+    private var valid = false
+
+    def reset(bytes: Array[Byte], length: Int): Unit = {
+      bytesRef = bytes
+      lineLength = length
+      currentIndex = 0
+      currentStart = 0
+      currentEnd = 0
+      nextOffset = 0
+      valid = length >= 0
+      if (valid) readCurrent()
+    }
+
+    private def readCurrent(): Unit = {
+      currentStart = nextOffset
+      var i = nextOffset
+      while (i < lineLength && (bytesRef(i) & 0xff) != delimiter)
+        i += 1
+      currentEnd = i
+      nextOffset = if (i < lineLength) i + 1 else lineLength + 1
+    }
+
+    private def advanceOne(): Unit =
+      if (valid && nextOffset <= lineLength) {
+        currentIndex += 1
+        readCurrent()
+      } else {
+        valid = false
+      }
+
+    def advanceTo(index: Int): Boolean = {
+      while (valid && currentIndex < index) advanceOne()
+      valid && currentIndex == index
+    }
+
+    def offset: Int = currentStart
+
+    def length: Int = currentEnd - currentStart
+  }
+
+  def parseMilliDecimal(bytes: Array[Byte], offset: Int, length: Int): Int =
+    if (bytes == null || length <= 0) -1
+    else if (length == 1 && bytes(offset) == '?'.toByte) -1
+    else {
+      var whole = 0
+      var frac = 0
+      var fracDigits = 0
+      var seenDot = false
+      var i = offset
+      val end = offset + length
+      while (i < end) {
+        val c = bytes(i) & 0xff
+        if (c == '.') seenDot = true
+        else if (c >= '0' && c <= '9') {
+          val digit = c - '0'
+          if (seenDot && fracDigits < 3) {
+            frac = frac * 10 + digit
+            fracDigits += 1
+          } else if (!seenDot) {
+            whole = whole * 10 + digit
+          }
+        } else return -1
+        i += 1
+      }
+      while (fracDigits < 3) {
+        frac *= 10
+        fracDigits += 1
+      }
+      whole * 1000 + frac
+    }
+
+  def parseIntDecimal(bytes: Array[Byte], offset: Int, length: Int): Int = {
+    val milli = parseMilliDecimal(bytes, offset, length)
+    if (milli < 0) -1 else milli / 1000
+  }
+
   def stableHash(value: String): Int = {
     var h = 0x811c9dc5
     var i = 0
