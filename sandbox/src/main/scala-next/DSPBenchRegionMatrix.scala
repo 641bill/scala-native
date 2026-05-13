@@ -1,6 +1,6 @@
 import scala.language.experimental.captureChecking
 
-import scala.scalanative.memory.{RiftRegion, SafeZone}
+import scala.scalanative.memory.{RiftOpenStreamingHandle, RiftRegion, SafeZone}
 import scala.scalanative.runtime.{
   fromRawUSize,
   GC,
@@ -1894,9 +1894,11 @@ object DSPBenchRegionMatrixHelpers {
     RunOutcome(checksum, outputCount)
   }
 
-  private def runRiftCheckedPageTokenBody(query: String, modeLabel: String)(using
-      stream: RiftRegion.StreamingRegion^
-  ): RunOutcome = {
+  private def runRiftCheckedPageTokenBody(
+      query: String,
+      modeLabel: String,
+      useRiftHandle: Boolean
+  )(using stream: RiftRegion.StreamingRegion^): RunOutcome = {
     val cfg = DSPBenchRegionConfig
     val state = new MovingAverageState()
     val fraudState = new FraudPredictorState()
@@ -1997,6 +1999,36 @@ object DSPBenchRegionMatrixHelpers {
 
     var currentStartEvent = Long.MinValue
     var currentRegion: RiftRegion.OpenStreamingRegion^{stream} = null
+    var currentHandle: RiftOpenStreamingHandle^{stream} = null
+
+    def selectBucket(start: Long): Unit =
+      if (start != currentStartEvent) {
+        val bucketStarted = if (diagnostics) System.nanoTime() else 0L
+        currentStartEvent = start
+        if (useRiftHandle) {
+          currentHandle =
+            RiftRegion.pageTokenAppendRiftOpenHandleFor(
+              stream,
+              window,
+              start,
+              closeCutoff(start)
+            )(closeRecords)
+          currentRegion = null
+        } else {
+          currentRegion =
+            RiftRegion.pageTokenAppendOpenRegionFor(
+              stream,
+              window,
+              start,
+              closeCutoff(start)
+            )(closeRecords)
+          currentHandle = null
+        }
+        if (diagnostics) {
+          bucketSwitchNanos += System.nanoTime() - bucketStarted
+          bucketSwitches += 1L
+        }
+      }
 
     def processSensor(
         i: Int,
@@ -2005,47 +2037,21 @@ object DSPBenchRegionMatrixHelpers {
         hash: Long
     ): Unit = {
       val start = bucketStart(i)
-      if (start != currentStartEvent) {
-        val bucketStarted = if (diagnostics) System.nanoTime() else 0L
-        currentStartEvent = start
-        currentRegion =
-          RiftRegion.pageTokenAppendOpenRegionFor(
-            stream,
-            window,
-            start,
-            closeCutoff(start)
-          )(closeRecords)
-        if (diagnostics) {
-          bucketSwitchNanos += System.nanoTime() - bucketStarted
-          bucketSwitches += 1L
-        }
-      }
-      val sensorRecord: CheckedRecord^{stream} =
-        RiftRegion.allocOpen(
-          new CheckedRecord(10, i, device, valueScaled, 0, false, hash)
-        )(using currentRegion)
-      RiftRegion.appendPageToken(stream, window, sensorRecord)
+      selectBucket(start)
+      appendChecked(10, i, device, valueScaled, 0, false, hash)
       if (averageQuery(query)) {
         val avg = state.update(device, valueScaled)
-        val avgRecord: CheckedRecord^{stream} =
-          RiftRegion.allocOpen(
-            new CheckedRecord(20, i, device, valueScaled, avg, false, hash ^ 20L)
-          )(using currentRegion)
-        RiftRegion.appendPageToken(stream, window, avgRecord)
+        appendChecked(20, i, device, valueScaled, avg, false, hash ^ 20L)
         if (candidateQuery(query)) {
           val spike = isSpike(valueScaled, avg)
-          val candidate: CheckedRecord^{stream} =
-            RiftRegion.allocOpen(
-              new CheckedRecord(30, i, device, valueScaled, avg, spike, hash ^ 30L)
-            )(using currentRegion)
-          RiftRegion.appendPageToken(stream, window, candidate)
+          appendChecked(30, i, device, valueScaled, avg, spike, hash ^ 30L)
         }
       }
       if (i % cfg.sampleEvery == 0)
         checksum = fold(checksum, 99, i, device, valueScaled, 0, false, hash, start)
     }
 
-    def appendChecked(
+    def appendCheckedLegacy(
         kind: Int,
         i: Int,
         key: Int,
@@ -2066,6 +2072,42 @@ object DSPBenchRegionMatrixHelpers {
       }
     }
 
+    def appendCheckedHandle(
+        kind: Int,
+        i: Int,
+        key: Int,
+        value: Int,
+        score: Int,
+        flag: Boolean,
+        hash: Long
+    ): Unit = {
+      val appendStarted = if (diagnostics) System.nanoTime() else 0L
+      val record: CheckedRecord^{stream} =
+        RiftAllocator.allocateOpenHandle(
+          currentHandle,
+          new CheckedRecord(kind, i, key, value, score, flag, hash)
+        )
+      RiftRegion.appendPageToken(stream, window, record)
+      if (diagnostics) {
+        appendNanos += System.nanoTime() - appendStarted
+        appendedRecords += 1L
+      }
+    }
+
+    def appendChecked(
+        kind: Int,
+        i: Int,
+        key: Int,
+        value: Int,
+        score: Int,
+        flag: Boolean,
+        hash: Long
+    ): Unit =
+      if (useRiftHandle)
+        appendCheckedHandle(kind, i, key, value, score, flag, hash)
+      else
+        appendCheckedLegacy(kind, i, key, value, score, flag, hash)
+
     def processFraud(
         i: Int,
         entity: Int,
@@ -2073,21 +2115,7 @@ object DSPBenchRegionMatrixHelpers {
         hash: Long
     ): Unit = {
       val start = bucketStart(i)
-      if (start != currentStartEvent) {
-        val bucketStarted = if (diagnostics) System.nanoTime() else 0L
-        currentStartEvent = start
-        currentRegion =
-          RiftRegion.pageTokenAppendOpenRegionFor(
-            stream,
-            window,
-            start,
-            closeCutoff(start)
-          )(closeRecords)
-        if (diagnostics) {
-          bucketSwitchNanos += System.nanoTime() - bucketStarted
-          bucketSwitches += 1L
-        }
-      }
+      selectBucket(start)
       appendChecked(110, i, entity, stateCode, 0, false, hash)
       if (fraudPredictQuery(query)) {
         val predictStarted = if (diagnostics) System.nanoTime() else 0L
@@ -2121,21 +2149,7 @@ object DSPBenchRegionMatrixHelpers {
         hash: Long
     ): Unit = {
       val start = bucketStart(i)
-      if (start != currentStartEvent) {
-        val bucketStarted = if (diagnostics) System.nanoTime() else 0L
-        currentStartEvent = start
-        currentRegion =
-          RiftRegion.pageTokenAppendOpenRegionFor(
-            stream,
-            window,
-            start,
-            closeCutoff(start)
-          )(closeRecords)
-        if (diagnostics) {
-          bucketSwitchNanos += System.nanoTime() - bucketStarted
-          bucketSwitches += 1L
-        }
-      }
+      selectBucket(start)
       val error = statusBucket >= 400 && statusBucket < 600
       appendChecked(210, i, statusBucket, byteSize, minuteBucket, error, hash)
       if (logStatusQuery(query)) {
@@ -2216,12 +2230,29 @@ object DSPBenchRegionMatrixHelpers {
 
   private def runRiftCheckedPageToken(query: String): RunOutcome =
     RiftRegion.streaming { stream ?=>
-      runRiftCheckedPageTokenBody(query, "rift-checked-page-token")
+      runRiftCheckedPageTokenBody(
+        query,
+        "rift-checked-page-token",
+        useRiftHandle = true
+      )
+    }
+
+  private def runRiftCheckedPageTokenLegacy(query: String): RunOutcome =
+    RiftRegion.streaming { stream ?=>
+      runRiftCheckedPageTokenBody(
+        query,
+        "rift-checked-page-token-legacy",
+        useRiftHandle = false
+      )
     }
 
   private def runRiftCheckedSafeZonePageToken(query: String): RunOutcome =
     RiftRegion.streamingSafeZone { stream ?=>
-      runRiftCheckedPageTokenBody(query, "rift-checked-safezone-page-token")
+      runRiftCheckedPageTokenBody(
+        query,
+        "rift-checked-safezone-page-token",
+        useRiftHandle = false
+      )
     }
 
   private def runHeapDirectEpochAggregate(
@@ -2781,6 +2812,9 @@ object DSPBenchRegionMatrixHelpers {
       case "region-hp-rootless" | "rift-trusted-hp" => "rift-hp"
       case "region-stream-rootless" | "rift-trusted-streaming" =>
         "rift-streaming"
+      case "rift-checked-page-token-open-region" |
+          "rift-checked-page-token-legacy" =>
+        "rift-checked-page-token-legacy"
       case "checked-region-stream" | "rift-checked-page-token" =>
         "rift-checked-page-token"
       case "checked-region-scoped" | "rift-checked-safezone-page-token" =>
@@ -2803,6 +2837,7 @@ object DSPBenchRegionMatrixHelpers {
   private def usesRiftRuntime(mode: String): Boolean =
     canonicalMode(mode) match {
       case "rift-hp" | "rift-streaming" | "rift-checked-page-token" |
+          "rift-checked-page-token-legacy" |
           "rift-checked-direct-epoch" |
           "checked-epoch-retained-no-traverse" =>
         true
@@ -2813,7 +2848,8 @@ object DSPBenchRegionMatrixHelpers {
     canonicalMode(mode) match {
       case "heap" | "safezone" | "rift-hp" | "rift-streaming" |
           "heap-direct-epoch" |
-          "rift-checked-page-token" | "rift-checked-safezone-page-token" |
+          "rift-checked-page-token" | "rift-checked-page-token-legacy" |
+          "rift-checked-safezone-page-token" |
           "rift-checked-direct-epoch" |
           "rift-checked-safezone-direct-epoch" |
           "heap-epoch-retained-no-traverse" |
@@ -2849,6 +2885,8 @@ object DSPBenchRegionMatrixHelpers {
       case "rift-hp"        => runRiftTrusted(query, RiftRegion.HPZone)
       case "rift-streaming" => runRiftTrusted(query, RiftRegion.Streaming)
       case "rift-checked-page-token" => runRiftCheckedPageToken(query)
+      case "rift-checked-page-token-legacy" =>
+        runRiftCheckedPageTokenLegacy(query)
       case "rift-checked-safezone-page-token" =>
         runRiftCheckedSafeZonePageToken(query)
       case "rift-checked-direct-epoch" => runRiftCheckedDirectEpoch(query)

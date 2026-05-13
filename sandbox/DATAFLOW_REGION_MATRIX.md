@@ -1,6 +1,6 @@
 # Dataflow Region Matrix
 
-Last updated: 2026-05-08 19:10 CEST
+Last updated: 2026-05-13 12:49 CEST
 
 Status: Broom-style methodology reproduction harness with trusted
 heap/SafeZone/Rift medians, checked RegionBuffer modes, and reusable checked
@@ -35,7 +35,11 @@ Heap and Rift variants use the same logical programs:
 - `checked-epoch-stream`: checked safe-API variant using
   `RiftRegion.epoch { ... }` over the Rift streaming backend. It exposes the
   direct per-epoch topology as a reusable API rather than benchmark-local
-  reset plumbing.
+  reset plumbing. As of the 2026-05-13 handle-backed allocation gate, this
+  mode uses the open-handle fast path for SELECT, AGGREGATE, and JOIN over the
+  Rift streaming backend. Region-owned arrays are covered by making the
+  internal open handle satisfy the `SafeZone` allocation contract used by
+  Scala Native's array allocation helpers.
 - `checked-epoch-scoped`: checked safe-API variant using the same
   `RiftRegion.epoch { ... }` source shape over the SafeZone-backed scoped
   backend.
@@ -362,6 +366,143 @@ Interpretation:
 - This run did not collect peak RSS. Use the earlier native-only rows for RSS,
   or rerun this same matrix with an instrumented/native-only runner before
   using it in final paper tables.
+
+## Handle-Backed Direct Epoch Gate
+
+Date: 2026-05-13
+
+This gate checks whether the `RiftOpenStreamingHandle` allocation-lowering path
+can be promoted from focused allocation/PageToken/StreamFlex rows into the
+Broom/Dataflow direct-epoch benchmark.
+
+Outcome:
+
+- SELECT/filter/project, AGGREGATE, and JOIN now use the handle-backed
+  allocation path and keep the same checksums.
+- The earlier AGGREGATE crash was caused by region-owned table arrays:
+  `new Array[...]` in a zone is lowered through `Array.alloc(length,
+  zone: SafeZone)`, but `RiftOpenStreamingHandle` did not satisfy `SafeZone`.
+  The handle now implements the internal allocation-only `SafeZone` contract
+  and routes `allocImpl` directly to the Rift allocator. Close/reset remain
+  owner-controlled.
+- The public reporting mode `checked-epoch-stream` is now handle-backed for the
+  full Dataflow direct-epoch operator family. The explicit
+  `checked-epoch-stream-open-handle` row remains a provenance/control alias.
+
+Validation:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "nscplugin3_next/testOnly org.scalanative.RiftRegionCheckedCompilerTest"
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "tests3_next/testOnly scala.scalanative.memory.RiftRegionCheckedTest"
+
+DATAFLOW_EPOCHS=2 DATAFLOW_DOCS_PER_EPOCH=1000 \
+DATAFLOW_BENCHMARK_RUNS=1 DATAFLOW_WARMUPS=0 \
+DATAFLOW_MODES="checked-epoch-stream-legacy checked-epoch-stream checked-epoch-stream-open-handle" \
+DATAFLOW_OPERATOR=all \
+  zsh sandbox/run_dataflow_region_matrix.sh
+
+DATAFLOW_BENCHMARK_RUNS=3 DATAFLOW_WARMUPS=0 \
+DATAFLOW_MODES="checked-epoch-stream-legacy checked-epoch-stream checked-epoch-stream-open-handle" \
+DATAFLOW_OPERATOR=all \
+  zsh sandbox/run_dataflow_region_matrix.sh
+
+for op in select aggregate join; do
+  for i in 1 2 3; do
+    RIFT_FINAL_CLEAN=1 \
+    DATAFLOW_BUILD=0 \
+    DATAFLOW_EPOCHS=10 \
+    DATAFLOW_DOCS_PER_EPOCH=100000 \
+    DATAFLOW_BENCHMARK_RUNS=20 \
+    DATAFLOW_WARMUPS=0 \
+    DATAFLOW_OPERATOR=${op} \
+    DATAFLOW_MODES="gc-heap region-scoped-rooted checked-epoch-scoped checked-epoch-stream" \
+    DATAFLOW_OUTPUT_DIR=/tmp/rift-l1-dataflow-controls-${op}-20260513-r${i} \
+      zsh sandbox/run_dataflow_region_instrumented_matrix.sh
+  done
+done
+```
+
+Results:
+
+- sandbox compile: passed;
+- compiler checked-region probes: `141/141`;
+- runtime checked-region tests: `65/65`, including direct open-handle array
+  allocation;
+- parent and child `git diff --check`: passed after the evidence update.
+
+Smoke result, 2 epochs x 1000 documents:
+
+| Operator | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Checksum |
+|---|---|---:|---:|---:|---:|---:|
+| SELECT | `checked-epoch-stream-legacy` | 0.082 | 0.000 | 0.017 | 2251 | 258537945 |
+| AGGREGATE | `checked-epoch-stream-legacy` | 1.303 | 0.000 | 0.039 | 4002 | 327600108 |
+| JOIN | `checked-epoch-stream-legacy` | 0.056 | 0.000 | 0.001 | 2183 | 361336122 |
+| SELECT | `checked-epoch-stream` | 0.155 | 0.000 | 0.014 | 2251 | 258537945 |
+| AGGREGATE | `checked-epoch-stream` | 3.000 | 0.000 | 0.042 | 4002 | 327600108 |
+| JOIN | `checked-epoch-stream` | 0.084 | 0.000 | 0.002 | 2183 | 361336122 |
+| SELECT | `checked-epoch-stream-open-handle` | 0.045 | 0.000 | 0.005 | 2251 | 258537945 |
+| AGGREGATE | `checked-epoch-stream-open-handle` | 1.371 | 0.000 | 0.031 | 4002 | 327600108 |
+| JOIN | `checked-epoch-stream-open-handle` | 0.043 | 0.000 | 0.001 | 2183 | 361336122 |
+
+The tiny smoke is only a correctness/routing check. It confirms that
+handle-backed region-owned arrays no longer crash AGGREGATE.
+
+10 epochs x 100k documents, 3-run L2 medians:
+
+| Operator | Mode | Allocation path | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Checksum |
+|---|---|---|---:|---:|---:|---:|---:|
+| SELECT | `checked-epoch-stream-legacy` | old checked epoch allocation | 18.956 | 0.000 | 0.049 | 1124990 | 131080080920 |
+| SELECT | `checked-epoch-stream` | promoted handle-backed direct epoch | 17.178 | 0.000 | 0.050 | 1124990 | 131080080920 |
+| SELECT | `checked-epoch-stream-open-handle` | explicit handle-backed alias | 17.227 | 0.000 | 0.050 | 1124990 | 131080080920 |
+| AGGREGATE | `checked-epoch-stream-legacy` | old checked epoch allocation | 36.888 | 0.000 | 0.300 | 1627152 | 163835709480 |
+| AGGREGATE | `checked-epoch-stream` | promoted handle-backed direct epoch | 33.551 | 0.000 | 0.223 | 1627152 | 163835709480 |
+| AGGREGATE | `checked-epoch-stream-open-handle` | explicit handle-backed alias | 33.639 | 0.000 | 0.274 | 1627152 | 163835709480 |
+| JOIN | `checked-epoch-stream-legacy` | old checked epoch allocation | 20.270 | 0.000 | 0.056 | 1078279 | 193232836790 |
+| JOIN | `checked-epoch-stream` | promoted handle-backed direct epoch | 19.133 | 0.000 | 0.052 | 1078279 | 193232836790 |
+| JOIN | `checked-epoch-stream-open-handle` | explicit handle-backed alias | 18.409 | 0.000 | 0.053 | 1078279 | 193232836790 |
+
+10 epochs x 100k documents x 20 internal iterations, 3-process L1 medians:
+
+| Operator | Mode | L1 external total s | L1 per-iteration ms | L1 RSS bytes | Checksum |
+|---|---|---:|---:|---:|---:|
+| SELECT | `gc-heap` | 0.61 | 30.5 | 39288832 | 131080080920 |
+| SELECT | `region-scoped-rooted` | 0.44 | 22.0 | 7569408 | 131080080920 |
+| SELECT | `checked-epoch-scoped` | 0.35 | 17.5 | 7569408 | 131080080920 |
+| SELECT | `checked-epoch-stream` | 0.31 | 15.5 | 7503872 | 131080080920 |
+| AGGREGATE | `gc-heap` | 1.18 | 59.0 | 40091648 | 163835709480 |
+| AGGREGATE | `region-scoped-rooted` | 0.78 | 39.0 | 10862592 | 163835709480 |
+| AGGREGATE | `checked-epoch-scoped` | 0.65 | 32.5 | 10862592 | 163835709480 |
+| AGGREGATE | `checked-epoch-stream` | 0.61 | 30.5 | 10813440 | 163835709480 |
+| JOIN | `gc-heap` | 0.56 | 28.0 | 75071488 | 193232836790 |
+| JOIN | `region-scoped-rooted` | 0.44 | 22.0 | 7421952 | 193232836790 |
+| JOIN | `checked-epoch-scoped` | 0.37 | 18.5 | 7405568 | 193232836790 |
+| JOIN | `checked-epoch-stream` | 0.31 | 15.5 | 7389184 | 193232836790 |
+
+Legacy/default L1 promotion control, same scale:
+
+| Operator | `checked-epoch-stream-legacy` total s | `checked-epoch-stream` total s | `checked-epoch-stream-open-handle` total s | Checksum |
+|---|---:|---:|---:|---:|
+| SELECT | 0.34 | 0.31 | 0.30 | 131080080920 |
+| AGGREGATE | 0.65 | 0.61 | 0.62 | 163835709480 |
+| JOIN | 0.35 | 0.31 | 0.31 | 193232836790 |
+| all operators in one process | 1.35 | 1.25 | 1.23 | all three matched |
+
+Interpretation:
+
+- The default promoted row improves all three Dataflow operators versus the
+  legacy checked stream path in this same-gate L2 run: SELECT `18.956 ->
+  17.178 ms`, AGGREGATE `36.888 -> 33.551 ms`, and JOIN `20.270 ->
+  19.133 ms`.
+- The final-clean L1 control confirms the same direction against current
+  heap/rooted/checked-scoped controls. The promoted `checked-epoch-stream`
+  is now the fastest checked direct-epoch Dataflow row in this same binary:
+  SELECT `15.5 ms/iter`, AGGREGATE `30.5 ms/iter`, and JOIN `15.5 ms/iter`,
+  with matching checksums and no RSS regression.
+- This closes the handle-array blocker for the current direct-epoch benchmark
+  shape and upgrades the Dataflow handle-backed promotion from L2-only evidence
+  to L1 headline timing plus L2 interpretation.
 
 ## Provisional Broom-Scale Single Run, 40 Epochs x 500k Documents
 

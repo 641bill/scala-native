@@ -1,6 +1,6 @@
 import scala.language.experimental.captureChecking
 
-import scala.scalanative.memory.{RiftRegion, SafeZone}
+import scala.scalanative.memory.{RiftOpenStreamingHandle, RiftRegion, SafeZone}
 import scala.scalanative.runtime.{
   fromRawUSize,
   GC,
@@ -511,6 +511,9 @@ object CommonCrawlWetMatrixHelpers {
       case "rift-trusted-hp"                 => "rift-hp"
       case "rift-trusted-streaming"          => "rift-streaming"
       case "rift-checked-rift"               => "rift-checked"
+      case "rift-checked-page-token-open-region" |
+          "rift-checked-page-token-legacy" =>
+        "rift-checked-page-token-legacy"
       case "rift-checked-safezone-improved-32k" =>
         "rift-checked-safezone-32k"
       case "rift-checked-safezone-rootless-32k" =>
@@ -521,7 +524,8 @@ object CommonCrawlWetMatrixHelpers {
   private def usesRiftRuntime(mode: String): Boolean =
     canonicalMode(mode) match {
       case "rift-hp" | "rift-streaming" | "rift-checked" |
-          "rift-checked-page-token" | "rift-checked-count-by-key" =>
+          "rift-checked-page-token" | "rift-checked-page-token-legacy" |
+          "rift-checked-page-token-open-handle" | "rift-checked-count-by-key" =>
         true
       case _ => false
     }
@@ -530,6 +534,8 @@ object CommonCrawlWetMatrixHelpers {
     canonicalMode(mode) match {
       case "heap" | "safezone" | "rift-hp" | "rift-streaming" |
           "rift-checked" | "rift-checked-page-token" |
+          "rift-checked-page-token-legacy" |
+          "rift-checked-page-token-open-handle" |
           "rift-checked-count-by-key" |
           "rift-checked-safezone-32k" |
           "rift-checked-safezone-page-token" |
@@ -1555,7 +1561,7 @@ object CommonCrawlWetMatrixHelpers {
       RunOutcome(checksum, outputCount)
     }
 
-  def runRiftCheckedPageToken(query: String): RunOutcome =
+  def runRiftCheckedPageTokenLegacy(query: String): RunOutcome =
     RiftRegion.streaming { stream ?=>
       runRiftCheckedPageTokenBody(query)
     }
@@ -1564,6 +1570,193 @@ object CommonCrawlWetMatrixHelpers {
     RiftRegion.streamingSafeZone { stream ?=>
       runRiftCheckedPageTokenBody(query)
     }
+
+  private def runRiftCheckedPageTokenOpenHandleBody(query: String)(using
+      stream: RiftRegion.StreamingRegion^
+  ): RunOutcome = {
+    if (scratchQuery(query))
+      throw new IllegalArgumentException(
+        s"checked page-token open-handle mode does not support scratch query '$query'"
+      )
+
+    val cfg = CommonCrawlWetConfig
+    val input = inputData
+
+    final class CheckedRecord(
+        val kind: Int,
+        val pageId: Int,
+        val domain: Int,
+        val value: Int,
+        val hash: Long
+    ) extends RiftRegion.StreamAppendNode
+
+    val window =
+      RiftRegion.streamPageTokenAppendWindow[CheckedRecord](
+        cfg.pagesPerBucket.toLong
+      )
+    var checksum = 0L
+    var outputCount = 0L
+
+    def consumeDomainSummary(
+        bucket: RiftRegion.StreamBucket^{stream},
+        domain: Int,
+        count: Int
+    ): Unit = {
+      checksum = fold(
+        checksum,
+        4,
+        bucket.startSeconds.toInt,
+        domain,
+        count,
+        (domain.toLong << 32) ^ count.toLong,
+        bucket.startSeconds
+      )
+      outputCount += 1L
+    }
+
+    def closeRecords(
+        bucket: RiftRegion.StreamBucket^{stream},
+        cursor: RiftRegion.StreamAppendCursor[CheckedRecord]^{stream}
+    ): Unit =
+      if (domainWindowQuery(query)) {
+        val counts = new Array[Int](cfg.domainSpace)
+        var current = cursor.nextOwnedOrNull()
+        while (current != null) {
+          val record: CheckedRecord^{stream} =
+            current.asInstanceOf[CheckedRecord^{stream}]
+          counts(record.domain) += 1
+          current = cursor.nextOwnedOrNull()
+        }
+        var domain = 0
+        while (domain < counts.length) {
+          val count = counts(domain)
+          if (count != 0)
+            consumeDomainSummary(bucket, domain, count)
+          domain += 1
+        }
+      } else {
+        var current = cursor.nextOwnedOrNull()
+        while (current != null) {
+          val record: CheckedRecord^{stream} =
+            current.asInstanceOf[CheckedRecord^{stream}]
+          checksum = fold(
+            checksum,
+            record.kind,
+            record.pageId,
+            record.domain,
+            record.value,
+            record.hash,
+            bucket.startSeconds
+          )
+          outputCount += 1L
+          current = cursor.nextOwnedOrNull()
+        }
+      }
+
+    var currentStartPage = Long.MinValue
+    var currentHandle: RiftOpenStreamingHandle^{stream} = null
+    var page = 0
+    while (page < input.pages) {
+      val domain = input.domainAt(page)
+      val startPage = bucketStart(page)
+      if (startPage != currentStartPage) {
+        currentStartPage = startPage
+        currentHandle =
+          RiftRegion.pageTokenAppendRiftOpenHandleFor(
+            stream,
+            window,
+            startPage,
+            closeCutoff(startPage)
+          )(closeRecords)
+      }
+
+      val pageRecord: CheckedRecord^{stream} =
+        RiftAllocator.allocateOpenHandle(
+          currentHandle,
+          new CheckedRecord(1, page, domain, 0, input.lineHashAt(page, 0))
+        )
+      RiftRegion.appendPageToken(stream, window, pageRecord)
+
+      var observed = 0
+      if (linkQuery(query)) {
+        val links = input.linkCountAt(page)
+        while (observed < links) {
+          val linkRecord: CheckedRecord^{stream} =
+            RiftAllocator.allocateOpenHandle(
+              currentHandle,
+              new CheckedRecord(
+                5,
+                page,
+                input.linkDomainAt(page, observed),
+                observed,
+                input.linkHashAt(page, observed)
+              )
+            )
+          RiftRegion.appendPageToken(stream, window, linkRecord)
+          observed += 1
+        }
+      } else {
+        val lines = input.lineCountAt(page)
+        while (observed < lines) {
+          val lh = input.lineHashAt(page, observed)
+          val lineRecord: CheckedRecord^{stream} =
+            RiftAllocator.allocateOpenHandle(
+              currentHandle,
+              new CheckedRecord(2, page, domain, observed, lh)
+            )
+          RiftRegion.appendPageToken(stream, window, lineRecord)
+          if (tokenQuery(query)) {
+            var token = 0
+            val tokens = input.tokenCountAt(page, observed)
+            while (token < tokens) {
+              val tokenRecord: CheckedRecord^{stream} =
+                RiftAllocator.allocateOpenHandle(
+                  currentHandle,
+                  new CheckedRecord(
+                    3,
+                    page,
+                    domain,
+                    token,
+                    input.tokenHashAt(page, observed, token)
+                  )
+                )
+              RiftRegion.appendPageToken(stream, window, tokenRecord)
+              token += 1
+            }
+          }
+          observed += 1
+        }
+      }
+      if (page % cfg.sampleEvery == 0)
+        checksum = fold(
+          checksum,
+          9,
+          page,
+          domain,
+          observed,
+          if (linkQuery(query) && observed > 0) input.linkHashAt(page, 0)
+          else input.lineHashAt(page, if (observed == 0) 0 else observed - 1),
+          currentStartPage
+        )
+      page += 1
+    }
+
+    RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
+      closeRecords
+    )
+
+    checksumSink = checksum
+    outputSink = outputCount
+    RunOutcome(checksum, outputCount)
+  }
+
+  def runRiftCheckedPageTokenOpenHandle(query: String): RunOutcome =
+    RiftRegion.streaming { stream ?=>
+      runRiftCheckedPageTokenOpenHandleBody(query)
+    }
+
+  def runRiftCheckedPageToken(query: String): RunOutcome =
+    runRiftCheckedPageTokenOpenHandle(query)
 
   private def runRiftCheckedCountByKeyBody(query: String)(using
       stream: RiftRegion.StreamingRegion^
@@ -1747,6 +1940,10 @@ object CommonCrawlWetMatrixHelpers {
       case "rift-streaming"        => runRiftTrusted(query, RiftRegion.Streaming)
       case "rift-checked"          => runRiftChecked(query)
       case "rift-checked-page-token" => runRiftCheckedPageToken(query)
+      case "rift-checked-page-token-legacy" =>
+        runRiftCheckedPageTokenLegacy(query)
+      case "rift-checked-page-token-open-handle" =>
+        runRiftCheckedPageTokenOpenHandle(query)
       case "rift-checked-count-by-key" => runRiftCheckedCountByKey(query)
       case "rift-checked-safezone-32k" | "rift-checked-rootfree-safezone-hp" =>
         runRiftCheckedSafeZone(query)

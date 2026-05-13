@@ -180,6 +180,12 @@ for selected_mode in "${modes[@]}"; do
     checked-epoch-stream|checked-region-stream-epoch)
       run_mode "checked-epoch-stream" "rift-checked-direct-epoch" "0"
       ;;
+    checked-epoch-stream-legacy|checked-region-stream-epoch-legacy)
+      run_mode "checked-epoch-stream-legacy" "rift-checked-direct-epoch-legacy" "0"
+      ;;
+    checked-epoch-stream-open-handle|checked-region-stream-epoch-open-handle)
+      run_mode "checked-epoch-stream-open-handle" "rift-checked-direct-epoch-open-handle" "0"
+      ;;
     checked-epoch-scoped|checked-region-scoped-epoch)
       run_mode "checked-epoch-scoped" "rift-checked-safezone-direct-epoch" "1" "32768"
       ;;

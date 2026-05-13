@@ -117,6 +117,17 @@ trait NirGenExpr(using Context) {
         widened.show.contains(openRegionName)
     }
 
+    private def isRiftOpenStreamingHandleType(tpe: Type): Boolean = {
+      val handleName = "scala.scalanative.memory.RiftOpenStreamingHandle"
+      val widened = tpe.widenDealias
+      widened.typeSymbol.fullName.toString == handleName ||
+        tpe.show.contains(handleName) ||
+        widened.show.contains(handleName)
+    }
+
+    private def isCheckedRiftAllocationOwnerType(tpe: Type): Boolean =
+      isCheckedRiftRegionType(tpe) || isRiftOpenStreamingHandleType(tpe)
+
     private def isRiftOpenStreamingLifecycleCall(
         sym: Symbol,
         receiver: Tree
@@ -418,12 +429,13 @@ trait NirGenExpr(using Context) {
 
     private def isRuntimeRiftAllocate(tree: Tree): Boolean =
       defnNir.RuntimeRiftAllocator_allocate.exists(_ == calledSymbol(tree)) ||
-        defnNir.RuntimeRiftAllocator_allocateOpen.exists(_ == calledSymbol(tree))
+        defnNir.RuntimeRiftAllocator_allocateOpen.exists(_ == calledSymbol(tree)) ||
+        defnNir.RuntimeRiftAllocator_allocateOpenHandle.exists(_ == calledSymbol(tree))
 
     private def isRuntimeRiftAllocateInCheckedRegion(tree: Tree): Boolean =
       tree match {
         case app @ Apply(_, List(region, _)) =>
-          isRuntimeRiftAllocate(app) && isCheckedRiftRegionType(region.tpe)
+          isRuntimeRiftAllocate(app) && isCheckedRiftAllocationOwnerType(region.tpe)
         case _ => false
       }
 
@@ -3099,7 +3111,7 @@ trait NirGenExpr(using Context) {
       val Apply(_, List(region, tree)) = app
       tree match {
         case Apply(Select(New(_), nme.CONSTRUCTOR), args)       =>
-          if isCheckedRiftRegionType(region.tpe) then
+          if isCheckedRiftAllocationOwnerType(region.tpe) then
             checkRiftConstructorArgs(args)
         case Apply(fun, _) if fun.symbol == defn.newArrayMethod =>
         case _                                                  =>

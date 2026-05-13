@@ -1,6 +1,6 @@
 import scala.language.experimental.captureChecking
 
-import scala.scalanative.memory.{RiftRegion, SafeZone}
+import scala.scalanative.memory.{RiftOpenStreamingHandle, RiftRegion, SafeZone}
 import scala.scalanative.runtime.{
   fromRawUSize,
   GC,
@@ -965,7 +965,7 @@ object CheckedAppendWindowMatrixHelpers {
     checksum
   }
 
-  private def runRiftCheckedPageTokenBody()(using
+  private def runRiftCheckedPageTokenLegacyBody()(using
       stream: RiftRegion.StreamingRegion^
   ): Long = {
     val cfg = CheckedAppendWindowConfig
@@ -1044,6 +1044,94 @@ object CheckedAppendWindowMatrixHelpers {
     running
   }
 
+  private def runRiftCheckedPageTokenBody()(using
+      stream: RiftRegion.StreamingRegion^
+  ): Long = {
+    val cfg = CheckedAppendWindowConfig
+    val totals = new Array[Long](cfg.keySpace)
+    final class Record(
+        val key: Int,
+        var value: Int,
+        var total: Long
+    ) extends RiftRegion.StreamAppendNode
+    val window =
+      RiftRegion.streamPageTokenAppendWindow[Record](
+        cfg.eventsPerBucket.toLong
+      )
+    var running = 0L
+
+    def consume(
+        bucket: RiftRegion.StreamBucket^{stream},
+        cursor: RiftRegion.StreamAppendCursor[Record]^{stream}
+    ): Unit = {
+      var current = cursor.nextOwnedOrNull()
+      while (current != null) {
+        val record: Record^{stream} = current.asInstanceOf[Record^{stream}]
+        val nextTotal =
+          (totals(record.key) + record.total) & 0xffffffffL
+        totals(record.key) = nextTotal
+        running = fold(
+          running,
+          record.key,
+          record.value,
+          nextTotal,
+          bucket.startSeconds
+        )
+        current = cursor.nextOwnedOrNull()
+      }
+    }
+
+    var currentStartSeconds = Long.MinValue
+    var currentHandle: RiftOpenStreamingHandle^{stream} = null
+    var i = 0
+    while (i < cfg.events) {
+      val seed = mix(i * 1103515245 + 12345)
+      val key = seed % cfg.keySpace
+      val value = (mix(seed + 17) & 0xffff) + 1
+      val startSeconds = bucketStart(i)
+      if (startSeconds != currentStartSeconds) {
+        currentStartSeconds = startSeconds
+        currentHandle =
+          RiftRegion.pageTokenAppendRiftOpenHandleFor(
+            stream,
+            window,
+            startSeconds,
+            closeCutoff(startSeconds)
+          )(consume)
+      }
+      val record: Record^{stream} =
+        RiftAllocator.allocateOpenHandle(
+          currentHandle,
+          new Record(key, value, value.toLong)
+        )
+      record.value += seed & 3
+      record.total += record.value.toLong
+      RiftRegion.appendPageToken(stream, window, record)
+      if (i % cfg.sampleEvery == 0)
+        running = fold(
+          running,
+          record.key,
+          record.value,
+          record.total,
+          currentStartSeconds
+        )
+      i += 1
+    }
+
+    RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
+      consume
+    )
+    running
+  }
+
+  private def runRiftCheckedPageTokenLegacy(): Long = {
+    val checksum = RiftRegion.streaming { stream ?=>
+      runRiftCheckedPageTokenLegacyBody()
+    }
+    checksumSink = checksum
+    checksum
+  }
+
   private def runRiftCheckedPageToken(): Long = {
     val checksum = RiftRegion.streaming { stream ?=>
       runRiftCheckedPageTokenBody()
@@ -1054,7 +1142,7 @@ object CheckedAppendWindowMatrixHelpers {
 
   private def runRiftCheckedSafeZonePageToken(): Long = {
     val checksum = RiftRegion.streamingSafeZone { stream ?=>
-      runRiftCheckedPageTokenBody()
+      runRiftCheckedPageTokenLegacyBody()
     }
     checksumSink = checksum
     checksum
@@ -1447,6 +1535,9 @@ object CheckedAppendWindowMatrixHelpers {
         // this focused matrix; the older `rift-checked` name remains the
         // manual checked control.
         "rift-checked-api-cursor"
+      case "rift-checked-page-token-open-region" |
+          "rift-checked-page-token-legacy" =>
+        "rift-checked-page-token-legacy"
       case "rift-checked-safezone-improved-32k" =>
         "rift-checked-safezone-32k"
       case "rift-checked-safezone-rootless-32k" =>
@@ -1460,6 +1551,7 @@ object CheckedAppendWindowMatrixHelpers {
       case "rift-checked" | "rift-checked-api" |
           "rift-checked-api-cursor" |
           "rift-checked-page-token" |
+          "rift-checked-page-token-legacy" |
           "rift-checked-epoch-buffer" |
           "rift-checked-chunk-token" |
           "rift-checked-api-prepend-cursor" | "rift-trusted-hp" |
@@ -1478,6 +1570,8 @@ object CheckedAppendWindowMatrixHelpers {
       case "rift-checked-api"       => runRiftCheckedApi()
       case "rift-checked-api-cursor" => runRiftCheckedApiCursor()
       case "rift-checked-page-token" => runRiftCheckedPageToken()
+      case "rift-checked-page-token-legacy" =>
+        runRiftCheckedPageTokenLegacy()
       case "rift-checked-epoch-buffer" => runRiftCheckedEpochBuffer()
       case "rift-checked-chunk-token" => runRiftCheckedChunkToken()
       case "rift-checked-safezone-32k" | "rift-checked-rootfree-safezone-hp" =>
@@ -1508,6 +1602,7 @@ object CheckedAppendWindowMatrixHelpers {
           "rift-trusted-streaming" | "rift-checked-api" |
           "heap-epoch" |
           "rift-checked-api-cursor" | "rift-checked-page-token" |
+          "rift-checked-page-token-legacy" |
           "rift-checked-epoch-buffer" |
           "rift-checked-chunk-token" |
           "rift-checked-api-prepend-cursor" |

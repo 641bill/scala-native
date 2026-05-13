@@ -17,6 +17,11 @@ object RiftAllocator {
       obj: T^{region}
   ): T^{region} = intrinsic
 
+  def allocateOpenHandle[T](
+      region: scala.scalanative.memory.RiftOpenStreamingHandle^,
+      obj: T^{region}
+  ): T^{region} = intrinsic
+
   @extern @define("__SCALANATIVE_MEMORY_RIFT") object Impl {
     @name("scalanative_rift_init")
     def init(initialSlabs: RawSize): Unit = extern

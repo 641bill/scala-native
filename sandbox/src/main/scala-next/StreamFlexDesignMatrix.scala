@@ -1,6 +1,6 @@
 import scala.language.experimental.captureChecking
 
-import scala.scalanative.memory.{RiftRegion, SafeZone}
+import scala.scalanative.memory.{RiftOpenStreamingHandle, RiftRegion, SafeZone}
 import scala.scalanative.runtime.{fromRawUSize, GC, RawSize, RiftAllocator}
 
 object StreamFlexDesignConfig {
@@ -548,6 +548,104 @@ object StreamFlexDesignMatrixHelpers {
     RunResult(mix(checksum, anchor), capsule.size.toLong, capsule.dropped.toLong)
   }
 
+  private def processCheckedOpenHandlePeriod(
+      stable: StableState,
+      capsule: AlertCapsule,
+      startSeq: Int,
+      count: Int,
+      objectsPerEvent: Int
+  )(using region: RiftOpenStreamingHandle^): RunResult = {
+    final class CheckedPacket(
+        val seq: Int,
+        val key: Int,
+        val payload: Int,
+        val next: CheckedPacket^{region}
+    )
+    final class CheckedFeature(
+        val seq: Int,
+        val key: Int,
+        val value: Int,
+        val next: CheckedFeature^{region}
+    )
+    final class CheckedDecision(
+        val seq: Int,
+        val key: Int,
+        val score: Long,
+        val next: CheckedDecision^{region}
+    )
+    final class CheckedAlert(
+        val seq: Int,
+        val key: Int,
+        val score: Long,
+        val next: CheckedAlert^{region}
+    )
+
+    capsule.clear()
+    var packets: CheckedPacket^{region} = null
+    var i = 0
+    while (i < count) {
+      val seq = startSeq + i
+      var fragment = 0
+      while (fragment < objectsPerEvent) {
+        val seed = mix(seq * 1009 + fragment * 9176)
+        val key = stable.key(seed)
+        stable.recordEvent(key)
+        packets = RiftAllocator.allocateOpenHandle(
+          region,
+          new CheckedPacket(seq, key, mix(seed + 31), packets)
+        )
+        fragment += 1
+      }
+      i += 1
+    }
+
+    var features: CheckedFeature^{region} = null
+    var packet = packets
+    while (packet != null) {
+      val value = mix(packet.payload + stable.laneBias(packet.key))
+      features = RiftAllocator.allocateOpenHandle(
+        region,
+        new CheckedFeature(packet.seq, packet.key, value, features)
+      )
+      packet = packet.next
+    }
+
+    var decisions: CheckedDecision^{region} = null
+    var feature = features
+    while (feature != null) {
+      val score = stable.classify(feature.key, feature.value, feature.seq)
+      decisions = RiftAllocator.allocateOpenHandle(
+        region,
+        new CheckedDecision(feature.seq, feature.key, score, decisions)
+      )
+      feature = feature.next
+    }
+
+    var alerts: CheckedAlert^{region} = null
+    var decision = decisions
+    while (decision != null) {
+      if (((decision.score ^ (decision.score >>> 11)) & 7L) == 0L)
+        alerts = RiftAllocator.allocateOpenHandle(
+          region,
+          new CheckedAlert(decision.seq, decision.key, decision.score, alerts)
+        )
+      decision = decision.next
+    }
+
+    var alert = alerts
+    while (alert != null) {
+      capsule.add(alert.seq, alert.key, alert.score)
+      alert = alert.next
+    }
+    val checksum = capsule.drainInto(stable)
+    val anchor =
+      (if (packets == null) 0L else packets.payload.toLong) ^
+        (if (features == null) 0L else features.value.toLong) ^
+        (if (decisions == null) 0L else decisions.score) ^
+        (if (alerts == null) 0L else alerts.score)
+    RunResult(mix(checksum, anchor), capsule.size.toLong, capsule.dropped.toLong)
+  }
+
   private def runThroughputOnce(mode: String): RunResult = {
     val cfg = StreamFlexDesignConfig
     val stable = new StableState(cfg.stableKeys)
@@ -586,12 +684,29 @@ object StreamFlexDesignMatrixHelpers {
             start += count
           }
         }
-      case "checked-epoch-stream" =>
+      case "checked-epoch-stream-legacy" =>
         RiftRegion.streaming { stream ?=>
           while (start < cfg.events) {
             val count = math.min(cfg.periodEvents, cfg.events - start)
             val result = RiftRegion.epoch {
               processCheckedPeriod(stable, capsule, start, count, cfg.objectsPerEvent)
+            }
+            consume(result)
+            start += count
+          }
+        }
+      case "checked-epoch-stream" | "checked-epoch-stream-open-handle" =>
+        RiftRegion.streamingOpenHandle {
+          while (start < cfg.events) {
+            val count = math.min(cfg.periodEvents, cfg.events - start)
+            val result = RiftRegion.resetOpenHandle {
+              processCheckedOpenHandlePeriod(
+                stable,
+                capsule,
+                start,
+                count,
+                cfg.objectsPerEvent
+              )
             }
             consume(result)
             start += count
@@ -652,12 +767,23 @@ object StreamFlexDesignMatrixHelpers {
             event += 1
           }
         }
-      case "checked-epoch-stream" =>
+      case "checked-epoch-stream-legacy" =>
         RiftRegion.streaming { stream ?=>
           while (event < events) {
             timed {
               RiftRegion.epoch {
                 processCheckedPeriod(stable, capsule, event, 1, objectsPerEvent)
+              }
+            }
+            event += 1
+          }
+        }
+      case "checked-epoch-stream" | "checked-epoch-stream-open-handle" =>
+        RiftRegion.streamingOpenHandle {
+          while (event < events) {
+            timed {
+              RiftRegion.resetOpenHandle {
+                processCheckedOpenHandlePeriod(stable, capsule, event, 1, objectsPerEvent)
               }
             }
             event += 1
@@ -691,7 +817,10 @@ object StreamFlexDesignMatrixHelpers {
   }
 
   private def usesRift(mode: String): Boolean =
-    mode == "checked-epoch-scoped" || mode == "checked-epoch-stream"
+    mode == "checked-epoch-scoped" ||
+      mode == "checked-epoch-stream" ||
+      mode == "checked-epoch-stream-legacy" ||
+      mode == "checked-epoch-stream-open-handle"
 
   private def validateAgainstHeap(result: RunResult, expected: RunResult): Unit =
     if (result != expected)
@@ -893,7 +1022,9 @@ object StreamFlexDesignMatrixHelpers {
   def validateMode(mode: String): Unit =
     mode match {
       case "gc-heap" | "heap-same-shape" | "region-scoped-rooted" |
-          "checked-epoch-scoped" | "checked-epoch-stream" =>
+          "checked-epoch-scoped" | "checked-epoch-stream" |
+          "checked-epoch-stream-legacy" |
+          "checked-epoch-stream-open-handle" =>
         ()
       case other =>
         throw new IllegalArgumentException(

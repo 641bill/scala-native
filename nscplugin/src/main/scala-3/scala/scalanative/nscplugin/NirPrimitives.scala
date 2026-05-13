@@ -232,6 +232,7 @@ class NirPrimitives(using ctx: Context) extends DottyPrimitives(ctx) {
     defnNir.RuntimeSafeZoneAllocator_allocate.foreach(addPrimitive(_, SAFEZONE_ALLOC))
     defnNir.RuntimeRiftAllocator_allocate.foreach(addPrimitive(_, RIFT_ALLOC))
     defnNir.RuntimeRiftAllocator_allocateOpen.foreach(addPrimitive(_, RIFT_OPEN_ALLOC))
+    defnNir.RuntimeRiftAllocator_allocateOpenHandle.foreach(addPrimitive(_, RIFT_OPEN_ALLOC))
     defnNir.LinktimeIntrinsics.foreach(addPrimitive(_, USES_LINKTIME_INTRINSIC))
     primitives
   }

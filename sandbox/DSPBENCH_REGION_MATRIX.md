@@ -1,7 +1,7 @@
 # DSPBench Region Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-10 18:03 CEST
+Last updated: 2026-05-13 03:13 CEST
 
 Status: implemented three local DSPBench-family real-input candidates: Spike
 Detection, Fraud Detection, and Log Processing. This is not an exact DSPBench
@@ -693,6 +693,63 @@ It keeps the real-input q2 row as a modest checked throughput/RSS win over heap,
 but trusted Streaming is still the fastest lower-bound row. Remaining overhead
 is not just reclaim or bucket opening; query replay, append/linking, cursor
 traversal, and object construction still dominate.
+
+### Fraud q2 handle-backed page-token promotion
+
+After the handle-level allocation lowering prototype, the normal
+`rift-checked-page-token` row now uses the direct Rift open-handle allocation
+path. The previous open-region lowering remains available as
+`rift-checked-page-token-legacy`; `rift-checked-safezone-page-token` is
+unchanged and still uses the SafeZone-backed checked path.
+
+20k smoke, real DSPBench `credit-card.dat`, L1 final-clean, one measured run:
+
+| Mode | External real s | RSS bytes | Checksum | Output |
+|---|---:|---:|---:|---:|
+| `rift-checked-page-token-legacy` | `0.44` | `21643264` | `-1399594498030869762` | `98` |
+| `rift-checked-page-token` | `0.10` | `21659648` | `-1399594498030869762` | `98` |
+| `rift-checked-safezone-page-token` | `0.10` | `21676032` | `-1399594498030869762` | `98` |
+
+1M L1 final-clean gate, three in-process q2 runs, executed outside the sandbox
+so `/usr/bin/time -l` could report RSS:
+
+```bash
+RIFT_FINAL_CLEAN=1 \
+DSPBENCH_BUILD=0 \
+DSPBENCH_EVENTS=1000000 \
+DSPBENCH_BENCHMARK_RUNS=3 \
+DSPBENCH_WARMUPS=0 \
+DSPBENCH_QUERIES="fraud-q2-alert-window" \
+DSPBENCH_MODES="rift-checked-page-token-legacy rift-checked-page-token rift-checked-safezone-page-token" \
+DSPBENCH_OUTPUT_DIR=/Users/siyaoliu/rift/cache/dspbench-page-token-promoted-fraud-q2-1m-l1-rss-20260513 \
+zsh sandbox/run_dspbench_region_matrix.sh
+```
+
+| Mode | External real s | User s | Sys s | RSS bytes | Checksum | Output |
+|---|---:|---:|---:|---:|---:|---:|
+| `rift-checked-page-token-legacy` | `2.63` | `2.58` | `0.04` | `59326464` | `2645894572926148009` | `594182` |
+| `rift-checked-page-token` | `2.60` | `2.54` | `0.04` | `59326464` | `2645894572926148009` | `594182` |
+| `rift-checked-safezone-page-token` | `2.78` | `2.74` | `0.02` | `59523072` | `2645894572926148009` | `594182` |
+
+1M L2 interpretation gate:
+
+| Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes | Rift op ms | Region objects | Opens/Closes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `rift-checked-page-token-legacy` | `863.329` | `11.313` | `13.068` | `2/3` | `278511616` | `0.613` | `4851373` | `41/41` |
+| `rift-checked-page-token` | `867.751` | `13.381` | `14.066` | `2/3` | `278528000` | `0.559` | `4851373` | `41/41` |
+| `rift-checked-safezone-page-token` | `857.657` | `16.626` | `17.438` | `2/3` | `278691840` | `0.000` | `0` | `0/0` |
+
+Interpretation: the promoted default passes correctness and is a small L1
+improvement over the legacy Rift checked page-token row (`2.60 s` vs
+`2.63 s`) with identical RSS. The L2 internal medians are noise-tied and show
+the real signal more conservatively: handle lowering reduces measured Rift op
+time slightly (`0.613 -> 0.559 ms`) but does not change object count,
+open/close count, checksum, or the parser/query-dominated shape. Treat this as
+an application sanity gate for handle-backed page-token lowering, not as a new
+DSPBench throughput headline. The older committed-code heap comparison above
+remains the better classification row for Fraud q2: modest checked RSS/GC win,
+trusted Streaming lower-bound elapsed win, and no large real-input GC-heavy
+case-study claim.
 
 ## Log Processing Input And Queries
 

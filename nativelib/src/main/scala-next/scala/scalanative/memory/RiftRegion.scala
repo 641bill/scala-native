@@ -20,6 +20,34 @@ import scala.scalanative.unsigned._
 
 import language.experimental.captureChecking
 
+/** Experimental allocation-lowering token for focused Rift backend tests.
+ *
+ *  This carries only a raw Rift handle and is not a replacement for the public
+ *  checked region APIs. Keep user-facing checked code on `epoch`,
+ *  page/window operators, and `OpenStreamingRegion` until this path is folded
+ *  back into compiler-owned lowering.
+ */
+final class RiftOpenStreamingHandle private[scalanative] (
+    private[scalanative] override val handle: RawPtr
+) extends SafeZone {
+  // This handle is only exposed inside operator-owned lifetimes. The owner
+  // controls close/reset, so allocation through the handle remains unchecked.
+  override def isOpen: Boolean = true
+
+  override def isClosed: Boolean = false
+
+  private[scalanative] override def close(): Unit =
+    throw new UnsupportedOperationException(
+      "Rift open streaming handles are closed by their owner"
+    )
+
+  private[scalanative] override def allocImpl(
+      cls: RawPtr,
+      size: RawSize
+  ): RawPtr =
+    RiftAllocator.Impl.alloc(handle, cls, size)
+}
+
 @implicitNotFound("Given method requires an implicit Rift region.")
 trait RiftRegion extends SafeZone {
 
@@ -3052,6 +3080,28 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   ): T^{region} =
     RiftAllocator.allocateOpen(region, obj)
 
+  final def epochOpenHandle[T](
+      body: (RiftOpenStreamingHandle^) ?=> T
+  )(using canReturn: CanReturnFromRegion[T]): T = {
+    val raw = RiftAllocator.Impl.open(Streaming)
+    val region: RiftOpenStreamingHandle^ = new RiftOpenStreamingHandle(raw)
+    if (region.handle == null)
+      throw new IllegalStateException("Rift open handle is null")
+    try body(using region)
+    finally RiftAllocator.Impl.close(raw)
+  }
+
+  final def streamingOpenHandle[T](
+      body: (RiftOpenStreamingHandle^) ?=> T
+  )(using canReturn: CanReturnFromRegion[T]): T =
+    epochOpenHandle(body)
+
+  final def resetOpenHandle[T](
+      body: (RiftOpenStreamingHandle^) ?=> T
+  )(using region: RiftOpenStreamingHandle^, canReturn: CanReturnFromRegion[T]): T =
+    try body(using region)
+    finally RiftAllocator.Impl.reset(region.handle)
+
   /** Opens a checked page-token map/filter operator.
    *
    *  This is the reusable operator-owned API for SELECT/filter/project-style
@@ -3404,6 +3454,20 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       bucket: StreamBucket^{parent}
   ): StreamingRegion^{parent} =
     bucket.child.region.asInstanceOf[StreamingRegion]
+
+  private def streamBucketRiftOpenHandleTrusted(
+      parent: StreamingRegion^,
+      bucket: StreamBucket^{parent}
+  ): RiftOpenStreamingHandle^{parent} =
+    bucket.child.region match {
+      case region: MemoryRiftRegion =>
+        new RiftOpenStreamingHandle(region.handle)
+          .asInstanceOf[RiftOpenStreamingHandle^{parent}]
+      case _ =>
+        throw new UnsupportedOperationException(
+          "Rift open-handle allocation is only available for Rift-backed streaming regions"
+        )
+    }
 
   /** Returns true if `closeStreamBucketsBefore` would close at least one bucket. */
   def hasStreamBucketsBefore(
@@ -3835,6 +3899,34 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       timestampSeconds,
       cutoffSeconds
     )(onBucket).asInstanceOf[OpenStreamingRegion^{parent}]
+
+  /** Returns a Rift backend handle for operator-owned page/token allocation.
+   *
+   *  This is an experimental lowering gate for the Rift-backed page-token path.
+   *  It has the same bucket-selection semantics as `pageTokenAppendOpenRegionFor`
+   *  but deliberately rejects SafeZone-backed checked regions because the handle
+   *  lowers directly to `scalanative_rift_region_alloc`.
+   */
+  def pageTokenAppendRiftOpenHandleFor[T <: StreamAppendNode](
+      parent: StreamingRegion^,
+      window: StreamPageTokenAppendWindow[T]^{parent},
+      timestampSeconds: Long,
+      cutoffSeconds: Long
+  )(onBucket: (
+      StreamBucket^{parent},
+      StreamAppendCursor[T]^{parent}
+  ) => Unit): RiftOpenStreamingHandle^{parent} = {
+    pageTokenAppendRegionFor(
+      parent,
+      window,
+      timestampSeconds,
+      cutoffSeconds
+    )(onBucket)
+    streamBucketRiftOpenHandleTrusted(
+      parent,
+      window.currentBucket.asInstanceOf[StreamBucket^{parent}]
+    )
+  }
 
   /** Returns the child region for the current map/filter page bucket. */
   def pageTokenMapFilterRegionFor[T <: StreamAppendNode](

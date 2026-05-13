@@ -1,6 +1,6 @@
 import scala.language.experimental.captureChecking
 
-import scala.scalanative.memory.RiftRegion
+import scala.scalanative.memory.{RiftOpenStreamingHandle, RiftRegion}
 import scala.scalanative.runtime.{fromRawUSize, GC, RawSize, RiftAllocator}
 
 object ObjectAllocationLoweringConfig {
@@ -238,9 +238,53 @@ object ObjectAllocationLoweringMatrixHelpers {
     checksum
   }
 
+  private def runCheckedOpenHandleBody()(using
+      region: RiftOpenStreamingHandle^
+  ): Long = {
+    val cfg = ObjectAllocationLoweringConfig
+    final class CheckedRecord(
+        val a: Int,
+        val b: Int,
+        val c: Long,
+        var d: Int
+    )
+    val records = new Array[CheckedRecord^{region}](cfg.objects)
+    var checksum = 0L
+    var i = 0
+    while (i < cfg.objects) {
+      val seed = mix(i * 1103515245 + 12345)
+      val record: CheckedRecord^{region} =
+        RiftAllocator.allocateOpenHandle(region, new CheckedRecord(
+          seed,
+          seed >>> 3,
+          seed.toLong * 1315423911L,
+          seed & 255
+        ))
+      record.d += record.a & 7
+      records(i) = record
+      i += 1
+    }
+    i = 0
+    while (i < records.length) {
+      val record = records(i)
+      if (i % cfg.sampleEvery == 0)
+        checksum = fold(checksum, record.a, record.b, record.c, record.d)
+      i += 1
+    }
+    checksum
+  }
+
   private def runCheckedRift(): Long = {
     val checksum = RiftRegion.streaming { stream ?=>
       runCheckedBody()
+    }
+    checksumSink = checksum
+    checksum
+  }
+
+  private def runCheckedRiftOpenHandle(): Long = {
+    val checksum = RiftRegion.epochOpenHandle {
+      runCheckedOpenHandleBody()
     }
     checksumSink = checksum
     checksum
@@ -261,6 +305,8 @@ object ObjectAllocationLoweringMatrixHelpers {
       case "rift-streaming" | "rift-trusted-streaming" =>
         "rift-trusted-streaming"
       case "rift-checked" | "rift-checked-rift" => "rift-checked-rift"
+      case "rift-checked-rift-open-handle" | "checked-rift-open-handle" =>
+        "rift-checked-rift-open-handle"
       case "rift-checked-safezone-32k" | "rift-checked-safezone-improved-32k" =>
         "rift-checked-safezone-improved-32k"
       case other =>
@@ -268,9 +314,10 @@ object ObjectAllocationLoweringMatrixHelpers {
     }
 
   private def usesRiftStats(mode: String): Boolean =
-    mode == "rift-trusted-hp" ||
+      mode == "rift-trusted-hp" ||
       mode == "rift-trusted-streaming" ||
-      mode == "rift-checked-rift"
+      mode == "rift-checked-rift" ||
+      mode == "rift-checked-rift-open-handle"
 
   private def runMode(mode: String): Long =
     mode match {
@@ -278,6 +325,7 @@ object ObjectAllocationLoweringMatrixHelpers {
       case "rift-trusted-hp" => runTrusted(RiftRegion.HPZone)
       case "rift-trusted-streaming" => runTrusted(RiftRegion.Streaming)
       case "rift-checked-rift" => runCheckedRift()
+      case "rift-checked-rift-open-handle" => runCheckedRiftOpenHandle()
       case "rift-checked-safezone-improved-32k" => runCheckedSafeZone()
     }
 

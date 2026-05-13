@@ -1,6 +1,6 @@
 import scala.language.experimental.captureChecking
 
-import scala.scalanative.memory.{RiftRegion, SafeZone}
+import scala.scalanative.memory.{RiftOpenStreamingHandle, RiftRegion, SafeZone}
 import scala.scalanative.memory.SafeZone._
 import scala.scalanative.runtime.{
   fromRawUSize,
@@ -988,6 +988,278 @@ object DataflowRegionMatrixHelpers {
     total
   }
 
+  def runCheckedSelectEpochHandle(): Long = {
+    val cfg = DataflowRegionConfig
+    var total = 0L
+
+    RiftRegion.streamingOpenHandle {
+      var epoch = 0
+      while (epoch < cfg.epochs) {
+        val currentEpoch = epoch
+        total += RiftRegion.resetOpenHandle { region ?=>
+          final class CheckedDocument(
+              val docId: Int,
+              val key: Int,
+              val authorKey: Int,
+              val value: Int,
+              val next: CheckedDocument^{region}
+          )
+          final class CheckedSelectedRecord(
+              val docId: Int,
+              val key: Int,
+              val score: Long,
+              val next: CheckedSelectedRecord^{region}
+          )
+
+          var docs: CheckedDocument^{region} = null
+          var i = 0
+          while (i < cfg.docsPerEpoch) {
+            val seed = mix(currentEpoch * 1000003 + i)
+            val key = seed % cfg.keySpace
+            val author = mix(seed + 17) % cfg.authorKeySpace
+            val value = mix(seed + 31) & 0xffff
+            val docId = currentEpoch * cfg.docsPerEpoch + i
+            docs =
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new CheckedDocument(docId, key, author, value, docs)
+              )
+            i += 1
+          }
+
+          var selected: CheckedSelectedRecord^{region} = null
+          var cursor = docs
+          while (cursor != null) {
+            if ((cursor.value % cfg.selectModulo) == 0) {
+              val score =
+                cursor.value.toLong * 31L + cursor.key.toLong + cursor.authorKey
+              selected =
+                RiftAllocator.allocateOpenHandle(
+                  region,
+                  new CheckedSelectedRecord(
+                    cursor.docId,
+                    cursor.key,
+                    score,
+                    selected
+                  )
+                )
+            }
+            cursor = cursor.next
+          }
+
+          var epochTotal = 0L
+          var out = selected
+          while (out != null) {
+            epochTotal += out.score ^ out.docId.toLong ^ out.key.toLong
+            out = out.next
+          }
+          epochTotal
+        }
+        epoch += 1
+      }
+    }
+
+    checksumSink = total
+    total
+  }
+
+  def runCheckedAggregateEpochHandle(): Long = {
+    val cfg = DataflowRegionConfig
+    val tableSize = nextPowerOfTwo(cfg.keySpace * 2)
+    val tableMask = tableSize - 1
+    var total = 0L
+
+    RiftRegion.streamingOpenHandle {
+      var epoch = 0
+      while (epoch < cfg.epochs) {
+        val currentEpoch = epoch
+        total += RiftRegion.resetOpenHandle { region ?=>
+          final class CheckedDocument(
+              val docId: Int,
+              val key: Int,
+              val authorKey: Int,
+              val value: Int,
+              val next: CheckedDocument^{region}
+          )
+          final class CheckedAggregateEntry(
+              val key: Int,
+              var count: Int,
+              var sum: Long,
+              var next: CheckedAggregateEntry^{region}
+          )
+
+          var docs: CheckedDocument^{region} = null
+          var i = 0
+          while (i < cfg.docsPerEpoch) {
+            val seed = mix(currentEpoch * 1000003 + i)
+            val key = seed % cfg.keySpace
+            val author = mix(seed + 17) % cfg.authorKeySpace
+            val value = mix(seed + 31) & 0xffff
+            val docId = currentEpoch * cfg.docsPerEpoch + i
+            docs =
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new CheckedDocument(docId, key, author, value, docs)
+              )
+            i += 1
+          }
+
+          val table: Array[CheckedAggregateEntry^{region}]^{region} =
+            RiftAllocator.allocateOpenHandle(
+              region,
+              new Array[CheckedAggregateEntry^{region}](tableSize)
+            )
+          var cursor = docs
+          while (cursor != null) {
+            val key = cursor.key
+            val bucket = mix(key) & tableMask
+            var entry: CheckedAggregateEntry^{region} = table(bucket)
+            var found: CheckedAggregateEntry^{region} = null
+            while (entry != null && found == null) {
+              if (entry.key == key) found = entry
+              entry = entry.next
+            }
+            if (found == null) {
+              found =
+                RiftAllocator.allocateOpenHandle(
+                  region,
+                  new CheckedAggregateEntry(key, 0, 0L, null)
+                )
+              found.next = table(bucket)
+              table(bucket) = found
+            }
+            found.count += 1
+            found.sum += cursor.value.toLong
+            cursor = cursor.next
+          }
+
+          var epochTotal = 0L
+          i = 0
+          while (i < table.length) {
+            var entry: CheckedAggregateEntry^{region} = table(i)
+            while (entry != null) {
+              epochTotal +=
+                entry.sum ^ (entry.count.toLong << 17) ^ entry.key.toLong
+              entry = entry.next
+            }
+            i += 1
+          }
+          epochTotal
+        }
+        epoch += 1
+      }
+    }
+
+    checksumSink = total
+    total
+  }
+
+  def runCheckedJoinEpochHandle(): Long = {
+    val cfg = DataflowRegionConfig
+    val tableSize = nextPowerOfTwo(cfg.authorKeySpace * 2)
+    val tableMask = tableSize - 1
+    var total = 0L
+
+    RiftRegion.streamingOpenHandle {
+      var epoch = 0
+      while (epoch < cfg.epochs) {
+        val currentEpoch = epoch
+        total += RiftRegion.resetOpenHandle { region ?=>
+          final class CheckedDocument(
+              val docId: Int,
+              val key: Int,
+              val authorKey: Int,
+              val value: Int,
+              val next: CheckedDocument^{region}
+          )
+          final class CheckedAuthorEntry(
+              val authorKey: Int,
+              val weight: Int,
+              var next: CheckedAuthorEntry^{region}
+          )
+          final class CheckedJoinedRecord(
+              val docId: Int,
+              val authorKey: Int,
+              val score: Long,
+              val next: CheckedJoinedRecord^{region}
+          )
+
+          val authors: Array[CheckedAuthorEntry^{region}]^{region} =
+            RiftAllocator.allocateOpenHandle(
+              region,
+              new Array[CheckedAuthorEntry^{region}](tableSize)
+            )
+          var a = 0
+          while (a < cfg.authorsPerEpoch) {
+            val key = authorKey(currentEpoch, a)
+            val bucket = mix(key) & tableMask
+            val entry =
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new CheckedAuthorEntry(key, (a + 1) * 7, null)
+              )
+            entry.next = authors(bucket)
+            authors(bucket) = entry
+            a += 1
+          }
+
+          var docs: CheckedDocument^{region} = null
+          var i = 0
+          while (i < cfg.docsPerEpoch) {
+            val seed = mix(currentEpoch * 1000003 + i)
+            val key = seed % cfg.keySpace
+            val author = mix(seed + 17) % cfg.authorKeySpace
+            val value = mix(seed + 31) & 0xffff
+            val docId = currentEpoch * cfg.docsPerEpoch + i
+            docs =
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new CheckedDocument(docId, key, author, value, docs)
+              )
+            i += 1
+          }
+
+          var joined: CheckedJoinedRecord^{region} = null
+          var cursor = docs
+          while (cursor != null) {
+            val bucket = mix(cursor.authorKey) & tableMask
+            var author: CheckedAuthorEntry^{region} = authors(bucket)
+            while (author != null) {
+              if (author.authorKey == cursor.authorKey) {
+                val score =
+                  cursor.value.toLong * author.weight.toLong + cursor.key
+                joined =
+                  RiftAllocator.allocateOpenHandle(
+                    region,
+                    new CheckedJoinedRecord(
+                      cursor.docId,
+                      cursor.authorKey,
+                      score,
+                      joined
+                    )
+                  )
+              }
+              author = author.next
+            }
+            cursor = cursor.next
+          }
+
+          var epochTotal = 0L
+          var out = joined
+          while (out != null) {
+            epochTotal += out.score ^ out.docId.toLong ^ out.authorKey.toLong
+            out = out.next
+          }
+          epochTotal
+        }
+        epoch += 1
+      }
+    }
+
+    checksumSink = total
+    total
+  }
+
   def runCheckedJoin(): Long = {
     val cfg = DataflowRegionConfig
     val tableSize = nextPowerOfTwo(cfg.authorKeySpace * 2)
@@ -1351,6 +1623,12 @@ object DataflowRegionMatrixHelpers {
         "rift-checked-epoch-fold"
       case "checked-epoch-stream" | "checked-region-stream-epoch" =>
         "rift-checked-direct-epoch"
+      case "checked-epoch-stream-legacy" |
+          "checked-region-stream-epoch-legacy" =>
+        "rift-checked-direct-epoch-legacy"
+      case "checked-epoch-stream-open-handle" |
+          "checked-region-stream-epoch-open-handle" =>
+        "rift-checked-direct-epoch-open-handle"
       case "checked-epoch-scoped" | "checked-region-scoped-epoch" =>
         "rift-checked-safezone-direct-epoch"
       case other => other
@@ -1377,7 +1655,10 @@ object DataflowRegionMatrixHelpers {
           runCheckedSelectPageToken()
         else if (internalMode == "rift-checked-safezone-page-token")
           runCheckedSafeZoneSelectPageToken()
-        else if (internalMode == "rift-checked-direct-epoch")
+        else if (internalMode == "rift-checked-direct-epoch" ||
+            internalMode == "rift-checked-direct-epoch-open-handle")
+          runCheckedSelectEpochHandle()
+        else if (internalMode == "rift-checked-direct-epoch-legacy")
           runCheckedSelectEpoch(false)
         else if (internalMode == "rift-checked-safezone-direct-epoch")
           runCheckedSelectEpoch(true)
@@ -1388,6 +1669,10 @@ object DataflowRegionMatrixHelpers {
         else if (internalMode == "rift-checked-epoch-fold")
           runCheckedAggregateEpochFold()
         else if (internalMode == "rift-checked-direct-epoch")
+          runCheckedAggregateEpochHandle()
+        else if (internalMode == "rift-checked-direct-epoch-open-handle")
+          runCheckedAggregateEpochHandle()
+        else if (internalMode == "rift-checked-direct-epoch-legacy")
           runCheckedAggregateEpoch(false)
         else if (internalMode == "rift-checked-safezone-direct-epoch")
           runCheckedAggregateEpoch(true)
@@ -1396,6 +1681,10 @@ object DataflowRegionMatrixHelpers {
         if (internalMode == "safezone") runSafeZoneJoin()
         else if (internalMode == "rift-checked") runCheckedJoin()
         else if (internalMode == "rift-checked-direct-epoch")
+          runCheckedJoinEpochHandle()
+        else if (internalMode == "rift-checked-direct-epoch-open-handle")
+          runCheckedJoinEpochHandle()
+        else if (internalMode == "rift-checked-direct-epoch-legacy")
           runCheckedJoinEpoch(false)
         else if (internalMode == "rift-checked-safezone-direct-epoch")
           runCheckedJoinEpoch(true)
@@ -1429,7 +1718,9 @@ object DataflowRegionMatrixHelpers {
         internalMode == "rift-checked" ||
         internalMode == "rift-checked-page-token" ||
         internalMode == "rift-checked-epoch-fold" ||
-        internalMode == "rift-checked-direct-epoch"
+        internalMode == "rift-checked-direct-epoch" ||
+        internalMode == "rift-checked-direct-epoch-open-handle" ||
+        internalMode == "rift-checked-direct-epoch-legacy"
 
     if (cfg.finalClean) {
       var run = 0
@@ -1551,6 +1842,8 @@ object DataflowRegionMatrixHelpers {
           "rift-checked" | "rift-checked-page-token" |
           "rift-checked-safezone-page-token" | "rift-checked-epoch-fold" |
           "rift-checked-direct-epoch" |
+          "rift-checked-direct-epoch-open-handle" |
+          "rift-checked-direct-epoch-legacy" |
           "rift-checked-safezone-direct-epoch" =>
         ()
       case other =>
@@ -1566,6 +1859,10 @@ object DataflowRegionMatrixHelpers {
       case "rift-checked-epoch-fold" =>
         operator == "aggregate"
       case "rift-checked-direct-epoch" | "rift-checked-safezone-direct-epoch" =>
+        operator == "select" || operator == "aggregate" || operator == "join"
+      case "rift-checked-direct-epoch-open-handle" =>
+        operator == "select" || operator == "aggregate" || operator == "join"
+      case "rift-checked-direct-epoch-legacy" =>
         operator == "select" || operator == "aggregate" || operator == "join"
       case _ => true
     }
@@ -1584,7 +1881,9 @@ object DataflowRegionMatrixHelpers {
       internalMode == "rift-checked" ||
       internalMode == "rift-checked-page-token" ||
       internalMode == "rift-checked-epoch-fold" ||
-      internalMode == "rift-checked-direct-epoch"
+      internalMode == "rift-checked-direct-epoch" ||
+      internalMode == "rift-checked-direct-epoch-open-handle" ||
+      internalMode == "rift-checked-direct-epoch-legacy"
   if (usesRift) RiftRegion.init(0)
   try {
     operator match {

@@ -3,8 +3,8 @@ package scala.scalanative.memory
 import org.junit.Assert._
 import org.junit.Test
 
+import scala.scalanative.runtime.{RiftAllocator, toRawPtr}
 import scala.scalanative.runtime.Intrinsics.castRawPtrToLong
-import scala.scalanative.runtime.toRawPtr
 import scala.scalanative.unsafe.Ptr
 
 import language.experimental.captureChecking
@@ -1501,6 +1501,50 @@ class RiftRegionCheckedTest {
             while (i < cells.length) {
               cells(i) =
                 RiftRegion.allocOpen(new Cell(epochIndex * 10 + i))
+              i += 1
+            }
+
+            var local = 0
+            var j = 0
+            while (j < cells.length) {
+              local += cells(j).value
+              j += 1
+            }
+            local
+          }
+          epochIndex += 1
+        }
+        sum
+      }
+
+      assertEquals(36, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def openHandleAllocatesRegionOwnedArrays(): Unit = {
+    RiftRegion.init(1)
+    try {
+      val total = RiftRegion.streamingOpenHandle {
+        final class Cell(val value: Int)
+
+        var sum = 0
+        var epochIndex = 0
+        while (epochIndex < 2) {
+          sum += RiftRegion.resetOpenHandle { region ?=>
+            val cells: Array[Cell^{region}]^{region} =
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new Array[Cell^{region}](3)
+              )
+            var i = 0
+            while (i < cells.length) {
+              cells(i) =
+                RiftAllocator.allocateOpenHandle(
+                  region,
+                  new Cell(epochIndex * 10 + i)
+                )
               i += 1
             }
 

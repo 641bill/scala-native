@@ -105,6 +105,8 @@ final class NirDefinitions()(using ctx: Context) {
   @tu lazy val RuntimeRiftAllocatorModule = RuntimeRiftAllocatorModuleRef.symbol
   @tu lazy val RuntimeRiftAllocator_allocate = optional(RuntimeRiftAllocatorModule.requiredMethod("allocate"))
   @tu lazy val RuntimeRiftAllocator_allocateOpen = optional(RuntimeRiftAllocatorModule.requiredMethod("allocateOpen"))
+  @tu lazy val RuntimeRiftAllocator_allocateOpenHandle =
+    optional(RuntimeRiftAllocatorModule.requiredMethod("allocateOpenHandle"))
 
   // Runtime intriniscs
   @tu lazy val IntrinsicMarker = RuntimePackageClass.requiredMethod("intrinsic")

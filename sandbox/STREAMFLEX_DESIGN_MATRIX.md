@@ -1,6 +1,6 @@
 # StreamFlex Design Matrix
 
-Last updated: 2026-05-13 00:33 CEST
+Last updated: 2026-05-13 10:26 CEST
 
 Status: first Rift-native StreamFlex system-design reproduction. This is a
 methodology benchmark for the StreamFlex axes: stable state, transient scoped
@@ -28,7 +28,9 @@ StreamFlex/Ovm artifact reproduction.
 | `heap-same-shape` | Same heap topology/control row. In v1 it is intentionally the same object pipeline as `gc-heap`, kept as the same-shape control label. |
 | `region-scoped-rooted` | SafeZone-family scoped region per period, with rooted/coalesced metadata mode expected from `SAFEZONE_ROOTS_MODE=1` and `SAFEZONE_PAGE_SIZE=32768`. |
 | `checked-epoch-scoped` | Checked `RiftRegion.epoch` API over the SafeZone-backed scoped backend. |
-| `checked-epoch-stream` | Checked `RiftRegion.epoch` API over the Rift streaming backend. |
+| `checked-epoch-stream` | Checked streaming epoch over the Rift backend. As of 2026-05-13, this benchmark label uses the handle-backed allocation lowering internally. |
+| `checked-epoch-stream-legacy` | Previous checked streaming epoch path using `RiftRegion.epoch` plus `allocOpen`; retained as an internal control. |
+| `checked-epoch-stream-open-handle` | Explicit alias for the handle-backed path, retained for provenance while the default label is promoted. |
 
 ## Commands
 
@@ -195,6 +197,54 @@ Interpretation: this is a small but consistent application-level improvement
 over the region-cached stats gate (`22.55 s`) and the clean rerun (`22.81 s`).
 The row still measures throughput/GC avoidance rather than RSS: RSS remains
 close to the previous checked stream rows.
+
+### L1/L2 Follow-Up After Handle-Backed Default Promotion
+
+Date/time: 2026-05-13 10:26 CEST.
+
+The default `checked-epoch-stream` benchmark label now uses the direct
+handle-backed allocation lowering that was previously exposed only as
+`checked-epoch-stream-open-handle`. The previous open-region lowering remains
+available as `checked-epoch-stream-legacy`.
+
+L1 final-clean command shape:
+
+```sh
+RIFT_FINAL_CLEAN=1 \
+STREAMFLEX_DESIGN_BUILD=0 \
+STREAMFLEX_DESIGN_WORKLOAD=throughput \
+STREAMFLEX_DESIGN_EVENTS=20000000 \
+STREAMFLEX_DESIGN_BENCHMARK_RUNS=3 \
+STREAMFLEX_DESIGN_WARMUPS=0 \
+STREAMFLEX_DESIGN_MODES="checked-epoch-stream-legacy checked-epoch-stream checked-epoch-stream-open-handle" \
+STREAMFLEX_DESIGN_OUTPUT_DIR=/Users/siyaoliu/rift/cache/streamflex-design-handle-promoted-20m-l1-20260513 \
+zsh sandbox/run_streamflex_design_matrix.sh
+```
+
+| Mode | External real s | External user s | RSS bytes | Checksum | Output count |
+|---|---:|---:|---:|---:|---:|
+| `checked-epoch-stream-legacy` | `22.68` | `22.52` | `12615680` | `5305809911915216923` | `19999119` |
+| `checked-epoch-stream` | `21.01` | `20.75` | `12599296` | `5305809911915216923` | `19999119` |
+| `checked-epoch-stream-open-handle` | `20.79` | `20.54` | `12599296` | `5305809911915216923` | `19999119` |
+
+L2 interpretation rows:
+
+| Mode | Median ms | Records/sec | Median GC ms | Max GC ms | Runs with GC | Rift op ms | Region objects | Opens/Closes/Resets | RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `checked-epoch-stream-legacy` | `8776.217` | `2278886.135` | `0.551` | `1.922` | `3/3` | `25.825` | `499999119` | `1/1/78125` | `12369920` |
+| `checked-epoch-stream` | `8096.514` | `2470198.928` | `0.500` | `0.725` | `3/3` | `24.768` | `499999119` | `1/1/78125` | `12369920` |
+| `checked-epoch-stream-open-handle` | `8090.915` | `2471908.218` | `0.419` | `0.496` | `2/3` | `25.635` | `499999119` | `1/1/78125` | `16646144` |
+
+Interpretation: the promoted default preserves checksum/output, object count,
+and epoch reset topology while removing the older open-region allocation path
+from the headline label. On the 20M L1 gate, default
+`checked-epoch-stream` improves over legacy by about `7.4%` (`22.68 s` to
+`21.01 s`) with essentially unchanged RSS. L2 shows the same effect in the
+timed region (`8776.217 ms` to `8096.514 ms`) while keeping the same
+`499999119` region-object count and `78125` resets. Treat the explicit
+`checked-epoch-stream-open-handle` row as a provenance alias; future
+StreamFlexDesign reporting should use `checked-epoch-stream` as the promoted
+checked streaming backend row.
 
 ## L2 Throughput, 1M Events x 3 Runs
 

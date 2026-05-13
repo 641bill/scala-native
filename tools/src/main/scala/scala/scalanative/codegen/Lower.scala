@@ -1396,6 +1396,30 @@ private[scalanative] object Lower {
       assert(size == size.toInt)
 
       v match {
+        case Some(rawZone) if isRiftOpenStreamingHandle(rawZone.ty) =>
+          val handleOwnerLocal = fresh()
+          buf += nir.Inst.Let(handleOwnerLocal, nir.Op.Copy(rawZone), unwind)
+          val handleOwner =
+            nir.Val.Local(handleOwnerLocal, RiftOpenStreamingHandle)
+          val rawHandle = nir.Val.Local(fresh(), nir.Type.Ptr)
+          genFieldloadOp(
+            buf,
+            rawHandle.id,
+            nir.Op.Fieldload(
+              nir.Type.Ptr,
+              handleOwner,
+              riftOpenStreamingHandleHandle
+            )
+          )
+          buf.let(
+            n,
+            nir.Op.Call(
+              riftRegionAllocSig,
+              riftRegionAlloc,
+              Seq(rawHandle, rtti(cls).const, nir.Val.Size(size.toInt))
+            ),
+            unwind
+          )
         case Some(rawZone) if isRiftOpenStreamingRegion(rawZone.ty) =>
           val riftRegionLocal = fresh()
           buf += nir.Inst.Let(riftRegionLocal, nir.Op.Copy(rawZone), unwind)
@@ -2116,6 +2140,25 @@ private[scalanative] object Lower {
     nir.Type.Ref(nir.Global.Top("scala.scalanative.memory.SafeZone"))
   val RiftRegionType =
     nir.Type.Ref(nir.Global.Top("scala.scalanative.memory.RiftRegion"))
+  val RiftOpenStreamingHandle =
+    nir.Type.Ref(
+      nir.Global.Top("scala.scalanative.memory.RiftOpenStreamingHandle")
+    )
+  val riftOpenStreamingHandleHandle =
+    RiftOpenStreamingHandle.name.member(
+      nir.Sig.Field(
+        "handle",
+        nir.Sig.Scope.Private(RiftOpenStreamingHandle.name)
+      )
+    )
+  val riftRegionAllocSig =
+    nir.Type.Function(
+      Seq(nir.Type.Ptr, nir.Type.Ptr, nir.Type.Size),
+      nir.Type.Ptr
+    )
+  val riftRegionAllocName = extern("scalanative_rift_region_alloc")
+  val riftRegionAlloc =
+    nir.Val.Global(riftRegionAllocName, riftRegionAllocSig)
   val safeZoneAllocImplSig =
     nir.Type.Function(Seq(SafeZone, nir.Type.Ptr, nir.Type.Size), nir.Type.Ptr)
   val safeZoneAllocImpl = SafeZone.name.member(
@@ -2139,6 +2182,13 @@ private[scalanative] object Lower {
         val id = name.id.toString
         id == "scala.scalanative.memory.RiftRegion.OpenStreamingRegion" ||
         id == "scala.scalanative.memory.RiftRegion$OpenStreamingRegion"
+      case _ => false
+    }
+
+  private def isRiftOpenStreamingHandle(ty: nir.Type): Boolean =
+    ty match {
+      case nir.Type.Ref(name, _, _) =>
+        name.id.toString == "scala.scalanative.memory.RiftOpenStreamingHandle"
       case _ => false
     }
 
@@ -2446,6 +2496,7 @@ private[scalanative] object Lower {
     def externDecl(name: nir.Global.Member, signature: nir.Type.Function) = nir.Defn.Declare(nir.Attrs.None.withIsExtern(true), name, signature)
     buf += externDecl(allocSmallName, allocSig)
     buf += externDecl(largeAllocName, allocSig)
+    buf += externDecl(riftRegionAllocName, riftRegionAllocSig)
     buf += externDecl(dyndispatchName, dyndispatchSig)
     buf += externDecl(throwName, throwSig)
     buf += externDecl(memsetName, memsetSig)

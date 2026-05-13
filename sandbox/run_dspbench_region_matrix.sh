@@ -247,6 +247,9 @@ run_case() {
     checked-region-stream|rift-checked-page-token)
       binary_mode="rift-checked-page-token"
       ;;
+    rift-checked-page-token-open-region|rift-checked-page-token-legacy)
+      binary_mode="rift-checked-page-token-legacy"
+      ;;
     checked-region-scoped|rift-checked-safezone-page-token)
       binary_mode="rift-checked-safezone-page-token"
       roots_mode="1"
