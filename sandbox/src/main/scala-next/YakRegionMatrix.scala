@@ -52,6 +52,19 @@ object YakRegionConfig {
   val textInputTokens: Int = envInt("YAK_TEXT_INPUT_TOKENS", 1000000)
   val textInputTokensPerEpoch: Int =
     envInt("YAK_TEXT_TOKENS_PER_EPOCH", recordsPerEpoch)
+  val textInputMode: String = {
+    val value = BenchmarkInputSupport.envString("YAK_TEXT_INPUT_MODE")
+    if (value.isEmpty) "preloaded"
+    else
+      value match {
+        case "preloaded" | "streaming-file" => value
+        case other =>
+          throw new IllegalArgumentException(
+            s"unknown YAK_TEXT_INPUT_MODE '$other'; expected preloaded or streaming-file"
+          )
+      }
+  }
+  val textStreamingInput: Boolean = textInputMode == "streaming-file"
   val escapeModulo: Int = envInt("YAK_ESCAPE_MODULO", 1000)
   val scratchSlots: Int = envInt("YAK_SCRATCH_SLOTS", 128)
   val benchmarkRuns: Int = envInt("YAK_BENCHMARK_RUNS", 3)
@@ -316,6 +329,116 @@ object YakRegionMatrixHelpers {
         }
         i += 1
       }
+      count
+    }
+
+    final class TokenSource(limit: Int, keySpace: Int) {
+      private val cfg = YakRegionConfig
+      private val reader = BenchmarkInputSupport.openByteLines(cfg.textInputPath)
+      private var lineLength = -1
+      private var offset = 0
+      private var patternIndex = 2
+      private var inAttribute = false
+      private var emitted = 0
+      private var closed = false
+
+      var key: Int = 0
+      var weight: Int = 0
+
+      private def pattern: Array[Byte] =
+        if (patternIndex == 0) TitlePattern else BodyPattern
+
+      private def readNextLine(): Boolean = {
+        lineLength = reader.readLine()
+        offset = 0
+        patternIndex = 0
+        inAttribute = false
+        lineLength >= 0
+      }
+
+      private def findCurrentPattern(): Boolean = {
+        val bytes = reader.bytes
+        val current = pattern
+        var i = 0
+        while (i < lineLength) {
+          if (matchesAt(bytes, lineLength, i, current)) {
+            offset = i + current.length
+            inAttribute = true
+            return true
+          }
+          i += 1
+        }
+        false
+      }
+
+      private def finishAttribute(): Unit = {
+        inAttribute = false
+        patternIndex += 1
+        offset = 0
+      }
+
+      def nextToken(): Boolean =
+        if (emitted >= limit) false
+        else {
+          while (true) {
+            if (lineLength < 0 || patternIndex >= 2) {
+              if (!readNextLine()) return false
+            } else if (!inAttribute) {
+              if (!findCurrentPattern()) finishAttribute()
+            } else {
+              val bytes = reader.bytes
+              while (
+                offset < lineLength && bytes(offset) != '"'.toByte &&
+                !tokenByte(bytes(offset) & 0xff)
+              ) offset += 1
+              if (offset >= lineLength || bytes(offset) == '"'.toByte)
+                finishAttribute()
+              else {
+                var hash = 0x811c9dc5
+                var tokenLength = 0
+                while (
+                  offset < lineLength && bytes(offset) != '"'.toByte &&
+                  tokenByte(bytes(offset) & 0xff)
+                ) {
+                  hash ^= lowerAscii(bytes(offset) & 0xff)
+                  hash *= 0x01000193
+                  tokenLength += 1
+                  offset += 1
+                }
+                if (tokenLength >= 3) {
+                  key = BenchmarkInputSupport.positiveModulo(hash, keySpace)
+                  weight = math.min(tokenLength, 16)
+                  emitted += 1
+                  return true
+                }
+              }
+            }
+          }
+          false
+        }
+
+      def close(): Unit =
+        if (!closed) {
+          closed = true
+          reader.close()
+        }
+    }
+
+    def openTokenSource(): TokenSource = {
+      val cfg = YakRegionConfig
+      if (cfg.textInputPath.isEmpty)
+        throw new IllegalArgumentException(
+          "YAK_WORKLOAD=topwordreal requires YAK_TEXT_INPUT"
+        )
+      new TokenSource(cfg.textInputTokens, cfg.keySpace)
+    }
+
+    def countStreamingTokens(): Int = {
+      val source = openTokenSource()
+      var count = 0
+      try {
+        while (source.nextToken()) count += 1
+      } finally source.close()
       count
     }
 
@@ -976,6 +1099,76 @@ object YakRegionMatrixHelpers {
     checksum
   }
 
+  def runHeapOrRiftRealTextTopWordStreaming(modeName: String): Long = {
+    val cfg = YakRegionConfig
+    val source = RealTextInput.openTokenSource()
+    val mode = new ModeState(modeName)
+    val globalCounts = new Array[Long](cfg.keySpace)
+    val localCounts = new Array[Int](cfg.keySpace)
+    val touchedKeys = new Array[Int](cfg.keySpace)
+    val tokensPerEpoch = math.max(1, cfg.textInputTokensPerEpoch)
+    var topChecksum = 0L
+    var epoch = 0
+    var hasToken = false
+    try {
+      hasToken = source.nextToken()
+      while (hasToken) {
+        val region = mode.beginEpoch()
+        var records: WordRecord = null
+        var inEpoch = 0
+        while (hasToken && inEpoch < tokensPerEpoch) {
+          records =
+            mode.allocWordRecord(
+              region,
+              source.key,
+              source.weight,
+              true,
+              records
+            )
+          inEpoch += 1
+          hasToken = source.nextToken()
+        }
+
+        var touched = 0
+        var current = records
+        while (current != null) {
+          if (localCounts(current.key) == 0) {
+            touchedKeys(touched) = current.key
+            touched += 1
+          }
+          localCounts(current.key) += current.weight
+          current = current.next
+        }
+
+        var bestKey = -1
+        var bestCount = -1L
+        var j = 0
+        while (j < touched) {
+          val key = touchedKeys(j)
+          val count = localCounts(key).toLong
+          globalCounts(key) = (globalCounts(key) + count) & 0xffffffffL
+          if (count > bestCount || (count == bestCount && key < bestKey)) {
+            bestCount = count
+            bestKey = key
+          }
+          localCounts(key) = 0
+          j += 1
+        }
+        topChecksum =
+          (topChecksum * 1099511628211L) ^ bestKey.toLong ^ bestCount ^
+            epoch.toLong
+        mode.endEpoch(region)
+        epoch += 1
+      }
+    } finally {
+      source.close()
+      mode.finish()
+    }
+    val checksum = checksumLongs(globalCounts) ^ topChecksum
+    checksumSink = checksum
+    checksum
+  }
+
   def runHeapRealTextTopWordEpochTopK(): Long = {
     val cfg = YakRegionConfig
     val input = RealTextInput.load()
@@ -1402,6 +1595,84 @@ object YakRegionMatrixHelpers {
 
     if (safeZoneBackend) RiftRegion.streamingSafeZone { stream ?=> run() }
     else RiftRegion.streaming { stream ?=> run() }
+
+    val checksum = checksumLongs(globalCounts) ^ topChecksum
+    checksumSink = checksum
+    checksum
+  }
+
+  def runCheckedRealTextTopWordEpochStreaming(
+      safeZoneBackend: Boolean
+  ): Long = {
+    val cfg = YakRegionConfig
+    val source = RealTextInput.openTokenSource()
+    val globalCounts = new Array[Long](cfg.keySpace)
+    val localCounts = new Array[Int](cfg.keySpace)
+    val touchedKeys = new Array[Int](cfg.keySpace)
+    val tokensPerEpoch = math.max(1, cfg.textInputTokensPerEpoch)
+    var topChecksum = 0L
+    var hasToken = false
+
+    def run()(using stream: RiftRegion.StreamingRegion^): Unit = {
+      hasToken = source.nextToken()
+      var epoch = 0
+      while (hasToken) {
+        val currentEpoch = epoch
+        RiftRegion.epoch { region ?=>
+          final class CheckedWordRecord(
+              val key: Int,
+              val weight: Int,
+              val next: CheckedWordRecord^{region}
+          )
+
+          var records: CheckedWordRecord^{region} = null
+          var inEpoch = 0
+          while (hasToken && inEpoch < tokensPerEpoch) {
+            records =
+              RiftRegion.allocOpen(
+                new CheckedWordRecord(source.key, source.weight, records)
+              )
+            inEpoch += 1
+            hasToken = source.nextToken()
+          }
+
+          var touched = 0
+          var current = records
+          while (current != null) {
+            if (localCounts(current.key) == 0) {
+              touchedKeys(touched) = current.key
+              touched += 1
+            }
+            localCounts(current.key) += current.weight
+            current = current.next
+          }
+
+          var bestKey = -1
+          var bestCount = -1L
+          var j = 0
+          while (j < touched) {
+            val key = touchedKeys(j)
+            val count = localCounts(key).toLong
+            globalCounts(key) = (globalCounts(key) + count) & 0xffffffffL
+            if (count > bestCount || (count == bestCount && key < bestKey)) {
+              bestCount = count
+              bestKey = key
+            }
+            localCounts(key) = 0
+            j += 1
+          }
+          topChecksum =
+            (topChecksum * 1099511628211L) ^ bestKey.toLong ^ bestCount ^
+              currentEpoch.toLong
+        }
+        epoch += 1
+      }
+    }
+
+    try {
+      if (safeZoneBackend) RiftRegion.streamingSafeZone { stream ?=> run() }
+      else RiftRegion.streaming { stream ?=> run() }
+    } finally source.close()
 
     val checksum = checksumLongs(globalCounts) ^ topChecksum
     checksumSink = checksum
@@ -2400,6 +2671,76 @@ object YakRegionMatrixHelpers {
     checksum
   }
 
+  def runSafeZoneRealTextTopWordStreaming(): Long = {
+    val cfg = YakRegionConfig
+    val source = RealTextInput.openTokenSource()
+    val globalCounts = new Array[Long](cfg.keySpace)
+    val localCounts = new Array[Int](cfg.keySpace)
+    val touchedKeys = new Array[Int](cfg.keySpace)
+    val tokensPerEpoch = math.max(1, cfg.textInputTokensPerEpoch)
+    var topChecksum = 0L
+    var epoch = 0
+    var hasToken = false
+    try {
+      hasToken = source.nextToken()
+      while (hasToken) {
+        val currentEpoch = epoch
+        SafeZone { sz ?=>
+          final class SZWordRecord(
+              val key: Int,
+              val weight: Int,
+              val next: SZWordRecord^{sz}
+          )
+
+          var records: SZWordRecord^{sz} = null
+          var inEpoch = 0
+          while (hasToken && inEpoch < tokensPerEpoch) {
+            records =
+              SafeZoneAllocator.allocate(
+                sz,
+                new SZWordRecord(source.key, source.weight, records)
+              )
+            inEpoch += 1
+            hasToken = source.nextToken()
+          }
+
+          var touched = 0
+          var current = records
+          while (current != null) {
+            if (localCounts(current.key) == 0) {
+              touchedKeys(touched) = current.key
+              touched += 1
+            }
+            localCounts(current.key) += current.weight
+            current = current.next
+          }
+
+          var bestKey = -1
+          var bestCount = -1L
+          var j = 0
+          while (j < touched) {
+            val key = touchedKeys(j)
+            val count = localCounts(key).toLong
+            globalCounts(key) = (globalCounts(key) + count) & 0xffffffffL
+            if (count > bestCount || (count == bestCount && key < bestKey)) {
+              bestCount = count
+              bestKey = key
+            }
+            localCounts(key) = 0
+            j += 1
+          }
+          topChecksum =
+            (topChecksum * 1099511628211L) ^ bestKey.toLong ^ bestCount ^
+              currentEpoch.toLong
+        }
+        epoch += 1
+      }
+    } finally source.close()
+    val checksum = checksumLongs(globalCounts) ^ topChecksum
+    checksumSink = checksum
+    checksum
+  }
+
   def runSafeZoneGraphChi(): Long = {
     val cfg = YakRegionConfig
     val values = new Array[Long](cfg.vertices)
@@ -2578,19 +2919,39 @@ object YakRegionMatrixHelpers {
           else runHeapOrRiftTopWord(mode)
         new WorkloadResult(checksum, 0L, 0L, 0L)
       case "topwordreal" =>
+        val cfg = YakRegionConfig
         val checksum =
-          if (mode == "heap-epoch-topk")
+          if (cfg.textStreamingInput && mode == "heap-epoch-topk")
+            throw new IllegalArgumentException(
+              "YAK_TEXT_INPUT_MODE=streaming-file is not wired for heap-epoch-topk yet; use heap, safezone, checked-epoch-stream, or checked-epoch-scoped"
+            )
+          else if (
+            cfg.textStreamingInput &&
+              (mode == "checked-epoch-topk-stream" ||
+                mode == "checked-epoch-topk-scoped")
+          )
+            throw new IllegalArgumentException(
+              "YAK_TEXT_INPUT_MODE=streaming-file is not wired for checked EpochTopKByKey yet; use checked-epoch-stream or checked-epoch-scoped"
+            )
+          else if (mode == "heap-epoch-topk")
             runHeapRealTextTopWordEpochTopK()
           else if (mode == "checked-epoch-topk-stream")
             runCheckedRealTextTopWordEpochTopK(false)
           else if (mode == "checked-epoch-topk-scoped")
             runCheckedRealTextTopWordEpochTopK(true)
-          else if (mode == "safezone")
-            runSafeZoneRealTextTopWord()
+          else if (mode == "safezone" && cfg.textStreamingInput)
+            runSafeZoneRealTextTopWordStreaming()
+          else if (mode == "safezone") runSafeZoneRealTextTopWord()
+          else if (mode == "checked-epoch-stream" && cfg.textStreamingInput)
+            runCheckedRealTextTopWordEpochStreaming(false)
           else if (mode == "checked-epoch-stream")
             runCheckedRealTextTopWordEpoch(false)
+          else if (mode == "checked-epoch-scoped" && cfg.textStreamingInput)
+            runCheckedRealTextTopWordEpochStreaming(true)
           else if (mode == "checked-epoch-scoped")
             runCheckedRealTextTopWordEpoch(true)
+          else if (cfg.textStreamingInput)
+            runHeapOrRiftRealTextTopWordStreaming(mode)
           else runHeapOrRiftRealTextTopWord(mode)
         new WorkloadResult(checksum, 0L, 0L, 0L)
       case "graphchi" =>
@@ -2646,7 +3007,9 @@ object YakRegionMatrixHelpers {
       case "graphstep" => cfg.epochs.toLong * cfg.messagesPerEpoch.toLong
       case "sort" => cfg.epochs.toLong * cfg.sortRecordsPerEpoch.toLong
       case "topword" => cfg.epochs.toLong * cfg.recordsPerEpoch.toLong
-      case "topwordreal" => RealTextInput.load().tokenCount.toLong
+      case "topwordreal" =>
+        if (cfg.textStreamingInput) cfg.textInputTokens.toLong
+        else RealTextInput.load().tokenCount.toLong
       case "graphchi" =>
         cfg.epochs.toLong * cfg.graphChiSubintervals.toLong *
           cfg.graphChiEdgesPerSubinterval.toLong
@@ -2797,7 +3160,7 @@ object YakRegionMatrixHelpers {
     val cfg = YakRegionConfig
     val rootsMode = sys.env.getOrElse("SAFEZONE_ROOTS_MODE", "0")
     println(
-      s"CONFIG mode=$mode workload=$workload runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} epochs=${cfg.epochs} records_per_epoch=${cfg.recordsPerEpoch} key_space=${cfg.keySpace} vertices=${cfg.vertices} messages_per_epoch=${cfg.messagesPerEpoch} sort_records_per_epoch=${cfg.sortRecordsPerEpoch} graphchi_subintervals=${cfg.graphChiSubintervals} graphchi_edges_per_subinterval=${cfg.graphChiEdgesPerSubinterval} graph_input='${cfg.graphInputPath}' graph_input_edges=${cfg.graphInputEdges} graph_input_vertices=${cfg.graphInputVertices} graph_input_edges_per_epoch=${cfg.graphInputEdgesPerEpoch} text_input='${cfg.textInputPath}' text_input_tokens=${cfg.textInputTokens} text_tokens_per_epoch=${cfg.textInputTokensPerEpoch} escape_modulo=${cfg.escapeModulo} scratch_slots=${cfg.scratchSlots} safezone_roots_mode=$rootsMode"
+      s"CONFIG mode=$mode workload=$workload runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} epochs=${cfg.epochs} records_per_epoch=${cfg.recordsPerEpoch} key_space=${cfg.keySpace} vertices=${cfg.vertices} messages_per_epoch=${cfg.messagesPerEpoch} sort_records_per_epoch=${cfg.sortRecordsPerEpoch} graphchi_subintervals=${cfg.graphChiSubintervals} graphchi_edges_per_subinterval=${cfg.graphChiEdgesPerSubinterval} graph_input='${cfg.graphInputPath}' graph_input_edges=${cfg.graphInputEdges} graph_input_vertices=${cfg.graphInputVertices} graph_input_edges_per_epoch=${cfg.graphInputEdgesPerEpoch} text_input='${cfg.textInputPath}' text_input_tokens=${cfg.textInputTokens} text_tokens_per_epoch=${cfg.textInputTokensPerEpoch} text_input_mode=${cfg.textInputMode} escape_modulo=${cfg.escapeModulo} scratch_slots=${cfg.scratchSlots} safezone_roots_mode=$rootsMode"
     )
   }
 

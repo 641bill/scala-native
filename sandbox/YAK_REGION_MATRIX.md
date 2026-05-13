@@ -1,7 +1,7 @@
 # Yak Region Matrix
 
 Date: 2026-04-25
-Last updated: 2026-05-12 12:05 CEST
+Last updated: 2026-05-13 15:58 CEST
 
 Status: Yak-style methodology reproduction harness with validated smoke,
 default median, pressure median, external-sort-shaped median, top-word/filter
@@ -31,7 +31,9 @@ and `checked-page-token`. Older historical tables in this source pack may still
 quote legacy labels as provenance; new rollups should not. The latest
 real-input text follow-up adds `topwordreal` over the Stack Exchange
 AskUbuntu `Posts.xml` dump. It is a local Yak/Hadoop top-word-shaped row, not
-an exact Yak artifact reproduction.
+an exact Yak artifact reproduction. `topwordreal` now supports
+`YAK_TEXT_INPUT_MODE=streaming-file`, which scans `Posts.xml` during the
+benchmark instead of preloading all token keys/weights into control arrays.
 
 ## Benchmark Intent
 
@@ -58,9 +60,11 @@ The current local workloads are:
   allocates ordinary word records, filters them, combines counts, and records
   the top word for the task.
 - `topwordreal`: real Stack Exchange AskUbuntu text replay. The input
-  `Posts.xml` title/body text is tokenized once into primitive key/weight
-  control arrays, then real tokens are replayed as epoch-local `WordRecord`
-  objects for the same top-word shape.
+  `Posts.xml` title/body text can either be tokenized once into primitive
+  key/weight control arrays (`YAK_TEXT_INPUT_MODE=preloaded`) or consumed
+  incrementally from the XML file (`YAK_TEXT_INPUT_MODE=streaming-file`). Both
+  paths replay real tokens as epoch-local `WordRecord` objects for the same
+  top-word shape.
 - `graphchi`: GraphChi-like subinterval update shape. Durable vertex values
   stay on the heap; each subinterval allocates ordinary edge-update objects,
   applies them to the current vertex interval, and releases the subinterval
@@ -104,6 +108,7 @@ or a distributed runtime.
 | `YAK_TEXT_INPUT` | empty |
 | `YAK_TEXT_INPUT_TOKENS` | `1000000` |
 | `YAK_TEXT_TOKENS_PER_EPOCH` | `YAK_RECORDS_PER_EPOCH` |
+| `YAK_TEXT_INPUT_MODE` | `preloaded` |
 | `YAK_ESCAPE_MODULO` | `1000` |
 | `YAK_SCRATCH_SLOTS` | `128` |
 | `YAK_WARMUPS` | `1` |
@@ -770,6 +775,70 @@ L1 final-clean row, 20M tokens x 5 internal iterations, one external process:
   at 20M (`7.86 s` vs `7.77 s` L1), so it should not be promoted as a
   top-word headline operator yet. The direct epoch topology is the reportable
   safe framework win.
+
+### Streaming-file AskUbuntu `topwordreal`
+
+This follow-up uses the same AskUbuntu `Posts.xml` input, but runs with
+`YAK_TEXT_INPUT_MODE=streaming-file`. The benchmark scans XML title/body
+tokens during the timed workload and does not retain a full token key/weight
+array proportional to total input size. The active state is bounded by the
+current token epoch plus durable count arrays.
+
+Implemented modes in this slice:
+
+- `gc-heap`
+- `region-scoped-rooted`
+- `checked-epoch-scoped`
+- `checked-epoch-stream`
+
+The reusable `EpochTopKByKey` streaming path is not wired yet; this row is a
+direct checked epoch streaming-input control.
+
+20k smoke, streaming-file input:
+
+Raw summary: `/tmp/rift-yak-topwordreal-streaming-smoke/summary.tsv`.
+
+| Workload | Mode | Topology/operator | Median elapsed ms | Median GC ms | Median Rift op ms | Logical objects | Max RSS bytes | Checksum |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| `topwordreal` | `gc-heap` | streaming file + retained epoch records | `7.299` | `0.190` | `0.000` | `20000` | `9584640` | `-1562585445518255472` |
+| `topwordreal` | `region-scoped-rooted` | streaming file + rooted epoch records | `7.016` | `0.269` | `0.000` | `20000` | `9551872` | `-1562585445518255472` |
+| `topwordreal` | `checked-epoch-scoped` | streaming file + `RiftRegion.epoch` | `7.258` | `0.273` | `0.000` | `20000` | `9551872` | `-1562585445518255472` |
+| `topwordreal` | `checked-epoch-stream` | streaming file + `RiftRegion.epoch` | `7.008` | `0.283` | `0.014` | `20000` | `9584640` | `-1562585445518255472` |
+
+1M L2 standard-stats row, streaming-file input:
+
+Raw summary: `/tmp/rift-yak-topwordreal-streaming-1m-l2/summary.tsv`.
+
+| Workload | Mode | Topology/operator | Median elapsed ms | Median GC ms | Median Rift op ms | Logical objects | Max RSS bytes | Checksum |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| `topwordreal` | `gc-heap` | streaming file + retained epoch records | `301.923` | `3.677` | `0.000` | `1000000` | `39714816` | `8501908365116000626` |
+| `topwordreal` | `region-scoped-rooted` | streaming file + rooted epoch records | `296.793` | `0.000` | `0.000` | `1000000` | `28966912` | `8501908365116000626` |
+| `topwordreal` | `checked-epoch-scoped` | streaming file + `RiftRegion.epoch` | `296.119` | `0.000` | `0.000` | `1000000` | `28966912` | `8501908365116000626` |
+| `topwordreal` | `checked-epoch-stream` | streaming file + `RiftRegion.epoch` | `294.197` | `0.000` | `0.041` | `1000000` | `28950528` | `8501908365116000626` |
+
+1M L1 final-clean row, streaming-file input, three external process repeats
+with three internal iterations per process:
+
+Raw summaries: `/tmp/rift-yak-topwordreal-streaming-1m-l1/summary.tsv`,
+`/tmp/rift-yak-topwordreal-streaming-1m-l1-r2/summary.tsv`, and
+`/tmp/rift-yak-topwordreal-streaming-1m-l1-r3/summary.tsv`.
+
+| Workload | Mode | Topology/operator | Median real s | Min real s | Max real s | Max RSS bytes | Checksum |
+|---|---|---|---:|---:|---:|---:|---:|
+| `topwordreal` | `gc-heap` | streaming file + retained epoch records | `0.96` | `0.94` | `1.77` | `39649280` | `8501908365116000626` |
+| `topwordreal` | `region-scoped-rooted` | streaming file + rooted epoch records | `0.91` | `0.89` | `0.93` | `12943360` | `8501908365116000626` |
+| `topwordreal` | `checked-epoch-scoped` | streaming file + `RiftRegion.epoch` | `0.91` | `0.88` | `0.97` | `12943360` | `8501908365116000626` |
+| `topwordreal` | `checked-epoch-stream` | streaming file + `RiftRegion.epoch` | `0.90` | `0.90` | `0.91` | `12943360` | `8501908365116000626` |
+
+Streaming-file interpretation:
+
+- This is the first true streaming-input Yak text row: the input is consumed
+  incrementally from a file and no full token replay array is retained.
+- The row is not GC-heavy. At 1M tokens, heap timed GC is only `3.677 ms` on a
+  `301.923 ms` L2 loop, so this should be reported as a modest
+  real-streaming-input RSS/fixed-memory row, not a flagship GC-pressure row.
+- The checked epoch rows still remove timed heap GC and cut L1 RSS from about
+  `39.6 MB` to `13.0 MB`, while improving median L1 elapsed by about `5-6%`.
 
 Interpretation:
 
