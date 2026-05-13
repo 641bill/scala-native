@@ -38,6 +38,19 @@ object TheodolitePowerRegionConfig {
       value.equalsIgnoreCase("yes")
 
   val input: String = BenchmarkInputSupport.envString("THEODOLITE_POWER_INPUT")
+  val inputMode: String = {
+    val raw = BenchmarkInputSupport.envString("THEODOLITE_POWER_INPUT_MODE")
+    if (raw.isEmpty) "preloaded"
+    else
+      raw match {
+        case "preloaded" | "streaming-file" => raw
+        case other =>
+          throw new IllegalArgumentException(
+            s"unknown THEODOLITE_POWER_INPUT_MODE '$other'; expected preloaded or streaming-file"
+          )
+      }
+  }
+  val streamingInput: Boolean = inputMode == "streaming-file"
   val requestedRecords: Int = envInt("THEODOLITE_POWER_RECORDS", 1000000)
   val recordsPerEpoch: Int =
     envInt("THEODOLITE_POWER_RECORDS_PER_EPOCH", 25000)
@@ -64,6 +77,17 @@ object TheodolitePowerRegionMatrixHelpers {
       val sub3Watt: Array[Int],
       val voltageDeci: Array[Int]
   )
+
+  private abstract class PowerConsumer {
+    def apply(
+        index: Int,
+        totalMilliW: Int,
+        sub1Watt: Int,
+        sub2Watt: Int,
+        sub3Watt: Int,
+        voltageDeci: Int
+    ): Unit
+  }
 
   private final class HeapMeasurement(
       val minute: Int,
@@ -220,12 +244,101 @@ object TheodolitePowerRegionMatrixHelpers {
     if (milli < 0) -1 else milli / 1000
   }
 
+  private var parsedTotalMilliW = 0
+  private var parsedSub1Watt = 0
+  private var parsedSub2Watt = 0
+  private var parsedSub3Watt = 0
+  private var parsedVoltageDeci = 0
+
+  private def parseLineScratch(line: String): Boolean = {
+    val parts = line.split(";")
+    if (parts.length < 9) false
+    else {
+      val active = parseMilliDecimal(parts(2))
+      val volt = parseMilliDecimal(parts(4))
+      val s1 = parseIntDecimal(parts(6))
+      val s2 = parseIntDecimal(parts(7))
+      val s3 = parseIntDecimal(parts(8))
+      if (active >= 0 && volt >= 0 && s1 >= 0 && s2 >= 0 && s3 >= 0) {
+        parsedTotalMilliW = active
+        parsedVoltageDeci = volt / 100
+        parsedSub1Watt = s1
+        parsedSub2Watt = s2
+        parsedSub3Watt = s3
+        true
+      } else false
+    }
+  }
+
+  private def parseLine(line: String, index: Int, consumer: PowerConsumer): Boolean = {
+    if (parseLineScratch(line)) {
+      consumer(
+        index,
+        parsedTotalMilliW,
+        parsedSub1Watt,
+        parsedSub2Watt,
+        parsedSub3Watt,
+        parsedVoltageDeci
+      )
+      true
+    } else {
+      false
+    }
+  }
+
+  private def foreachStreamingRecord(consumer: PowerConsumer): Int = {
+    val cfg = TheodolitePowerRegionConfig
+    val reader = BenchmarkInputSupport.openText(cfg.input)
+    var count = 0
+    try {
+      var line = reader.readLine() // header
+      line = reader.readLine()
+      while (line != null && count < cfg.requestedRecords) {
+        if (parseLine(line, count, consumer))
+          count += 1
+        line = reader.readLine()
+      }
+    } finally {
+      reader.close()
+    }
+    count
+  }
+
+  private def countStreamingRecords(): Int =
+    foreachStreamingRecord(new PowerConsumer {
+      def apply(
+          index: Int,
+          totalMilliW: Int,
+          sub1Watt: Int,
+          sub2Watt: Int,
+          sub3Watt: Int,
+          voltageDeci: Int
+      ): Unit = ()
+    })
+
   private def loadInput(): InputData = {
     val cfg = TheodolitePowerRegionConfig
     if (cfg.input.isEmpty)
       throw new IllegalArgumentException(
         "THEODOLITE_POWER_INPUT must point to household_power_consumption.txt"
       )
+
+    if (cfg.streamingInput) {
+      val count = countStreamingRecords()
+      if (count == 0)
+        throw new IllegalArgumentException(
+          s"no usable power records counted from ${cfg.input}"
+        )
+      return new InputData(
+        "real-uci-household-power-streaming-file",
+        count,
+        null,
+        null,
+        null,
+        null,
+        null
+      )
+    }
 
     val total = new Array[Int](cfg.requestedRecords)
     val sub1 = new Array[Int](cfg.requestedRecords)
@@ -239,22 +352,27 @@ object TheodolitePowerRegionMatrixHelpers {
       var line = reader.readLine() // header
       line = reader.readLine()
       while (line != null && count < cfg.requestedRecords) {
-        val parts = line.split(";")
-        if (parts.length >= 9) {
-          val active = parseMilliDecimal(parts(2))
-          val volt = parseMilliDecimal(parts(4))
-          val s1 = parseIntDecimal(parts(6))
-          val s2 = parseIntDecimal(parts(7))
-          val s3 = parseIntDecimal(parts(8))
-          if (active >= 0 && volt >= 0 && s1 >= 0 && s2 >= 0 && s3 >= 0) {
-            total(count) = active
-            voltage(count) = volt / 100
-            sub1(count) = s1
-            sub2(count) = s2
-            sub3(count) = s3
-            count += 1
+        parseLine(
+          line,
+          count,
+          new PowerConsumer {
+            def apply(
+                index: Int,
+                active: Int,
+                s1: Int,
+                s2: Int,
+                s3: Int,
+                volt: Int
+            ): Unit = {
+              total(index) = active
+              voltage(index) = volt
+              sub1(index) = s1
+              sub2(index) = s2
+              sub3(index) = s3
+              count += 1
+            }
           }
-        }
+        )
         line = reader.readLine()
       }
     } finally {
@@ -347,8 +465,100 @@ object TheodolitePowerRegionMatrixHelpers {
     ()
   }
 
+  private def runHeapStreaming(query: String): RunOutcome = {
+    val cfg = TheodolitePowerRegionConfig
+    val input = loadedInput
+    val sums = new Array[Long](cfg.groupCount * queryOutputMultiplier(query))
+    val counts = new Array[Int](sums.length)
+    val reader = BenchmarkInputSupport.openText(cfg.input)
+    var checksum = 0L
+    var outputs = 0L
+    var index = 0
+    try {
+      var line = reader.readLine() // header
+      line = reader.readLine()
+      while (line != null && index < input.records) {
+        var measurementHead: HeapMeasurement = null
+        var contributionHead: HeapContribution = null
+        var inEpoch = 0
+        while (line != null && index < input.records && inEpoch < cfg.recordsPerEpoch) {
+          if (parseLineScratch(line)) {
+            val group = groupFor(index)
+            val measurement = new HeapMeasurement(
+              index,
+              group,
+              parsedTotalMilliW,
+              parsedVoltageDeci,
+              measurementHead
+            )
+            measurementHead = measurement
+            sums(group) += measurement.totalMilliW.toLong
+            counts(group) += 1
+            checksum = fold(
+              checksum,
+              measurement.minute,
+              measurement.group,
+              measurement.voltageDeci,
+              measurement.totalMilliW.toLong
+            )
+            if (query == "q2-hierarchical") {
+              val base = cfg.groupCount
+              val c1 = new HeapContribution(
+                index,
+                group,
+                1,
+                parsedSub1Watt,
+                contributionHead
+              )
+              contributionHead = c1
+              sums(base + group) += c1.watt.toLong
+              counts(base + group) += 1
+              val c2 = new HeapContribution(
+                index,
+                group,
+                2,
+                parsedSub2Watt,
+                contributionHead
+              )
+              contributionHead = c2
+              sums(base * 2 + group) += c2.watt.toLong
+              counts(base * 2 + group) += 1
+              val c3 = new HeapContribution(
+                index,
+                group,
+                3,
+                parsedSub3Watt,
+                contributionHead
+              )
+              contributionHead = c3
+              sums(base * 3 + group) += c3.watt.toLong
+              counts(base * 3 + group) += 1
+              checksum = fold(checksum, c1.minute, c2.watt, c3.watt, c1.watt.toLong)
+            }
+            index += 1
+            inEpoch += 1
+          }
+          line = reader.readLine()
+        }
+        if (inEpoch > 0) {
+          retainedAnchorSink ^= {
+            val a = if (measurementHead == null) 0L else measurementHead.totalMilliW.toLong
+            val b = if (contributionHead == null) 0L else contributionHead.watt.toLong
+            a ^ (b << 5)
+          }
+          outputs += closeEpoch(sums, counts)
+        }
+      }
+    } finally {
+      reader.close()
+    }
+    checksumSink = checksum
+    RunOutcome(checksum ^ checksumState(sums, counts), outputs)
+  }
+
   private def runHeap(query: String): RunOutcome = {
     val cfg = TheodolitePowerRegionConfig
+    if (cfg.streamingInput) return runHeapStreaming(query)
     val input = loadedInput
     val sums = new Array[Long](cfg.groupCount * queryOutputMultiplier(query))
     val counts = new Array[Int](sums.length)
@@ -410,8 +620,112 @@ object TheodolitePowerRegionMatrixHelpers {
     RunOutcome(checksum ^ checksumState(sums, counts), outputs)
   }
 
+  private def runSafeZoneStreaming(query: String): RunOutcome = {
+    val cfg = TheodolitePowerRegionConfig
+    val input = loadedInput
+    val sums = new Array[Long](cfg.groupCount * queryOutputMultiplier(query))
+    val counts = new Array[Int](sums.length)
+    val reader = BenchmarkInputSupport.openText(cfg.input)
+    var checksum = 0L
+    var outputs = 0L
+    var index = 0
+    try {
+      var line = reader.readLine() // header
+      line = reader.readLine()
+      while (line != null && index < input.records) {
+        var anchor = 0L
+        var inEpoch = 0
+        SafeZone { sz ?=>
+          final class SZMeasurement(
+              val minute: Int,
+              val group: Int,
+              val totalMilliW: Int,
+              val voltageDeci: Int,
+              val next: SZMeasurement^{sz}
+          )
+
+          final class SZContribution(
+              val minute: Int,
+              val group: Int,
+              val circuit: Int,
+              val watt: Int,
+              val next: SZContribution^{sz}
+          )
+
+          var measurementHead: SZMeasurement^{sz} = null
+          var contributionHead: SZContribution^{sz} = null
+          while (line != null && index < input.records && inEpoch < cfg.recordsPerEpoch) {
+            if (parseLineScratch(line)) {
+              val group = groupFor(index)
+              val measurement = SafeZoneAllocator.allocate(
+                sz,
+                new SZMeasurement(
+                  index,
+                  group,
+                  parsedTotalMilliW,
+                  parsedVoltageDeci,
+                  measurementHead
+                )
+              )
+              measurementHead = measurement
+              sums(group) += measurement.totalMilliW.toLong
+              counts(group) += 1
+              checksum = fold(
+                checksum,
+                measurement.minute,
+                measurement.group,
+                measurement.voltageDeci,
+                measurement.totalMilliW.toLong
+              )
+              if (query == "q2-hierarchical") {
+                val base = cfg.groupCount
+                val c1 = SafeZoneAllocator.allocate(
+                  sz,
+                  new SZContribution(index, group, 1, parsedSub1Watt, contributionHead)
+                )
+                contributionHead = c1
+                sums(base + group) += c1.watt.toLong
+                counts(base + group) += 1
+                val c2 = SafeZoneAllocator.allocate(
+                  sz,
+                  new SZContribution(index, group, 2, parsedSub2Watt, contributionHead)
+                )
+                contributionHead = c2
+                sums(base * 2 + group) += c2.watt.toLong
+                counts(base * 2 + group) += 1
+                val c3 = SafeZoneAllocator.allocate(
+                  sz,
+                  new SZContribution(index, group, 3, parsedSub3Watt, contributionHead)
+                )
+                contributionHead = c3
+                sums(base * 3 + group) += c3.watt.toLong
+                counts(base * 3 + group) += 1
+                checksum = fold(checksum, c1.minute, c2.watt, c3.watt, c1.watt.toLong)
+              }
+              index += 1
+              inEpoch += 1
+            }
+            line = reader.readLine()
+          }
+          val a = if (measurementHead == null) 0L else measurementHead.totalMilliW.toLong
+          val b = if (contributionHead == null) 0L else contributionHead.watt.toLong
+          anchor = a ^ (b << 5)
+        }
+        if (inEpoch > 0) {
+          retainedAnchorSink ^= anchor
+          outputs += closeEpoch(sums, counts)
+        }
+      }
+    } finally {
+      reader.close()
+    }
+    checksumSink = checksum
+    RunOutcome(checksum ^ checksumState(sums, counts), outputs)
+  }
+
   private def runSafeZone(query: String): RunOutcome = {
     val cfg = TheodolitePowerRegionConfig
+    if (cfg.streamingInput) return runSafeZoneStreaming(query)
     val input = loadedInput
     val sums = new Array[Long](cfg.groupCount * queryOutputMultiplier(query))
     val counts = new Array[Int](sums.length)
@@ -505,6 +819,10 @@ object TheodolitePowerRegionMatrixHelpers {
 
   private def runRiftTrusted(query: String): RunOutcome = {
     val cfg = TheodolitePowerRegionConfig
+    if (cfg.streamingInput)
+      throw new UnsupportedOperationException(
+        "region-stream-rootless is not wired for Theodolite streaming-file input; use checked epoch or scoped rows"
+      )
     val input = loadedInput
     val sums = new Array[Long](cfg.groupCount * queryOutputMultiplier(query))
     val counts = new Array[Int](sums.length)
@@ -579,8 +897,146 @@ object TheodolitePowerRegionMatrixHelpers {
     RunOutcome(checksum ^ checksumState(sums, counts), outputs)
   }
 
+  private def runCheckedEpochStreaming(
+      query: String,
+      safeZoneBackend: Boolean
+  ): RunOutcome = {
+    val cfg = TheodolitePowerRegionConfig
+    val input = loadedInput
+    val sums = new Array[Long](cfg.groupCount * queryOutputMultiplier(query))
+    val counts = new Array[Int](sums.length)
+    var checksum = 0L
+    var outputs = 0L
+
+    def run()(using stream: RiftRegion.StreamingRegion^): Unit = {
+      val reader = BenchmarkInputSupport.openText(cfg.input)
+      var index = 0
+      try {
+        var line = reader.readLine() // header
+        line = reader.readLine()
+        while (line != null && index < input.records) {
+          var anchor = 0L
+          var inEpoch = 0
+          RiftRegion.epoch { region ?=>
+            final class CheckedMeasurement(
+                val minute: Int,
+                val group: Int,
+                val totalMilliW: Int,
+                val voltageDeci: Int,
+                val next: CheckedMeasurement^{region}
+            )
+
+            final class CheckedContribution(
+                val minute: Int,
+                val group: Int,
+                val circuit: Int,
+                val watt: Int,
+                val next: CheckedContribution^{region}
+            )
+
+            var measurementHead: CheckedMeasurement^{region} = null
+            var contributionHead: CheckedContribution^{region} = null
+            while (
+              line != null && index < input.records && inEpoch < cfg.recordsPerEpoch
+            ) {
+              if (parseLineScratch(line)) {
+                val group = groupFor(index)
+                val measurement = RiftRegion.allocOpen(
+                  new CheckedMeasurement(
+                    index,
+                    group,
+                    parsedTotalMilliW,
+                    parsedVoltageDeci,
+                    measurementHead
+                  )
+                )
+                measurementHead = measurement
+                sums(group) += measurement.totalMilliW.toLong
+                counts(group) += 1
+                checksum = fold(
+                  checksum,
+                  measurement.minute,
+                  measurement.group,
+                  measurement.voltageDeci,
+                  measurement.totalMilliW.toLong
+                )
+                if (query == "q2-hierarchical") {
+                  val base = cfg.groupCount
+                  val c1 = RiftRegion.allocOpen(
+                    new CheckedContribution(
+                      index,
+                      group,
+                      1,
+                      parsedSub1Watt,
+                      contributionHead
+                    )
+                  )
+                  contributionHead = c1
+                  sums(base + group) += c1.watt.toLong
+                  counts(base + group) += 1
+                  val c2 = RiftRegion.allocOpen(
+                    new CheckedContribution(
+                      index,
+                      group,
+                      2,
+                      parsedSub2Watt,
+                      contributionHead
+                    )
+                  )
+                  contributionHead = c2
+                  sums(base * 2 + group) += c2.watt.toLong
+                  counts(base * 2 + group) += 1
+                  val c3 = RiftRegion.allocOpen(
+                    new CheckedContribution(
+                      index,
+                      group,
+                      3,
+                      parsedSub3Watt,
+                      contributionHead
+                    )
+                  )
+                  contributionHead = c3
+                  sums(base * 3 + group) += c3.watt.toLong
+                  counts(base * 3 + group) += 1
+                  checksum = fold(
+                    checksum,
+                    c1.minute,
+                    c2.watt,
+                    c3.watt,
+                    c1.watt.toLong
+                  )
+                }
+                index += 1
+                inEpoch += 1
+              }
+              line = reader.readLine()
+            }
+            val a =
+              if (measurementHead == null) 0L else measurementHead.totalMilliW.toLong
+            val b =
+              if (contributionHead == null) 0L else contributionHead.watt.toLong
+            anchor = a ^ (b << 5)
+          }
+          if (inEpoch > 0) {
+            retainedAnchorSink ^= anchor
+            outputs += closeEpoch(sums, counts)
+          }
+        }
+      } finally {
+        reader.close()
+      }
+    }
+
+    if (safeZoneBackend) RiftRegion.streamingSafeZone { stream ?=> run() }
+    else RiftRegion.streaming { stream ?=> run() }
+    checksumSink = checksum
+    RunOutcome(checksum ^ checksumState(sums, counts), outputs)
+  }
+
   private def runCheckedEpoch(query: String, safeZoneBackend: Boolean): RunOutcome = {
     val cfg = TheodolitePowerRegionConfig
+    if (cfg.streamingInput)
+      return runCheckedEpochStreaming(query, safeZoneBackend)
     val input = loadedInput
     val sums = new Array[Long](cfg.groupCount * queryOutputMultiplier(query))
     val counts = new Array[Int](sums.length)
@@ -767,7 +1223,7 @@ object TheodolitePowerRegionMatrixHelpers {
       println(
         s"RESULT name=theodolite-power-$query-$canonical " +
           s"measurement_level=L1 final_clean=1 query=$query mode=$canonical " +
-          s"input=${input.label} records=${input.records} " +
+          s"input=${input.label} input_mode=${cfg.inputMode} records=${input.records} " +
           s"records_per_epoch=${cfg.recordsPerEpoch} groups=${cfg.groupCount} " +
           s"runs=${cfg.benchmarkRuns} checksum=${expected.checksum} " +
           s"output_count=${expected.outputCount}"
@@ -839,7 +1295,7 @@ object TheodolitePowerRegionMatrixHelpers {
 
     println(
       f"RESULT name=theodolite-power-$query-$canonical " +
-        f"query=$query mode=$canonical input=${input.label} " +
+        f"query=$query mode=$canonical input=${input.label} input_mode=${cfg.inputMode} " +
         f"records=${input.records}%d records_per_epoch=${cfg.recordsPerEpoch}%d " +
         f"groups=${cfg.groupCount}%d median_ms=$medianMs%.3f " +
         f"median_gc_ms=$medianGcMs%.3f max_gc_ms=$maxGcMs%.3f " +
@@ -858,7 +1314,7 @@ object TheodolitePowerRegionMatrixHelpers {
     val input = loadedInput
     println(
       s"CONFIG mode=$mode canonical_mode=${canonicalMode(mode)} query=$query " +
-        s"input=${cfg.input} input_label=${input.label} records=${input.records} " +
+        s"input=${cfg.input} input_label=${input.label} input_mode=${cfg.inputMode} records=${input.records} " +
         s"records_per_epoch=${cfg.recordsPerEpoch} groups=${cfg.groupCount} " +
         s"runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} " +
         s"final_clean=${cfg.finalClean}"

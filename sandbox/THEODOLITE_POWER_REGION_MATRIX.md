@@ -1,7 +1,7 @@
 # Theodolite Power Region Matrix
 
 Date: 2026-05-11
-Last updated: 2026-05-11 21:28 CEST
+Last updated: 2026-05-13 13:35 CEST
 
 Status: implemented a local single-process Theodolite UC2/UC4-style real-input
 kernel over the UCI Household Electric Power Consumption trace. This is not an
@@ -9,7 +9,10 @@ exact Theodolite artifact reproduction: Theodolite's public implementation is
 Kafka/Flink/Kubernetes-oriented and its documented active-power load path is
 generated. This matrix instead pairs the same downsampling/hierarchical
 aggregation shape with a public real power-meter trace so external framework
-overhead does not hide memory-management behavior.
+overhead does not hide memory-management behavior. The matrix now also has an
+explicit `THEODOLITE_POWER_INPUT_MODE=streaming-file` path: real records are
+parsed inside each benchmark run, no parsed full-input arrays are retained, and
+active memory is bounded by the current epoch plus durable aggregate metadata.
 
 ## Input
 
@@ -106,6 +109,36 @@ THEODOLITE_POWER_OUTPUT_DIR=/Users/siyaoliu/rift/cache/theodolite-power-full-q2-
 zsh sandbox/run_theodolite_power_region_matrix.sh
 ```
 
+1M q2 streaming-file L1/L2:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+THEODOLITE_POWER_BUILD=0 \
+THEODOLITE_POWER_INPUT_MODE=streaming-file \
+THEODOLITE_POWER_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/theodolite/real-power/household_power_consumption.txt \
+THEODOLITE_POWER_RECORDS=1000000 \
+THEODOLITE_POWER_RECORDS_PER_EPOCH=25000 \
+THEODOLITE_POWER_BENCHMARK_RUNS=3 \
+THEODOLITE_POWER_WARMUPS=0 \
+THEODOLITE_POWER_QUERIES="q2-hierarchical" \
+THEODOLITE_POWER_MODES="heap-immix region-scoped-rooted checked-epoch-scoped" \
+THEODOLITE_POWER_OUTPUT_DIR=/tmp/rift-theodolite-streaming-1m-20260513 \
+zsh sandbox/run_theodolite_power_region_matrix.sh
+
+RIFT_FINAL_CLEAN=1 \
+THEODOLITE_POWER_BUILD=0 \
+THEODOLITE_POWER_INPUT_MODE=streaming-file \
+THEODOLITE_POWER_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/theodolite/real-power/household_power_consumption.txt \
+THEODOLITE_POWER_RECORDS=1000000 \
+THEODOLITE_POWER_RECORDS_PER_EPOCH=25000 \
+THEODOLITE_POWER_BENCHMARK_RUNS=3 \
+THEODOLITE_POWER_WARMUPS=0 \
+THEODOLITE_POWER_QUERIES="q2-hierarchical" \
+THEODOLITE_POWER_MODES="heap-immix region-scoped-rooted checked-epoch-scoped" \
+THEODOLITE_POWER_OUTPUT_DIR=/tmp/rift-theodolite-streaming-1m-l1-20260513 \
+zsh sandbox/run_theodolite_power_region_matrix.sh
+```
+
 ## 20k Smoke
 
 All modes matched checksums/output counts.
@@ -164,6 +197,30 @@ process: `3`. No internal GC/region counter reads in the timed query loop.
 | `checked-epoch-stream` | `5.49` | `5.33` | `0.13` | `304332800` | `83968` |
 | `checked-epoch-scoped` | `5.45` | `5.29` | `0.13` | `304398336` | `83968` |
 
+## Streaming-File q2
+
+Input mode: `THEODOLITE_POWER_INPUT_MODE=streaming-file`. The benchmark parses
+the real power trace inside each run instead of preloading parsed primitive
+arrays before timing.
+
+1M L2 standard-stats row. Records: `1000000`. Epoch size: `25000`. Runs: `3`,
+warmups: `0`.
+
+| Mode | External s | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes | Output count |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `heap-immix` | `12.32` | `2479.703` | `143.088` | `143.944` | `3/3` | `147292160` | `40960` |
+| `region-scoped-rooted` | `12.46` | `2542.816` | `47.324` | `50.442` | `3/3` | `150585344` | `40960` |
+| `checked-epoch-scoped` | `12.97` | `2436.713` | `54.154` | `76.680` | `3/3` | `150585344` | `40960` |
+
+1M L1 final-clean row. Runs per external process: `3`. No internal
+GC/region counter reads in the timed query loop.
+
+| Mode | External real s | External user s | External sys s | RSS bytes | Output count |
+|---|---:|---:|---:|---:|---:|
+| `heap-immix` | `10.92` | `10.10` | `0.10` | `147144704` | `40960` |
+| `region-scoped-rooted` | `10.07` | `9.78` | `0.09` | `25247744` | `40960` |
+| `checked-epoch-scoped` | `10.07` | `9.78` | `0.09` | `29605888` | `40960` |
+
 ## Interpretation
 
 Theodolite real power q2 is a useful real-input control, but not the missing
@@ -183,7 +240,15 @@ GC-heavy flagship:
   faster (`5.45 s` versus heap `5.46 s`) with slightly lower RSS (`304 MB`
   versus heap `307 MB`). Parser/file CPU dominates the end-to-end workload.
 
-Decision: keep this as real-input modest/control evidence for the
-Theodolite-style time-series aggregation ladder. Do not tune it as a flagship
-case unless a larger real power trace or a richer UC4 hierarchy creates
-material RSS/tail/fixed-memory pressure.
+The new streaming-file q2 row is stronger than the older preloaded/full-local
+control because it keeps the input source true to stream-processing semantics.
+At 1M records, checked scoped epoch is an L1 throughput/RSS/fixed-memory win
+(`10.07 s`, `29.6 MB` RSS) versus heap (`10.92 s`, `147.1 MB` RSS). L2 shows
+heap has visible GC (`143.088 ms` median), while checked scoped still reports
+some GC (`54.154 ms`) because the file parser allocates heap strings/split
+arrays in all modes.
+
+Decision: keep Theodolite streaming-file q2 as real-streaming-input
+throughput/RSS/fixed-memory evidence. It is still not the missing flagship
+"huge GC" stream case because parser/string work remains dominant and region
+placement does not remove all parser allocation.
