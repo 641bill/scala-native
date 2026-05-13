@@ -77,11 +77,11 @@ object GithubArchiveRegionConfig {
   }
   val fileBackedInput: Boolean =
     inputMode match {
-      case "preloaded"   => false
-      case "file-backed" => true
+      case "preloaded"                 => false
+      case "file-backed" | "streaming-file" => true
       case other =>
         throw new IllegalArgumentException(
-          s"unknown GITHUB_ARCHIVE_INPUT_MODE '$other'; expected preloaded or file-backed"
+          s"unknown GITHUB_ARCHIVE_INPUT_MODE '$other'; expected preloaded, file-backed, or streaming-file"
         )
     }
 }
@@ -561,7 +561,7 @@ object GithubArchiveRegionMatrixHelpers {
     val cfg = GithubArchiveRegionConfig
     if (cfg.inputPath.isEmpty)
       throw new IllegalArgumentException(
-        "GITHUB_ARCHIVE_INPUT_MODE=file-backed requires GITHUB_ARCHIVE_INPUT or GITHUB_ARCHIVE_INPUTS"
+        "GITHUB_ARCHIVE_INPUT_MODE=file-backed/streaming-file requires GITHUB_ARCHIVE_INPUT or GITHUB_ARCHIVE_INPUTS"
       )
 
     if (cfg.fileParser == "string") countFileBackedInputRowsString()
@@ -691,9 +691,13 @@ object GithubArchiveRegionMatrixHelpers {
         )
       val parserLabel =
         if (cfg.fileParser == "byte-slice") "byte" else "string"
+      val inputKind =
+        if (cfg.inputMode == "streaming-file") "streaming-file"
+        else "file-backed"
       return new InputData(
-        if (cfg.inputPaths.length == 1) s"real-gharchive-${parserLabel}-file-backed"
-        else s"real-gharchive-${parserLabel}-file-backed-${cfg.inputPaths.length}files",
+        if (cfg.inputPaths.length == 1)
+          s"real-gharchive-${parserLabel}-${inputKind}"
+        else s"real-gharchive-${parserLabel}-${inputKind}-${cfg.inputPaths.length}files",
         rows,
         cfg.inputPaths.length,
         null,

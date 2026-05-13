@@ -1,13 +1,16 @@
 # GH Archive Region Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-10 17:47 CEST
+Last updated: 2026-05-13 13:09 CEST
 
-Status: first real NDJSON/log-event stream matrix added, with both preloaded
-and file-backed q1/q2 rows. The preloaded rows time object allocation/query
-processing after extracting primitive metadata before warmups.
-`GITHUB_ARCHIVE_INPUT_MODE=file-backed` rereads and parses gzip JSON lines
-inside every timed run. File-backed rows now support two parser paths:
+Status: first real NDJSON/log-event stream matrix added, with preloaded,
+file-backed, and explicit streaming-file q1/q2 rows. The preloaded rows time
+object allocation/query processing after extracting primitive metadata before
+warmups. `GITHUB_ARCHIVE_INPUT_MODE=file-backed` and
+`GITHUB_ARCHIVE_INPUT_MODE=streaming-file` reread and parse gzip JSON lines
+inside every timed run; `streaming-file` is the real-streaming-input reporting
+label, while `file-backed` remains a legacy alias. These rows now support two
+parser paths:
 `GITHUB_ARCHIVE_FILE_PARSER=string` for the legacy `BufferedReader`/`String`
 path and `GITHUB_ARCHIVE_FILE_PARSER=byte-slice` for the current default
 reusable byte-line reader.
@@ -35,9 +38,12 @@ the matrix extracts event type, repo, actor, field-count, and a stable line
 hash into primitive preloaded arrays, then times object allocation/query
 processing. With `GITHUB_ARCHIVE_INPUT_MODE=file-backed`, the same logical
 query rereads the gzip file and parses the JSON line fields during every timed
-run. The default file-backed parser is now `byte-slice`, which reuses input
-buffers and extracts JSON string fields from raw UTF-8 bytes. The legacy
-`string` parser remains available as a control.
+run. `GITHUB_ARCHIVE_INPUT_MODE=streaming-file` is the explicit streaming-input
+name for the same bounded replay shape: no parsed total-input arrays are kept,
+and memory is bounded by active buckets plus durable control state. The default
+streaming/file-backed parser is now `byte-slice`, which reuses input buffers
+and extracts JSON string fields from raw UTF-8 bytes. The legacy `string`
+parser remains available as a control.
 
 ## Queries
 
@@ -875,3 +881,45 @@ Next useful GH Archive work:
    extraction operator before adding GH-specific tuning.
 3. Add latency/tail metrics or per-run elapsed tables, since median elapsed
    hides the GC outlier that regions remove.
+
+## Explicit Streaming-File q1/q2 Triage
+
+Date: 2026-05-13
+
+`GITHUB_ARCHIVE_INPUT_MODE=streaming-file` was added as the explicit
+`real-streaming-input` label. It follows the same bounded byte-slice replay as
+the older `file-backed` path, but reports `input_mode=streaming-file` and
+labels the input `real-gharchive-byte-streaming-file`.
+
+Command shape:
+
+```bash
+cd /Users/siyaoliu/rift/scala-native-rift
+GITHUB_ARCHIVE_BUILD=0 \
+GITHUB_ARCHIVE_INPUT_MODE=streaming-file \
+GITHUB_ARCHIVE_FILE_PARSER=byte-slice \
+GITHUB_ARCHIVE_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/gharchive/2026-04-01-0.json.gz \
+GITHUB_ARCHIVE_EVENTS=100000 \
+GITHUB_ARCHIVE_BENCHMARK_RUNS=3 \
+GITHUB_ARCHIVE_WARMUPS=0 \
+GITHUB_ARCHIVE_QUERIES="q1-fields q2-repo-window" \
+GITHUB_ARCHIVE_MODES="heap-immix rift-checked-page-token" \
+GITHUB_ARCHIVE_OUTPUT_DIR=/tmp/rift-gharchive-streaming-100k-20260513 \
+zsh sandbox/run_github_archive_region_matrix.sh
+```
+
+20k smoke and 100k triage both matched checksums across heap and checked
+page-token rows. The 100k triage:
+
+| Query | Mode | External s | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes | Output |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| q1-fields | `gc-heap` | `10.39` | `2325.844` | `0.000` | `71.641` | `1/3` | `169263104` | `1300000` |
+| q1-fields | `rift-checked-page-token` | `9.62` | `1989.461` | `0.000` | `0.000` | `0/3` | `162054144` | `1300000` |
+| q2-repo-window | `gc-heap` | `9.38` | `2151.431` | `0.000` | `72.159` | `1/3` | `169443328` | `15877` |
+| q2-repo-window | `rift-checked-page-token` | `9.16` | `2016.085` | `0.000` | `0.000` | `0/3` | `162381824` | `15877` |
+
+Interpretation: this is the first explicit GH Archive streaming-input row.
+Checked page-token removes the observed heap GC tail and gives modest elapsed
+and RSS wins at 100k, but median heap GC is still zero and byte-slice parsing
+dominates external process time. Treat it as real-streaming-input
+RSS/tail/modest-throughput evidence, not a flagship GC-heavy stream result.
