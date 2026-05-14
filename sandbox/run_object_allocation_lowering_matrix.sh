@@ -48,7 +48,7 @@ read_max_rss_bytes() {
 }
 
 write_summary_header() {
-  printf "mode\theap_cap\tstatus\tmedian_ms\tmedian_gc_ms\tmax_gc_ms\truns_with_gc\tmedian_rift_op_ms\tmedian_rift_slow_alloc_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\tmax_rss_bytes\n" > "${summary}"
+  printf "mode\theap_cap\tstatus\tmedian_ms\tmedian_gc_ms\tmax_gc_ms\truns_with_gc\tmedian_rift_op_ms\tmedian_rift_slow_alloc_ms\tmedian_rift_alloc_object_total\tmedian_rift_zero_object_total\tmedian_rift_zero_object_bytes_total\tmedian_rift_zero_skipped_total\tmedian_rift_zero_skipped_bytes_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\tmax_rss_bytes\n" > "${summary}"
 }
 
 write_result_row() {
@@ -70,7 +70,7 @@ write_result_row() {
     fi
   done
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "${mode}" \
     "${heap_cap}" \
     "${run_status}" \
@@ -81,6 +81,10 @@ write_result_row() {
     "${fields[median_rift_op_ms]-}" \
     "${fields[median_rift_slow_alloc_ms]-}" \
     "${fields[median_rift_alloc_object_total]-}" \
+    "${fields[median_rift_zero_object_total]-}" \
+    "${fields[median_rift_zero_object_bytes_total]-}" \
+    "${fields[median_rift_zero_skipped_total]-}" \
+    "${fields[median_rift_zero_skipped_bytes_total]-}" \
     "${fields[median_rift_open_total]-}" \
     "${fields[median_rift_close_total]-}" \
     "${fields[median_rift_reset_total]-}" \

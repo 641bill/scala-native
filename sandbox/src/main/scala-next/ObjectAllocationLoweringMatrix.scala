@@ -65,13 +65,17 @@ object ObjectAllocationLoweringMatrixHelpers {
       riftRegionCloseTotal: Long,
       riftRegionResetTotal: Long,
       riftAllocObjectTotal: Long,
+      riftZeroObjectTotal: Long,
+      riftZeroObjectBytesTotal: Long,
+      riftZeroSkippedTotal: Long,
+      riftZeroSkippedBytesTotal: Long,
       riftRegionOpNanos: Long,
       riftSlowAllocNanos: Long
   )
 
   private object RuntimeSample {
     val zero: RuntimeSample =
-      RuntimeSample(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L)
+      RuntimeSample(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L)
 
     private def rawSizeToLong(value: RawSize): Long =
       fromRawUSize(value).toLong
@@ -99,6 +103,14 @@ object ObjectAllocationLoweringMatrixHelpers {
             rawSizeToLong(RiftAllocator.Impl.statsRegionResetTotal()),
           riftAllocObjectTotal =
             rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal()),
+          riftZeroObjectTotal =
+            rawSizeToLong(RiftAllocator.Impl.statsAllocZeroObjectTotal()),
+          riftZeroObjectBytesTotal =
+            rawSizeToLong(RiftAllocator.Impl.statsAllocZeroObjectBytesTotal()),
+          riftZeroSkippedTotal =
+            rawSizeToLong(RiftAllocator.Impl.statsAllocZeroSkippedTotal()),
+          riftZeroSkippedBytesTotal =
+            rawSizeToLong(RiftAllocator.Impl.statsAllocZeroSkippedBytesTotal()),
           riftRegionOpNanos =
             rawSizeToLong(RiftAllocator.Impl.statsRegionOpNanos()),
           riftSlowAllocNanos =
@@ -118,6 +130,14 @@ object ObjectAllocationLoweringMatrixHelpers {
           delta(end.riftRegionResetTotal, start.riftRegionResetTotal),
         riftAllocObjectTotal =
           delta(end.riftAllocObjectTotal, start.riftAllocObjectTotal),
+        riftZeroObjectTotal =
+          delta(end.riftZeroObjectTotal, start.riftZeroObjectTotal),
+        riftZeroObjectBytesTotal =
+          delta(end.riftZeroObjectBytesTotal, start.riftZeroObjectBytesTotal),
+        riftZeroSkippedTotal =
+          delta(end.riftZeroSkippedTotal, start.riftZeroSkippedTotal),
+        riftZeroSkippedBytesTotal =
+          delta(end.riftZeroSkippedBytesTotal, start.riftZeroSkippedBytesTotal),
         riftRegionOpNanos =
           delta(end.riftRegionOpNanos, start.riftRegionOpNanos),
         riftSlowAllocNanos =
@@ -388,6 +408,10 @@ object ObjectAllocationLoweringMatrixHelpers {
     val slowAllocTimes = new Array[Double](cfg.benchmarkRuns)
     val gcCollections = new Array[Long](cfg.benchmarkRuns)
     val riftAllocObjects = new Array[Long](cfg.benchmarkRuns)
+    val riftZeroObjects = new Array[Long](cfg.benchmarkRuns)
+    val riftZeroBytes = new Array[Long](cfg.benchmarkRuns)
+    val riftZeroSkipped = new Array[Long](cfg.benchmarkRuns)
+    val riftZeroSkippedBytes = new Array[Long](cfg.benchmarkRuns)
     val riftOpenTotal = new Array[Long](cfg.benchmarkRuns)
     val riftCloseTotal = new Array[Long](cfg.benchmarkRuns)
     val riftResetTotal = new Array[Long](cfg.benchmarkRuns)
@@ -411,6 +435,10 @@ object ObjectAllocationLoweringMatrixHelpers {
         slowAllocTimes(index) = delta.riftSlowAllocNanos.toDouble / 1000000.0
         gcCollections(index) = delta.gcCollections
         riftAllocObjects(index) = delta.riftAllocObjectTotal
+        riftZeroObjects(index) = delta.riftZeroObjectTotal
+        riftZeroBytes(index) = delta.riftZeroObjectBytesTotal
+        riftZeroSkipped(index) = delta.riftZeroSkippedTotal
+        riftZeroSkippedBytes(index) = delta.riftZeroSkippedBytesTotal
         riftOpenTotal(index) = delta.riftRegionOpenTotal
         riftCloseTotal(index) = delta.riftRegionCloseTotal
         riftResetTotal(index) = delta.riftRegionResetTotal
@@ -426,6 +454,10 @@ object ObjectAllocationLoweringMatrixHelpers {
     val medianRiftOpMs = medianDouble(riftOpTimes)
     val medianSlowAllocMs = medianDouble(slowAllocTimes)
     val medianRiftObjects = medianLong(riftAllocObjects)
+    val medianRiftZeroObjects = medianLong(riftZeroObjects)
+    val medianRiftZeroBytes = medianLong(riftZeroBytes)
+    val medianRiftZeroSkipped = medianLong(riftZeroSkipped)
+    val medianRiftZeroSkippedBytes = medianLong(riftZeroSkippedBytes)
     val medianOpen = medianLong(riftOpenTotal)
     val medianClose = medianLong(riftCloseTotal)
     val medianReset = medianLong(riftResetTotal)
@@ -440,6 +472,10 @@ object ObjectAllocationLoweringMatrixHelpers {
         f"median_rift_op_ms=$medianRiftOpMs%.3f " +
         f"median_rift_slow_alloc_ms=$medianSlowAllocMs%.3f " +
         s"median_rift_alloc_object_total=$medianRiftObjects " +
+        s"median_rift_zero_object_total=$medianRiftZeroObjects " +
+        s"median_rift_zero_object_bytes_total=$medianRiftZeroBytes " +
+        s"median_rift_zero_skipped_total=$medianRiftZeroSkipped " +
+        s"median_rift_zero_skipped_bytes_total=$medianRiftZeroSkippedBytes " +
         s"median_rift_open_total=$medianOpen " +
         s"median_rift_close_total=$medianClose " +
         s"median_rift_reset_total=$medianReset " +

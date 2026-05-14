@@ -1,11 +1,12 @@
 # Object Allocation Lowering Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-13 17:45 CEST
+Last updated: 2026-05-14 13:45 CEST
 
 Status: refined retained-region-array matrix validated at 20k smoke, 100k, 1M,
 and 10M, plus focused final-clean allocator-counter, cached-stats,
-current-slab zeroed-cache, handle-backed allocation, and warm/dirty-slab gates.
+current-slab zeroed-cache, handle-backed allocation, warm/dirty-slab gates,
+and object zeroing attribution counters.
 This
 benchmark isolates ordinary Scala object construction through heap, trusted
 Rift, checked Rift, and checked SafeZone-backed allocation paths without
@@ -202,6 +203,58 @@ with slow-allocation/attach time rising to `3.277 ms`. Keep the current
 per-object zeroing policy for dirty reused slabs until a better measured policy
 exists.
 
+Zeroing attribution probe, 2026-05-14: the Rift runtime now records, when
+allocation stats are enabled, how many managed object allocations actually call
+`memset` and how many skip zeroing because the current slab is known fresh and
+zero-filled by the OS. These counters are diagnostic L2 evidence only; they
+are disabled with the rest of allocation stats in `RIFT_FINAL_CLEAN=1`.
+
+Smoke command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+OBJECT_ALLOC_OBJECTS=20000 \
+OBJECT_ALLOC_BENCHMARK_RUNS=1 \
+OBJECT_ALLOC_WARMUPS=0 \
+OBJECT_ALLOC_MODES="rift-checked-rift-open-handle rift-checked-rift-open-handle-dirty-slab" \
+OBJECT_ALLOC_OUTPUT_DIR=/Users/siyaoliu/rift/cache/object-zeroing-probe-smoke-20260514 \
+zsh sandbox/run_object_allocation_lowering_matrix.sh
+```
+
+20k smoke rows:
+
+| Mode | Median ms | Zeroed objects | Zeroed bytes | Zero-skipped objects | Zero-skipped bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|
+| `rift-checked-rift-open-handle` | 0.902 | 0 | 0 | 20,000 | 640,000 | -5014597496877744147 |
+| `rift-checked-rift-open-handle-dirty-slab` | 0.444 | 511 | 16,352 | 19,489 | 623,648 | -5014597496877744147 |
+
+Focused diagnostic command:
+
+```sh
+OBJECT_ALLOC_BUILD=0 \
+OBJECT_ALLOC_OBJECTS=5000000 \
+OBJECT_ALLOC_BENCHMARK_RUNS=5 \
+OBJECT_ALLOC_WARMUPS=1 \
+OBJECT_ALLOC_MODES="rift-checked-rift-open-handle rift-checked-rift-open-handle-dirty-slab" \
+OBJECT_ALLOC_OUTPUT_DIR=/Users/siyaoliu/rift/cache/object-zeroing-probe-5m-20260514 \
+zsh sandbox/run_object_allocation_lowering_matrix.sh
+```
+
+5M rows:
+
+| Mode | Median ms | GC median ms | Zeroed objects | Zeroed bytes | Zero-skipped objects | Zero-skipped bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `rift-checked-rift-open-handle` | 70.197 | 0.070 | 4,198,392 | 134,348,544 | 801,608 | 25,651,456 | -1183547843768457859 |
+| `rift-checked-rift-open-handle-dirty-slab` | 70.329 | 0.074 | 4,198,392 | 134,348,544 | 801,608 | 25,651,456 | -1183547843768457859 |
+
+Interpretation: zeroing is now quantified, not guessed. At 5M objects, about
+`84%` of managed object allocations are zeroed and about `16%` skip zeroing
+because they land on fresh zeroed slabs. That confirms object initialization /
+zeroing is a real remaining allocation-body cost, but it still does not justify
+unsafe no-zero allocation. The next optimization step needs compiler proof of
+definite initialization for final record-like classes, or a runtime policy that
+changes this ratio without increasing attach/reset cost.
+
 Cached allocation-stats mode follow-up, 2026-05-12: the L4 clean-winner profile
 still sampled `scalanative_rift_alloc_stats_enabled`, so the Rift runtime now
 caches the allocation-stats mode on each `scalanative_rift_region` at open.
@@ -241,6 +294,118 @@ Interpretation: unlike the cached-stats-only row, the current-slab zeroed
 cache beats the prior object-fast baseline in the focused allocation matrix.
 It is still a narrow allocation-body optimization: object construction,
 mandatory zeroing on dirty slabs, and field stores remain.
+
+Rejected stats-branch split follow-up, 2026-05-13: splitting the Rift
+managed-object allocation helper into stats-disabled and stats-enabled helper
+functions improved the focused 5M `rift-checked-rift` allocation row slightly
+(`68.561 ms` versus the accepted current-slab zeroed-cache `68.998 ms`), and
+the forced-stats 1M row still reported `1000001` region objects. It was
+rejected because application gates moved the wrong way: focused page-token
+checked Rift reran at `24.799 ms` versus the accepted `23.930 ms`, and
+StreamFlexDesign `checked-epoch-stream` moved to `23.24 s` versus the accepted
+`22.31 s`. Keep the accepted single-helper allocation body; the next serious
+target is a compiler/backend-known allocation lowering change or proven
+zero-initialization work, not another C branch reshuffle.
+
+Rejected backend-specific open-marker prototype, 2026-05-13: a prototype added
+Rift-open and SafeZone-open marker traits plus a marker-preserving lowering
+path so `allocOpen` could avoid retagging the zone back to generic
+`RiftRegion`. The first overload shape made existing generic `allocOpen` calls
+ambiguous across many checked operators. A narrower experimental
+`allocRiftOpen` mode compiled, but crashed in the focused allocation matrix
+with an unrecoverable null allocation path, and the same binary regressed the
+baseline `rift-checked-rift` row (`75.706 ms`). The prototype was reverted.
+Conclusion: marker traits and casts are not enough. The next backend-known
+allocation attempt needs a real compiler/NIR intrinsic that can lower directly
+to a handle-level allocation path, or a typed API that carries the handle
+without dynamic method lookup.
+
+Focused handle-level lowering prototype, 2026-05-13: the next attempt added a
+Rift-only experimental open handle and a distinct allocation intrinsic that
+the NIR lowerer can recognize. The lowerer reads the handle field and emits a
+direct `scalanative_rift_region_alloc` call, avoiding the virtual
+`allocUncheckedImpl` method path. This row is deliberately focused
+allocation-lowering evidence, not a final public API decision and not yet an
+application row.
+
+Focused 5M checked Rift handle-level allocation gate, 5 measured runs:
+
+| Mode / env | Median ms | GC median ms | GC max ms | Runs with GC | Rift op ms | Slow alloc ms | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `rift-trusted-streaming`, same binary | 87.494 | 0.079 | 0.215 | 5/5 | 2.739 | 1.333 | 203800576 | -1183547843768457859 |
+| `rift-checked-rift`, current checked path | 70.247 | 0.000 | 0.000 | 0/5 | 2.843 | 1.238 | 203685888 | -1183547843768457859 |
+| `rift-checked-rift-open-handle`, experimental handle path | 59.777 | 0.070 | 0.082 | 5/5 | 2.554 | 1.172 | 203784192 | -1183547843768457859 |
+
+Interpretation: this is the first focused result showing that a real
+backend-known handle-level allocation lowering can beat the current checked
+path materially: about `14.9%` faster than the same-binary current checked row
+and about `13.4%` faster than the accepted current-slab zeroed-cache row
+(`68.998 ms`). RSS and checksum are unchanged at this scale. The next step is
+to redesign this as an internal/compiler-owned path for safe checked epoch and
+page-token APIs, then rerun application gates before exposing or claiming it.
+Validation after tightening the handle field visibility: `sandbox3_next/compile`
+passed, the focused open-handle 20k native-link smoke passed, and the existing
+checked-region compiler/runtime tests passed (`141/141` and `64/64`).
+
+First application gate, 2026-05-13: `StreamFlexDesignMatrix` added an
+experimental `checked-epoch-stream-open-handle` row. It keeps the same
+stable/transient/capsule workload and the same per-period reset topology as
+`checked-epoch-stream`; only the checked transient allocations use the
+handle-level lowering.
+
+| Workload | Current checked stream | Open-handle checked stream | Result |
+|---|---:|---:|---|
+| StreamFlex design throughput, 2M events | `1.09 s`, user `0.75 s`, RSS `6209536` | `0.67 s`, user `0.66 s`, RSS `6045696` | Same checksum/output; positive smoke-scale application gate. |
+| StreamFlex design throughput, 20M events | `7.27 s`, user `7.24 s`, RSS `10354688` | `6.60 s`, user `6.56 s`, RSS `9027584` | Same checksum/output; about `9.2%` external-time improvement and lower RSS in this same-binary gate. |
+
+Clean 20M L1 gate, 3 measured runs inside each non-profiled process:
+
+| Mode | External real s | External user s | RSS bytes | Checksum | Output count |
+|---|---:|---:|---:|---:|---:|
+| `gc-heap` | 30.67 | 30.46 | 12435456 | 5305809911915216923 | 19999119 |
+| `heap-same-shape` | 30.77 | 30.53 | 12435456 | 5305809911915216923 | 19999119 |
+| `region-scoped-rooted` | 28.16 | 28.01 | 12255232 | 5305809911915216923 | 19999119 |
+| `checked-epoch-stream` | 22.57 | 22.07 | 12615680 | 5305809911915216923 | 19999119 |
+| `checked-epoch-stream-open-handle` | 19.69 | 19.49 | 12550144 | 5305809911915216923 | 19999119 |
+
+Interpretation: the handle-level allocation result is not just a microbenchmark
+artifact. It survives a StreamFlex-style application shape: the clean 20M gate
+improves current checked stream by about `12.8%` while keeping the same
+checksum/output and essentially the same RSS. This still needs L2
+interpretation rows and integration behind the normal checked API before it
+becomes a public-system claim.
+
+Second application gate, 2026-05-13: generated Common Crawl-shaped q2 now has a
+Rift-only `rift-checked-page-token-open-handle` row. It keeps the same
+page/window token topology as `rift-checked-page-token`, but the active bucket
+allocation owner is a handle lowered directly to `scalanative_rift_region_alloc`.
+
+| Workload | Current checked page-token | Open-handle checked page-token | Result |
+|---|---:|---:|---|
+| Common Crawl-shaped q2, 20k smoke | `0.41 s`, RSS `63242240` | `0.07 s`, RSS `63242240` | Same checksum/output; positive smoke. |
+| Common Crawl-shaped q2, 1M L1, 3 runs/process | `10.62 s`, RSS `63324160` | `9.66 s`, RSS `63340544` | Same checksum/output; about `9.0%` external-time improvement. |
+| Common Crawl-shaped q2, 1M L2 median | `3883.742 ms`, GC `21.017 ms` | `3695.704 ms`, GC `20.648 ms` | Same allocation/open/close counts; about `4.8%` internal median improvement. |
+
+Interpretation: the handle-level path transfers to the page/window stream
+shape too. The next promotion step is to hide this behind compiler-owned
+checked API lowering instead of exposing separate benchmark labels.
+
+Promotion follow-up, 2026-05-13: the normal generated Common Crawl-shaped
+`rift-checked-page-token` row now dispatches to the handle-backed Rift
+page-token path. The old open-region lowering remains available as
+`rift-checked-page-token-legacy`.
+
+| Workload | Legacy checked page-token | Promoted checked page-token | Result |
+|---|---:|---:|---|
+| Common Crawl-shaped q2, 20k smoke | `0.33 s`, RSS `63242240` | `0.07 s`, RSS `63225856` | Same checksum/output. |
+| Common Crawl-shaped q2, 1M L1, 3 runs/process | `11.18 s`, RSS `63324160` | `10.59 s`, RSS `63324160` | Same checksum/output; about `5.3%` external-time improvement. |
+| Common Crawl-shaped q2, 1M L2 median | `3909.015 ms`, GC `31.825 ms` | `3562.617 ms`, GC `23.230 ms` | Same allocation/open/close counts; about `8.9%` internal median improvement. |
+
+Interpretation: the default checked page-token benchmark row now reflects the
+handle-level allocation win. The remaining cleanup is API/reporting: remove the
+temporary `open-handle` label from default scripts once enough legacy controls
+are recorded, and make the same internal lowering available for other
+operator-owned checked paths that carry a Rift handle.
 
 Validation note: an initial 20k construct-only smoke linked and emitted rows,
 but was rejected as evidence because checked allocations could be optimized

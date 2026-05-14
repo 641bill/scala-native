@@ -66,6 +66,18 @@ object RiftAllocator {
     @name("scalanative_rift_stats_alloc_slow_total")
     def statsAllocSlowTotal(): RawSize = extern
 
+    @name("scalanative_rift_stats_alloc_zero_object_total")
+    def statsAllocZeroObjectTotal(): RawSize = extern
+
+    @name("scalanative_rift_stats_alloc_zero_object_bytes_total")
+    def statsAllocZeroObjectBytesTotal(): RawSize = extern
+
+    @name("scalanative_rift_stats_alloc_zero_skipped_total")
+    def statsAllocZeroSkippedTotal(): RawSize = extern
+
+    @name("scalanative_rift_stats_alloc_zero_skipped_bytes_total")
+    def statsAllocZeroSkippedBytesTotal(): RawSize = extern
+
     @name("scalanative_rift_stats_mmap_slab_total")
     def statsMmapSlabTotal(): RawSize = extern
 
