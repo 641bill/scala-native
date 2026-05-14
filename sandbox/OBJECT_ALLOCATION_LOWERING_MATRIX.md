@@ -1,7 +1,7 @@
 # Object Allocation Lowering Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-14 14:41 CEST
+Last updated: 2026-05-14 23:12 CEST
 
 Status: refined retained-region-array matrix validated at 20k smoke, 100k, 1M,
 and 10M, plus focused final-clean allocator-counter, cached-stats,
@@ -282,6 +282,22 @@ region close/reset so the allocation hot path can skip per-object `memset`.
 The measured Rift op time rises because close/reset now does the bulk zero
 work. Keep this experimental until application gates show the close/reset
 tradeoff is favorable for real epoch/page/window workloads.
+
+Rejected high-water follow-up, 2026-05-14: a narrower policy tried to reduce
+the close/reset cost by tracking a reusable slab's high-water mark and zeroing
+only the prefix ever allocated in that slab. The first version updated the
+mark on every allocation and regressed the focused 5M default row to
+`76.532 ms`. A transition-only version recorded usage only when switching
+slabs and at close/reset, and reused the existing 32-bit slab header slot so
+the slab data size was restored. It still failed the focused gate: default
+`70.186 ms`, high-water bulk-zero `69.619 ms`, versus the accepted full-slab
+bulk-zero gate's `68.692 ms` default and `65.228 ms` enabled result. The
+prototype was reverted. Conclusion: high-water bookkeeping is not the right
+way to reduce region-op cost for the current object allocation path. Next
+zeroing-policy experiments should avoid per-allocation or transition metadata
+in the hot runtime and instead test coarser policies such as TLS-cache-only
+zeroing, RSS-aware cache release, or compiler-proven no-zero for definitely
+initialized record classes.
 
 Cached allocation-stats mode follow-up, 2026-05-12: the L4 clean-winner profile
 still sampled `scalanative_rift_alloc_stats_enabled`, so the Rift runtime now
