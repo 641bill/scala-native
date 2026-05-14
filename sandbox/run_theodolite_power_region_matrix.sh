@@ -176,6 +176,12 @@ run_case() {
     checked-epoch-stream|checked-region-stream)
       binary_mode="checked-epoch-stream"
       ;;
+    checked-epoch-stream-open-handle|checked-region-stream-open-handle)
+      binary_mode="checked-epoch-stream-open-handle"
+      ;;
+    checked-epoch-stream-legacy|checked-region-stream-legacy)
+      binary_mode="checked-epoch-stream-legacy"
+      ;;
     checked-epoch-scoped|checked-region-scoped)
       binary_mode="checked-epoch-scoped"
       roots_mode="1"

@@ -436,6 +436,12 @@ object TheodolitePowerRegionMatrixHelpers {
         "rift-streaming"
       case "checked-epoch-stream" | "checked-region-stream" =>
         "checked-epoch-stream"
+      case "checked-epoch-stream-open-handle" |
+          "checked-region-stream-open-handle" =>
+        "checked-epoch-stream-open-handle"
+      case "checked-epoch-stream-legacy" |
+          "checked-region-stream-legacy" =>
+        "checked-epoch-stream-legacy"
       case "checked-epoch-scoped" | "checked-region-scoped" =>
         "checked-epoch-scoped"
       case other => other
@@ -443,13 +449,18 @@ object TheodolitePowerRegionMatrixHelpers {
 
   private def usesRiftRuntime(mode: String): Boolean =
     canonicalMode(mode) match {
-      case "rift-streaming" | "checked-epoch-stream" => true
+      case "rift-streaming" | "checked-epoch-stream" |
+          "checked-epoch-stream-open-handle" |
+          "checked-epoch-stream-legacy" =>
+        true
       case _                                        => false
     }
 
   def validateMode(mode: String): Unit =
     canonicalMode(mode) match {
       case "heap" | "safezone" | "rift-streaming" | "checked-epoch-stream" |
+          "checked-epoch-stream-open-handle" |
+          "checked-epoch-stream-legacy" |
           "checked-epoch-scoped" =>
         ()
       case other =>
@@ -897,6 +908,141 @@ object TheodolitePowerRegionMatrixHelpers {
     RunOutcome(checksum ^ checksumState(sums, counts), outputs)
   }
 
+  private def runCheckedEpochStreamingHandle(query: String): RunOutcome = {
+    val cfg = TheodolitePowerRegionConfig
+    val input = loadedInput
+    val sums = new Array[Long](cfg.groupCount * queryOutputMultiplier(query))
+    val counts = new Array[Int](sums.length)
+    var checksum = 0L
+    var outputs = 0L
+
+    RiftRegion.streamingOpenHandle {
+      val reader = BenchmarkInputSupport.openByteLines(cfg.input)
+      var index = 0
+      try {
+        reader.readLine() // header
+        var length = reader.readLine()
+        while (length >= 0 && index < input.records) {
+          var anchor = 0L
+          var inEpoch = 0
+          RiftRegion.resetOpenHandle { region ?=>
+            final class CheckedMeasurement(
+                val minute: Int,
+                val group: Int,
+                val totalMilliW: Int,
+                val voltageDeci: Int,
+                val next: CheckedMeasurement^{region}
+            )
+
+            final class CheckedContribution(
+                val minute: Int,
+                val group: Int,
+                val circuit: Int,
+                val watt: Int,
+                val next: CheckedContribution^{region}
+            )
+
+            var measurementHead: CheckedMeasurement^{region} = null
+            var contributionHead: CheckedContribution^{region} = null
+            while (
+              length >= 0 && index < input.records && inEpoch < cfg.recordsPerEpoch
+            ) {
+              if (parseCurrentLine(reader.bytes, length)) {
+                val group = groupFor(index)
+                val measurement = RiftAllocator.allocateOpenHandle(
+                  region,
+                  new CheckedMeasurement(
+                    index,
+                    group,
+                    parsedTotalMilliW,
+                    parsedVoltageDeci,
+                    measurementHead
+                  )
+                )
+                measurementHead = measurement
+                sums(group) += measurement.totalMilliW.toLong
+                counts(group) += 1
+                checksum = fold(
+                  checksum,
+                  measurement.minute,
+                  measurement.group,
+                  measurement.voltageDeci,
+                  measurement.totalMilliW.toLong
+                )
+                if (query == "q2-hierarchical") {
+                  val base = cfg.groupCount
+                  val c1 = RiftAllocator.allocateOpenHandle(
+                    region,
+                    new CheckedContribution(
+                      index,
+                      group,
+                      1,
+                      parsedSub1Watt,
+                      contributionHead
+                    )
+                  )
+                  contributionHead = c1
+                  sums(base + group) += c1.watt.toLong
+                  counts(base + group) += 1
+                  val c2 = RiftAllocator.allocateOpenHandle(
+                    region,
+                    new CheckedContribution(
+                      index,
+                      group,
+                      2,
+                      parsedSub2Watt,
+                      contributionHead
+                    )
+                  )
+                  contributionHead = c2
+                  sums(base * 2 + group) += c2.watt.toLong
+                  counts(base * 2 + group) += 1
+                  val c3 = RiftAllocator.allocateOpenHandle(
+                    region,
+                    new CheckedContribution(
+                      index,
+                      group,
+                      3,
+                      parsedSub3Watt,
+                      contributionHead
+                    )
+                  )
+                  contributionHead = c3
+                  sums(base * 3 + group) += c3.watt.toLong
+                  counts(base * 3 + group) += 1
+                  checksum = fold(
+                    checksum,
+                    c1.minute,
+                    c2.watt,
+                    c3.watt,
+                    c1.watt.toLong
+                  )
+                }
+                index += 1
+                inEpoch += 1
+              }
+              length = reader.readLine()
+            }
+            val a =
+              if (measurementHead == null) 0L else measurementHead.totalMilliW.toLong
+            val b =
+              if (contributionHead == null) 0L else contributionHead.watt.toLong
+            anchor = a ^ (b << 5)
+          }
+          if (inEpoch > 0) {
+            retainedAnchorSink ^= anchor
+            outputs += closeEpoch(sums, counts)
+          }
+        }
+      } finally {
+        reader.close()
+      }
+    }
+
+    checksumSink = checksum
+    RunOutcome(checksum ^ checksumState(sums, counts), outputs)
+  }
+
   private def runCheckedEpochStreaming(
       query: String,
       safeZoneBackend: Boolean
@@ -1033,8 +1179,129 @@ object TheodolitePowerRegionMatrixHelpers {
     RunOutcome(checksum ^ checksumState(sums, counts), outputs)
   }
 
-  private def runCheckedEpoch(query: String, safeZoneBackend: Boolean): RunOutcome = {
+  private def runCheckedEpochHandle(query: String): RunOutcome = {
     val cfg = TheodolitePowerRegionConfig
+    if (cfg.streamingInput) return runCheckedEpochStreamingHandle(query)
+
+    val input = loadedInput
+    val sums = new Array[Long](cfg.groupCount * queryOutputMultiplier(query))
+    val counts = new Array[Int](sums.length)
+    var checksum = 0L
+    var outputs = 0L
+
+    RiftRegion.streamingOpenHandle {
+      var index = 0
+      while (index < input.records) {
+        val end = math.min(input.records, index + cfg.recordsPerEpoch)
+        var anchor = 0L
+        RiftRegion.resetOpenHandle { region ?=>
+          final class CheckedMeasurement(
+              val minute: Int,
+              val group: Int,
+              val totalMilliW: Int,
+              val voltageDeci: Int,
+              val next: CheckedMeasurement^{region}
+          )
+
+          final class CheckedContribution(
+              val minute: Int,
+              val group: Int,
+              val circuit: Int,
+              val watt: Int,
+              val next: CheckedContribution^{region}
+          )
+
+          var measurementHead: CheckedMeasurement^{region} = null
+          var contributionHead: CheckedContribution^{region} = null
+          var i = index
+          while (i < end) {
+            val group = groupFor(i)
+            val measurement = RiftAllocator.allocateOpenHandle(
+              region,
+              new CheckedMeasurement(
+                i,
+                group,
+                input.totalMilliW(i),
+                input.voltageDeci(i),
+                measurementHead
+              )
+            )
+            measurementHead = measurement
+            sums(group) += measurement.totalMilliW.toLong
+            counts(group) += 1
+            checksum = fold(
+              checksum,
+              measurement.minute,
+              measurement.group,
+              measurement.voltageDeci,
+              measurement.totalMilliW.toLong
+            )
+            if (query == "q2-hierarchical") {
+              val base = cfg.groupCount
+              val c1 = RiftAllocator.allocateOpenHandle(
+                region,
+                new CheckedContribution(
+                  i,
+                  group,
+                  1,
+                  input.sub1Watt(i),
+                  contributionHead
+                )
+              )
+              contributionHead = c1
+              sums(base + group) += c1.watt.toLong
+              counts(base + group) += 1
+              val c2 = RiftAllocator.allocateOpenHandle(
+                region,
+                new CheckedContribution(
+                  i,
+                  group,
+                  2,
+                  input.sub2Watt(i),
+                  contributionHead
+                )
+              )
+              contributionHead = c2
+              sums(base * 2 + group) += c2.watt.toLong
+              counts(base * 2 + group) += 1
+              val c3 = RiftAllocator.allocateOpenHandle(
+                region,
+                new CheckedContribution(
+                  i,
+                  group,
+                  3,
+                  input.sub3Watt(i),
+                  contributionHead
+                )
+              )
+              contributionHead = c3
+              sums(base * 3 + group) += c3.watt.toLong
+              counts(base * 3 + group) += 1
+              checksum = fold(checksum, c1.minute, c2.watt, c3.watt, c1.watt.toLong)
+            }
+            i += 1
+          }
+          val a = if (measurementHead == null) 0L else measurementHead.totalMilliW.toLong
+          val b = if (contributionHead == null) 0L else contributionHead.watt.toLong
+          anchor = a ^ (b << 5)
+        }
+        retainedAnchorSink ^= anchor
+        outputs += closeEpoch(sums, counts)
+        index = end
+      }
+    }
+
+    checksumSink = checksum
+    RunOutcome(checksum ^ checksumState(sums, counts), outputs)
+  }
+
+  private def runCheckedEpoch(
+      query: String,
+      safeZoneBackend: Boolean,
+      useHandle: Boolean = true
+  ): RunOutcome = {
+    val cfg = TheodolitePowerRegionConfig
+    if (!safeZoneBackend && useHandle) return runCheckedEpochHandle(query)
     if (cfg.streamingInput)
       return runCheckedEpochStreaming(query, safeZoneBackend)
     val input = loadedInput
@@ -1194,7 +1461,12 @@ object TheodolitePowerRegionMatrixHelpers {
       case "heap"                 => runHeap(query)
       case "safezone"             => runSafeZone(query)
       case "rift-streaming"       => runRiftTrusted(query)
-      case "checked-epoch-stream" => runCheckedEpoch(query, safeZoneBackend = false)
+      case "checked-epoch-stream" =>
+        runCheckedEpoch(query, safeZoneBackend = false, useHandle = true)
+      case "checked-epoch-stream-open-handle" =>
+        runCheckedEpoch(query, safeZoneBackend = false, useHandle = true)
+      case "checked-epoch-stream-legacy" =>
+        runCheckedEpoch(query, safeZoneBackend = false, useHandle = false)
       case "checked-epoch-scoped" => runCheckedEpoch(query, safeZoneBackend = true)
       case other =>
         throw new IllegalArgumentException(

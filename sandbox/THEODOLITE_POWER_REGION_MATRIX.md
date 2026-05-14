@@ -1,7 +1,7 @@
 # Theodolite Power Region Matrix
 
 Date: 2026-05-11
-Last updated: 2026-05-13 15:21 CEST
+Last updated: 2026-05-14 13:17 CEST
 
 Status: implemented a local single-process Theodolite UC2/UC4-style real-input
 kernel over the UCI Household Electric Power Consumption trace. This is not an
@@ -15,7 +15,9 @@ parsed inside each benchmark run, no parsed full-input arrays are retained, and
 active memory is bounded by the current epoch plus durable aggregate metadata.
 The streaming path now uses the shared byte-line reader and a reusable
 semicolon-delimited byte-field cursor instead of `String.split`, so the parser
-does not manufacture a `String[]` per record.
+does not manufacture a `String[]` per record. The checked stream epoch path now
+also has a handle-backed allocation lowering; the old generic checked path is
+retained as `checked-epoch-stream-legacy`.
 
 ## Input
 
@@ -142,9 +144,76 @@ THEODOLITE_POWER_OUTPUT_DIR=/tmp/rift-theodolite-bytecursor-1m-l1-20260513 \
 zsh sandbox/run_theodolite_power_region_matrix.sh
 ```
 
+1M q2 streaming-file handle-backed checked epoch gate:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+RIFT_FINAL_CLEAN=1 \
+THEODOLITE_POWER_INPUT_MODE=streaming-file \
+THEODOLITE_POWER_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/theodolite/real-power/household_power_consumption.txt \
+THEODOLITE_POWER_RECORDS=1000000 \
+THEODOLITE_POWER_RECORDS_PER_EPOCH=25000 \
+THEODOLITE_POWER_BENCHMARK_RUNS=3 \
+THEODOLITE_POWER_WARMUPS=0 \
+THEODOLITE_POWER_QUERIES=q2-hierarchical \
+THEODOLITE_POWER_MODES="heap-immix checked-epoch-stream-legacy checked-epoch-stream checked-epoch-stream-open-handle checked-epoch-scoped region-scoped-rooted" \
+THEODOLITE_POWER_OUTPUT_DIR=/Users/siyaoliu/rift/cache/theodolite-handle-promotion-20260514 \
+zsh sandbox/run_theodolite_power_region_matrix.sh
+
+THEODOLITE_POWER_BUILD=0 \
+THEODOLITE_POWER_INPUT_MODE=streaming-file \
+THEODOLITE_POWER_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/theodolite/real-power/household_power_consumption.txt \
+THEODOLITE_POWER_RECORDS=1000000 \
+THEODOLITE_POWER_RECORDS_PER_EPOCH=25000 \
+THEODOLITE_POWER_BENCHMARK_RUNS=3 \
+THEODOLITE_POWER_WARMUPS=1 \
+THEODOLITE_POWER_QUERIES=q2-hierarchical \
+THEODOLITE_POWER_MODES="heap-immix checked-epoch-stream-legacy checked-epoch-stream checked-epoch-stream-open-handle checked-epoch-scoped region-scoped-rooted" \
+THEODOLITE_POWER_OUTPUT_DIR=/Users/siyaoliu/rift/cache/theodolite-handle-promotion-l2-20260514 \
+zsh sandbox/run_theodolite_power_region_matrix.sh
+```
+
 ## 20k Smoke
 
 All modes matched checksums/output counts.
+
+## Handle-Backed Checked Epoch Promotion
+
+Date/time: 2026-05-14 13:17 CEST.
+
+This gate promotes the real streaming q2 checked epoch path from generic
+`RiftRegion.allocOpen` to backend-known `RiftAllocator.allocateOpenHandle`.
+The public benchmark label `checked-epoch-stream` is the optimized default;
+`checked-epoch-stream-legacy` keeps the old generic lowering, and
+`checked-epoch-stream-open-handle` is an explicit alias/provenance row.
+
+L1 source:
+`/Users/siyaoliu/rift/cache/theodolite-handle-promotion-20260514`.
+
+L2 source:
+`/Users/siyaoliu/rift/cache/theodolite-handle-promotion-l2-20260514`.
+
+Input mode: `THEODOLITE_POWER_INPUT_MODE=streaming-file`. The benchmark parses
+the UCI file inside each run and does not retain a parsed full-input array.
+Records: `1000000`. Epoch size: `25000`. Query: `q2-hierarchical`.
+All rows matched checksum `7683095093045065342` and output count `40960`.
+
+| Mode | L1 real s | L1 RSS bytes | L2 median ms | L2 median GC ms | L2 max GC ms | L2 Rift op ms | L2 region objects | Claim |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `heap-immix` | 4.33 | 75,300,864 | 1054.432 | 19.906 | 20.980 | 0.000 | 0 | Natural heap baseline. |
+| `checked-epoch-stream-legacy` | 3.83 | 15,908,864 | 1006.176 | 0.000 | 0.000 | 0.387 | 4,000,000 | Legacy generic checked stream epoch. |
+| `checked-epoch-stream` | 3.80 | 15,892,480 | 993.191 | 0.000 | 0.000 | 0.406 | 4,000,000 | Optimized checked stream epoch default. |
+| `checked-epoch-stream-open-handle` | 3.80 | 15,892,480 | 1002.330 | 0.000 | 0.000 | 0.376 | 4,000,000 | Explicit alias/provenance row. |
+| `checked-epoch-scoped` | 3.83 | 15,974,400 | 995.167 | 0.000 | 0.000 | 0.000 | 0 | Checked SafeZone-backed scoped control. |
+| `region-scoped-rooted` | 3.90 | 15,925,248 | 1009.541 | 0.000 | 0.000 | 0.000 | 0 | Rooted scoped baseline. |
+
+Interpretation: backend-known checked allocation gives a modest win on this
+real streaming row: optimized checked stream is about `0.8%` faster than the
+legacy checked stream in L1 and about `1.3%` faster in L2, while retaining the
+large RSS reduction versus heap. The result is smaller than SPECjbb because
+the byte parser and aggregate/update CPU dominate; still, it confirms that the
+handle-backed lowering is safe and directionally positive outside generated
+stressors.
 
 | Query | Mode | Median ms | Median GC ms | RSS bytes | Output count |
 |---|---|---:|---:|---:|---:|
