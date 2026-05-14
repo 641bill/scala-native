@@ -1,6 +1,6 @@
 # StreamFlex Design Matrix
 
-Last updated: 2026-05-14 14:41 CEST
+Last updated: 2026-05-15 01:27 CEST
 
 Status: first Rift-native StreamFlex system-design reproduction. This is a
 methodology benchmark for the StreamFlex axes: stable state, transient scoped
@@ -286,6 +286,56 @@ no RSS regression. The explicit open-handle alias is effectively identical to
 the default, confirming that the default label now carries the handle-backed
 allocation lowering. This satisfies the application-gate requirement for the
 checked stream epoch backend.
+
+### L1/L2 Transfer Gate After Proof-Gated No-Zero Lowering
+
+Date/time: 2026-05-15 01:22 CEST.
+
+This transfer gate reruns the representative StreamFlex-design workload after
+normal `RiftOpenStreamingHandle` allocation gained proof-gated no-zero lowering
+for definitely initialized primitive-field record shapes. It is not a new
+StreamFlex artifact claim; it checks whether the latest allocation lowering
+still transfers to the StreamFlex-style stable/transient/capsule benchmark.
+
+L1 final-clean throughput, 20M events x 3 runs:
+
+| Mode | External real s | External user s | RSS bytes | Checksum | Output count |
+|---|---:|---:|---:|---:|---:|
+| `gc-heap` | 29.04 | 28.99 | 12419072 | `5305809911915216923` | 19999119 |
+| `checked-epoch-stream` | 19.91 | 19.72 | 12582912 | `5305809911915216923` | 19999119 |
+| `checked-epoch-stream-legacy` | 22.19 | 22.03 | 12599296 | `5305809911915216923` | 19999119 |
+| `checked-epoch-scoped` | 23.57 | 23.52 | 12664832 | `5305809911915216923` | 19999119 |
+
+L2 throughput, 1M events x 3 runs:
+
+| Mode | Median ms | Records/sec | Median GC ms | Max GC ms | Runs with GC | Rift op ms | Region objects | RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `gc-heap` | 493.207 | 2027545.898 | 97.029 | 98.915 | 3 | 0.000 | 0 | 12517376 |
+| `checked-epoch-stream` | 382.353 | 2615384.781 | 0.000 | 0.151 | 1 | 1.216 | 24997627 | 12697600 |
+| `checked-epoch-stream-legacy` | 422.225 | 2368407.810 | 0.000 | 0.177 | 1 | 1.208 | 24997627 | 12713984 |
+| `checked-epoch-scoped` | 390.927 | 2558025.345 | 0.000 | 0.177 | 1 | 0.000 | 0 | 12763136 |
+
+L2 allocation-pressure latency, 50k events x 3 runs, deadline `80000 ns`:
+
+| Mode | Median ms | Median GC ms | Max GC ms | p50 ns | p95 ns | p99 ns | p999 ns | Max ns | Deadline misses | RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `gc-heap` | 196.985 | 25.658 | 26.301 | 3209 | 3500 | 3750 | 28000 | 667875 | 49 | 12517376 |
+| `checked-epoch-stream` | 170.864 | 0.705 | 0.757 | 3167 | 3458 | 3625 | 4417 | 88458 | 1 | 21495808 |
+| `checked-epoch-stream-legacy` | 184.954 | 0.782 | 0.847 | 3458 | 3709 | 3875 | 4708 | 30083 | 0 | 21479424 |
+| `checked-epoch-scoped` | 170.563 | 0.726 | 0.731 | 3208 | 3458 | 3584 | 4333 | 22084 | 0 | 21528576 |
+
+Interpretation:
+
+- The optimized checked stream default remains clearly faster than the legacy
+  checked stream path: `19.91 s` versus `22.19 s` in L1 throughput and
+  `382.353 ms` versus `422.225 ms` in the 1M L2 loop.
+- Against heap, the checked stream row is `31.4%` lower L1 external time and
+  removes heap's `97.029 ms` median timed GC in the L2 throughput row.
+- In allocation-pressure latency, checked stream and checked scoped both remove
+  nearly all GC pause time and reduce deadline misses from `49` to `0-1`.
+  Checked scoped has the best max-latency row in this run; checked stream is
+  the direct evidence that the Rift-backed allocation lowering transfers to
+  the StreamFlex-style backend.
 
 ## Experimental Reusable-Slab Bulk-Zero Gate
 

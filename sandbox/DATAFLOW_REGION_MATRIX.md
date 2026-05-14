@@ -1,6 +1,6 @@
 # Dataflow Region Matrix
 
-Last updated: 2026-05-13 12:49 CEST
+Last updated: 2026-05-15 01:27 CEST
 
 Status: Broom-style methodology reproduction harness with trusted
 heap/SafeZone/Rift medians, checked RegionBuffer modes, and reusable checked
@@ -503,6 +503,54 @@ Interpretation:
 - This closes the handle-array blocker for the current direct-epoch benchmark
   shape and upgrades the Dataflow handle-backed promotion from L2-only evidence
   to L1 headline timing plus L2 interpretation.
+
+## Proof-Gated No-Zero Transfer Gate
+
+Date/time: 2026-05-15 01:06 CEST.
+
+This gate reruns the same local Dataflow direct-epoch shape after the
+proof-gated no-zero lowerer became the normal `RiftOpenStreamingHandle`
+allocation path for eligible record-like classes. It is an L2 transfer gate:
+use it to compare promoted checked stream against legacy checked stream and
+heap GC, not as final-clean headline timing.
+
+Command shape:
+
+```sh
+DATAFLOW_MODES="gc-heap checked-epoch-stream checked-epoch-stream-legacy checked-epoch-scoped" \
+DATAFLOW_EPOCHS=10 \
+DATAFLOW_DOCS_PER_EPOCH=100000 \
+DATAFLOW_BENCHMARK_RUNS=3 \
+DATAFLOW_WARMUPS=1 \
+  zsh sandbox/run_dataflow_region_matrix.sh
+```
+
+| Operator | Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Region objects | Checksum |
+|---|---|---:|---:|---:|---:|---:|
+| SELECT | `gc-heap` | 27.952 | 6.630 | 0.000 | 0 | 131080080920 |
+| SELECT | `checked-epoch-stream` | 18.141 | 0.000 | 0.065 | 1124990 | 131080080920 |
+| SELECT | `checked-epoch-stream-legacy` | 22.523 | 0.000 | 0.084 | 1124990 | 131080080920 |
+| SELECT | `checked-epoch-scoped` | 17.517 | 0.000 | 0.000 | 0 | 131080080920 |
+| AGGREGATE | `gc-heap` | 50.485 | 11.195 | 0.000 | 0 | 163835709480 |
+| AGGREGATE | `checked-epoch-stream` | 33.574 | 0.000 | 0.227 | 1627152 | 163835709480 |
+| AGGREGATE | `checked-epoch-stream-legacy` | 36.711 | 0.000 | 0.233 | 1627152 | 163835709480 |
+| AGGREGATE | `checked-epoch-scoped` | 33.515 | 0.000 | 0.000 | 0 | 163835709480 |
+| JOIN | `gc-heap` | 28.349 | 8.766 | 0.000 | 0 | 193232836790 |
+| JOIN | `checked-epoch-stream` | 17.669 | 0.000 | 0.057 | 1078279 | 193232836790 |
+| JOIN | `checked-epoch-stream-legacy` | 20.202 | 0.000 | 0.063 | 1078279 | 193232836790 |
+| JOIN | `checked-epoch-scoped` | 18.674 | 0.000 | 0.000 | 0 | 193232836790 |
+
+Interpretation:
+
+- The optimized checked stream row remains a useful application transfer gate:
+  it beats the legacy checked stream path by `19.5%` on SELECT, `8.5%` on
+  AGGREGATE, and `12.5%` on JOIN in this run.
+- It also removes heap's `6.6-11.2 ms` median timed GC and beats heap by
+  `33-38%` elapsed at the local 1M-document scale.
+- Checked scoped is still a competitive safe backend: it is fastest on SELECT
+  and essentially tied with checked stream on AGGREGATE. The final system story
+  should keep both backend choices visible until the selected L1 tables settle
+  the best default per topology.
 
 ## Provisional Broom-Scale Single Run, 40 Epochs x 500k Documents
 
