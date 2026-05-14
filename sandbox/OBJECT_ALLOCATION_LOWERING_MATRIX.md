@@ -1,7 +1,7 @@
 # Object Allocation Lowering Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-14 23:12 CEST
+Last updated: 2026-05-14 23:35 CEST
 
 Status: refined retained-region-array matrix validated at 20k smoke, 100k, 1M,
 and 10M, plus focused final-clean allocator-counter, cached-stats,
@@ -297,6 +297,22 @@ way to reduce region-op cost for the current object allocation path. Next
 zeroing-policy experiments should avoid per-allocation or transition metadata
 in the hot runtime and instead test coarser policies such as TLS-cache-only
 zeroing, RSS-aware cache release, or compiler-proven no-zero for definitely
+initialized record classes.
+
+Rejected local-only zeroing follow-up, 2026-05-14: a second narrow policy tried
+to bulk-zero only slabs kept for local reuse, namely the TLS reusable-slab cache
+and the first slab retained by `reset`, while leaving slabs that spill to the
+global pool dirty. This avoided global-pool page touches but failed the focused
+5M allocation gate. In the same linked binary, default was `71.834 ms`, full
+`RIFT_ZERO_REUSED_SLABS=1` was `68.614 ms`, and local-only zeroing was
+`72.339 ms`. The local-only row still zeroed `4,190,208` objects and skipped
+only `809,792`, essentially the same shape as default (`4,198,392` zeroed,
+`801,608` skipped), because the focused allocator reuses most slabs through
+the global pool rather than the small TLS cache. The prototype was reverted.
+Conclusion: TLS/local-only zeroing is too narrow to deliver the allocation-side
+benefit. The remaining zeroing choices are either keep the current full-slab
+bulk-zeroing policy as a workload-selective knob, add RSS-aware release for
+cold cached slabs, or move to compiler-proven no-zero for definitely
 initialized record classes.
 
 Cached allocation-stats mode follow-up, 2026-05-12: the L4 clean-winner profile
