@@ -1,6 +1,6 @@
 # StreamFlex Design Matrix
 
-Last updated: 2026-05-14 13:59 CEST
+Last updated: 2026-05-14 14:41 CEST
 
 Status: first Rift-native StreamFlex system-design reproduction. This is a
 methodology benchmark for the StreamFlex axes: stable state, transient scoped
@@ -303,11 +303,20 @@ object allocation to the region boundary.
 | 20M x3 | default | 19.51 | 19.50 | 12599296 | 5305809911915216923 | 19999119 |
 | 20M x3 | `RIFT_ZERO_REUSED_SLABS=1` | 18.91 | 18.90 | 12599296 | 5305809911915216923 | 19999119 |
 
+L2 interpretation rows, 20M events x3 with one warmup:
+
+| Policy | Median ms | Records/sec | GC median ms | GC max ms | Runs with GC | Rift op ms | Region objects | Opens/closes/resets | RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| default | 7517.881 | 2660323.967 | 0.000 | 0.836 | 1/3 | 23.563 | 499,999,119 | 1/1/78,125 | 21626880 |
+| `RIFT_ZERO_REUSED_SLABS=1` | 7330.702 | 2728251.627 | 0.000 | 0.841 | 1/3 | 254.858 | 499,999,119 | 1/1/78,125 | 21626880 |
+
 Interpretation: the focused allocation-row win transfers to this
 StreamFlex-design checked epoch workload, but more modestly at 20M: about
-`3.1%` external-time improvement with identical checksum/output and RSS. Keep
-the policy experimental until page/window and real-input gates confirm the
-close/reset zeroing tradeoff is broadly favorable.
+`3.1%` external-time improvement and `2.5%` L2 median improvement with
+identical checksum/output and RSS. The cost is visible in region op time:
+close/reset accounting rises from `23.563 ms` to `254.858 ms`. Keep the policy
+experimental until page/window and real-input gates confirm the close/reset
+zeroing tradeoff is broadly favorable.
 
 ## L2 Throughput, 1M Events x 3 Runs
 

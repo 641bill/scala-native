@@ -1,7 +1,7 @@
 # Common Crawl WET Matrix
 
 Date: 2026-05-01
-Last updated: 2026-05-14 13:59 CEST
+Last updated: 2026-05-14 14:41 CEST
 
 Status: generated WET-shaped detector plus first real Common Crawl WET input
 wiring. Real WET input is currently preloaded before timing so parser and
@@ -434,11 +434,20 @@ zero-initialization semantics and is not the default.
 | q2-domain-window | default | `rift-checked-page-token` | 10.00 | 9.64 | 63324160 | 1076064953308107199 | 929230 |
 | q2-domain-window | `RIFT_ZERO_REUSED_SLABS=1` | `rift-checked-page-token` | 9.22 | 9.20 | 63324160 | 1076064953308107199 | 929230 |
 
+L2 interpretation rows, 1M pages x3 with one warmup:
+
+| Policy | Median ms | GC median ms | GC max ms | Rift op ms | Slow alloc ms | Region objects | Opens/closes | RSS bytes | Checksum | Outputs |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| default | 3544.071 | 19.617 | 21.360 | 9.640 | 6.021 | 137,000,000 | 401/401 | 463749120 | 1076064953308107199 | 929230 |
+| `RIFT_ZERO_REUSED_SLABS=1` | 3507.216 | 19.014 | 19.827 | 68.771 | 5.937 | 137,000,000 | 401/401 | 463749120 | 1076064953308107199 | 929230 |
+
 Interpretation: the experimental policy also helps the generated page/window
-stream shape in this single 1M x3 L1 gate: about `7.8%` faster external time
-with unchanged RSS and checksum/output. This is still generated stressor
-evidence; before making it a default policy, rerun L2 interpretation plus at
-least one real streaming-input page/window row.
+stream shape in this 1M x3 gate: about `7.8%` faster external time and about
+`1.0%` faster L2 median with unchanged RSS and checksum/output. Region op time
+rises from `9.640 ms` to `68.771 ms`, so most of the close-time bulk-zero cost
+is visible even though the total median still nudges down. This is still
+generated stressor evidence; before making it a default policy, rerun at least
+one real streaming-input page/window row.
 
 ## Current Conclusion
 

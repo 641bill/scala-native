@@ -1,7 +1,7 @@
 # Theodolite Power Region Matrix
 
 Date: 2026-05-11
-Last updated: 2026-05-14 13:17 CEST
+Last updated: 2026-05-14 14:41 CEST
 
 Status: implemented a local single-process Theodolite UC2/UC4-style real-input
 kernel over the UCI Household Electric Power Consumption trace. This is not an
@@ -214,6 +214,27 @@ large RSS reduction versus heap. The result is smaller than SPECjbb because
 the byte parser and aggregate/update CPU dominate; still, it confirms that the
 handle-backed lowering is safe and directionally positive outside generated
 stressors.
+
+## Experimental Reusable-Slab Bulk-Zero Gate
+
+Date/time: 2026-05-14 14:39 CEST.
+
+This real streaming-input gate tests `RIFT_ZERO_REUSED_SLABS=1` on the
+optimized `checked-epoch-stream` q2 path. The policy bulk-zeros dead non-huge
+Rift slabs at close/reset before cache reuse. It preserves zero-initialization
+semantics but can touch more pages at epoch boundaries.
+
+| Policy | L1 real s | L1 user s | L1 RSS bytes | L2 median ms | L2 GC ms | L2 Rift op ms | L2 region objects | Checksum | Output count |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| default | 3.94 | 3.64 | 15,908,864 | 927.612 | 0.000 | 0.215 | 4,000,000 | 7683095093045065342 | 40,960 |
+| `RIFT_ZERO_REUSED_SLABS=1` | 3.60 | 3.57 | 24,870,912 | 922.823 | 0.000 | 1.362 | 4,000,000 | 7683095093045065342 | 40,960 |
+
+Interpretation: this is a real streaming-input throughput-positive but
+RSS-negative result. L1 improves by about `8.6%`, and L2 median improves
+slightly, but RSS rises because bulk zeroing touches reusable pages that the
+default policy leaves dirty and less resident. Therefore reusable-slab
+bulk-zeroing should stay experimental and workload-selective rather than
+becoming a default after only generated/focused wins.
 
 | Query | Mode | Median ms | Median GC ms | RSS bytes | Output count |
 |---|---|---:|---:|---:|---:|

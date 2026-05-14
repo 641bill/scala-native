@@ -1,7 +1,7 @@
 # Checked Page/Token Append Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-14 13:59 CEST
+Last updated: 2026-05-14 14:41 CEST
 
 Status: focused checked page/token gate passed, generated Common Crawl-shaped
 q1/q2 application gate passed, the fixed-chunk append control failed to beat
