@@ -1,15 +1,16 @@
 # Object Allocation Lowering Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-15 00:32 CEST
+Last updated: 2026-05-15 01:40 CEST
 
 Status: refined retained-region-array matrix validated at 20k smoke, 100k, 1M,
 and 10M, plus focused final-clean allocator-counter, cached-stats,
 current-slab zeroed-cache, handle-backed allocation, warm/dirty-slab gates,
 object zeroing attribution counters, an experimental reusable-slab
-bulk-zero policy gate, an unsafe no-zero lower-bound gate, and a first
-proof-gated no-zero lowering for definitely initialized handle-backed records.
-This
+bulk-zero policy gate, an unsafe no-zero lower-bound gate, and proof-gated
+no-zero lowering for definitely initialized handle-backed records. The no-zero
+proof now covers both primitive-only records and local region-linked records
+with reference fields when every field is definitely stored before use. This
 benchmark isolates ordinary Scala object construction through heap, trusted
 Rift, checked Rift, and checked SafeZone-backed allocation paths without
 stream-window, ranking, aggregation, or output work.
@@ -26,6 +27,9 @@ allocation-lowering question from operator/query CPU:
 does not collect;
 - the benchmark keeps only a simple retained-array/traversal shape in every
   mode so allocated objects cannot be optimized away;
+- `OBJECT_ALLOC_RECORD_SHAPE=primitive` keeps the original primitive-field
+  record shape, while `OBJECT_ALLOC_RECORD_SHAPE=reference` builds a linked
+  region-local object graph with reference fields;
 - any remaining gap here is allocation lowering/object construction overhead,
   not bucket, cursor, aggregation, output, or ranking overhead.
 
@@ -621,6 +625,72 @@ improves from `71.320 -> 65.528 ms` at 5M and from
 but only for the local primitive-field, definitely-stored pattern described
 above. Application rows still need separate gates because many stream records
 contain references or perform query work that dominates allocation body cost.
+
+## Proof-Gated No-Zero For Reference Fields
+
+Date/time: 2026-05-15 01:40 CEST.
+
+The no-zero proof was broadened from primitive-only record classes to
+definitely initialized reference-field records. The lowerer still only applies
+the optimization to `RiftOpenStreamingHandle` allocations of concrete,
+non-module, no-subclass classes, and it still rejects the allocation if the
+object is used, control flow exits, or any non-pure operation occurs before all
+fields are stored.
+
+The additional safety argument is specific to Rift-backed open handles:
+Rift slabs are not scanned by the Scala Native GC, so uninitialized reference
+slots are not GC-visible while the object is still unescaped and before every
+field store has executed. Checked region safety still has to reject unsafe
+region-to-heap references separately; this lowering change does not make
+root-free or mixed-reference claims.
+
+Focused reference-record command shape:
+
+```sh
+OBJECT_ALLOC_BUILD=0 \
+OBJECT_ALLOC_RECORD_SHAPE=reference \
+OBJECT_ALLOC_OBJECTS=5000000 \
+OBJECT_ALLOC_BENCHMARK_RUNS=5 \
+OBJECT_ALLOC_WARMUPS=1 \
+OBJECT_ALLOC_MODES="heap-immix rift-checked-rift-open-handle rift-checked-rift-open-handle-nozero-unsafe rift-checked-safezone-improved-32k" \
+OBJECT_ALLOC_OUTPUT_DIR=/private/tmp/rift-ref-nozero-5m-20260515 \
+  zsh sandbox/run_object_allocation_lowering_matrix.sh
+```
+
+5M linked reference-record rows:
+
+| Mode | Median ms | Median GC ms | Region op ms | Slow alloc ms | Region objects | Zeroed objects | Zero-skipped objects | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-immix` | 307.568 | 231.522 | 0.000 | 0.000 | 0 | 0 | 0 | 640237568 | 3953966985786210233 |
+| `rift-checked-rift-open-handle` | 66.249 | 0.080 | 2.000 | 0.988 | 5000001 | 0 | 5000001 | 203882496 | 3953966985786210233 |
+| `rift-checked-rift-open-handle-nozero-unsafe` | 66.177 | 0.073 | 1.960 | 0.993 | 5000001 | 0 | 5000001 | 203882496 | 3953966985786210233 |
+| `rift-checked-safezone-improved-32k` | 70.196 | 0.000 | 0.000 | 0.000 | 0 | 0 | 0 | 204193792 | 3953966985786210233 |
+
+Primitive-shape regression gate, same 5M x5 run shape:
+
+| Mode | Median ms | Median GC ms | Region op ms | Slow alloc ms | Region objects | Zeroed objects | Zero-skipped objects | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-immix` | 79.874 | 8.549 | 0.000 | 0.000 | 0 | 0 | 0 | 246284288 | -1183547843768457859 |
+| `rift-checked-rift-open-handle` | 63.303 | 0.078 | 2.089 | 1.027 | 5000000 | 0 | 5000000 | 203882496 | -1183547843768457859 |
+| `rift-checked-rift-open-handle-nozero-unsafe` | 63.764 | 0.078 | 2.346 | 1.023 | 5000000 | 0 | 5000000 | 203882496 | -1183547843768457859 |
+| `rift-checked-safezone-improved-32k` | 67.309 | 0.000 | 0.000 | 0.000 | 0 | 0 | 0 | 204226560 | -1183547843768457859 |
+
+Selected StreamFlexDesign linked-object transfer gate, 1M throughput x3:
+
+| Mode | Median ms | Median GC ms | Max GC ms | Records/sec | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|
+| `gc-heap` | 502.939 | 98.964 | 104.949 | 1988313.358 | 12517376 | -7120610804659902001 |
+| `checked-epoch-stream` | 393.107 | 0.000 | 0.178 | 2543839.092 | 12730368 | -7120610804659902001 |
+| `checked-epoch-stream-legacy` | 418.081 | 0.000 | 0.183 | 2391879.329 | 12697600 | -7120610804659902001 |
+| `checked-epoch-scoped` | 396.186 | 0.000 | 0.190 | 2524065.647 | 12746752 | -7120610804659902001 |
+
+Interpretation: the focused reference-record row reaches the unsafe no-zero
+lower-bound ceiling, so the broadened proof works for ordinary linked
+region-local object graphs. The StreamFlexDesign transfer gate remains positive
+against heap and legacy, but it is not a new application speedup over the
+previous noisy 1M StreamFlexDesign row. That workload is now limited more by
+stable-state/query CPU, linked traversal, capsule add/drain, and allocation
+body outside memset than by reference-field zeroing alone.
 
 ## Interpretation
 

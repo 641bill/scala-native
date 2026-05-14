@@ -48,7 +48,7 @@ read_max_rss_bytes() {
 }
 
 write_summary_header() {
-  printf "mode\theap_cap\tstatus\tmedian_ms\tmedian_gc_ms\tmax_gc_ms\truns_with_gc\tmedian_rift_op_ms\tmedian_rift_slow_alloc_ms\tmedian_rift_alloc_object_total\tmedian_rift_zero_object_total\tmedian_rift_zero_object_bytes_total\tmedian_rift_zero_skipped_total\tmedian_rift_zero_skipped_bytes_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\tmax_rss_bytes\n" > "${summary}"
+  printf "mode\trecord_shape\theap_cap\tstatus\tmedian_ms\tmedian_gc_ms\tmax_gc_ms\truns_with_gc\tmedian_rift_op_ms\tmedian_rift_slow_alloc_ms\tmedian_rift_alloc_object_total\tmedian_rift_zero_object_total\tmedian_rift_zero_object_bytes_total\tmedian_rift_zero_skipped_total\tmedian_rift_zero_skipped_bytes_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\tmax_rss_bytes\n" > "${summary}"
 }
 
 write_result_row() {
@@ -70,8 +70,9 @@ write_result_row() {
     fi
   done
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "${mode}" \
+    "${fields[record_shape]-}" \
     "${heap_cap}" \
     "${run_status}" \
     "${fields[median_ms]-}" \
@@ -161,8 +162,9 @@ run_mode() {
     cat "${run_log}" >&2
     cat "${time_log}" >&2
     echo "OBJECT_ALLOC_RESULT mode=${mode} heap_cap=${heap_cap} status=failed exit_status=${command_status} max_rss_bytes=${max_rss_bytes}" >&2
-    printf "%s\t%s\tfailed\t\t\t\t\t\t\t\t\t\t\t\t%s\n" \
-      "${mode}" "${heap_cap}" "${max_rss_bytes}" >> "${summary}"
+    printf "%s\t%s\t%s\tfailed\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t%s\n" \
+      "${mode}" "${OBJECT_ALLOC_RECORD_SHAPE:-primitive}" "${heap_cap}" \
+      "${max_rss_bytes}" >> "${summary}"
     return 0
   fi
 

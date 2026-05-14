@@ -1391,6 +1391,10 @@ private[scalanative] object Lower {
     private def isNoZeroEligibleFieldType(ty: nir.Type): Boolean =
       ty match {
         case _: nir.Type.I | _: nir.Type.F | nir.Type.Bool => true
+        // Rift region slabs are not scanned as GC roots. Reference fields are
+        // safe here only because the local proof below rejects every use,
+        // control-flow exit, and impure operation before all fields are stored.
+        case _: nir.Type.Ref                               => true
         case _                                             => false
       }
 

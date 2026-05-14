@@ -33,6 +33,8 @@ object ObjectAllocationLoweringConfig {
   val objects: Int = envInt("OBJECT_ALLOC_OBJECTS", 1000000)
   val dirtyPrepObjects: Int =
     envNonNegativeInt("OBJECT_ALLOC_DIRTY_PREP_OBJECTS", objects)
+  val recordShape: String =
+    sys.env.getOrElse("OBJECT_ALLOC_RECORD_SHAPE", "primitive").toLowerCase
   val sampleEvery: Int = envInt("OBJECT_ALLOC_SAMPLE_EVERY", 4096)
   val warmupRuns: Int = envNonNegativeInt("OBJECT_ALLOC_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("OBJECT_ALLOC_BENCHMARK_RUNS", 3)
@@ -59,6 +61,24 @@ object ObjectAllocationLoweringMatrixHelpers {
       val a: Int,
       val b: Int,
       val c: Long,
+      var d: Int
+  )
+
+  private final class HeapRefMetadata(val salt: Int)
+
+  private final class HeapRefRecord(
+      val a: Int,
+      val prev: HeapRefRecord,
+      val metadata: HeapRefMetadata,
+      var d: Int
+  )
+
+  private final class TrustedRefMetadata(val salt: Int)
+
+  private final class TrustedRefRecord(
+      val a: Int,
+      val prev: TrustedRefRecord,
+      val metadata: TrustedRefMetadata,
       var d: Int
   )
 
@@ -160,6 +180,9 @@ object ObjectAllocationLoweringMatrixHelpers {
   private def fold(checksum: Long, a: Int, b: Int, c: Long, d: Int): Long =
     (((checksum ^ a.toLong) * 1099511628211L) ^ b.toLong ^ c ^ d.toLong)
 
+  private def foldRef(checksum: Long, a: Int, prevA: Int, salt: Int, d: Int): Long =
+    (((checksum ^ a.toLong) * 1099511628211L) ^ prevA.toLong ^ salt.toLong ^ d.toLong)
+
   private def medianDouble(values: Array[Double]): Double = {
     val sorted = values.clone()
     scala.util.Sorting.quickSort(sorted)
@@ -203,6 +226,35 @@ object ObjectAllocationLoweringMatrixHelpers {
     checksum
   }
 
+  private def runHeapReference(): Long = {
+    val cfg = ObjectAllocationLoweringConfig
+    val records = new Array[HeapRefRecord](cfg.objects)
+    val metadata = new HeapRefMetadata(0x5eed)
+    var prev: HeapRefRecord = null
+    var checksum = 0L
+    var i = 0
+    while (i < cfg.objects) {
+      val seed = mix(i * 1103515245 + 12345)
+      val record =
+        new HeapRefRecord(seed, prev, metadata, seed & 255)
+      record.d += record.a & 7
+      records(i) = record
+      prev = record
+      i += 1
+    }
+    i = 0
+    while (i < records.length) {
+      val record = records(i)
+      if (i % cfg.sampleEvery == 0) {
+        val prevA = if (record.prev == null) 0 else record.prev.a
+        checksum = foldRef(checksum, record.a, prevA, record.metadata.salt, record.d)
+      }
+      i += 1
+    }
+    checksumSink = checksum
+    checksum
+  }
+
   private def runTrusted(kind: Int): Long = {
     val cfg = ObjectAllocationLoweringConfig
     val region = RiftRegion.trustedOpen(kind)
@@ -229,6 +281,42 @@ object ObjectAllocationLoweringMatrixHelpers {
         val record = records(i)
         if (i % cfg.sampleEvery == 0)
           checksum = fold(checksum, record.a, record.b, record.c, record.d)
+        i += 1
+      }
+    } finally region.close()
+    checksumSink = checksum
+    checksum
+  }
+
+  private def runTrustedReference(kind: Int): Long = {
+    val cfg = ObjectAllocationLoweringConfig
+    val region = RiftRegion.trustedOpen(kind)
+    val records = new Array[TrustedRefRecord](cfg.objects)
+    var checksum = 0L
+    var i = 0
+    try {
+      val metadata = region
+        .alloc(new TrustedRefMetadata(0x5eed))
+        .asInstanceOf[TrustedRefMetadata]
+      var prev: TrustedRefRecord = null
+      while (i < cfg.objects) {
+        val seed = mix(i * 1103515245 + 12345)
+        val record = region
+          .alloc(new TrustedRefRecord(seed, prev, metadata, seed & 255))
+          .asInstanceOf[TrustedRefRecord]
+        record.d += record.a & 7
+        records(i) = record
+        prev = record
+        i += 1
+      }
+      i = 0
+      while (i < records.length) {
+        val record = records(i)
+        if (i % cfg.sampleEvery == 0) {
+          val prevA = if (record.prev == null) 0 else record.prev.a
+          checksum =
+            foldRef(checksum, record.a, prevA, record.metadata.salt, record.d)
+        }
         i += 1
       }
     } finally region.close()
@@ -271,6 +359,45 @@ object ObjectAllocationLoweringMatrixHelpers {
     checksum
   }
 
+  private def runCheckedReferenceBody()(using
+      region: RiftRegion.StreamingRegion^
+  ): Long = {
+    val cfg = ObjectAllocationLoweringConfig
+    final class CheckedRefMetadata(val salt: Int)
+    final class CheckedRefRecord(
+        val a: Int,
+        val prev: CheckedRefRecord^{region},
+        val metadata: CheckedRefMetadata^{region},
+        var d: Int
+    )
+    val records: Array[CheckedRefRecord^{region}]^{region} =
+      RiftRegion.alloc(new Array[CheckedRefRecord^{region}](cfg.objects))
+    val metadata: CheckedRefMetadata^{region} =
+      RiftRegion.alloc(new CheckedRefMetadata(0x5eed))
+    var prev: CheckedRefRecord^{region} = null
+    var checksum = 0L
+    var i = 0
+    while (i < cfg.objects) {
+      val seed = mix(i * 1103515245 + 12345)
+      val record: CheckedRefRecord^{region} =
+        RiftRegion.alloc(new CheckedRefRecord(seed, prev, metadata, seed & 255))
+      record.d += record.a & 7
+      records(i) = record
+      prev = record
+      i += 1
+    }
+    i = 0
+    while (i < records.length) {
+      val record = records(i)
+      if (i % cfg.sampleEvery == 0) {
+        val prevA = if (record.prev == null) 0 else record.prev.a
+        checksum = foldRef(checksum, record.a, prevA, record.metadata.salt, record.d)
+      }
+      i += 1
+    }
+    checksum
+  }
+
   private def runCheckedOpenHandleBody()(using
       region: RiftOpenStreamingHandle^
   ): Long = {
@@ -307,9 +434,52 @@ object ObjectAllocationLoweringMatrixHelpers {
     checksum
   }
 
+  private def runCheckedOpenHandleReferenceBody()(using
+      region: RiftOpenStreamingHandle^
+  ): Long = {
+    val cfg = ObjectAllocationLoweringConfig
+    final class CheckedRefMetadata(val salt: Int)
+    final class CheckedRefRecord(
+        val a: Int,
+        val prev: CheckedRefRecord^{region},
+        val metadata: CheckedRefMetadata^{region},
+        var d: Int
+    )
+    val records = new Array[CheckedRefRecord^{region}](cfg.objects)
+    val metadata: CheckedRefMetadata^{region} =
+      RiftAllocator.allocateOpenHandle(region, new CheckedRefMetadata(0x5eed))
+    var prev: CheckedRefRecord^{region} = null
+    var checksum = 0L
+    var i = 0
+    while (i < cfg.objects) {
+      val seed = mix(i * 1103515245 + 12345)
+      val record: CheckedRefRecord^{region} =
+        RiftAllocator.allocateOpenHandle(
+          region,
+          new CheckedRefRecord(seed, prev, metadata, seed & 255)
+        )
+      record.d += record.a & 7
+      records(i) = record
+      prev = record
+      i += 1
+    }
+    i = 0
+    while (i < records.length) {
+      val record = records(i)
+      if (i % cfg.sampleEvery == 0) {
+        val prevA = if (record.prev == null) 0 else record.prev.a
+        checksum = foldRef(checksum, record.a, prevA, record.metadata.salt, record.d)
+      }
+      i += 1
+    }
+    checksum
+  }
+
   private def runCheckedRift(): Long = {
     val checksum = RiftRegion.streaming { stream ?=>
-      runCheckedBody()
+      if (ObjectAllocationLoweringConfig.recordShape == "reference")
+        runCheckedReferenceBody()
+      else runCheckedBody()
     }
     checksumSink = checksum
     checksum
@@ -351,9 +521,55 @@ object ObjectAllocationLoweringMatrixHelpers {
     checksum
   }
 
+  private def runCheckedNoZeroOpenHandleReferenceBody()(using
+      region: RiftNoZeroOpenStreamingHandle^
+  ): Long = {
+    val cfg = ObjectAllocationLoweringConfig
+    final class CheckedRefMetadata(val salt: Int)
+    final class CheckedRefRecord(
+        val a: Int,
+        val prev: CheckedRefRecord^{region},
+        val metadata: CheckedRefMetadata^{region},
+        var d: Int
+    )
+    val records = new Array[CheckedRefRecord^{region}](cfg.objects)
+    val metadata: CheckedRefMetadata^{region} =
+      RiftAllocator.allocateOpenHandleNoZero(
+        region,
+        new CheckedRefMetadata(0x5eed)
+      )
+    var prev: CheckedRefRecord^{region} = null
+    var checksum = 0L
+    var i = 0
+    while (i < cfg.objects) {
+      val seed = mix(i * 1103515245 + 12345)
+      val record: CheckedRefRecord^{region} =
+        RiftAllocator.allocateOpenHandleNoZero(
+          region,
+          new CheckedRefRecord(seed, prev, metadata, seed & 255)
+        )
+      record.d += record.a & 7
+      records(i) = record
+      prev = record
+      i += 1
+    }
+    i = 0
+    while (i < records.length) {
+      val record = records(i)
+      if (i % cfg.sampleEvery == 0) {
+        val prevA = if (record.prev == null) 0 else record.prev.a
+        checksum = foldRef(checksum, record.a, prevA, record.metadata.salt, record.d)
+      }
+      i += 1
+    }
+    checksum
+  }
+
   private def runCheckedRiftOpenHandle(): Long = {
     val checksum = RiftRegion.epochOpenHandle {
-      runCheckedOpenHandleBody()
+      if (ObjectAllocationLoweringConfig.recordShape == "reference")
+        runCheckedOpenHandleReferenceBody()
+      else runCheckedOpenHandleBody()
     }
     checksumSink = checksum
     checksum
@@ -361,7 +577,9 @@ object ObjectAllocationLoweringMatrixHelpers {
 
   private def runCheckedRiftNoZeroOpenHandle(): Long = {
     val checksum = RiftRegion.epochNoZeroOpenHandle {
-      runCheckedNoZeroOpenHandleBody()
+      if (ObjectAllocationLoweringConfig.recordShape == "reference")
+        runCheckedNoZeroOpenHandleReferenceBody()
+      else runCheckedNoZeroOpenHandleBody()
     }
     checksumSink = checksum
     checksum
@@ -396,7 +614,9 @@ object ObjectAllocationLoweringMatrixHelpers {
 
   private def runCheckedSafeZone(): Long = {
     val checksum = RiftRegion.streamingSafeZone { stream ?=>
-      runCheckedBody()
+      if (ObjectAllocationLoweringConfig.recordShape == "reference")
+        runCheckedReferenceBody()
+      else runCheckedBody()
     }
     checksumSink = checksum
     checksum
@@ -433,9 +653,18 @@ object ObjectAllocationLoweringMatrixHelpers {
 
   private def runMode(mode: String): Long =
     mode match {
-      case "heap-immix" => runHeap()
-      case "rift-trusted-hp" => runTrusted(RiftRegion.HPZone)
-      case "rift-trusted-streaming" => runTrusted(RiftRegion.Streaming)
+      case "heap-immix" =>
+        if (ObjectAllocationLoweringConfig.recordShape == "reference")
+          runHeapReference()
+        else runHeap()
+      case "rift-trusted-hp" =>
+        if (ObjectAllocationLoweringConfig.recordShape == "reference")
+          runTrustedReference(RiftRegion.HPZone)
+        else runTrusted(RiftRegion.HPZone)
+      case "rift-trusted-streaming" =>
+        if (ObjectAllocationLoweringConfig.recordShape == "reference")
+          runTrustedReference(RiftRegion.Streaming)
+        else runTrusted(RiftRegion.Streaming)
       case "rift-checked-rift" => runCheckedRift()
       case "rift-checked-rift-open-handle" => runCheckedRiftOpenHandle()
       case "rift-checked-rift-open-handle-nozero-unsafe" =>
@@ -455,6 +684,10 @@ object ObjectAllocationLoweringMatrixHelpers {
   def run(modeArg: String): Unit = {
     val mode = canonicalMode(modeArg)
     val cfg = ObjectAllocationLoweringConfig
+    if (cfg.recordShape != "primitive" && cfg.recordShape != "reference")
+      throw new IllegalArgumentException(
+        s"unknown OBJECT_ALLOC_RECORD_SHAPE '${cfg.recordShape}'"
+      )
     val totalRuns = cfg.warmupRuns + cfg.benchmarkRuns
     val times = new Array[Double](cfg.benchmarkRuns)
     val gcTimes = new Array[Double](cfg.benchmarkRuns)
@@ -518,7 +751,7 @@ object ObjectAllocationLoweringMatrixHelpers {
 
     println(
       f"RESULT name=object-allocation-lowering-$mode " +
-        s"mode=$mode objects=${cfg.objects} " +
+        s"mode=$mode record_shape=${cfg.recordShape} objects=${cfg.objects} " +
         f"median_ms=$medianMs%.3f " +
         f"median_gc_ms=$medianGcMs%.3f " +
         f"max_gc_ms=$maxGcMs%.3f " +
