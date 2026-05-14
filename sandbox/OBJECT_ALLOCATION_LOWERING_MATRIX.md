@@ -1,7 +1,7 @@
 # Object Allocation Lowering Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-14 23:35 CEST
+Last updated: 2026-05-14 23:52 CEST
 
 Status: refined retained-region-array matrix validated at 20k smoke, 100k, 1M,
 and 10M, plus focused final-clean allocator-counter, cached-stats,
@@ -314,6 +314,24 @@ benefit. The remaining zeroing choices are either keep the current full-slab
 bulk-zeroing policy as a workload-selective knob, add RSS-aware release for
 cold cached slabs, or move to compiler-proven no-zero for definitely
 initialized record classes.
+
+Rejected pool-cap release follow-up, 2026-05-14: an experimental
+`RIFT_REUSABLE_POOL_MAX_BYTES` knob let the global reusable slab pool cap be
+lowered at runtime, including to zero, while keeping the existing full
+`RIFT_ZERO_REUSED_SLABS=1` policy. The focused 5M allocator row showed that
+cold-slab release is not free: default cap/full bulk-zero was `68.124 ms`,
+96 MiB was `73.023 ms`, 64 MiB was `74.595 ms`, 32 MiB was `76.415 ms`, and
+cap zero was `78.603 ms`. The cap-zero row raised region op time to
+`12.248 ms` and slow-allocation time to `5.817 ms`, showing mmap/unmap churn.
+The real Theodolite q2 streaming-file check did not recover RSS either: full
+bulk-zero/default cap was external `5.52 s`, RSS `78,512,128` bytes, median
+loop `932.614 ms`, region op `1.590 ms`; full bulk-zero/cap-zero was external
+`5.47 s`, RSS `78,413,824` bytes, median loop `923.325 ms`, region op
+`8.405 ms`. The RSS difference was noise-level while region-op cost rose. The
+prototype was reverted. Conclusion: a static global-pool cap is too blunt for
+the observed RSS issue. Future RSS work should either target untouched-page
+release/madvise on cold slabs with evidence that resident pages actually drop,
+or avoid touching pages in the first place through compiler-proven no-zero.
 
 Cached allocation-stats mode follow-up, 2026-05-12: the L4 clean-winner profile
 still sampled `scalanative_rift_alloc_stats_enabled`, so the Rift runtime now
