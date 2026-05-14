@@ -787,7 +787,213 @@ object SpecJbb2005PortMatrixHelpers {
     checksum
   }
 
-  def runCheckedDirectEpoch(safeZoneBackend: Boolean): Long = {
+  def runCheckedDirectEpochHandle(): Long = {
+    val cfg = SpecJbb2005PortConfig
+    val state = newWarehouseState()
+    var transactionChecksum = 0L
+
+    RiftRegion.streamingOpenHandle {
+      var tx = 0
+      while (tx < cfg.totalTransactions) {
+        val batchStart = tx
+        val batchEnd =
+          math.min(cfg.totalTransactions, tx + cfg.transactionsPerRegion)
+        RiftRegion.resetOpenHandle { region ?=>
+          final class CheckedLine(
+              val product: Int,
+              val quantity: Int,
+              val priceCents: Int,
+              val next: CheckedLine^{region}
+          )
+
+          final class CheckedProbe(
+              val product: Int,
+              val quantity: Int,
+              val belowThreshold: Boolean,
+              val next: CheckedProbe^{region}
+          )
+
+          final class CheckedRequest(
+              val id: Int,
+              val warehouse: Int,
+              val customer: Int,
+              val district: Int,
+              val kind: Int,
+              val amountCents: Long,
+              val lines: CheckedLine^{region},
+              val probes: CheckedProbe^{region}
+          )
+
+          final class CheckedReceipt(
+              val id: Int,
+              val warehouse: Int,
+              val customer: Int,
+              val kind: Int,
+              val status: Int,
+              val totalCents: Long,
+              val lineCount: Int,
+              val lines: CheckedLine^{region},
+              val probes: CheckedProbe^{region}
+          )
+
+          def processCheckedReceipt(
+              receipt: CheckedReceipt^{region},
+              request: CheckedRequest^{region}
+          ): Long = {
+            val wh = request.warehouse
+            val customerSlot = customerIndex(wh, request.customer)
+            val districtSlot = districtIndex(wh, request.district)
+            var checksum =
+              receipt.id.toLong ^ (receipt.kind.toLong << 8) ^ receipt.totalCents
+
+            receipt.kind match {
+              case 0 =>
+                var line = receipt.lines
+                while (line != null) {
+                  val slot = stockIndex(wh, line.product)
+                  state.stock(slot) -= line.quantity
+                  checksum += state.stock(slot).toLong ^ line.priceCents.toLong
+                  line = line.next
+                }
+                state.orders(wh) += 1L
+                state.revenue(wh) += receipt.totalCents
+                state.customers(customerSlot) -= receipt.totalCents / 100L
+                state.districts(districtSlot) ^=
+                  state.orders(wh) + receipt.id.toLong
+
+              case 1 =>
+                state.revenue(wh) += request.amountCents
+                state.customers(customerSlot) += request.amountCents
+                checksum ^= state.customers(customerSlot)
+
+              case 2 =>
+                checksum ^= state.customers(customerSlot)
+                checksum ^= state.orders(wh)
+
+              case 3 =>
+                state.orders(wh) += 1L
+                state.customers(customerSlot) -= request.amountCents / 10L
+                state.districts(districtSlot) += 1L
+                checksum ^= state.districts(districtSlot)
+
+              case _ =>
+                var below = 0
+                var probe = receipt.probes
+                while (probe != null) {
+                  val slot = stockIndex(wh, probe.product)
+                  val current = state.stock(slot)
+                  if (current < 100010) below += 1
+                  checksum ^= current.toLong + probe.quantity.toLong
+                  probe = probe.next
+                }
+                state.districts(districtSlot) ^=
+                  below.toLong + cfg.itemsPerOrder.toLong
+            }
+
+            checksum ^ receipt.status.toLong ^ receipt.lineCount.toLong
+          }
+
+          var currentTx = batchStart
+          while (currentTx < batchEnd) {
+            val warehouse = warehouseFor(currentTx)
+            val district = mix(currentTx + 31) % cfg.districtsPerWarehouse
+            val customer = mix(currentTx + 101) % cfg.customersPerWarehouse
+            val kind = txKind(currentTx, warehouse)
+            val amount =
+              1000L + (mixLong(currentTx.toLong * 65537L + 19L) % 100000L)
+            var lines: CheckedLine^{region} = null
+            var probes: CheckedProbe^{region} = null
+            var total = 0L
+            var item = 0
+
+            if (kind == 0) {
+              while (item < cfg.itemsPerOrder) {
+                val seed = mix(currentTx * 104729 + item * 8191)
+                val product = seed % cfg.products
+                val quantity = (mix(seed + 19) & 3) + 1
+                val price = state.prices(product)
+                total += quantity.toLong * price.toLong
+                lines = RiftAllocator.allocateOpenHandle(
+                  region,
+                  new CheckedLine(product, quantity, price, lines)
+                )
+                item += 1
+              }
+            } else if (kind == 4) {
+              while (item < cfg.itemsPerOrder) {
+                val seed = mix(currentTx * 524287 + item * 4099)
+                val product = seed % cfg.products
+                val quantity = (mix(seed + 29) & 7) + 1
+                val current = state.stock(stockIndex(warehouse, product))
+                probes = RiftAllocator.allocateOpenHandle(
+                  region,
+                  new CheckedProbe(product, quantity, current < 100010, probes)
+                )
+                item += 1
+              }
+              total = amount
+            } else {
+              total = amount
+            }
+
+            val request = RiftAllocator.allocateOpenHandle(
+              region,
+              new CheckedRequest(
+                currentTx,
+                warehouse,
+                customer,
+                district,
+                kind,
+                amount,
+                lines,
+                probes
+              )
+            )
+            val status = (kind << 16) ^ customer ^ district
+            val receipt = RiftAllocator.allocateOpenHandle(
+              region,
+              new CheckedReceipt(
+                currentTx,
+                warehouse,
+                customer,
+                kind,
+                status,
+                total,
+                if (kind == 0 || kind == 4) cfg.itemsPerOrder else 0,
+                lines,
+                probes
+              )
+            )
+
+            transactionChecksum =
+              (transactionChecksum * 16777619L) ^
+                processCheckedReceipt(receipt, request)
+            currentTx += 1
+          }
+        }
+        tx = batchEnd
+      }
+    }
+
+    val checksum = checksumState(
+      state.stock,
+      state.prices,
+      state.customers,
+      state.revenue,
+      state.orders,
+      state.districts,
+      transactionChecksum
+    )
+    checksumSink = checksum
+    checksum
+  }
+
+  def runCheckedDirectEpoch(
+      safeZoneBackend: Boolean,
+      useHandle: Boolean = true
+  ): Long = {
+    if (!safeZoneBackend && useHandle) return runCheckedDirectEpochHandle()
+
     val cfg = SpecJbb2005PortConfig
     val state = newWarehouseState()
     var transactionChecksum = 0L
@@ -1004,7 +1210,11 @@ object SpecJbb2005PortMatrixHelpers {
   private def runWorkload(mode: String): Long =
     if (mode == "safezone") runSafeZone()
     else if (mode == "rift-checked-direct-epoch")
-      runCheckedDirectEpoch(safeZoneBackend = false)
+      runCheckedDirectEpoch(safeZoneBackend = false, useHandle = true)
+    else if (mode == "rift-checked-direct-epoch-open-handle")
+      runCheckedDirectEpoch(safeZoneBackend = false, useHandle = true)
+    else if (mode == "rift-checked-direct-epoch-legacy")
+      runCheckedDirectEpoch(safeZoneBackend = false, useHandle = false)
     else if (mode == "rift-checked-safezone-direct-epoch")
       runCheckedDirectEpoch(safeZoneBackend = true)
     else runHeapOrRift(mode)
@@ -1088,7 +1298,9 @@ object SpecJbb2005PortMatrixHelpers {
     val usesRift =
       mode == "rift-hp" ||
         mode == "rift-streaming" ||
-        mode == "rift-checked-direct-epoch"
+        mode == "rift-checked-direct-epoch" ||
+        mode == "rift-checked-direct-epoch-open-handle" ||
+        mode == "rift-checked-direct-epoch-legacy"
 
     if (cfg.finalClean) {
       var run = 0
@@ -1235,11 +1447,13 @@ object SpecJbb2005PortMatrixHelpers {
     mode match {
       case "heap" | "safezone" | "rift-hp" | "rift-streaming" |
           "rift-checked-direct-epoch" |
+          "rift-checked-direct-epoch-open-handle" |
+          "rift-checked-direct-epoch-legacy" |
           "rift-checked-safezone-direct-epoch" =>
         ()
       case other =>
         throw new IllegalArgumentException(
-          s"unknown SpecJbb2005Port mode '$other'; expected heap, safezone, rift-hp, rift-streaming, rift-checked-direct-epoch, or rift-checked-safezone-direct-epoch"
+          s"unknown SpecJbb2005Port mode '$other'; expected heap, safezone, rift-hp, rift-streaming, rift-checked-direct-epoch, rift-checked-direct-epoch-open-handle, rift-checked-direct-epoch-legacy, or rift-checked-safezone-direct-epoch"
         )
     }
 }
@@ -1251,7 +1465,9 @@ object SpecJbb2005PortMatrixHelpers {
   val usesRift =
     mode == "rift-hp" ||
       mode == "rift-streaming" ||
-      mode == "rift-checked-direct-epoch"
+      mode == "rift-checked-direct-epoch" ||
+      mode == "rift-checked-direct-epoch-open-handle" ||
+      mode == "rift-checked-direct-epoch-legacy"
   if (usesRift) RiftRegion.init(0)
   try {
     SpecJbb2005PortMatrixHelpers.runBenchmark(mode)

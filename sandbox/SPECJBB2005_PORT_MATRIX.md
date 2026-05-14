@@ -1,11 +1,13 @@
 # SPECjbb2005 Workload Port Matrix
 
-Last updated: 2026-05-13 17:45 CEST
+Last updated: 2026-05-14 12:48 CEST
 
 Status: clean initial Scala Native workload-port rows plus an L1 final-clean
 8-warehouse representative row from child commit `678a6eb41`, plus a
 fresh all-optimizations 4-warehouse gate after the handle-backed allocation
-promotion.
+promotion. The default checked stream epoch path now uses handle-backed
+allocation; the old generic `allocOpen` path is retained as
+`checked-epoch-stream-legacy`.
 
 This is **not** an official SPECjbb2005 result. It is a deterministic
 single-process Scala Native workload port that preserves the memory-management
@@ -26,6 +28,8 @@ Raw logs:
 - `/tmp/rift-l1-specjbb-8w-x20-678a6eb41-r2/`
 - `/tmp/rift-l1-specjbb-8w-x20-678a6eb41-r3/`
 - `/Users/siyaoliu/rift/cache/specjbb-allopts-20260513/`
+- `/Users/siyaoliu/rift/cache/specjbb-handle-promotion-20260514/`
+- `/Users/siyaoliu/rift/cache/specjbb-handle-promotion-l2-20260514/`
 
 ## Workload
 
@@ -100,6 +104,49 @@ Interpretation: this shorter all-optimizations gate preserves the same
 transaction-local lifetime story as the 8-warehouse row. It is not a new
 official SPEC claim; it is a quick L1 check that the current optimized default
 still wins on the Stancu/SPECjbb-shaped transaction topology.
+
+## Handle-Backed Checked Stream Epoch Promotion
+
+Date/time: 2026-05-14 12:48 CEST.
+
+This gate promotes the SPECjbb/Stancu-style checked stream epoch path from the
+generic checked `RiftRegion.allocOpen` route to the backend-known
+`RiftAllocator.allocateOpenHandle` lowering. The public benchmark label
+`checked-epoch-stream` is now the optimized default; the old path remains
+available as `checked-epoch-stream-legacy`, and
+`checked-epoch-stream-open-handle` is an explicit alias/provenance row.
+
+L1 source:
+`/Users/siyaoliu/rift/cache/specjbb-handle-promotion-20260514`.
+
+L2 source:
+`/Users/siyaoliu/rift/cache/specjbb-handle-promotion-l2-20260514`.
+
+Configuration:
+
+- warehouses: 4;
+- iterations: 100,000 transactions per warehouse;
+- total transactions: 400,000 per inner iteration;
+- L1 runs: 5;
+- L2 runs: 3 after 1 warmup;
+- transaction epoch: 64 transactions per region;
+- checksum: `-6492448434046782774` across all modes.
+
+| Mode | L1 real s | L1 RSS bytes | L2 median ms | L2 median GC ms | L2 region op ms | L2 slow alloc ms | Claim |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `gc-heap` | 0.64 | 7,913,472 | 67.378 | 7.635 | 0.000 | 0.000 | Natural heap baseline. |
+| `checked-epoch-stream-legacy` | 0.30 | 7,340,032 | 56.371 | 0.000 | 0.178 | 0.007 | Legacy generic checked epoch control. |
+| `checked-epoch-stream` | 0.27 | 6,782,976 | 51.168 | 0.000 | 0.169 | 0.005 | Optimized checked stream epoch default. |
+| `checked-epoch-stream-open-handle` | 0.27 | 6,782,976 | 49.977 | 0.000 | 0.164 | 0.005 | Explicit alias/provenance row. |
+| `checked-epoch-scoped` | 0.31 | 7,929,856 | 54.146 | 0.000 | 0.000 | 0.000 | SafeZone-backed checked scoped control. |
+| `region-scoped-rooted` | 0.34 | 7,929,856 | 60.347 | 0.000 | 0.000 | 0.000 | Rooted scoped baseline. |
+
+Interpretation: backend-known checked allocation transfers cleanly to the
+transaction-epoch topology. The optimized checked stream row is about `10%`
+faster than the legacy generic checked row at L1 and about `9%` faster in L2,
+while preserving checksum and region/reset counts. This supports continuing
+the audit on remaining epoch-shaped matrices before attempting unsafe no-zero
+or root-free scoped modes.
 
 ## Scale Results
 
