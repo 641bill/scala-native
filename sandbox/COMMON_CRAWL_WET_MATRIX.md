@@ -1,7 +1,7 @@
 # Common Crawl WET Matrix
 
 Date: 2026-05-01
-Last updated: 2026-05-13 17:45 CEST
+Last updated: 2026-05-14 13:59 CEST
 
 Status: generated WET-shaped detector plus first real Common Crawl WET input
 wiring. Real WET input is currently preloaded before timing so parser and
@@ -419,6 +419,26 @@ row shows the same median-timed improvement while preserving identical
 object/open/close counts. This is generated methodology evidence for the
 page/window topology and backend-known allocation lowering, not real-input
 proof.
+
+## Experimental Reusable-Slab Bulk-Zero Gate
+
+Date/time: 2026-05-14 13:59 CEST.
+
+This q2 page/window gate tests the same experimental runtime policy as the
+focused allocation matrix: `RIFT_ZERO_REUSED_SLABS=1` bulk-zeros dead non-huge
+Rift slabs at close/reset before caching them for reuse. It preserves object
+zero-initialization semantics and is not the default.
+
+| Query | Policy | Mode | L1 external real s | User s | RSS bytes | Checksum | Outputs |
+|---|---|---|---:|---:|---:|---:|---:|
+| q2-domain-window | default | `rift-checked-page-token` | 10.00 | 9.64 | 63324160 | 1076064953308107199 | 929230 |
+| q2-domain-window | `RIFT_ZERO_REUSED_SLABS=1` | `rift-checked-page-token` | 9.22 | 9.20 | 63324160 | 1076064953308107199 | 929230 |
+
+Interpretation: the experimental policy also helps the generated page/window
+stream shape in this single 1M x3 L1 gate: about `7.8%` faster external time
+with unchanged RSS and checksum/output. This is still generated stressor
+evidence; before making it a default policy, rerun L2 interpretation plus at
+least one real streaming-input page/window row.
 
 ## Current Conclusion
 

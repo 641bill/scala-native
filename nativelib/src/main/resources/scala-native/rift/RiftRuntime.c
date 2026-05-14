@@ -123,6 +123,8 @@ static bool scalanative_rift_precise_alloc_stats_initialized = false;
 static bool scalanative_rift_precise_alloc_stats_value = false;
 static bool scalanative_rift_alloc_stats_initialized = false;
 static bool scalanative_rift_alloc_stats_value = true;
+static bool scalanative_rift_zero_reused_slabs_initialized = false;
+static bool scalanative_rift_zero_reused_slabs_value = false;
 
 static __thread scalanative_rift_slab *
     scalanative_rift_tls_cache[SCALANATIVE_RIFT_TLS_SLAB_CACHE_MAX];
@@ -175,6 +177,40 @@ static inline bool scalanative_rift_alloc_stats_enabled(void) {
         scalanative_rift_alloc_stats_initialized = true;
     }
     return scalanative_rift_alloc_stats_value;
+}
+
+static inline bool scalanative_rift_zero_reused_slabs_enabled(void) {
+    if (!scalanative_rift_zero_reused_slabs_initialized) {
+        scalanative_rift_zero_reused_slabs_value =
+            scalanative_rift_truthy_env(getenv("RIFT_ZERO_REUSED_SLABS"));
+        scalanative_rift_zero_reused_slabs_initialized = true;
+    }
+    return scalanative_rift_zero_reused_slabs_value;
+}
+
+static inline void scalanative_rift_prepare_reusable_slab(
+    scalanative_rift_slab *slab) {
+    if (slab == NULL ||
+        (slab->flags & SCALANATIVE_RIFT_SLAB_FLAG_HUGE) != 0) {
+        return;
+    }
+
+    if (scalanative_rift_zero_reused_slabs_enabled()) {
+        memset(slab->data, 0, slab->mapped_size - sizeof(*slab));
+        slab->flags |= SCALANATIVE_RIFT_SLAB_FLAG_ZEROED;
+    } else {
+        slab->flags &= ~SCALANATIVE_RIFT_SLAB_FLAG_ZEROED;
+    }
+}
+
+static void scalanative_rift_prepare_reusable_slab_chain(
+    scalanative_rift_slab *head, size_t count) {
+    size_t i;
+
+    for (i = 0; i < count && head != NULL; i++) {
+        scalanative_rift_prepare_reusable_slab(head);
+        head = head->next;
+    }
 }
 
 static inline void scalanative_rift_stats_update_peak(
@@ -511,6 +547,7 @@ static void scalanative_rift_pool_push_regular_chain_capped(
     }
 
     if (keep_count == count) {
+        scalanative_rift_prepare_reusable_slab_chain(head, count);
         if (small) {
             scalanative_rift_small_pool_push_chain(head, tail, count);
         } else {
@@ -526,6 +563,7 @@ static void scalanative_rift_pool_push_regular_chain_capped(
     drop_head = keep_tail->next;
     keep_tail->next = NULL;
 
+    scalanative_rift_prepare_reusable_slab_chain(head, keep_count);
     if (small) {
         scalanative_rift_small_pool_push_chain(head, keep_tail, keep_count);
     } else {
@@ -698,7 +736,6 @@ static void scalanative_rift_release_slab_chain(
             scalanative_rift_stats_record_munmap(head->mapped_size);
             (void)munmap(head, head->mapped_size);
         } else if (scalanative_rift_slab_is_small(head)) {
-            head->flags &= ~SCALANATIVE_RIFT_SLAB_FLAG_ZEROED;
             head->next = NULL;
             if (small_tail != NULL) {
                 small_tail->next = head;
@@ -708,7 +745,6 @@ static void scalanative_rift_release_slab_chain(
             small_tail = head;
             small_count++;
         } else {
-            head->flags &= ~SCALANATIVE_RIFT_SLAB_FLAG_ZEROED;
             head->next = NULL;
             if (regular_tail != NULL) {
                 regular_tail->next = head;
@@ -727,6 +763,7 @@ static void scalanative_rift_release_slab_chain(
                SCALANATIVE_RIFT_TLS_SLAB_CACHE_MAX) {
         scalanative_rift_slab *next = regular_head->next;
         regular_head->next = NULL;
+        scalanative_rift_prepare_reusable_slab(regular_head);
         scalanative_rift_tls_cache[scalanative_rift_tls_count++] = regular_head;
         regular_head = next;
         regular_count--;
@@ -956,13 +993,14 @@ void scalanative_rift_region_reset(void *rawregion) {
 
     scalanative_rift_release_slab_chain(rest, region->family);
 
-    first->flags &= ~SCALANATIVE_RIFT_SLAB_FLAG_ZEROED;
+    scalanative_rift_prepare_reusable_slab(first);
 
     region->bump = first->data;
     region->end = first->data + scalanative_rift_slab_usable_size(first);
     region->current = first;
     region->slab_count = 1;
-    region->current_slab_zeroed = 0u;
+    region->current_slab_zeroed =
+        scalanative_rift_slab_is_zeroed(first) ? 1u : 0u;
     scalanative_rift_stats_add(&scalanative_rift_stats_region_reset_total_value,
                                1);
     {

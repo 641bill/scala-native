@@ -1,7 +1,7 @@
 # Checked Page/Token Append Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-12 15:58 CEST
+Last updated: 2026-05-14 13:59 CEST
 
 Status: focused checked page/token gate passed, generated Common Crawl-shaped
 q1/q2 application gate passed, the fixed-chunk append control failed to beat
@@ -251,6 +251,35 @@ append-drain, and `82.623 ms` on append-aggregate after the safe same-bucket
 fast-path rerun. Conclusion: no-drain close is safe and useful as an
 operator-owned option, but close traversal is not the main remaining
 bottleneck in this focused matrix.
+
+## 2026-05-13 Handle-Backed Page-Token Promotion
+
+The normal focused `rift-checked-page-token` row now uses the same
+handle-backed Rift allocation path promoted in the Common Crawl-shaped q2
+matrix. The previous `OpenStreamingRegion` lowering remains available as
+`rift-checked-page-token-legacy`.
+
+20k smoke:
+
+| Mode | Median ms | GC ms | Rift op ms | Opens/closes | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|
+| `rift-checked-page-token-legacy` | 1.432 | 0.000 | 0.084 | 2/2 | 6881280 | -1919398397124784300 |
+| `rift-checked-page-token` | 0.787 | 0.000 | 0.043 | 2/2 | 6881280 | -1919398397124784300 |
+
+Focused 1M, final-clean, 5 measured runs:
+
+| Mode | Median ms | GC ms | Rift op ms | Region objects | Opens/closes | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `rift-checked-page-token-legacy` | 23.913 | 0.000 | 0.062 | 0 | 41/41 | 47562752 | -2507118467295660905 |
+| `rift-checked-page-token` | 22.785 | 0.000 | 0.063 | 0 | 41/41 | 47562752 | -2507118467295660905 |
+| `rift-checked-safezone-page-token` | 25.520 | 0.000 | 0.000 | 0 | 0/0 | 47464448 | -2507118467295660905 |
+
+Interpretation: the focused operator gate confirms the promoted default
+checked page-token row is faster than the legacy open-region lowering with the
+same checksum, RSS, and open/close count. The improvement is modest at 1M
+(`4.7%`), but it is directionally consistent with the generated
+Common Crawl-shaped q2 L1/L2 gate and keeps `rift-checked-page-token` ahead of
+the SafeZone-backed page-token row in this focused shape.
 
 Generated Common Crawl-shaped 100k regression:
 

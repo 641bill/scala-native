@@ -1,12 +1,13 @@
 # Object Allocation Lowering Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-14 13:45 CEST
+Last updated: 2026-05-14 13:59 CEST
 
 Status: refined retained-region-array matrix validated at 20k smoke, 100k, 1M,
 and 10M, plus focused final-clean allocator-counter, cached-stats,
 current-slab zeroed-cache, handle-backed allocation, warm/dirty-slab gates,
-and object zeroing attribution counters.
+object zeroing attribution counters, and an experimental reusable-slab
+bulk-zero policy gate.
 This
 benchmark isolates ordinary Scala object construction through heap, trusted
 Rift, checked Rift, and checked SafeZone-backed allocation paths without
@@ -254,6 +255,33 @@ zeroing is a real remaining allocation-body cost, but it still does not justify
 unsafe no-zero allocation. The next optimization step needs compiler proof of
 definite initialization for final record-like classes, or a runtime policy that
 changes this ratio without increasing attach/reset cost.
+
+Reusable-slab bulk-zero experiment, 2026-05-14: the runtime now has an
+experimental policy gate, `RIFT_ZERO_REUSED_SLABS=1`, that bulk-zeros dead
+non-huge slabs when they are returned to the Rift TLS/global slab cache or
+when a reset keeps the first slab. This preserves zero-initialization
+semantics: objects are dead at region close/reset, the reusable slab is made
+zero-filled before it is marked zeroed, and future object allocations can skip
+per-object `memset`. The default policy is unchanged unless the environment
+variable is set.
+
+Focused 5M and 10M handle-backed allocation gates, 5 measured runs:
+
+| Scale | Policy | Median ms | GC median ms | Rift op ms | Slow alloc ms | Zeroed objects | Zero-skipped objects | RSS bytes | Checksum |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 5M | default | 68.692 | 0.068 | 2.153 | 1.008 | 4,198,392 | 801,608 | 203751424 | -1183547843768457859 |
+| 5M | `RIFT_ZERO_REUSED_SLABS=1` | 65.228 | 0.062 | 4.121 | 0.998 | 0 | 5,000,000 | 203767808 | -1183547843768457859 |
+| 10M | default | 144.067 | 0.067 | 10.813 | 5.828 | 4,198,392 | 5,801,608 | 403931136 | -6851333344653324122 |
+| 10M | `RIFT_ZERO_REUSED_SLABS=1` | 138.078 | 0.069 | 13.817 | 5.827 | 0 | 10,000,000 | 403947520 | -6851333344653324122 |
+
+Interpretation: bulk-zeroing reusable slabs is a safe runtime-side
+zeroing-policy win in this focused allocator row: about `5.0%` faster at 5M
+and about `4.2%` faster at 10M with unchanged checksums and effectively
+unchanged RSS. It does not eliminate initialization work; it moves zeroing to
+region close/reset so the allocation hot path can skip per-object `memset`.
+The measured Rift op time rises because close/reset now does the bulk zero
+work. Keep this experimental until application gates show the close/reset
+tradeoff is favorable for real epoch/page/window workloads.
 
 Cached allocation-stats mode follow-up, 2026-05-12: the L4 clean-winner profile
 still sampled `scalanative_rift_alloc_stats_enabled`, so the Rift runtime now

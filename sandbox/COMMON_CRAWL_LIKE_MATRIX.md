@@ -7,7 +7,7 @@ checked page/token operator follow-up recorded and clears the generated
 application-shaped gate.
 
 Date: 2026-05-03
-Last updated: 2026-05-12 15:58 CEST
+Last updated: 2026-05-14 13:59 CEST
 
 ## Purpose
 
@@ -41,6 +41,9 @@ the reusable checked `StreamAppendWindow` cursor API. The newer
 `rift-checked-page-token` and `rift-checked-safezone-page-token` modes use
 `StreamPageTokenAppendWindow`, an operator-owned path that removes redundant
 per-record checks and child-region lookups.
+`rift-checked-page-token-open-handle` is an experimental Rift-only lowering
+gate for the same page-token topology: it keeps the checked page/window API
+shape but sends record allocation through the handle-level Rift allocator path.
 `rift-checked-count-by-key` and `rift-checked-safezone-count-by-key` are
 available as opt-in q2/q5-only controls using `PageTokenCountByKey`, which
 updates domain counts during append and closes buckets without record drain.
@@ -151,6 +154,81 @@ the static-safety overhead-removal story: when the operator owns the lifetime
 boundary, it can avoid redundant per-record dynamic checks without changing the
 logical program. Caveat: it remains generated WET-shaped stressor evidence, not
 real Common Crawl input proof.
+
+### Page-Token Handle-Level Lowering Gate
+
+Date/time: 2026-05-13 02:37 CEST.
+
+This gate tests whether the positive handle-level allocation result from
+`ObjectAllocationLoweringMatrix` and `StreamFlexDesignMatrix` also transfers to
+the page/window stream shape. The new mode keeps the same q2
+`StreamPageTokenAppendWindow` topology and close traversal, but
+`pageTokenAppendRiftOpenHandleFor` returns a Rift backend handle for the active
+bucket and record construction uses `RiftAllocator.allocateOpenHandle`.
+SafeZone-backed page-token rows are deliberately not routed through this path.
+
+20k smoke:
+
+| Mode | External real s | RSS bytes | Checksum | Output count |
+|---|---:|---:|---:|---:|
+| `rift-checked-page-token` | 0.41 | 63242240 | -7246040220793005327 | 18592 |
+| `rift-checked-page-token-open-handle` | 0.07 | 63242240 | -7246040220793005327 | 18592 |
+
+1M L1, three measured runs inside each non-profiled process:
+
+| Mode | External real s | External user s | RSS bytes | Checksum | Output count |
+|---|---:|---:|---:|---:|---:|
+| `rift-checked-page-token` | 10.62 | 10.56 | 63324160 | 1076064953308107199 | 929230 |
+| `rift-checked-page-token-open-handle` | 9.66 | 9.61 | 63340544 | 1076064953308107199 | 929230 |
+
+1M L2 interpretation, three measured runs:
+
+| Mode | Median ms | GC median ms | Rift op ms | Slow alloc ms | Region objects | Opens/closes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `rift-checked-page-token` | 3883.742 | 21.017 | 8.803 | 6.271 | 137000000 | 401/401 | 1076064953308107199 |
+| `rift-checked-page-token-open-handle` | 3695.704 | 20.648 | 10.365 | 6.831 | 137000000 | 401/401 | 1076064953308107199 |
+
+Interpretation: handle-level allocation also helps the generated page/window
+stream shape. L1 improves by about `9.0%` with the same checksum/output and
+nearly identical RSS; L2 improves by about `4.8%` with the same allocation and
+open/close counts. This is still generated stressor evidence and an
+experimental lowering gate, not a final public API row.
+
+### Promoted Page-Token Label Gate
+
+Date/time: 2026-05-13 02:49 CEST.
+
+The normal `rift-checked-page-token` benchmark label now uses the handle-backed
+Rift page-token path. The previous `OpenStreamingRegion` lowering remains
+available as `rift-checked-page-token-legacy` for comparison and regression
+tracking.
+
+20k smoke:
+
+| Mode | External real s | RSS bytes | Checksum | Output count |
+|---|---:|---:|---:|---:|
+| `rift-checked-page-token-legacy` | 0.33 | 63242240 | -7246040220793005327 | 18592 |
+| `rift-checked-page-token` | 0.07 | 63225856 | -7246040220793005327 | 18592 |
+
+1M L1, three measured runs inside each non-profiled process:
+
+| Mode | External real s | External user s | RSS bytes | Checksum | Output count |
+|---|---:|---:|---:|---:|---:|
+| `rift-checked-page-token-legacy` | 11.18 | 11.10 | 63324160 | 1076064953308107199 | 929230 |
+| `rift-checked-page-token` | 10.59 | 10.11 | 63324160 | 1076064953308107199 | 929230 |
+
+1M L2 interpretation, three measured runs:
+
+| Mode | Median ms | GC median ms | Rift op ms | Slow alloc ms | Region objects | Opens/closes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `rift-checked-page-token-legacy` | 3909.015 | 31.825 | 8.532 | 6.252 | 137000000 | 401/401 | 1076064953308107199 |
+| `rift-checked-page-token` | 3562.617 | 23.230 | 8.568 | 6.166 | 137000000 | 401/401 | 1076064953308107199 |
+
+Interpretation: after promotion, the default Rift checked page-token row is
+the handle-backed path. The comparison to `rift-checked-page-token-legacy` is
+the fair before/after control: L1 improves by about `5.3%`, and L2 median time
+improves by about `8.9%`, with matching checksum/output, identical object
+counts, identical open/close counts, and identical RSS in the L1 row.
 
 ### Page-Token Diagnostic Follow-Up
 

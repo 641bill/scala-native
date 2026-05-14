@@ -1,6 +1,6 @@
 # StreamFlex Design Matrix
 
-Last updated: 2026-05-13 17:45 CEST
+Last updated: 2026-05-14 13:59 CEST
 
 Status: first Rift-native StreamFlex system-design reproduction. This is a
 methodology benchmark for the StreamFlex axes: stable state, transient scoped
@@ -286,6 +286,28 @@ no RSS regression. The explicit open-handle alias is effectively identical to
 the default, confirming that the default label now carries the handle-backed
 allocation lowering. This satisfies the application-gate requirement for the
 checked stream epoch backend.
+
+## Experimental Reusable-Slab Bulk-Zero Gate
+
+Date/time: 2026-05-14 13:59 CEST.
+
+This gate tests `RIFT_ZERO_REUSED_SLABS=1`, which bulk-zeros dead non-huge Rift
+slabs at close/reset before caching them for reuse. It is not the default. The
+policy preserves zero-initialization semantics but moves zeroing from each
+object allocation to the region boundary.
+
+| Events x runs | Policy | L1 external real s | L1 user s | RSS bytes | Checksum | Outputs |
+|---|---|---:|---:|---:|---:|---:|
+| 2M x3 | default | 2.31 | 2.01 | 8093696 | -3301579998455784484 | 1998001 |
+| 2M x3 | `RIFT_ZERO_REUSED_SLABS=1` | 1.90 | 1.89 | 8093696 | -3301579998455784484 | 1998001 |
+| 20M x3 | default | 19.51 | 19.50 | 12599296 | 5305809911915216923 | 19999119 |
+| 20M x3 | `RIFT_ZERO_REUSED_SLABS=1` | 18.91 | 18.90 | 12599296 | 5305809911915216923 | 19999119 |
+
+Interpretation: the focused allocation-row win transfers to this
+StreamFlex-design checked epoch workload, but more modestly at 20M: about
+`3.1%` external-time improvement with identical checksum/output and RSS. Keep
+the policy experimental until page/window and real-input gates confirm the
+close/reset zeroing tradeoff is broadly favorable.
 
 ## L2 Throughput, 1M Events x 3 Runs
 
