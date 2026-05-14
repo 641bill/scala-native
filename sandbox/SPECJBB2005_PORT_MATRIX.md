@@ -1,9 +1,11 @@
 # SPECjbb2005 Workload Port Matrix
 
-Last updated: 2026-05-10 09:40 CEST
+Last updated: 2026-05-13 17:45 CEST
 
 Status: clean initial Scala Native workload-port rows plus an L1 final-clean
-8-warehouse representative row from child commit `678a6eb41`.
+8-warehouse representative row from child commit `678a6eb41`, plus a
+fresh all-optimizations 4-warehouse gate after the handle-backed allocation
+promotion.
 
 This is **not** an official SPECjbb2005 result. It is a deterministic
 single-process Scala Native workload port that preserves the memory-management
@@ -23,6 +25,7 @@ Raw logs:
 - `/tmp/rift-l1-specjbb-8w-x20-678a6eb41-r1/`
 - `/tmp/rift-l1-specjbb-8w-x20-678a6eb41-r2/`
 - `/tmp/rift-l1-specjbb-8w-x20-678a6eb41-r3/`
+- `/Users/siyaoliu/rift/cache/specjbb-allopts-20260513/`
 
 ## Workload
 
@@ -64,6 +67,39 @@ Interpretation: this L1 row preserves the L2 direction without internal
 timers. `checked-epoch-scoped` is about 16.3% faster than `gc-heap` and about
 10.9% faster than `region-scoped-rooted`, while RSS is about 35% lower than
 heap and near the rooted scoped baseline.
+
+## All-Optimizations 4-Warehouse Gate
+
+Date/time: 2026-05-13 17:55 CEST.
+
+This row reruns the representative transaction workload after the current
+handle-backed allocation promotion. It uses L1 final-clean mode, so the table
+contains external process timing/RSS and correctness metadata only. L2 rows
+above remain the GC/region interpretation source.
+
+Source:
+`/Users/siyaoliu/rift/cache/specjbb-allopts-20260513`.
+
+Configuration:
+
+- warehouses: 4;
+- iterations: 100,000 transactions per warehouse;
+- total transactions: 400,000 per inner iteration;
+- runs: 3;
+- transaction epoch: 64 transactions per region;
+- checksum: `-6492448434046782774` across all modes.
+
+| Mode | Real s | User s | Sys s | RSS bytes | Region-freed object proxy | Checksum | Claim |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `gc-heap` | 0.51 | 0.24 | 0.00 | 7,929,856 | 2,080,320 | -6492448434046782774 | Natural heap baseline. |
+| `region-scoped-rooted` | 0.21 | 0.21 | 0.00 | 6,307,840 | 2,080,320 | -6492448434046782774 | Rooted scoped baseline. |
+| `checked-epoch-stream` | 0.18 | 0.18 | 0.00 | 5,980,160 | 2,080,320 | -6492448434046782774 | Checked epoch win over heap and rooted baseline. |
+| `checked-epoch-scoped` | 0.19 | 0.19 | 0.00 | 6,307,840 | 2,080,320 | -6492448434046782774 | Checked scoped epoch near checked stream. |
+
+Interpretation: this shorter all-optimizations gate preserves the same
+transaction-local lifetime story as the 8-warehouse row. It is not a new
+official SPEC claim; it is a quick L1 check that the current optimized default
+still wins on the Stancu/SPECjbb-shaped transaction topology.
 
 ## Scale Results
 

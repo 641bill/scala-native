@@ -1,11 +1,12 @@
 # Object Allocation Lowering Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-13 00:33 CEST
+Last updated: 2026-05-13 17:45 CEST
 
 Status: refined retained-region-array matrix validated at 20k smoke, 100k, 1M,
-and 10M, plus focused final-clean allocator-counter, cached-stats, and
-current-slab zeroed-cache gates. This
+and 10M, plus focused final-clean allocator-counter, cached-stats,
+current-slab zeroed-cache, handle-backed allocation, and warm/dirty-slab gates.
+This
 benchmark isolates ordinary Scala object construction through heap, trusted
 Rift, checked Rift, and checked SafeZone-backed allocation paths without
 stream-window, ranking, aggregation, or output work.
@@ -245,6 +246,49 @@ Validation note: an initial 20k construct-only smoke linked and emitted rows,
 but was rejected as evidence because checked allocations could be optimized
 away from the Rift allocation counters. The measured rows above use the
 retained-region-array/traversal shape.
+
+## Handle-Backed Allocation And Warm/Dirty-Slab Gate
+
+Date/time: 2026-05-13 17:27 CEST.
+
+This gate reruns the focused 5M ordinary-object allocation benchmark after the
+normal checked StreamFlex/page-token paths were promoted to the handle-backed
+allocation lowering. It also adds
+`rift-checked-rift-open-handle-dirty-slab`, which dirties Rift slabs outside
+the timed section, resets stats, then times the same handle-backed allocation
+body. This is a safe measurement probe only; it does not skip zeroing.
+
+Source:
+`/Users/siyaoliu/rift/cache/object-allocation-allopts-20260513`.
+
+Command shape:
+
+```sh
+OBJECT_ALLOC_OBJECTS=5000000 \
+OBJECT_ALLOC_BENCHMARK_RUNS=5 \
+OBJECT_ALLOC_WARMUPS=1 \
+OBJECT_ALLOC_MODES="heap-immix rift-checked-rift rift-checked-rift-open-handle rift-checked-rift-open-handle-dirty-slab rift-checked-safezone-improved-32k" \
+OBJECT_ALLOC_OUTPUT_DIR=/Users/siyaoliu/rift/cache/object-allocation-allopts-20260513 \
+  zsh sandbox/run_object_allocation_lowering_matrix.sh
+```
+
+| Mode | Median ms | Median GC ms | Max GC ms | Region op ms | Slow alloc ms | Region objects | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-immix` | 82.165 | 8.913 | 11.848 | 0.000 | 0.000 | 0 | 246267904 | -1183547843768457859 |
+| `rift-checked-rift` | 78.557 | 0.000 | 0.000 | 2.498 | 1.088 | 5000001 | 203653120 | -1183547843768457859 |
+| `rift-checked-rift-open-handle` | 69.422 | 0.071 | 0.074 | 1.836 | 1.027 | 5000000 | 203767808 | -1183547843768457859 |
+| `rift-checked-rift-open-handle-dirty-slab` | 67.128 | 0.067 | 0.069 | 1.787 | 0.975 | 5000000 | 203767808 | -1183547843768457859 |
+| `rift-checked-safezone-improved-32k` | 68.868 | 0.000 | 0.000 | 0.000 | 0.000 | 0 | 204144640 | -1183547843768457859 |
+
+Interpretation: handle-backed checked Rift allocation is about `11.6%` faster
+than the current generic checked Rift allocation in this focused row and is now
+close to the checked SafeZone-backed row. The warm/dirty-slab prep does not
+show a zeroing penalty; it is slightly faster here, likely because it warms
+the region slab pool outside the timed section. Therefore this row does not
+justify no-zero allocation. It says the next zeroing experiment needs a lower
+level fresh/dirty probe that separates pool warmup from mandatory object
+clearing, and any no-zero path still needs compiler proof of definite
+initialization before it can ship.
 
 ## Interpretation
 

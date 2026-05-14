@@ -1,6 +1,6 @@
 # Checked Append Window Matrix
 
-Last updated: 2026-05-13 00:33 CEST
+Last updated: 2026-05-13 17:45 CEST
 
 Status: focused cheap checked-operator benchmark. This is framework evidence,
 not DEBS application evidence.
@@ -8,6 +8,44 @@ not DEBS application evidence.
 The harness is implemented in
 `sandbox/src/main/scala-next/CheckedAppendWindowMatrix.scala` and run with
 `sandbox/run_checked_append_window_matrix.sh`.
+
+## All-Optimizations Page-Token Gate
+
+Date/time: 2026-05-13 17:38 CEST.
+
+This focused 1M append-window gate reruns the heap, legacy checked page-token,
+promoted checked page-token, and checked SafeZone-backed page-token rows after
+the handle-backed allocation path became the default checked Rift page-token
+implementation. All rows matched checksum `-2507118467295660905`.
+
+Source:
+`/Users/siyaoliu/rift/cache/checked-append-allopts-20260513`.
+
+Command shape:
+
+```sh
+RIFT_FINAL_CLEAN=1 \
+CHECKED_APPEND_EVENTS=1000000 \
+CHECKED_APPEND_BENCHMARK_RUNS=5 \
+CHECKED_APPEND_WARMUPS=0 \
+CHECKED_APPEND_MODES="heap-immix rift-checked-page-token-legacy rift-checked-page-token rift-checked-safezone-page-token" \
+CHECKED_APPEND_OUTPUT_DIR=/Users/siyaoliu/rift/cache/checked-append-allopts-20260513 \
+  zsh sandbox/run_checked_append_window_matrix.sh
+```
+
+| Mode | Median ms | Median GC ms | Rift op ms | Opens/Closes/Resets | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|
+| `heap-immix` | 38.352 | 12.512 | 0.000 | 0/0/0 | 75104256 | -2507118467295660905 |
+| `rift-checked-page-token-legacy` | 24.687 | 0.000 | 0.066 | 41/41/0 | 47562752 | -2507118467295660905 |
+| `rift-checked-page-token` | 23.059 | 0.000 | 0.067 | 41/41/0 | 47562752 | -2507118467295660905 |
+| `rift-checked-safezone-page-token` | 25.805 | 0.000 | 0.000 | 0/0/0 | 47464448 | -2507118467295660905 |
+
+Interpretation: the promoted default `rift-checked-page-token` is `6.6%`
+faster than the legacy checked page-token control, `10.6%` faster than the
+checked SafeZone-backed page-token row, and `39.9%` faster than heap in this
+focused shape while preserving lower RSS than heap. This is focused framework
+evidence that handle-backed allocation is the right default for Rift-backed
+operator-owned page/window paths.
 
 ## Latest Final-Clean Page-Token Gate
 

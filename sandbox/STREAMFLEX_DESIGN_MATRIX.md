@@ -1,6 +1,6 @@
 # StreamFlex Design Matrix
 
-Last updated: 2026-05-13 10:26 CEST
+Last updated: 2026-05-13 17:45 CEST
 
 Status: first Rift-native StreamFlex system-design reproduction. This is a
 methodology benchmark for the StreamFlex axes: stable state, transient scoped
@@ -245,6 +245,47 @@ timed region (`8776.217 ms` to `8096.514 ms`) while keeping the same
 `checked-epoch-stream-open-handle` row as a provenance alias; future
 StreamFlexDesign reporting should use `checked-epoch-stream` as the promoted
 checked streaming backend row.
+
+## All-Optimizations L1 Throughput Gate, 20M Events x 3 Runs
+
+Date/time: 2026-05-13 17:29 CEST.
+
+This final-clean gate checks the promoted handle-backed checked stream default
+against heap, the legacy checked stream control, the explicit open-handle
+provenance alias, rooted scoped SafeZone, and checked scoped SafeZone. All rows
+matched checksum `5305809911915216923` and output count `19999119`.
+
+Source:
+`/Users/siyaoliu/rift/cache/streamflex-design-allopts-20260513`.
+
+Command shape:
+
+```sh
+RIFT_FINAL_CLEAN=1 \
+STREAMFLEX_DESIGN_EVENTS=20000000 \
+STREAMFLEX_DESIGN_BENCHMARK_RUNS=3 \
+STREAMFLEX_DESIGN_WARMUPS=0 \
+STREAMFLEX_DESIGN_WORKLOAD=throughput \
+STREAMFLEX_DESIGN_MODES="gc-heap checked-epoch-stream-legacy checked-epoch-stream checked-epoch-stream-open-handle region-scoped-rooted checked-epoch-scoped" \
+STREAMFLEX_DESIGN_OUTPUT_DIR=/Users/siyaoliu/rift/cache/streamflex-design-allopts-20260513 \
+  zsh sandbox/run_streamflex_design_matrix.sh
+```
+
+| Mode | L1 external real s | L1 user s | RSS bytes | Checksum | Outputs |
+|---|---:|---:|---:|---:|---:|
+| `gc-heap` | 30.90 | 30.55 | 12419072 | 5305809911915216923 | 19999119 |
+| `checked-epoch-stream-legacy` | 21.32 | 21.27 | 12599296 | 5305809911915216923 | 19999119 |
+| `checked-epoch-stream` | 19.25 | 19.21 | 12582912 | 5305809911915216923 | 19999119 |
+| `checked-epoch-stream-open-handle` | 19.23 | 19.20 | 12582912 | 5305809911915216923 | 19999119 |
+| `region-scoped-rooted` | 28.47 | 28.18 | 12681216 | 5305809911915216923 | 19999119 |
+| `checked-epoch-scoped` | 23.41 | 23.27 | 12697600 | 5305809911915216923 | 19999119 |
+
+Interpretation: the optimized default `checked-epoch-stream` is `37.7%`
+faster than heap and `9.7%` faster than the legacy checked stream path, with
+no RSS regression. The explicit open-handle alias is effectively identical to
+the default, confirming that the default label now carries the handle-backed
+allocation lowering. This satisfies the application-gate requirement for the
+checked stream epoch backend.
 
 ## L2 Throughput, 1M Events x 3 Runs
 

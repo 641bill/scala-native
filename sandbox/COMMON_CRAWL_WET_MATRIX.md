@@ -1,7 +1,7 @@
 # Common Crawl WET Matrix
 
 Date: 2026-05-01
-Last updated: 2026-05-13 00:33 CEST
+Last updated: 2026-05-13 17:45 CEST
 
 Status: generated WET-shaped detector plus first real Common Crawl WET input
 wiring. Real WET input is currently preloaded before timing so parser and
@@ -370,6 +370,55 @@ Interpretation: this is a small generated page/window application improvement
 over both the clean q2 row (`11.49 s`) and the region-cached stats gate
 (`11.39 s`). It is still generated stressor evidence; real-input stream claims
 require separate streaming-input rows.
+
+## All-Optimizations Page-Token Gate
+
+Date/time: 2026-05-13 17:35 CEST.
+
+This reruns generated WET-shaped q0/q1/q2 at 1M pages with final-clean L1
+timing after the normal `rift-checked-page-token` label was promoted to the
+handle-backed allocation path. q3 parser-scratch rows are not supported by
+page-token modes and remain excluded from the checked page-token claim.
+
+Source:
+`/Users/siyaoliu/rift/cache/common-crawl-allopts-q2-20260513`.
+
+Representative L1 rows:
+
+| Query | Mode | External real s | User s | RSS bytes | Checksum | Outputs |
+|---|---|---:|---:|---:|---:|---:|
+| q1-tokenize | `heap-immix` | 16.67 | 16.53 | 408633344 | -3166891223384968696 | 137000000 |
+| q1-tokenize | `safezone-improved-32k` | 16.07 | 15.97 | 74465280 | -3166891223384968696 | 137000000 |
+| q1-tokenize | `rift-checked-page-token-legacy` | 10.29 | 10.21 | 63324160 | -3166891223384968696 | 137000000 |
+| q1-tokenize | `rift-checked-page-token` | 9.30 | 9.19 | 63324160 | -3166891223384968696 | 137000000 |
+| q1-tokenize | `rift-checked-page-token-open-handle` | 9.29 | 9.22 | 63340544 | -3166891223384968696 | 137000000 |
+| q1-tokenize | `rift-checked-safezone-page-token` | 12.88 | 12.78 | 63455232 | -3166891223384968696 | 137000000 |
+| q2-domain-window | `heap-immix` | 16.23 | 16.08 | 408633344 | 1076064953308107199 | 929230 |
+| q2-domain-window | `safezone-improved-32k` | 16.08 | 15.96 | 74465280 | 1076064953308107199 | 929230 |
+| q2-domain-window | `rift-checked-page-token-legacy` | 11.06 | 10.98 | 63324160 | 1076064953308107199 | 929230 |
+| q2-domain-window | `rift-checked-page-token` | 9.76 | 9.67 | 63324160 | 1076064953308107199 | 929230 |
+| q2-domain-window | `rift-checked-page-token-open-handle` | 9.75 | 9.66 | 63324160 | 1076064953308107199 | 929230 |
+| q2-domain-window | `rift-checked-safezone-page-token` | 14.39 | 14.10 | 63455232 | 1076064953308107199 | 929230 |
+
+L2 q2 interpretation rows:
+
+Source:
+`/Users/siyaoliu/rift/cache/common-crawl-allopts-q2-l2-20260513`.
+
+| Mode | Median ms | Median GC ms | Max GC ms | Region op ms | Slow alloc ms | Region objects | Opens/Closes | Checksum | Outputs |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-immix` | 5414.458 | 1632.232 | 1657.295 | 0.000 | 0.000 | 0 | 0/0 | 1076064953308107199 | 929230 |
+| `rift-checked-page-token-legacy` | 3972.377 | 19.867 | 25.628 | 9.562 | 6.479 | 137000000 | 401/401 | 1076064953308107199 | 929230 |
+| `rift-checked-page-token` | 3591.612 | 20.904 | 22.491 | 9.192 | 6.344 | 137000000 | 401/401 | 1076064953308107199 | 929230 |
+| `rift-checked-page-token-open-handle` | 3593.829 | 30.099 | 31.461 | 9.124 | 6.372 | 137000000 | 401/401 | 1076064953308107199 | 929230 |
+
+Interpretation: the optimized default page-token path is now indistinguishable
+from the explicit open-handle provenance alias and beats the legacy checked
+page-token path by about `9.6%` on q1 and `11.8%` on q2 under L1. The L2 q2
+row shows the same median-timed improvement while preserving identical
+object/open/close counts. This is generated methodology evidence for the
+page/window topology and backend-known allocation lowering, not real-input
+proof.
 
 ## Current Conclusion
 

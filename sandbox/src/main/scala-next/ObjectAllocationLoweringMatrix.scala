@@ -27,6 +27,8 @@ object ObjectAllocationLoweringConfig {
     sys.env.get(name).flatMap(parseNonNegativeInt).getOrElse(default)
 
   val objects: Int = envInt("OBJECT_ALLOC_OBJECTS", 1000000)
+  val dirtyPrepObjects: Int =
+    envNonNegativeInt("OBJECT_ALLOC_DIRTY_PREP_OBJECTS", objects)
   val sampleEvery: Int = envInt("OBJECT_ALLOC_SAMPLE_EVERY", 4096)
   val warmupRuns: Int = envNonNegativeInt("OBJECT_ALLOC_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("OBJECT_ALLOC_BENCHMARK_RUNS", 3)
@@ -43,6 +45,13 @@ object ObjectAllocationLoweringMatrixHelpers {
   )
 
   private final class TrustedRecord(
+      val a: Int,
+      val b: Int,
+      val c: Long,
+      var d: Int
+  )
+
+  private final class DirtyPrepRecord(
       val a: Int,
       val b: Int,
       val c: Long,
@@ -290,6 +299,33 @@ object ObjectAllocationLoweringMatrixHelpers {
     checksum
   }
 
+  private def dirtyRiftSlabsWithOpenHandle(): Unit = {
+    val cfg = ObjectAllocationLoweringConfig
+    if (cfg.dirtyPrepObjects <= 0) return
+    var sink = 0L
+    RiftRegion.epochOpenHandle {
+      val region = summon[RiftOpenStreamingHandle^]
+      var i = 0
+      while (i < cfg.dirtyPrepObjects) {
+        val seed = mix(i * 1103515245 + 12345)
+        val record: DirtyPrepRecord^{region} =
+          RiftAllocator.allocateOpenHandle(
+            region,
+            new DirtyPrepRecord(
+              seed,
+              seed >>> 3,
+              seed.toLong * 1315423911L,
+              seed & 255
+            )
+          )
+        if ((i & 4095) == 0)
+          sink = fold(sink, record.a, record.b, record.c, record.d)
+        i += 1
+      }
+    }
+    checksumSink ^= sink
+  }
+
   private def runCheckedSafeZone(): Long = {
     val checksum = RiftRegion.streamingSafeZone { stream ?=>
       runCheckedBody()
@@ -307,6 +343,9 @@ object ObjectAllocationLoweringMatrixHelpers {
       case "rift-checked" | "rift-checked-rift" => "rift-checked-rift"
       case "rift-checked-rift-open-handle" | "checked-rift-open-handle" =>
         "rift-checked-rift-open-handle"
+      case "rift-checked-rift-open-handle-dirty-slab" |
+          "checked-rift-open-handle-dirty-slab" =>
+        "rift-checked-rift-open-handle-dirty-slab"
       case "rift-checked-safezone-32k" | "rift-checked-safezone-improved-32k" =>
         "rift-checked-safezone-improved-32k"
       case other =>
@@ -317,7 +356,8 @@ object ObjectAllocationLoweringMatrixHelpers {
       mode == "rift-trusted-hp" ||
       mode == "rift-trusted-streaming" ||
       mode == "rift-checked-rift" ||
-      mode == "rift-checked-rift-open-handle"
+      mode == "rift-checked-rift-open-handle" ||
+      mode == "rift-checked-rift-open-handle-dirty-slab"
 
   private def runMode(mode: String): Long =
     mode match {
@@ -326,7 +366,16 @@ object ObjectAllocationLoweringMatrixHelpers {
       case "rift-trusted-streaming" => runTrusted(RiftRegion.Streaming)
       case "rift-checked-rift" => runCheckedRift()
       case "rift-checked-rift-open-handle" => runCheckedRiftOpenHandle()
+      case "rift-checked-rift-open-handle-dirty-slab" =>
+        runCheckedRiftOpenHandle()
       case "rift-checked-safezone-improved-32k" => runCheckedSafeZone()
+    }
+
+  private def prepareMode(mode: String): Unit =
+    mode match {
+      case "rift-checked-rift-open-handle-dirty-slab" =>
+        dirtyRiftSlabsWithOpenHandle()
+      case _ => ()
     }
 
   def run(modeArg: String): Unit = {
@@ -346,6 +395,7 @@ object ObjectAllocationLoweringMatrixHelpers {
     var run = 0
     while (run < totalRuns) {
       val measured = run >= cfg.warmupRuns
+      prepareMode(mode)
       if (usesRiftStats(mode)) RiftAllocator.Impl.statsReset()
       val before = RuntimeSample.capture(usesRiftStats(mode))
       val start = System.nanoTime()
