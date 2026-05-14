@@ -1,13 +1,14 @@
 # Object Allocation Lowering Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-15 00:09 CEST
+Last updated: 2026-05-15 00:32 CEST
 
 Status: refined retained-region-array matrix validated at 20k smoke, 100k, 1M,
 and 10M, plus focused final-clean allocator-counter, cached-stats,
 current-slab zeroed-cache, handle-backed allocation, warm/dirty-slab gates,
 object zeroing attribution counters, an experimental reusable-slab
-bulk-zero policy gate, and an unsafe no-zero lower-bound gate.
+bulk-zero policy gate, an unsafe no-zero lower-bound gate, and a first
+proof-gated no-zero lowering for definitely initialized handle-backed records.
 This
 benchmark isolates ordinary Scala object construction through heap, trusted
 Rift, checked Rift, and checked SafeZone-backed allocation paths without
@@ -570,6 +571,56 @@ matching checksums in this fully initialized benchmark shape and unchanged RSS.
 The result validates compiler-proven no-zero as the next promising target after
 rejecting runtime-side slab policy variants. It does not justify enabling
 no-zero allocation without the static proof described above.
+
+## Proof-Gated No-Zero Lowering
+
+Date/time: 2026-05-15 00:32 CEST.
+
+The normal `RiftOpenStreamingHandle` allocation lowering now has a narrow
+compiler/backend proof gate. During lowering, a class allocation through a
+Rift open handle is allowed to call `scalanative_rift_region_alloc_nozero`
+only if all of these local NIR conditions hold:
+
+- the allocated class is concrete, non-module, and has no reachable subclass;
+- its instance fields are primitive value fields;
+- every field is stored after allocation;
+- those stores happen before the allocated object is otherwise used, before
+  control-flow leaves the block, and before any non-pure operation that could
+  observe the object or introduce a safepoint.
+
+If any condition fails, the normal handle-backed path still calls
+`scalanative_rift_region_alloc` and preserves object-body zeroing. The unsafe
+no-zero mode remains only as a lower-bound/provenance row.
+
+Smoke result, 20k objects:
+
+| Mode | Median ms | Zeroed objects | Zero-skipped objects | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|
+| `rift-checked-rift-open-handle` | 0.431 | 0 | 20,000 | 4,554,752 | -5014597496877744147 |
+| `rift-checked-rift-open-handle-nozero-unsafe` | 0.342 | 0 | 20,000 | 4,554,752 | -5014597496877744147 |
+
+Focused 5M proof-gated no-zero gate, 5 measured runs:
+
+| Mode | Median ms | Region op ms | Slow alloc ms | Zeroed objects | Zero-skipped objects | Checksum |
+|---|---:|---:|---:|---:|---:|---:|
+| `rift-checked-rift-open-handle` | 65.528 | 2.707 | 1.214 | 0 | 5,000,000 | -1183547843768457859 |
+| `rift-checked-rift-open-handle-nozero-unsafe` | 65.277 | 2.506 | 1.130 | 0 | 5,000,000 | -1183547843768457859 |
+
+Focused 10M proof-gated no-zero gate, 5 measured runs:
+
+| Mode | Median ms | Region op ms | Slow alloc ms | Zeroed objects | Zero-skipped objects | Checksum |
+|---|---:|---:|---:|---:|---:|---:|
+| `rift-checked-rift-open-handle` | 139.832 | 13.327 | 6.845 | 0 | 10,000,000 | -6851333344653324122 |
+| `rift-checked-rift-open-handle-nozero-unsafe` | 144.286 | 13.318 | 6.761 | 0 | 10,000,000 | -6851333344653324122 |
+
+Interpretation: the proved normal handle-backed row now reaches the unsafe
+lower-bound ceiling on this definitely initialized record shape. Relative to
+the pre-proof normal handle-backed rows above, the focused allocation path
+improves from `71.320 -> 65.528 ms` at 5M and from
+`155.947 -> 139.832 ms` at 10M. This is the first safe no-zero optimization,
+but only for the local primitive-field, definitely-stored pattern described
+above. Application rows still need separate gates because many stream records
+contain references or perform query work that dominates allocation body cost.
 
 ## Interpretation
 

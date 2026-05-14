@@ -52,6 +52,7 @@ private[scalanative] object Lower {
     private implicit val intrinsicMethods: util.ScopedVar[mutable.Map[nir.Local, IntrinsicCall]] = new util.ScopedVar()
     private val blockInfo = mutable.Map.empty[Block, BlockInfo]
     private var currentBlock: Block = _
+    private var riftProvenNoZeroClassallocs = Set.empty[nir.Local]
     private def getCurrentBlockInfo: BlockInfo = {
       assert(currentBlock != null)
       blockInfo.getOrElseUpdate(currentBlock, new BlockInfo())
@@ -167,6 +168,8 @@ private[scalanative] object Lower {
     }
 
     override def onInsts(insts: Seq[nir.Inst]): Seq[nir.Inst] = {
+      riftProvenNoZeroClassallocs = findRiftProvenNoZeroClassallocs(insts)
+
       val defn = currentDefn.get
       val buf = new nir.InstructionBuilder()(fresh)
       val handlers = new nir.InstructionBuilder()(fresh)
@@ -1385,6 +1388,102 @@ private[scalanative] object Lower {
       buf.let(n, nir.Op.Copy(nir.Val.Size(alignment)), unwind)
     }
 
+    private def isNoZeroEligibleFieldType(ty: nir.Type): Boolean =
+      ty match {
+        case _: nir.Type.I | _: nir.Type.F | nir.Type.Bool => true
+        case _                                             => false
+      }
+
+    private def noZeroEligibleFields(
+        cls: Class
+    ): Option[Set[nir.Global.Member]] =
+      if (!cls.attrs.isAbstract && !cls.isModule && cls.subclasses.isEmpty) {
+        val fields = cls.fields
+        if (fields.nonEmpty && fields.forall(f =>
+              isNoZeroEligibleFieldType(f.ty)
+            ))
+          Some(fields.map(_.name).toSet)
+        else None
+      } else None
+
+    private def opMentionsLocal(op: nir.Op, target: nir.Local): Boolean = {
+      var found = false
+      val collector = new nir.Transform {
+        override def onVal(value: nir.Val): nir.Val = {
+          value match {
+            case nir.Val.Local(id, _) if id == target => found = true
+            case _                                    => ()
+          }
+          super.onVal(value)
+        }
+
+        override def onType(ty: nir.Type): nir.Type = ty
+      }
+      collector.onOp(op)
+      found
+    }
+
+    private def fieldStoreToTarget(
+        op: nir.Op,
+        target: nir.Local,
+        fields: Set[nir.Global.Member]
+    ): Option[nir.Global.Member] =
+      op match {
+        case nir.Op.Fieldstore(_, nir.Val.Local(obj, _), field, _)
+            if obj == target && fields.contains(field) =>
+          Some(field)
+        case _ => None
+      }
+
+    private def provesAllFieldsBeforeUse(
+        insts: Seq[nir.Inst],
+        startIndex: Int,
+        target: nir.Local,
+        fields: Set[nir.Global.Member]
+    ): Boolean = {
+      var stored = Set.empty[nir.Global.Member]
+      var idx = startIndex
+      while (idx < insts.length) {
+        if (stored == fields) return true
+        insts(idx) match {
+          case _: nir.Inst.Label | _: nir.Inst.Cf =>
+            return false
+          case nir.Inst.Let(_, op, _) =>
+            fieldStoreToTarget(op, target, fields) match {
+              case Some(field) =>
+                stored += field
+              case None =>
+                if (opMentionsLocal(op, target) || !op.isPure)
+                  return false
+            }
+        }
+        idx += 1
+      }
+      stored == fields
+    }
+
+    private def findRiftProvenNoZeroClassallocs(
+        insts: Seq[nir.Inst]
+    ): Set[nir.Local] = {
+      val proven = Set.newBuilder[nir.Local]
+      insts.zipWithIndex.foreach {
+        case (
+              nir.Inst.Let(
+                target,
+                nir.Op.Classalloc(ClassRef(cls), Some(zone)),
+                _
+              ),
+              idx
+            ) if isRiftOpenStreamingHandle(zone.ty) =>
+          noZeroEligibleFields(cls).foreach { fields =>
+            if (provesAllFieldsBeforeUse(insts, idx + 1, target, fields))
+              proven += target
+          }
+        case _ => ()
+      }
+      proven.result()
+    }
+
     def genClassallocOp(
         buf: nir.InstructionBuilder,
         n: nir.Local,
@@ -1438,8 +1537,12 @@ private[scalanative] object Lower {
           buf.let(
             n,
             nir.Op.Call(
-              riftRegionAllocSig,
-              riftRegionAlloc,
+              if (riftProvenNoZeroClassallocs.contains(n))
+                riftRegionAllocNoZeroSig
+              else riftRegionAllocSig,
+              if (riftProvenNoZeroClassallocs.contains(n))
+                riftRegionAllocNoZero
+              else riftRegionAlloc,
               Seq(rawHandle, rtti(cls).const, nir.Val.Size(size.toInt))
             ),
             unwind

@@ -1,6 +1,6 @@
 # Checked Append Window Matrix
 
-Last updated: 2026-05-13 17:45 CEST
+Last updated: 2026-05-15 00:32 CEST
 
 Status: focused cheap checked-operator benchmark. This is framework evidence,
 not DEBS application evidence.
@@ -46,6 +46,41 @@ checked SafeZone-backed page-token row, and `39.9%` faster than heap in this
 focused shape while preserving lower RSS than heap. This is focused framework
 evidence that handle-backed allocation is the right default for Rift-backed
 operator-owned page/window paths.
+
+## Proof-Gated No-Zero Page-Token Sanity Gate
+
+Date/time: 2026-05-15 00:32 CEST.
+
+This focused 1M append-window gate reruns heap, the promoted checked
+page-token default, and the legacy checked page-token control after the lowerer
+started applying proof-gated no-zero allocation to primitive-field
+handle-backed records. All rows matched checksum `-2507118467295660905`.
+
+Source:
+`/private/tmp/rift-proven-nozero-append-1m-20260515`.
+
+Command shape:
+
+```sh
+CHECKED_APPEND_EVENTS=1000000 \
+CHECKED_APPEND_BENCHMARK_RUNS=3 \
+CHECKED_APPEND_WARMUPS=1 \
+CHECKED_APPEND_MODES="heap-immix rift-checked-page-token rift-checked-page-token-legacy" \
+CHECKED_APPEND_OUTPUT_DIR=/private/tmp/rift-proven-nozero-append-1m-20260515 \
+  zsh sandbox/run_checked_append_window_matrix.sh
+```
+
+| Mode | Median ms | Median GC ms | Rift op ms | Region objects | Opens/Closes/Resets | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `heap-immix` | 35.918 | 10.526 | 0.000 | 0 | 0/0/0 | 75087872 | -2507118467295660905 |
+| `rift-checked-page-token` | 24.975 | 0.000 | 0.073 | 1000000 | 41/41/0 | 47579136 | -2507118467295660905 |
+| `rift-checked-page-token-legacy` | 26.495 | 0.000 | 0.073 | 1000000 | 41/41/0 | 47579136 | -2507118467295660905 |
+
+Interpretation: the proof-gated build keeps the promoted checked page-token
+row ahead of the legacy checked control by about `5.7%` and ahead of heap by
+about `30%`, with the same checksum and lower RSS than heap. This is a sanity
+application gate, not an isolated no-zero attribution row; page-token still
+contains append/link/traversal work that can dominate object-body zeroing.
 
 ## Latest Final-Clean Page-Token Gate
 
