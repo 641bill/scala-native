@@ -1093,6 +1093,28 @@ void *scalanative_rift_region_alloc(void *rawregion, void *info, size_t size) {
     return current;
 }
 
+void *scalanative_rift_region_alloc_nozero(void *rawregion, void *info,
+                                           size_t size) {
+    scalanative_rift_region *region = (scalanative_rift_region *)rawregion;
+    bool stats_enabled;
+    void *current;
+
+    if (region == NULL) return NULL;
+    stats_enabled = region->alloc_stats_enabled != 0u;
+
+    current = scalanative_rift_region_alloc_object_fast(
+        region, size, stats_enabled);
+    if (current == NULL) return NULL;
+
+    if (stats_enabled) {
+        region->alloc_object_count++;
+        region->alloc_zero_skipped_count++;
+        region->alloc_zero_skipped_bytes += size;
+    }
+    *((void **)current) = info;
+    return current;
+}
+
 size_t scalanative_rift_pool_slab_count(void) {
     size_t regular = atomic_load_explicit(&scalanative_rift_pool_size,
                                           memory_order_relaxed);

@@ -30,6 +30,8 @@ void scalanative_rift_region_set_family(void *region, uint32_t family);
 void *scalanative_rift_region_alloc_raw(void *region, size_t size,
                                         size_t align);
 void *scalanative_rift_region_alloc(void *region, void *info, size_t size);
+void *scalanative_rift_region_alloc_nozero(void *region, void *info,
+                                           size_t size);
 
 size_t scalanative_rift_pool_slab_count(void);
 size_t scalanative_rift_pool_resident_bytes(void);

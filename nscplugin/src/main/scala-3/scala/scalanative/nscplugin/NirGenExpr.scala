@@ -118,11 +118,16 @@ trait NirGenExpr(using Context) {
     }
 
     private def isRiftOpenStreamingHandleType(tpe: Type): Boolean = {
-      val handleName = "scala.scalanative.memory.RiftOpenStreamingHandle"
+      val handleNames = Set(
+        "scala.scalanative.memory.RiftOpenStreamingHandle",
+        "scala.scalanative.memory.RiftNoZeroOpenStreamingHandle"
+      )
       val widened = tpe.widenDealias
-      widened.typeSymbol.fullName.toString == handleName ||
-        tpe.show.contains(handleName) ||
-        widened.show.contains(handleName)
+      val fullName = widened.typeSymbol.fullName.toString
+      handleNames.contains(fullName) ||
+        handleNames.exists(name =>
+          tpe.show.contains(name) || widened.show.contains(name)
+        )
     }
 
     private def isCheckedRiftAllocationOwnerType(tpe: Type): Boolean =
@@ -430,7 +435,8 @@ trait NirGenExpr(using Context) {
     private def isRuntimeRiftAllocate(tree: Tree): Boolean =
       defnNir.RuntimeRiftAllocator_allocate.exists(_ == calledSymbol(tree)) ||
         defnNir.RuntimeRiftAllocator_allocateOpen.exists(_ == calledSymbol(tree)) ||
-        defnNir.RuntimeRiftAllocator_allocateOpenHandle.exists(_ == calledSymbol(tree))
+        defnNir.RuntimeRiftAllocator_allocateOpenHandle.exists(_ == calledSymbol(tree)) ||
+        defnNir.RuntimeRiftAllocator_allocateOpenHandleNoZero.exists(_ == calledSymbol(tree))
 
     private def isRuntimeRiftAllocateInCheckedRegion(tree: Tree): Boolean =
       tree match {

@@ -1,13 +1,13 @@
 # Object Allocation Lowering Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-14 23:52 CEST
+Last updated: 2026-05-15 00:09 CEST
 
 Status: refined retained-region-array matrix validated at 20k smoke, 100k, 1M,
 and 10M, plus focused final-clean allocator-counter, cached-stats,
 current-slab zeroed-cache, handle-backed allocation, warm/dirty-slab gates,
-object zeroing attribution counters, and an experimental reusable-slab
-bulk-zero policy gate.
+object zeroing attribution counters, an experimental reusable-slab
+bulk-zero policy gate, and an unsafe no-zero lower-bound gate.
 This
 benchmark isolates ordinary Scala object construction through heap, trusted
 Rift, checked Rift, and checked SafeZone-backed allocation paths without
@@ -532,6 +532,44 @@ justify no-zero allocation. It says the next zeroing experiment needs a lower
 level fresh/dirty probe that separates pool warmup from mandatory object
 clearing, and any no-zero path still needs compiler proof of definite
 initialization before it can ship.
+
+## Unsafe No-Zero Lower-Bound Gate
+
+Date/time: 2026-05-15 00:09 CEST.
+
+This gate adds `rift-checked-rift-open-handle-nozero-unsafe`, an explicit
+unsafe lower-bound mode for checked Rift handle-backed allocation. The mode
+lowers directly to `scalanative_rift_region_alloc_nozero`, writes the object
+RTTI/header word, and deliberately skips the object-body zeroing performed by
+the normal checked allocation path.
+
+This is not safe checked evidence and is not a default mode. It exists only to
+measure the possible ceiling for a future compiler-proven no-zero lowering.
+Shipping such a path would require proof that the allocated class is a final
+record-like shape, every field is definitely assigned before escape, no
+virtual call or `this` escape happens during construction, superclass fields
+are handled, and arrays are excluded.
+
+Focused 5M checked Rift no-zero lower-bound gate, 5 measured runs:
+
+| Mode | Median ms | Region op ms | Slow alloc ms | Zeroed objects | Zero-skipped objects | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `rift-checked-rift-open-handle` | 71.320 | 2.272 | 1.069 | 4,198,392 | 801,608 | 203735040 | -1183547843768457859 |
+| `rift-checked-rift-open-handle-nozero-unsafe` | 65.196 | 2.472 | 1.204 | 0 | 5,000,000 | 203735040 | -1183547843768457859 |
+
+Focused 10M checked Rift no-zero lower-bound gate, 5 measured runs:
+
+| Mode | Median ms | Region op ms | Slow alloc ms | Zeroed objects | Zero-skipped objects | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `rift-checked-rift-open-handle` | 155.947 | 17.571 | 7.500 | 4,198,392 | 5,801,608 | 404037632 | -6851333344653324122 |
+| `rift-checked-rift-open-handle-nozero-unsafe` | 142.769 | 14.569 | 6.993 | 0 | 10,000,000 | 404037632 | -6851333344653324122 |
+
+Interpretation: skipping object-body zeroing is a real focused allocation
+ceiling: about `8.6%` faster at 5M and about `8.5%` faster at 10M, with
+matching checksums in this fully initialized benchmark shape and unchanged RSS.
+The result validates compiler-proven no-zero as the next promising target after
+rejecting runtime-side slab policy variants. It does not justify enabling
+no-zero allocation without the static proof described above.
 
 ## Interpretation
 

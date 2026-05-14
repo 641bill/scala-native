@@ -120,6 +120,9 @@ run_mode() {
     rift-checked-open-handle|rift-checked-rift-open-handle|checked-rift-open-handle)
       binary_mode="rift-checked-rift-open-handle"
       ;;
+    rift-checked-open-handle-nozero-unsafe|rift-checked-rift-open-handle-nozero-unsafe|checked-rift-open-handle-nozero-unsafe)
+      binary_mode="rift-checked-rift-open-handle-nozero-unsafe"
+      ;;
     rift-checked-open-handle-dirty-slab|rift-checked-rift-open-handle-dirty-slab|checked-rift-open-handle-dirty-slab)
       binary_mode="rift-checked-rift-open-handle-dirty-slab"
       ;;

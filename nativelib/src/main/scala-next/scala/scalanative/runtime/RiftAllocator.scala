@@ -1,6 +1,7 @@
 package scala.scalanative.runtime
 
 import scala.scalanative.memory.RiftRegion
+import scala.scalanative.memory.RiftNoZeroOpenStreamingHandle
 import scala.scalanative.unsafe._
 
 import language.experimental.captureChecking
@@ -19,6 +20,11 @@ object RiftAllocator {
 
   def allocateOpenHandle[T](
       region: scala.scalanative.memory.RiftOpenStreamingHandle^,
+      obj: T^{region}
+  ): T^{region} = intrinsic
+
+  def allocateOpenHandleNoZero[T](
+      region: RiftNoZeroOpenStreamingHandle^,
       obj: T^{region}
   ): T^{region} = intrinsic
 
@@ -47,6 +53,10 @@ object RiftAllocator {
 
     @name("scalanative_rift_region_alloc")
     def alloc(region: RawPtr, info: RawPtr, size: RawSize): RawPtr = extern
+
+    @name("scalanative_rift_region_alloc_nozero")
+    def allocNoZero(region: RawPtr, info: RawPtr, size: RawSize): RawPtr =
+      extern
 
     @name("scalanative_rift_pool_slab_count")
     def poolSlabCount(): RawSize = extern

@@ -48,6 +48,33 @@ final class RiftOpenStreamingHandle private[scalanative] (
     RiftAllocator.Impl.alloc(handle, cls, size)
 }
 
+/** Experimental no-zero allocation-lowering token for proof-gap measurements.
+ *
+ *  This is not a public checked API. It is only for focused lower-bound rows
+ *  that measure the possible benefit of compiler-proven definite
+ *  initialization. Normal checked code must use `RiftOpenStreamingHandle` or
+ *  the ordinary checked region APIs until the compiler proves every field is
+ *  assigned before escape and no constructor path observes uninitialized data.
+ */
+final class RiftNoZeroOpenStreamingHandle private[scalanative] (
+    private[scalanative] override val handle: RawPtr
+) extends SafeZone {
+  override def isOpen: Boolean = true
+
+  override def isClosed: Boolean = false
+
+  private[scalanative] override def close(): Unit =
+    throw new UnsupportedOperationException(
+      "Rift no-zero open streaming handles are closed by their owner"
+    )
+
+  private[scalanative] override def allocImpl(
+      cls: RawPtr,
+      size: RawSize
+  ): RawPtr =
+    RiftAllocator.Impl.allocNoZero(handle, cls, size)
+}
+
 @implicitNotFound("Given method requires an implicit Rift region.")
 trait RiftRegion extends SafeZone {
 
@@ -3087,6 +3114,18 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     val region: RiftOpenStreamingHandle^ = new RiftOpenStreamingHandle(raw)
     if (region.handle == null)
       throw new IllegalStateException("Rift open handle is null")
+    try body(using region)
+    finally RiftAllocator.Impl.close(raw)
+  }
+
+  final def epochNoZeroOpenHandle[T](
+      body: (RiftNoZeroOpenStreamingHandle^) ?=> T
+  )(using canReturn: CanReturnFromRegion[T]): T = {
+    val raw = RiftAllocator.Impl.open(Streaming)
+    val region: RiftNoZeroOpenStreamingHandle^ =
+      new RiftNoZeroOpenStreamingHandle(raw)
+    if (region.handle == null)
+      throw new IllegalStateException("Rift no-zero open handle is null")
     try body(using region)
     finally RiftAllocator.Impl.close(raw)
   }

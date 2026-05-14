@@ -1396,6 +1396,30 @@ private[scalanative] object Lower {
       assert(size == size.toInt)
 
       v match {
+        case Some(rawZone) if isRiftNoZeroOpenStreamingHandle(rawZone.ty) =>
+          val handleOwnerLocal = fresh()
+          buf += nir.Inst.Let(handleOwnerLocal, nir.Op.Copy(rawZone), unwind)
+          val handleOwner =
+            nir.Val.Local(handleOwnerLocal, RiftNoZeroOpenStreamingHandle)
+          val rawHandle = nir.Val.Local(fresh(), nir.Type.Ptr)
+          genFieldloadOp(
+            buf,
+            rawHandle.id,
+            nir.Op.Fieldload(
+              nir.Type.Ptr,
+              handleOwner,
+              riftNoZeroOpenStreamingHandleHandle
+            )
+          )
+          buf.let(
+            n,
+            nir.Op.Call(
+              riftRegionAllocNoZeroSig,
+              riftRegionAllocNoZero,
+              Seq(rawHandle, rtti(cls).const, nir.Val.Size(size.toInt))
+            ),
+            unwind
+          )
         case Some(rawZone) if isRiftOpenStreamingHandle(rawZone.ty) =>
           val handleOwnerLocal = fresh()
           buf += nir.Inst.Let(handleOwnerLocal, nir.Op.Copy(rawZone), unwind)
@@ -2144,11 +2168,22 @@ private[scalanative] object Lower {
     nir.Type.Ref(
       nir.Global.Top("scala.scalanative.memory.RiftOpenStreamingHandle")
     )
+  val RiftNoZeroOpenStreamingHandle =
+    nir.Type.Ref(
+      nir.Global.Top("scala.scalanative.memory.RiftNoZeroOpenStreamingHandle")
+    )
   val riftOpenStreamingHandleHandle =
     RiftOpenStreamingHandle.name.member(
       nir.Sig.Field(
         "handle",
         nir.Sig.Scope.Private(RiftOpenStreamingHandle.name)
+      )
+    )
+  val riftNoZeroOpenStreamingHandleHandle =
+    RiftNoZeroOpenStreamingHandle.name.member(
+      nir.Sig.Field(
+        "handle",
+        nir.Sig.Scope.Private(RiftNoZeroOpenStreamingHandle.name)
       )
     )
   val riftRegionAllocSig =
@@ -2159,6 +2194,14 @@ private[scalanative] object Lower {
   val riftRegionAllocName = extern("scalanative_rift_region_alloc")
   val riftRegionAlloc =
     nir.Val.Global(riftRegionAllocName, riftRegionAllocSig)
+  val riftRegionAllocNoZeroSig =
+    nir.Type.Function(
+      Seq(nir.Type.Ptr, nir.Type.Ptr, nir.Type.Size),
+      nir.Type.Ptr
+    )
+  val riftRegionAllocNoZeroName = extern("scalanative_rift_region_alloc_nozero")
+  val riftRegionAllocNoZero =
+    nir.Val.Global(riftRegionAllocNoZeroName, riftRegionAllocNoZeroSig)
   val safeZoneAllocImplSig =
     nir.Type.Function(Seq(SafeZone, nir.Type.Ptr, nir.Type.Size), nir.Type.Ptr)
   val safeZoneAllocImpl = SafeZone.name.member(
@@ -2189,6 +2232,13 @@ private[scalanative] object Lower {
     ty match {
       case nir.Type.Ref(name, _, _) =>
         name.id.toString == "scala.scalanative.memory.RiftOpenStreamingHandle"
+      case _ => false
+    }
+
+  private def isRiftNoZeroOpenStreamingHandle(ty: nir.Type): Boolean =
+    ty match {
+      case nir.Type.Ref(name, _, _) =>
+        name.id.toString == "scala.scalanative.memory.RiftNoZeroOpenStreamingHandle"
       case _ => false
     }
 
@@ -2497,6 +2547,7 @@ private[scalanative] object Lower {
     buf += externDecl(allocSmallName, allocSig)
     buf += externDecl(largeAllocName, allocSig)
     buf += externDecl(riftRegionAllocName, riftRegionAllocSig)
+    buf += externDecl(riftRegionAllocNoZeroName, riftRegionAllocNoZeroSig)
     buf += externDecl(dyndispatchName, dyndispatchSig)
     buf += externDecl(throwName, throwSig)
     buf += externDecl(memsetName, memsetSig)
