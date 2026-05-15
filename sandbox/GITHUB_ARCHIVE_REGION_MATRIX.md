@@ -1,7 +1,7 @@
 # GH Archive Region Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-13 13:09 CEST
+Last updated: 2026-05-15 21:24 CEST
 
 Status: first real NDJSON/log-event stream matrix added, with preloaded,
 file-backed, and explicit streaming-file q1/q2 rows. The preloaded rows time
@@ -64,6 +64,7 @@ environment settings internally:
 - `rift-trusted-hp`
 - `rift-trusted-streaming`
 - `rift-checked-page-token`
+- `rift-checked-page-token-legacy`
 - `rift-checked-safezone-page-token`
 - `heap-direct-epoch`
 - `rift-checked-direct-epoch`
@@ -72,6 +73,47 @@ environment settings internally:
 The direct-epoch modes currently support generated/preloaded `q2-repo-window`
 only. They reject file-backed rows because file-backed input is a sequential
 reader path; page-token remains the checked mode for file-backed GH Archive.
+
+`rift-checked-page-token` now uses the backend-known
+`pageTokenAppendRiftOpenHandleFor`/`RiftAllocator.allocateOpenHandle` lowering
+on the Rift-backed checked page-token path. `rift-checked-page-token-legacy`
+keeps the older generic `pageTokenAppendOpenRegionFor` plus `allocOpen` path as
+an explicit allocation-lowering control. SafeZone-backed checked page-token
+continues to use the generic open-region path because it is a different
+backend.
+
+## 2026-05-15 Handle-Backed Checked Page-Token Transfer Gate
+
+This gate tests the remaining generic allocation-path audit on GH
+Archive-shaped q1/q2. It uses generated/preloaded metadata so it is allocation
+lowering transfer evidence, not real-input or streaming-input proof.
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+GITHUB_ARCHIVE_BUILD=0 \
+GITHUB_ARCHIVE_EVENTS=1000000 \
+GITHUB_ARCHIVE_BENCHMARK_RUNS=3 \
+GITHUB_ARCHIVE_WARMUPS=1 \
+GITHUB_ARCHIVE_MODES="rift-checked-page-token-legacy rift-checked-page-token" \
+GITHUB_ARCHIVE_QUERIES="q1-fields q2-repo-window" \
+GITHUB_ARCHIVE_OUTPUT_DIR=/private/tmp/gh-archive-page-token-handle-1m \
+zsh sandbox/run_github_archive_region_matrix.sh
+```
+
+| Query | Mode | Median ms | Median GC ms | Rift op ms | Objects | Opens/Closes | Checksum | Output count |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| q1-fields | `rift-checked-page-token-legacy` | 316.947 | 2.729 | 0.799 | 7502145 | 41/41 | 6902965039885704015 | 7502145 |
+| q1-fields | `rift-checked-page-token` | 299.512 | 2.677 | 0.744 | 7502145 | 41/41 | 6902965039885704015 | 7502145 |
+| q2-repo-window | `rift-checked-page-token-legacy` | 317.997 | 2.653 | 0.764 | 7502145 | 41/41 | 7294087528134281006 | 163487 |
+| q2-repo-window | `rift-checked-page-token` | 298.186 | 2.626 | 0.781 | 7502145 | 41/41 | 7294087528134281006 | 163487 |
+
+Interpretation: promoting GH Archive checked page-token to the backend-known
+Rift handle path improves q1 by `5.5%` and q2 by `6.2%` over the legacy generic
+checked allocation path, with identical checksums, object counts, and
+open/close counts. This is a modest positive transfer gate for allocation
+lowering. It does not replace the real GH Archive streaming/file-backed rows,
+where parser/source/query CPU dominates and checked scoped page-token remains
+the stronger reported backend.
 
 ## Commands
 

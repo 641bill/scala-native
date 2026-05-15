@@ -1,6 +1,6 @@
 import scala.language.experimental.captureChecking
 
-import scala.scalanative.memory.{RiftRegion, SafeZone}
+import scala.scalanative.memory.{RiftOpenStreamingHandle, RiftRegion, SafeZone}
 import scala.scalanative.runtime.{
   fromRawUSize,
   GC,
@@ -833,6 +833,7 @@ object GithubArchiveRegionMatrixHelpers {
     canonicalMode(mode) match {
       case "heap" | "heap-direct-epoch" | "safezone" | "rift-hp" |
           "rift-streaming" | "rift-checked-page-token" |
+          "rift-checked-page-token-legacy" |
           "rift-checked-safezone-page-token" | "rift-checked-direct-epoch" |
           "rift-checked-safezone-direct-epoch" |
           "heap-epoch-retained-no-traverse" |
@@ -1441,9 +1442,10 @@ object GithubArchiveRegionMatrixHelpers {
     RunOutcome(checksum, outputCount)
   }
 
-  private def runRiftCheckedPageTokenBody(query: String)(using
-      stream: RiftRegion.StreamingRegion^
-  ): RunOutcome = {
+  private def runRiftCheckedPageTokenBody(
+      query: String,
+      useRiftHandle: Boolean
+  )(using stream: RiftRegion.StreamingRegion^): RunOutcome = {
     val cfg = GithubArchiveRegionConfig
     val input = inputData
 
@@ -1510,6 +1512,75 @@ object GithubArchiveRegionMatrixHelpers {
 
     var currentStartEvent = Long.MinValue
     var currentRegion: RiftRegion.OpenStreamingRegion^{stream} = null
+    var currentHandle: RiftOpenStreamingHandle^{stream} = null
+
+    def selectBucket(start: Long): Unit =
+      if (start != currentStartEvent) {
+        currentStartEvent = start
+        if (useRiftHandle) {
+          currentHandle =
+            RiftRegion.pageTokenAppendRiftOpenHandleFor(
+              stream,
+              window,
+              start,
+              closeCutoff(start)
+            )(closeRecords)
+          currentRegion = null
+        } else {
+          currentRegion =
+            RiftRegion.pageTokenAppendOpenRegionFor(
+              stream,
+              window,
+              start,
+              closeCutoff(start)
+            )(closeRecords)
+          currentHandle = null
+        }
+      }
+
+    def appendCheckedLegacy(
+        kind: Int,
+        i: Int,
+        repo: Int,
+        eventType: Int,
+        value: Int,
+        hash: Long
+    ): Unit = {
+      val record: CheckedRecord^{stream} =
+        RiftRegion.allocOpen(
+          new CheckedRecord(kind, i, repo, eventType, value, hash)
+        )(using currentRegion)
+      RiftRegion.appendPageToken(stream, window, record)
+    }
+
+    def appendCheckedHandle(
+        kind: Int,
+        i: Int,
+        repo: Int,
+        eventType: Int,
+        value: Int,
+        hash: Long
+    ): Unit = {
+      val record: CheckedRecord^{stream} =
+        RiftAllocator.allocateOpenHandle(
+          currentHandle,
+          new CheckedRecord(kind, i, repo, eventType, value, hash)
+        )
+      RiftRegion.appendPageToken(stream, window, record)
+    }
+
+    def appendChecked(
+        kind: Int,
+        i: Int,
+        repo: Int,
+        eventType: Int,
+        value: Int,
+        hash: Long
+    ): Unit =
+      if (useRiftHandle)
+        appendCheckedHandle(kind, i, repo, eventType, value, hash)
+      else
+        appendCheckedLegacy(kind, i, repo, eventType, value, hash)
 
     def processEvent(
         i: Int,
@@ -1519,36 +1590,19 @@ object GithubArchiveRegionMatrixHelpers {
         hash: Long
     ): Unit = {
       val start = bucketStart(i)
-      if (start != currentStartEvent) {
-        currentStartEvent = start
-        currentRegion =
-          RiftRegion.pageTokenAppendOpenRegionFor(
-            stream,
-            window,
-            start,
-            closeCutoff(start)
-          )(closeRecords)
-      }
-      val eventRecord: CheckedRecord^{stream} =
-        RiftRegion.allocOpen(
-          new CheckedRecord(10, i, repo, eventType, fields, hash)
-        )(using currentRegion)
-      RiftRegion.appendPageToken(stream, window, eventRecord)
+      selectBucket(start)
+      appendChecked(10, i, repo, eventType, fields, hash)
       if (fieldQuery(query)) {
         var field = 0
         while (field < fields) {
-          val fieldRecord: CheckedRecord^{stream} =
-            RiftRegion.allocOpen(
-              new CheckedRecord(
-                20 + (field & 3),
-                i,
-                repo,
-                eventType,
-                field,
-                hash ^ (field.toLong * 1315423911L)
-              )
-            )(using currentRegion)
-          RiftRegion.appendPageToken(stream, window, fieldRecord)
+          appendChecked(
+            20 + (field & 3),
+            i,
+            repo,
+            eventType,
+            field,
+            hash ^ (field.toLong * 1315423911L)
+          )
           field += 1
         }
       }
@@ -1590,12 +1644,17 @@ object GithubArchiveRegionMatrixHelpers {
 
   private def runRiftCheckedPageToken(query: String): RunOutcome =
     RiftRegion.streaming { stream ?=>
-      runRiftCheckedPageTokenBody(query)
+      runRiftCheckedPageTokenBody(query, useRiftHandle = true)
+    }
+
+  private def runRiftCheckedPageTokenLegacy(query: String): RunOutcome =
+    RiftRegion.streaming { stream ?=>
+      runRiftCheckedPageTokenBody(query, useRiftHandle = false)
     }
 
   private def runRiftCheckedSafeZonePageToken(query: String): RunOutcome =
     RiftRegion.streamingSafeZone { stream ?=>
-      runRiftCheckedPageTokenBody(query)
+      runRiftCheckedPageTokenBody(query, useRiftHandle = false)
     }
 
   private def runHeapDirectEpochAggregate(
@@ -2000,6 +2059,7 @@ object GithubArchiveRegionMatrixHelpers {
   private def usesRiftRuntime(mode: String): Boolean =
     canonicalMode(mode) match {
       case "rift-hp" | "rift-streaming" | "rift-checked-page-token" |
+          "rift-checked-page-token-legacy" |
           "rift-checked-direct-epoch" |
           "checked-epoch-retained-no-traverse" =>
         true
@@ -2016,6 +2076,8 @@ object GithubArchiveRegionMatrixHelpers {
       case "rift-hp"                     => runRiftTrusted(query, RiftRegion.HPZone)
       case "rift-streaming"              => runRiftTrusted(query, RiftRegion.Streaming)
       case "rift-checked-page-token"     => runRiftCheckedPageToken(query)
+      case "rift-checked-page-token-legacy" =>
+        runRiftCheckedPageTokenLegacy(query)
       case "rift-checked-safezone-page-token" =>
         runRiftCheckedSafeZonePageToken(query)
       case "rift-checked-direct-epoch" => runRiftCheckedDirectEpoch(query)

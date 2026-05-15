@@ -232,6 +232,9 @@ run_case() {
     rift-checked-page-token)
       binary_mode="${mode}"
       ;;
+    rift-checked-page-token-legacy)
+      binary_mode="${mode}"
+      ;;
     rift-checked-safezone-page-token)
       binary_mode="${mode}"
       roots_mode="1"
