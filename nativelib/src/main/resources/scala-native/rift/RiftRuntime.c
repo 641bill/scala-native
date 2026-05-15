@@ -32,9 +32,12 @@
 #define SCALANATIVE_RIFT_SMALL_SLAB_SIZE (4 * 1024)
 
 /* Keep enough closed slabs for reuse, but do not let streaming runs retain
- * hundreds of MiB in the global pool after old windows have been closed.
+ * hundreds of MiB in the default global pool after old windows have been
+ * closed. Throughput-biased policies can opt into larger resident pools.
  */
-#define SCALANATIVE_RIFT_POOL_MAX_BYTES (128 * 1024 * 1024)
+#define SCALANATIVE_RIFT_POOL_DEFAULT_MAX_BYTES (128 * 1024 * 1024)
+#define SCALANATIVE_RIFT_POOL_CACHE_SMALL_MAX_BYTES (256 * 1024 * 1024)
+#define SCALANATIVE_RIFT_POOL_CACHE_LARGE_MAX_BYTES (512 * 1024 * 1024)
 
 typedef struct scalanative_rift_slab {
     struct scalanative_rift_slab *next;
@@ -63,6 +66,14 @@ typedef struct scalanative_rift_region {
     uint32_t alloc_stats_enabled;
     uint32_t current_slab_zeroed;
 } scalanative_rift_region;
+
+typedef enum {
+    SCALANATIVE_RIFT_REUSE_POLICY_DEFAULT = 0,
+    SCALANATIVE_RIFT_REUSE_POLICY_BULK_ZERO_RETAINED = 1,
+    SCALANATIVE_RIFT_REUSE_POLICY_CACHE_SMALL = 2,
+    SCALANATIVE_RIFT_REUSE_POLICY_CACHE_LARGE = 3,
+    SCALANATIVE_RIFT_REUSE_POLICY_PREZERO_LARGE = 4
+} scalanative_rift_reuse_policy;
 
 #define SCALANATIVE_RIFT_SLAB_DATA_SIZE                                         \
     (SCALANATIVE_RIFT_SLAB_SIZE - sizeof(scalanative_rift_slab))
@@ -123,8 +134,9 @@ static bool scalanative_rift_precise_alloc_stats_initialized = false;
 static bool scalanative_rift_precise_alloc_stats_value = false;
 static bool scalanative_rift_alloc_stats_initialized = false;
 static bool scalanative_rift_alloc_stats_value = true;
-static bool scalanative_rift_zero_reused_slabs_initialized = false;
-static bool scalanative_rift_zero_reused_slabs_value = false;
+static bool scalanative_rift_reuse_policy_initialized = false;
+static scalanative_rift_reuse_policy scalanative_rift_reuse_policy_value =
+    SCALANATIVE_RIFT_REUSE_POLICY_DEFAULT;
 
 static __thread scalanative_rift_slab *
     scalanative_rift_tls_cache[SCALANATIVE_RIFT_TLS_SLAB_CACHE_MAX];
@@ -179,13 +191,66 @@ static inline bool scalanative_rift_alloc_stats_enabled(void) {
     return scalanative_rift_alloc_stats_value;
 }
 
-static inline bool scalanative_rift_zero_reused_slabs_enabled(void) {
-    if (!scalanative_rift_zero_reused_slabs_initialized) {
-        scalanative_rift_zero_reused_slabs_value =
-            scalanative_rift_truthy_env(getenv("RIFT_ZERO_REUSED_SLABS"));
-        scalanative_rift_zero_reused_slabs_initialized = true;
+static scalanative_rift_reuse_policy scalanative_rift_region_reuse_policy(void) {
+    if (!scalanative_rift_reuse_policy_initialized) {
+        const char *value = getenv("RIFT_REGION_REUSE_POLICY");
+
+        if (value == NULL || value[0] == '\0') {
+            scalanative_rift_reuse_policy_value =
+                scalanative_rift_truthy_env(
+                    getenv("RIFT_ZERO_REUSED_SLABS"))
+                    ? SCALANATIVE_RIFT_REUSE_POLICY_BULK_ZERO_RETAINED
+                    : SCALANATIVE_RIFT_REUSE_POLICY_DEFAULT;
+        } else if (strcmp(value, "default") == 0 ||
+                   strcmp(value, "conservative") == 0) {
+            scalanative_rift_reuse_policy_value =
+                SCALANATIVE_RIFT_REUSE_POLICY_DEFAULT;
+        } else if (strcmp(value, "bulk-zero-retained") == 0 ||
+                   strcmp(value, "bulk_zero_retained") == 0 ||
+                   strcmp(value, "bulk-zero") == 0 ||
+                   strcmp(value, "bulk_zero") == 0) {
+            scalanative_rift_reuse_policy_value =
+                SCALANATIVE_RIFT_REUSE_POLICY_BULK_ZERO_RETAINED;
+        } else if (strcmp(value, "cache-small") == 0 ||
+                   strcmp(value, "cache_small") == 0) {
+            scalanative_rift_reuse_policy_value =
+                SCALANATIVE_RIFT_REUSE_POLICY_CACHE_SMALL;
+        } else if (strcmp(value, "cache-large") == 0 ||
+                   strcmp(value, "cache_large") == 0) {
+            scalanative_rift_reuse_policy_value =
+                SCALANATIVE_RIFT_REUSE_POLICY_CACHE_LARGE;
+        } else if (strcmp(value, "prezero-large") == 0 ||
+                   strcmp(value, "prezero_large") == 0) {
+            scalanative_rift_reuse_policy_value =
+                SCALANATIVE_RIFT_REUSE_POLICY_PREZERO_LARGE;
+        } else {
+            scalanative_rift_reuse_policy_value =
+                SCALANATIVE_RIFT_REUSE_POLICY_DEFAULT;
+        }
+        scalanative_rift_reuse_policy_initialized = true;
     }
-    return scalanative_rift_zero_reused_slabs_value;
+    return scalanative_rift_reuse_policy_value;
+}
+
+static inline bool scalanative_rift_zero_reused_slabs_enabled(void) {
+    scalanative_rift_reuse_policy policy =
+        scalanative_rift_region_reuse_policy();
+    return policy == SCALANATIVE_RIFT_REUSE_POLICY_BULK_ZERO_RETAINED ||
+           policy == SCALANATIVE_RIFT_REUSE_POLICY_PREZERO_LARGE;
+}
+
+static inline size_t scalanative_rift_pool_max_bytes(void) {
+    switch (scalanative_rift_region_reuse_policy()) {
+    case SCALANATIVE_RIFT_REUSE_POLICY_CACHE_SMALL:
+        return SCALANATIVE_RIFT_POOL_CACHE_SMALL_MAX_BYTES;
+    case SCALANATIVE_RIFT_REUSE_POLICY_CACHE_LARGE:
+    case SCALANATIVE_RIFT_REUSE_POLICY_PREZERO_LARGE:
+        return SCALANATIVE_RIFT_POOL_CACHE_LARGE_MAX_BYTES;
+    case SCALANATIVE_RIFT_REUSE_POLICY_BULK_ZERO_RETAINED:
+    case SCALANATIVE_RIFT_REUSE_POLICY_DEFAULT:
+    default:
+        return SCALANATIVE_RIFT_POOL_DEFAULT_MAX_BYTES;
+    }
 }
 
 static inline void scalanative_rift_prepare_reusable_slab(
@@ -529,6 +594,7 @@ static void scalanative_rift_pool_push_regular_chain_capped(
     size_t slab_size = small ? scalanative_rift_small_slab_mapped_size()
                              : SCALANATIVE_RIFT_SLAB_SIZE;
     size_t pool_bytes = scalanative_rift_pool_resident_bytes_approx();
+    size_t pool_max_bytes = scalanative_rift_pool_max_bytes();
     size_t keep_count = 0;
     scalanative_rift_slab *keep_tail;
     scalanative_rift_slab *drop_head;
@@ -536,8 +602,8 @@ static void scalanative_rift_pool_push_regular_chain_capped(
 
     if (head == NULL || tail == NULL || count == 0) return;
 
-    if (pool_bytes < SCALANATIVE_RIFT_POOL_MAX_BYTES) {
-        keep_count = (SCALANATIVE_RIFT_POOL_MAX_BYTES - pool_bytes) / slab_size;
+    if (pool_bytes < pool_max_bytes) {
+        keep_count = (pool_max_bytes - pool_bytes) / slab_size;
         if (keep_count > count) keep_count = count;
     }
 

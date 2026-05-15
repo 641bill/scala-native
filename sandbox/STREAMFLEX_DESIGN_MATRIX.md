@@ -1,6 +1,6 @@
 # StreamFlex Design Matrix
 
-Last updated: 2026-05-15 01:27 CEST
+Last updated: 2026-05-15 14:45 CEST
 
 Status: first Rift-native StreamFlex system-design reproduction. This is a
 methodology benchmark for the StreamFlex axes: stable state, transient scoped
@@ -31,6 +31,28 @@ StreamFlex/Ovm artifact reproduction.
 | `checked-epoch-stream` | Checked streaming epoch over the Rift backend. As of 2026-05-13, this benchmark label uses the handle-backed allocation lowering internally. |
 | `checked-epoch-stream-legacy` | Previous checked streaming epoch path using `RiftRegion.epoch` plus `allocOpen`; retained as an internal control. |
 | `checked-epoch-stream-open-handle` | Explicit alias for the handle-backed path, retained for provenance while the default label is promoted. |
+
+## Runtime Policy Notes
+
+`RIFT_REGION_REUSE_POLICY` applies to Rift-backed checked stream modes such as
+`checked-epoch-stream`. The policies are opt-in throughput/RSS tradeoffs:
+`default`, `bulk-zero-retained`, `cache-small`, `cache-large`, and
+`prezero-large`. The legacy `RIFT_ZERO_REUSED_SLABS=1` setting remains an alias
+for `bulk-zero-retained`.
+
+The 2026-05-15 focused allocator gate found `cache-large` fastest on
+allocation-only rows, but the first 1M StreamFlexDesign throughput smoke was
+neutral after rerun:
+
+| Policy | L1 external real s | L1 RSS bytes | L2 median ms | L2 region op ms | Checksum |
+|---|---:|---:|---:|---:|---:|
+| `default` | 0.93 | 7913472 | 373.053 | 1.330 | -7120610804659902001 |
+| `cache-large` | 0.93 | 7913472 | 372.851 | 1.247 | -7120610804659902001 |
+
+Interpretation: the policy is useful for focused allocation pressure, but this
+StreamFlexDesign row is currently dominated by stable-state/query CPU,
+capsule add/drain, linked-object traversal, and allocation body cost outside
+region pool bookkeeping.
 
 ## Commands
 

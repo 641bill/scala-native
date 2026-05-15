@@ -1,19 +1,20 @@
 # Object Allocation Lowering Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-15 01:40 CEST
+Last updated: 2026-05-15 14:45 CEST
 
 Status: refined retained-region-array matrix validated at 20k smoke, 100k, 1M,
 and 10M, plus focused final-clean allocator-counter, cached-stats,
 current-slab zeroed-cache, handle-backed allocation, warm/dirty-slab gates,
 object zeroing attribution counters, an experimental reusable-slab
 bulk-zero policy gate, an unsafe no-zero lower-bound gate, and proof-gated
-no-zero lowering for definitely initialized handle-backed records. The no-zero
-proof now covers both primitive-only records and local region-linked records
-with reference fields when every field is definitely stored before use. This
-benchmark isolates ordinary Scala object construction through heap, trusted
-Rift, checked Rift, and checked SafeZone-backed allocation paths without
-stream-window, ranking, aggregation, or output work.
+no-zero lowering for definitely initialized handle-backed records. The runtime
+now also has `RIFT_REGION_REUSE_POLICY` as the canonical opt-in slab reuse
+policy knob. The no-zero proof now covers both primitive-only records and local
+region-linked records with reference fields when every field is definitely
+stored before use. This benchmark isolates ordinary Scala object construction
+through heap, trusted Rift, checked Rift, and checked SafeZone-backed allocation
+paths without stream-window, ranking, aggregation, or output work.
 
 ## Purpose
 
@@ -691,6 +692,73 @@ against heap and legacy, but it is not a new application speedup over the
 previous noisy 1M StreamFlexDesign row. That workload is now limited more by
 stable-state/query CPU, linked traversal, capsule add/drain, and allocation
 body outside memset than by reference-field zeroing alone.
+
+## Throughput/RSS Reuse Policy Gate
+
+Date/time: 2026-05-15 14:45 CEST.
+
+`RIFT_REGION_REUSE_POLICY` is now the canonical runtime knob for opt-in slab
+reuse behavior:
+
+| Policy | Meaning |
+|---|---|
+| `default` | Current memory-conservative behavior; 128 MiB regular-slab pool budget. |
+| `bulk-zero-retained` | Legacy `RIFT_ZERO_REUSED_SLABS=1` behavior; old env var remains an alias. |
+| `cache-small` | Retain a bounded 256 MiB reusable regular-slab pool without eager bulk zeroing. |
+| `cache-large` | Retain a bounded 512 MiB reusable regular-slab pool without eager bulk zeroing. |
+| `prezero-large` | Retain the 512 MiB pool and prezero reusable slabs at close/reset. |
+
+Huge slabs and explicit close semantics are unchanged. These policies are
+throughput/RSS tradeoff modes: they should not be reported as lower-memory wins
+unless peak RSS actually improves.
+
+Focused 5M primitive-record gate, 5 measured runs, mode
+`rift-checked-rift-open-handle`:
+
+| Policy | Median ms | Region op ms | Slow alloc ms | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|
+| `default` | 67.822 | 2.780 | 1.217 | 203849728 | -1183547843768457859 |
+| `bulk-zero-retained` | 69.909 | 5.553 | 1.167 | 203849728 | -1183547843768457859 |
+| `cache-small` | 65.161 | 0.472 | 0.225 | 204062720 | -1183547843768457859 |
+| `cache-large` | 63.566 | 0.437 | 0.210 | 204062720 | -1183547843768457859 |
+| `prezero-large` | 67.521 | 3.257 | 0.214 | 204079104 | -1183547843768457859 |
+
+Focused 10M primitive-record gate, 5 measured runs, same mode:
+
+| Policy | Median ms | Region op ms | Slow alloc ms | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|
+| `default` | 149.609 | 17.445 | 7.564 | 404029440 | -6851333344653324122 |
+| `bulk-zero-retained` | 155.161 | 21.729 | 7.479 | 404029440 | -6851333344653324122 |
+| `cache-small` | 134.237 | 6.597 | 2.534 | 404029440 | -6851333344653324122 |
+| `cache-large` | 130.250 | 0.894 | 0.408 | 404209664 | -6851333344653324122 |
+| `prezero-large` | 133.345 | 6.818 | 0.534 | 404209664 | -6851333344653324122 |
+
+First application smoke, StreamFlexDesign throughput, 1M events, L1 final-clean,
+3 in-process repeats:
+
+| Policy | External real s | External user s | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|
+| `default` | 0.93 | 0.90 | 7913472 | -7120610804659902001 |
+| `bulk-zero-retained` | 0.98 | 0.95 | 7913472 | -7120610804659902001 |
+| `cache-small` | 0.93 | 0.91 | 7913472 | -7120610804659902001 |
+| `cache-large` | 0.93 | 0.90 | 7913472 | -7120610804659902001 |
+| `prezero-large` | 0.97 | 0.95 | 7913472 | -7120610804659902001 |
+
+Matching L2 interpretation for default versus the best microgate policy:
+
+| Policy | Median ms | Records/sec | GC ms | Region op ms | Region objects | Opens | Closes | Resets | RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `default` | 373.053 | 2680581.566 | 0.000 | 1.330 | 24997627 | 1 | 1 | 3907 | 12746752 |
+| `cache-large` | 372.851 | 2682038.617 | 0.000 | 1.247 | 24997627 | 1 | 1 | 3907 | 12746752 |
+
+Interpretation: `cache-large` is a clear focused allocator win at 10M
+(`149.609 -> 130.250 ms`, with region-op time dropping
+`17.445 -> 0.894 ms`) and only a negligible RSS change in this single-region
+microgate. The first StreamFlexDesign application smoke is neutral after a
+warm rerun; its L2 region-op time is already near 1 ms, so stable-state/query
+CPU and capsule/traversal work dominate. Keep `cache-large` as the current
+throughput-biased candidate, but do not promote it as a broad application win
+until at least two representative rows improve under L1.
 
 ## Interpretation
 
