@@ -1,9 +1,15 @@
 # Stream GC Benchmark Candidates
 
 Date: 2026-05-01
-Last updated: 2026-05-07 12:24 CEST
+Last updated: 2026-05-15 17:36 CEST
 
 Status: benchmark-selection note for Phase 6. This is not a result pack.
+
+Related investigation:
+`evidence/GC_HEAVY_BENCHMARK_INVESTIGATION.md` records the 2026-05-15
+literature/online follow-up on why many real streaming rows are not GC-heavy,
+where prior systems and practitioners see GC pressure, and which retained
+object workloads should be tried next.
 
 ## Decision
 

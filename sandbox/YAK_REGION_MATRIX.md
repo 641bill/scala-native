@@ -1,7 +1,7 @@
 # Yak Region Matrix
 
 Date: 2026-04-25
-Last updated: 2026-05-13 15:58 CEST
+Last updated: 2026-05-15 20:57 CEST
 
 Status: Yak-style methodology reproduction harness with validated smoke,
 default median, pressure median, external-sort-shaped median, top-word/filter
@@ -17,6 +17,10 @@ retained/no-traverse heap controls and reusable `EpochTopKByKey` checked rows.
 The latest graphstep follow-up measures the profile-guided allocator cleanup:
 the checked scoped epoch row improves on the 10M graphstep baseline and remains
 the fastest safe row at the 50M graphstep profile scale.
+The latest graphreal follow-up promotes the `checked-epoch-stream` LiveJournal
+path from generic `RiftRegion.allocOpen` to backend-known
+`RiftAllocator.allocateOpenHandle`, while keeping
+`checked-epoch-stream-legacy` as a graphreal-only control.
 
 The harness is implemented in
 `sandbox/src/main/scala-next/YakRegionMatrix.scala` and run with
@@ -465,6 +469,43 @@ close drains with `closeEpochBufferWithCursor`.
 | `checked-epoch-buffer-scoped` | checked scoped | reusable `EpochBuffer` | `285.605` | `0.000` | `0.000` | `10000000` | `0 / 0 / 0` | `328630272` |
 | `checked-epoch-buffer-stream` | checked stream | reusable `EpochBuffer` | `287.201` | `0.000` | `0.628` | `10000000` | `11 / 11 / 0` | `328548352` |
 
+10M graphreal handle-backed stream audit:
+
+Command shape:
+
+```sh
+YAK_BUILD=0 \
+YAK_OUTPUT_DIR=/private/tmp/yak-graphreal-handle-vs-legacy-10m-rerun \
+YAK_WORKLOAD=graphreal \
+YAK_MODES="checked-epoch-stream-legacy checked-epoch-stream checked-epoch-scoped" \
+YAK_GRAPH_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/yak/snap/soc-LiveJournal1.txt.gz \
+YAK_GRAPH_INPUT_EDGES=10000000 \
+YAK_GRAPH_INPUT_VERTICES=5000000 \
+YAK_GRAPH_INPUT_EDGES_PER_EPOCH=1000000 \
+YAK_EPOCHS=10 \
+YAK_BENCHMARK_RUNS=3 \
+YAK_WARMUPS=1 \
+zsh sandbox/run_yak_region_instrumented_matrix.sh
+```
+
+| Mode | Backend | Allocation lowering | Median elapsed ms | Median GC ms | Median Rift op ms | Slow alloc ms | Logical objects | Opens/closes/resets | Peak RSS bytes |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `checked-epoch-stream-legacy` | checked stream | generic `RiftRegion.allocOpen` | `290.539` | `0.000` | `0.935` | `0.403` | `10000000` | `1 / 1 / 10` | `372703232` |
+| `checked-epoch-stream` | checked stream | backend-known `RiftAllocator.allocateOpenHandle` | `279.469` | `0.000` | `0.864` | `0.392` | `10000000` | `1 / 1 / 10` | `372703232` |
+| `checked-epoch-scoped` | checked scoped | SafeZone-backed checked epoch | `280.801` | `0.000` | `0.000` | `0.000` | `10000000` | `0 / 0 / 0` | `372817920` |
+
+Interpretation:
+
+- This is a same-binary audit of the remaining generic allocation path in the
+  strongest real-input Yak row. The handle-backed stream path improves over the
+  legacy stream path by about `3.8%` with matching checksum and unchanged RSS.
+- At this scale/configuration, handle-backed `checked-epoch-stream` also edges
+  out checked scoped, but treat that as a local audit signal rather than a
+  replacement for the clean 50M topology table.
+- The optimization removes part of allocation lowering overhead; the row is
+  still dominated by linked-object construction/traversal and the graph update
+  loop, not region close time.
+
 50M API-backed checked epoch rerun, same topology as the 50M topology table
 (`YAK_EPOCHS=10`, `YAK_GRAPH_INPUT_EDGES_PER_EPOCH=5000000`):
 
@@ -894,6 +935,10 @@ Interpretation:
   `EpochBuffer` around `286 ms` at 10M; at 50M, API-backed
   `checked-epoch-scoped` is `1055.958 ms` with `1.53 GB` RSS versus
   `gc-heap` `1604.811 ms`, `288.801 ms` timed GC, and `2.76 GB` RSS.
+  The 2026-05-15 graphreal handle-backed stream audit then compares the same
+  stream topology against a same-binary legacy generic allocation control:
+  `checked-epoch-stream` improves from `290.539 ms` to `279.469 ms` at 10M
+  logical LiveJournal edge-update objects with identical checksum and RSS.
   Validation after adding `epoch`,
   `epochBufferOpenRegionFor`, and the Yak `checked-epoch-buffer-*` modes:
   `sandbox3_next/compile` passed, `RiftRegionCheckedCompilerTest` passed

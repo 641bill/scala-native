@@ -1,6 +1,6 @@
 import scala.language.experimental.captureChecking
 
-import scala.scalanative.memory.{RiftRegion, SafeZone}
+import scala.scalanative.memory.{RiftOpenStreamingHandle, RiftRegion, SafeZone}
 import scala.scalanative.memory.SafeZone._
 import scala.scalanative.runtime.{
   fromRawUSize,
@@ -2086,6 +2086,45 @@ object YakRegionMatrixHelpers {
     }
   }
 
+  private def runCheckedGraphRealLinkedEpochHandle(
+      input: RealGraphInput,
+      values: Array[Long],
+      currentEdgeCursor: Int,
+      currentEpoch: Int
+  )(using region: RiftOpenStreamingHandle^): Unit = {
+    val cfg = YakRegionConfig
+    final class CheckedEdgeUpdate(
+        val src: Int,
+        val dst: Int,
+        val delta: Int,
+        val next: CheckedEdgeUpdate^{region}
+    )
+
+    var updates: CheckedEdgeUpdate^{region} = null
+    var edge = 0
+    while (edge < cfg.graphInputEdgesPerEpoch) {
+      val index = (currentEdgeCursor + edge) % input.edgeCount
+      val src = input.srcs(index)
+      val dst = input.dsts(index)
+      val delta = ((src ^ dst ^ currentEpoch ^ edge) & 31) - 15
+      updates =
+        RiftAllocator.allocateOpenHandle(
+          region,
+          new CheckedEdgeUpdate(src, dst, delta, updates)
+        )
+      edge += 1
+    }
+
+    var current = updates
+    while (current != null) {
+      val contribution =
+        (values(current.src) + current.delta.toLong + currentEpoch) & 0xffL
+      values(current.dst) =
+        (values(current.dst) + contribution) & 0xffffffffL
+      current = current.next
+    }
+  }
+
   private def runCheckedGraphRealWholeRunBody()(using
       region: RiftRegion.StreamingRegion^
   ): Long = {
@@ -2127,6 +2166,61 @@ object YakRegionMatrixHelpers {
       }
 
   def runCheckedGraphRealEpoch(safeZoneBackend: Boolean): Long = {
+    val cfg = YakRegionConfig
+    val input = RealGraphInput.load()
+    val values = new Array[Long](input.vertices)
+    var vertex = 0
+    while (vertex < values.length) {
+      values(vertex) = mix(vertex + 131).toLong & 0xffffL
+      vertex += 1
+    }
+
+    var edgeCursor = 0
+    if (safeZoneBackend) {
+      RiftRegion.streamingSafeZone { stream ?=>
+        var epoch = 0
+        while (epoch < cfg.epochs) {
+          val currentEdgeCursor = edgeCursor
+          val currentEpoch = epoch
+          RiftRegion.epoch { region ?=>
+            runCheckedGraphRealLinkedEpoch(
+              input,
+              values,
+              currentEdgeCursor,
+              currentEpoch
+            )
+          }
+          edgeCursor = (edgeCursor + cfg.graphInputEdgesPerEpoch) % input.edgeCount
+          epoch += 1
+        }
+      }
+    } else {
+      RiftRegion.streamingOpenHandle { stream ?=>
+        var epoch = 0
+        while (epoch < cfg.epochs) {
+          val currentEdgeCursor = edgeCursor
+          val currentEpoch = epoch
+          RiftRegion.resetOpenHandle {
+            runCheckedGraphRealLinkedEpochHandle(
+              input,
+              values,
+              currentEdgeCursor,
+              currentEpoch
+            )
+          }
+          edgeCursor =
+            (edgeCursor + cfg.graphInputEdgesPerEpoch) % input.edgeCount
+          epoch += 1
+        }
+      }
+    }
+
+    val checksum = checksumLongs(values)
+    checksumSink = checksum
+    checksum
+  }
+
+  def runCheckedGraphRealEpochLegacy(safeZoneBackend: Boolean): Long = {
     val cfg = YakRegionConfig
     val input = RealGraphInput.load()
     val values = new Array[Long](input.vertices)
@@ -2980,6 +3074,8 @@ object YakRegionMatrixHelpers {
             runCheckedGraphRealWholeRun(true)
           else if (mode == "checked-epoch-stream")
             runCheckedGraphRealEpoch(false)
+          else if (mode == "checked-epoch-stream-legacy")
+            runCheckedGraphRealEpochLegacy(false)
           else if (mode == "checked-epoch-scoped")
             runCheckedGraphRealEpoch(true)
           else if (mode == "checked-epoch-buffer-stream")
@@ -3043,6 +3139,7 @@ object YakRegionMatrixHelpers {
         mode == "checked-page-token-stream" ||
         mode == "checked-whole-run-stream" ||
         mode == "checked-epoch-stream" ||
+        mode == "checked-epoch-stream-legacy" ||
         mode == "checked-epoch-topk-stream" ||
         mode == "checked-epoch-buffer-stream"
     if (cfg.finalClean) {
@@ -3170,7 +3267,8 @@ object YakRegionMatrixHelpers {
           "checked-region-stream" | "checked-region-scoped" |
           "checked-page-token-stream" | "checked-page-token-scoped" |
           "checked-whole-run-stream" | "checked-whole-run-scoped" |
-          "checked-epoch-stream" | "checked-epoch-scoped" |
+          "checked-epoch-stream" | "checked-epoch-stream-legacy" |
+          "checked-epoch-scoped" |
           "heap-epoch-topk" |
           "checked-epoch-topk-stream" | "checked-epoch-topk-scoped" |
           "checked-epoch-buffer-stream" | "checked-epoch-buffer-scoped" =>
@@ -3195,6 +3293,7 @@ object YakRegionMatrixHelpers {
       mode == "checked-page-token-stream" ||
       mode == "checked-whole-run-stream" ||
       mode == "checked-epoch-stream" ||
+      mode == "checked-epoch-stream-legacy" ||
       mode == "checked-epoch-topk-stream" ||
       mode == "checked-epoch-buffer-stream"
   if (usesRift) RiftRegion.init(0)

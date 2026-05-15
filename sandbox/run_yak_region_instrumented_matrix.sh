@@ -240,6 +240,14 @@ for selected_mode in "${modes[@]}"; do
         exit 1
       fi
       ;;
+    checked-epoch-stream-legacy)
+      if [[ "${workload}" == "graphreal" ]]; then
+        run_mode "checked-epoch-stream-legacy" "checked-epoch-stream-legacy" "0"
+      else
+        echo "checked-epoch-stream-legacy is currently implemented only for YAK_WORKLOAD=graphreal" >&2
+        exit 1
+      fi
+      ;;
     checked-epoch-scoped)
       if [[ "${workload}" != "all" && "${workload}" != "promotion" ]]; then
         run_mode "checked-epoch-scoped" "checked-epoch-scoped" "1" "${workload}" "32768"
