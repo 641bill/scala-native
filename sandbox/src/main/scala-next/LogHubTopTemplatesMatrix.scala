@@ -1,6 +1,6 @@
 import scala.language.experimental.captureChecking
 
-import scala.scalanative.memory.RiftRegion
+import scala.scalanative.memory.{RiftOpenStreamingHandle, RiftRegion}
 import scala.scalanative.runtime.{
   fromRawUSize,
   GC,
@@ -786,6 +786,11 @@ object LogHubTopTemplatesMatrixHelpers {
   }
 
   private def runCheckedRetainedStream(): RunOutcome =
+    RiftRegion.streamingOpenHandle {
+      runCheckedRetainedHandleBody()
+    }
+
+  private def runCheckedRetainedStreamLegacy(): RunOutcome =
     RiftRegion.streaming { stream ?=>
       runCheckedRetainedBody()
     }
@@ -794,6 +799,87 @@ object LogHubTopTemplatesMatrixHelpers {
     RiftRegion.streamingSafeZone { stream ?=>
       runCheckedRetainedBody()
     }
+
+  private def runCheckedRetainedHandleBody()(using
+      stream: RiftOpenStreamingHandle^
+  ): RunOutcome = {
+    val cfg = LogHubTopTemplatesConfig
+    val input = inputData
+    val counts = new Array[Int](cfg.templateBuckets)
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedAnchor = 0L
+    var epochStart = 0
+    while (epochStart < input.lines) {
+      val epochEnd = math.min(input.lines, epochStart + cfg.linesPerEpoch)
+      clearCounts(counts)
+
+      RiftRegion.resetOpenHandle { region ?=>
+        final class CheckedRecord(
+            val lineIndex: Int,
+            val template: Int,
+            val token: Int,
+            val hash: Long
+        ) {
+          var next: CheckedRecord^{region} = null
+        }
+
+        var head: CheckedRecord^{region} = null
+        var tail: CheckedRecord^{region} = null
+        var retainedCount = 0
+
+        def append(record: CheckedRecord^{region}): Unit = {
+          record.next = head
+          if (head == null) tail = record
+          head = record
+          retainedCount += 1
+          counts(record.template) += 1
+        }
+
+        var i = epochStart
+        while (i < epochEnd) {
+          val template = input.templates(i)
+          val tokenCount = input.tokenCounts(i)
+          var token = 0
+          while (token < tokenCount) {
+            val record: CheckedRecord^{region} =
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new CheckedRecord(
+                  i,
+                  template,
+                  token,
+                  input.hashes(i) ^ (token.toLong * 1315423911L)
+                )
+              )
+            append(record)
+            token += 1
+          }
+          if (i % cfg.sampleEvery == 0)
+            checksum =
+              fold(checksum, 99, i, template, 0, tokenCount, input.hashes(i), epochStart)
+          i += 1
+        }
+
+        if (head != null && tail != null)
+          retainedAnchor =
+            (retainedAnchor * 1099511628211L) ^
+              head.hash ^
+              (tail.hash << 1) ^
+              retainedCount.toLong ^
+              epochStart.toLong
+      }
+
+      val emitted = emitTopTemplates(counts, epochStart.toLong, checksum, outputCount)
+      checksum = emitted.checksum
+      outputCount = emitted.outputCount
+      epochStart = epochEnd
+    }
+    checksumSink = checksum
+    outputSink = outputCount
+    retainedAnchorSink = retainedAnchor
+    RunOutcome(checksum, outputCount)
+  }
 
   private def runCheckedTopKBody()(using
       stream: RiftRegion.StreamingRegion^
@@ -1181,6 +1267,11 @@ object LogHubTopTemplatesMatrixHelpers {
   }
 
   private def runCheckedRetainedStreamStreaming(): RunOutcome =
+    RiftRegion.streamingOpenHandle {
+      runCheckedRetainedHandleStreamingBody()
+    }
+
+  private def runCheckedRetainedStreamStreamingLegacy(): RunOutcome =
     RiftRegion.streaming { stream ?=>
       runCheckedRetainedStreamingBody()
     }
@@ -1189,6 +1280,102 @@ object LogHubTopTemplatesMatrixHelpers {
     RiftRegion.streamingSafeZone { stream ?=>
       runCheckedRetainedStreamingBody()
     }
+
+  private def runCheckedRetainedHandleStreamingBody()(using
+      stream: RiftOpenStreamingHandle^
+  ): RunOutcome = {
+    val cfg = LogHubTopTemplatesConfig
+    val source = openStreamingInput()
+    val counts = new Array[Int](cfg.templateBuckets)
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedAnchor = 0L
+    var recordsRead = 0
+    try {
+      var done = false
+      while (!done && recordsRead < cfg.lines) {
+        val epochStart = recordsRead
+        var recordsInEpoch = 0
+        clearCounts(counts)
+
+        RiftRegion.resetOpenHandle { region ?=>
+          final class CheckedRecord(
+              val lineIndex: Int,
+              val template: Int,
+              val token: Int,
+              val hash: Long
+          ) {
+            var next: CheckedRecord^{region} = null
+          }
+
+          var head: CheckedRecord^{region} = null
+          var tail: CheckedRecord^{region} = null
+          var retainedCount = 0
+
+          def append(record: CheckedRecord^{region}): Unit = {
+            record.next = head
+            if (head == null) tail = record
+            head = record
+            retainedCount += 1
+            counts(record.template) += 1
+          }
+
+          while (!done && recordsInEpoch < cfg.linesPerEpoch && recordsRead < cfg.lines) {
+            val length = readNextUsableLine(source)
+            if (length < 0) done = true
+            else {
+              val line = source.bytes
+              val template = templateBucketFor(line, length)
+              val tokenCount = templateTokensFor(line, length)
+              val hash =
+                BenchmarkInputSupport.stableHash(line, 0, length).toLong ^
+                  (template.toLong * 1099511628211L)
+              var token = 0
+              while (token < tokenCount) {
+                val record: CheckedRecord^{region} =
+                  RiftAllocator.allocateOpenHandle(
+                    region,
+                    new CheckedRecord(
+                      recordsRead,
+                      template,
+                      token,
+                      hash ^ (token.toLong * 1315423911L)
+                    )
+                  )
+                append(record)
+                token += 1
+              }
+              if (recordsRead % cfg.sampleEvery == 0)
+                checksum =
+                  fold(checksum, 99, recordsRead, template, 0, tokenCount, hash, epochStart)
+              recordsRead += 1
+              recordsInEpoch += 1
+            }
+          }
+
+          if (head != null && tail != null)
+            retainedAnchor =
+              (retainedAnchor * 1099511628211L) ^
+                head.hash ^
+                (tail.hash << 1) ^
+                retainedCount.toLong ^
+                epochStart.toLong
+        }
+
+        if (recordsInEpoch > 0) {
+          val emitted = emitTopTemplates(counts, epochStart.toLong, checksum, outputCount)
+          checksum = emitted.checksum
+          outputCount = emitted.outputCount
+        }
+      }
+    } finally {
+      source.close()
+    }
+    checksumSink = checksum
+    outputSink = outputCount
+    retainedAnchorSink = retainedAnchor
+    RunOutcome(checksum, outputCount, recordsRead.toLong, source.bytesRead, 0L)
+  }
 
   private def runCheckedTopKStreamingBody()(using
       stream: RiftRegion.StreamingRegion^
@@ -1307,6 +1494,9 @@ object LogHubTopTemplatesMatrixHelpers {
       case "checked-epoch-retained-no-traverse" |
           "checked-region-stream-retained-epoch" =>
         "checked-epoch-retained-no-traverse"
+      case "checked-epoch-retained-no-traverse-legacy" |
+          "checked-region-stream-retained-epoch-legacy" =>
+        "checked-epoch-retained-no-traverse-legacy"
       case "checked-scoped-epoch-retained-no-traverse" |
           "checked-region-scoped-retained-epoch" =>
         "checked-scoped-epoch-retained-no-traverse"
@@ -1322,6 +1512,7 @@ object LogHubTopTemplatesMatrixHelpers {
   private def usesRiftRuntime(mode: String): Boolean =
     canonicalMode(mode) match {
       case "checked-epoch-retained-no-traverse" |
+          "checked-epoch-retained-no-traverse-legacy" |
           "checked-epoch-topk-retained-no-traverse" =>
         true
       case _ => false
@@ -1332,6 +1523,7 @@ object LogHubTopTemplatesMatrixHelpers {
       case "heap-natural" | "heap-summary-only" |
           "heap-retained-drop-anchor" |
           "checked-epoch-retained-no-traverse" |
+          "checked-epoch-retained-no-traverse-legacy" |
           "checked-scoped-epoch-retained-no-traverse" |
           "checked-epoch-topk-retained-no-traverse" |
           "checked-scoped-epoch-topk-retained-no-traverse" =>
@@ -1355,6 +1547,9 @@ object LogHubTopTemplatesMatrixHelpers {
       case "checked-epoch-retained-no-traverse" =>
         if (streaming) runCheckedRetainedStreamStreaming()
         else runCheckedRetainedStream()
+      case "checked-epoch-retained-no-traverse-legacy" =>
+        if (streaming) runCheckedRetainedStreamStreamingLegacy()
+        else runCheckedRetainedStreamLegacy()
       case "checked-scoped-epoch-retained-no-traverse" =>
         if (streaming) runCheckedRetainedScopedStreaming()
         else runCheckedRetainedScoped()
@@ -1532,6 +1727,7 @@ object LogHubTopTemplatesMatrixHelpers {
   def requiresRiftRuntime(mode: String): Boolean =
     canonicalMode(mode) match {
       case "checked-epoch-retained-no-traverse" |
+          "checked-epoch-retained-no-traverse-legacy" |
           "checked-epoch-topk-retained-no-traverse" |
           "checked-scoped-epoch-retained-no-traverse" |
           "checked-scoped-epoch-topk-retained-no-traverse" =>

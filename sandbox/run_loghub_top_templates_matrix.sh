@@ -154,6 +154,9 @@ binary_mode_for() {
     checked-epoch-retained-no-traverse|checked-region-stream-retained-epoch)
       echo "checked-epoch-retained-no-traverse"
       ;;
+    checked-epoch-retained-no-traverse-legacy|checked-region-stream-retained-epoch-legacy)
+      echo "checked-epoch-retained-no-traverse-legacy"
+      ;;
     checked-scoped-epoch-retained-no-traverse|checked-region-scoped-retained-epoch)
       echo "checked-scoped-epoch-retained-no-traverse"
       ;;

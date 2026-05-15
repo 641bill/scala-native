@@ -1,7 +1,7 @@
 # LogHub Top Templates Matrix
 
 Date: 2026-05-09
-Last updated: 2026-05-11 23:49 CEST
+Last updated: 2026-05-15 22:14 CEST
 
 Status: focused top-k/rank candidate matrix with retained-object controls and
 the first reusable `EpochTopKByKey` checked API gate. L1 final-clean support
@@ -29,8 +29,12 @@ The key comparison is retained heap versus retained checked epoch:
 - `heap-retained-drop-anchor`: heap retains token records, updates primitive
   counts on append, and drops the retained bucket anchor at close without
   traversing records. This is the fair retained heap control.
-- `checked-epoch-retained-no-traverse`: same retained shape using
-  `RiftRegion.epoch` over the Rift streaming backend.
+- `checked-epoch-retained-no-traverse`: same retained shape using the Rift
+  streaming backend. This is now lowered through
+  `RiftRegion.streamingOpenHandle`/`resetOpenHandle` and
+  `RiftAllocator.allocateOpenHandle` for Rift-backed checked epochs.
+- `checked-epoch-retained-no-traverse-legacy`: old generic checked retained
+  stream path using `RiftRegion.streaming` plus `RiftRegion.epoch`/`allocOpen`.
 - `checked-scoped-epoch-retained-no-traverse`: same retained shape using
   `RiftRegion.epoch` over the SafeZone-backed scoped checked backend.
 - `checked-epoch-topk-retained-no-traverse`: same retained shape using the
@@ -193,6 +197,63 @@ LOGHUB_TOP_OUTPUT_DIR=/tmp/loghub-top-templates-100k \
 Interpretation: the 100k row has the desired retained-control shape, but it is
 too short for a headline. Checked scoped is slightly faster than retained heap
 and much lower RSS; heap's GC appears only as an outlier.
+
+## 2026-05-15 Retained Stream Handle-Backed Allocation Gate
+
+This gate tests the remaining generic allocation-path audit for the
+benchmark-local retained epoch stream path. It does not change the reusable
+`EpochTopKByKey` scoped rows, which remain the presentation-facing LogHub
+top-template API result.
+
+Generated/preloaded 1M command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+LOGHUB_TOP_BUILD=0 \
+LOGHUB_TOP_LINES=1000000 \
+LOGHUB_TOP_BENCHMARK_RUNS=3 \
+LOGHUB_TOP_WARMUPS=1 \
+LOGHUB_TOP_MODES="checked-epoch-retained-no-traverse-legacy checked-epoch-retained-no-traverse" \
+LOGHUB_TOP_OUTPUT_DIR=/private/tmp/loghub-retained-handle-1m \
+zsh sandbox/run_loghub_top_templates_matrix.sh
+```
+
+| Input | Mode | Median ms | Median GC ms | Rift op ms | Objects | Opens/Closes/Resets | Checksum | Output count |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| generated/preloaded 1M | `checked-epoch-retained-no-traverse-legacy` | 291.519 | 0.000 | 1.371 | 15509744 | 1/1/40 | -761408849270161430 | 1280 |
+| generated/preloaded 1M | `checked-epoch-retained-no-traverse` | 269.309 | 0.000 | 1.323 | 15509744 | 1/1/40 | -761408849270161430 | 1280 |
+
+Interpretation: handle-backed allocation improves the generated retained
+stream row by `7.6%` over the legacy generic checked allocation path, with the
+same checksum, object count, and open/close/reset shape. This is a positive
+allocation-lowering transfer gate, but it is still benchmark-local retained
+epoch evidence rather than the reusable top-k API result.
+
+Real HDFS streaming-file 100k sanity command:
+
+```sh
+LOGHUB_TOP_BUILD=0 \
+LOGHUB_TOP_INPUT_MODE=streaming-file \
+LOGHUB_TOP_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/loghub/HDFS_1/HDFS.log \
+LOGHUB_TOP_LINES=100000 \
+LOGHUB_TOP_LINES_PER_EPOCH=25000 \
+LOGHUB_TOP_BENCHMARK_RUNS=3 \
+LOGHUB_TOP_WARMUPS=1 \
+LOGHUB_TOP_MODES="checked-epoch-retained-no-traverse-legacy checked-epoch-retained-no-traverse" \
+LOGHUB_TOP_OUTPUT_DIR=/private/tmp/loghub-retained-handle-hdfs-stream-100k \
+zsh sandbox/run_loghub_top_templates_matrix.sh
+```
+
+| Input | Mode | Median ms | Median GC ms | Rift op ms | Objects | Opens/Closes/Resets | Checksum | Output count |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| real HDFS streaming-file 100k | `checked-epoch-retained-no-traverse-legacy` | 273.834 | 0.000 | 0.056 | 407067 | 1/1/4 | -8128686789696942939 | 128 |
+| real HDFS streaming-file 100k | `checked-epoch-retained-no-traverse` | 275.054 | 0.000 | 0.049 | 407067 | 1/1/4 | -8128686789696942939 | 128 |
+
+Interpretation: the same allocation-lowering change is neutral on the small
+real HDFS streaming-file sanity row because source parsing and template hashing
+dominate at this scale. Keep the existing scoped/top-k HDFS streaming rows as
+the real-input evidence; use this row only as an allocation-path transfer
+sanity check.
 
 ## Generated 1M Gate
 
