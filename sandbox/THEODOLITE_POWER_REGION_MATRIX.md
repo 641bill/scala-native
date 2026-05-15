@@ -1,7 +1,7 @@
 # Theodolite Power Region Matrix
 
 Date: 2026-05-11
-Last updated: 2026-05-14 14:41 CEST
+Last updated: 2026-05-15 13:38 CEST
 
 Status: implemented a local single-process Theodolite UC2/UC4-style real-input
 kernel over the UCI Household Electric Power Consumption trace. This is not an
@@ -235,6 +235,51 @@ slightly, but RSS rises because bulk zeroing touches reusable pages that the
 default policy leaves dirty and less resident. Therefore reusable-slab
 bulk-zeroing should stay experimental and workload-selective rather than
 becoming a default after only generated/focused wins.
+
+## Reference-Field No-Zero Transfer Gate
+
+Date/time: 2026-05-15 13:38 CEST.
+
+This L2 transfer gate reruns the real streaming-file q2 row after the
+definite-initialization proof was broadened from primitive-only records to
+reference-field records. The benchmark parses the UCI file inside each run and
+does not retain a parsed full-input array. It is a real-streaming-input
+interpretation row, not an L1 final-clean headline row.
+
+Command:
+
+```sh
+THEODOLITE_POWER_OUTPUT_DIR=/private/tmp/rift-ref-nozero-theodolite-q2-20260515 \
+THEODOLITE_POWER_INPUT_MODE=streaming-file \
+THEODOLITE_POWER_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/theodolite/real-power/household_power_consumption.txt \
+THEODOLITE_POWER_MODES="heap-immix checked-epoch-stream checked-epoch-stream-legacy checked-epoch-scoped region-scoped-rooted" \
+THEODOLITE_POWER_QUERIES="q2-hierarchical" \
+THEODOLITE_POWER_RECORDS=1000000 \
+THEODOLITE_POWER_BENCHMARK_RUNS=3 \
+THEODOLITE_POWER_WARMUPS=1 \
+zsh sandbox/run_theodolite_power_region_matrix.sh
+```
+
+Records: `1000000`. Query: `q2-hierarchical`. All rows matched checksum
+`7683095093045065342` and output count `40960`.
+
+| Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | Region op ms | Region objects | RSS bytes | Claim |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `heap-immix` | 988.976 | 19.292 | 19.629 | 3/3 | 0.000 | 0 | 75350016 | Natural heap baseline. |
+| `checked-epoch-stream-legacy` | 963.018 | 0.000 | 0.000 | 0/3 | 0.386 | 4000000 | 78495744 | Legacy generic checked stream epoch. |
+| `checked-epoch-stream` | 952.664 | 0.000 | 0.000 | 0/3 | 0.354 | 4000000 | 78512128 | Optimized checked stream epoch default. |
+| `checked-epoch-scoped` | 954.529 | 0.000 | 0.000 | 0/3 | 0.000 | 0 | 78512128 | Checked SafeZone-backed scoped control. |
+| `region-scoped-rooted` | 965.048 | 0.000 | 0.000 | 0/3 | 0.000 | 0 | 78528512 | Rooted scoped baseline. |
+
+Interpretation: the real streaming q2 row remains modest but positive for the
+optimized checked stream epoch path. It beats heap by about `3.7%`, removes
+about `19.3 ms` of median timed heap GC, and beats the legacy checked stream
+path by about `1.1%`. The reference-field proof does not produce a large new
+speedup here because source scanning, byte parsing, and hierarchy-query CPU are
+now the dominant costs. The latest L2 RSS values are close across region modes
+and slightly above heap, so this specific transfer gate should be reported as
+throughput/GC evidence rather than an RSS win; older L1 final-clean rows remain
+the source for headline elapsed/RSS.
 
 | Query | Mode | Median ms | Median GC ms | RSS bytes | Output count |
 |---|---|---:|---:|---:|---:|

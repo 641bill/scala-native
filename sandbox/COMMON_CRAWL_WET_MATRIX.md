@@ -1,7 +1,7 @@
 # Common Crawl WET Matrix
 
 Date: 2026-05-01
-Last updated: 2026-05-14 14:41 CEST
+Last updated: 2026-05-15 13:38 CEST
 
 Status: generated WET-shaped detector plus first real Common Crawl WET input
 wiring. Real WET input is currently preloaded before timing so parser and
@@ -449,20 +449,67 @@ is visible even though the total median still nudges down. This is still
 generated stressor evidence; before making it a default policy, rerun at least
 one real streaming-input page/window row.
 
+## Reference-Field No-Zero Transfer Gate
+
+Date/time: 2026-05-15 13:38 CEST.
+
+This L2 transfer gate reruns generated WET-shaped q1/q2 after the
+definite-initialization proof was broadened from primitive-only records to
+reference-field records. The row is still generated methodology evidence, not
+an L1 final-clean headline row and not real Common Crawl proof. It checks that
+the optimized checked page-token default remains ahead of the legacy checked
+path after the proof change.
+
+Command:
+
+```sh
+COMMON_CRAWL_WET_OUTPUT_DIR=/private/tmp/rift-ref-nozero-commoncrawl-1m-20260515 \
+COMMON_CRAWL_WET_MODES="heap-immix rift-checked-page-token rift-checked-page-token-legacy rift-checked-safezone-page-token" \
+COMMON_CRAWL_WET_QUERIES="q1-tokenize q2-domain-window" \
+COMMON_CRAWL_WET_PAGES=1000000 \
+COMMON_CRAWL_WET_BENCHMARK_RUNS=3 \
+COMMON_CRAWL_WET_WARMUPS=1 \
+zsh sandbox/run_common_crawl_wet_matrix.sh
+```
+
+| Query | Mode | Median ms | Median GC ms | Max GC ms | Region op ms | Slow alloc ms | Region objects | Opens/closes | RSS bytes | Output count |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| q1-tokenize | `heap-immix` | 5501.961 | 1590.646 | 1591.363 | 0.000 | 0.000 | 0 | 0/0 | 408698880 | 137000000 |
+| q1-tokenize | `rift-checked-page-token-legacy` | 3938.596 | 20.395 | 20.715 | 10.678 | 6.180 | 137000000 | 401/401 | 463749120 | 137000000 |
+| q1-tokenize | `rift-checked-page-token` | 3590.874 | 25.328 | 27.839 | 10.903 | 6.193 | 137000000 | 401/401 | 463749120 | 137000000 |
+| q1-tokenize | `rift-checked-safezone-page-token` | 3628.598 | 34.719 | 35.410 | 0.000 | 0.000 | 0 | 0/0 | 463880192 | 137000000 |
+| q2-domain-window | `heap-immix` | 5286.428 | 1582.506 | 1599.300 | 0.000 | 0.000 | 0 | 0/0 | 408698880 | 929230 |
+| q2-domain-window | `rift-checked-page-token-legacy` | 3961.363 | 18.373 | 18.512 | 10.577 | 6.056 | 137000000 | 401/401 | 463749120 | 929230 |
+| q2-domain-window | `rift-checked-page-token` | 3589.017 | 19.063 | 23.401 | 10.636 | 6.121 | 137000000 | 401/401 | 463749120 | 929230 |
+| q2-domain-window | `rift-checked-safezone-page-token` | 3688.512 | 29.856 | 32.387 | 0.000 | 0.000 | 0 | 0/0 | 463863808 | 929230 |
+
+Checksums matched the previous q1/q2 rows:
+`-3166891223384968696` for q1 and `1076064953308107199` for q2.
+
+Interpretation: promoted `rift-checked-page-token` remains the fastest checked
+Rift page-token row and beats legacy by about `8.8%` on q1 and `9.4%` on q2 in
+this L2 run. It beats heap elapsed by about `34.7%` on q1 and `32.1%` on q2 by
+removing roughly `1.58-1.59 s` of timed heap GC. This row does not show an RSS
+win over heap and should be reported as generated page/window topology plus
+backend-lowering evidence. The proof change itself does not create a fresh
+application-sized jump here because these generated q1/q2 records are still
+mostly primitive and token/query/traversal costs dominate.
+
 ## Current Conclusion
 
-Common Crawl WET remains useful as a *memory-pressure detector*, but the
-generated workload does not give a strong Rift case study:
+Common Crawl WET remains useful as a *memory-pressure detector*. The generated
+WET-shaped q1/q2 rows are now strong page/window topology and checked
+page-token backend evidence, but they are still generated stressors rather
+than real-input stream proof:
 
-- default buckets show lower GC/RSS for region modes, but improved SafeZone is
-  faster than trusted Rift;
-- smaller, more natural token lifetimes make heap and improved SafeZone
-  competitive or faster;
-- current SafeZone is poor on the large default-bucket tokenization case, but
-  improved SafeZone is not;
-- no checked Common Crawl mode should be added until a cheap checked page/token
-  append operator can match the trusted shape.
+- checked page-token rows remove most timed heap GC and beat heap elapsed on
+  generated q1/q2;
+- checked page-token rows are not RSS wins in the latest generated gates;
+- real/preloaded WET rows remain heap-fast or modest controls because parser
+  and query CPU dominate and heap GC is small;
+- real streaming-input rows, not generated WET-shaped rows, are still required
+  for final stream-processing case-study claims.
 
-Next benchmark candidate: Wikimedia-style pageview/clickstream aggregation,
-with both generated and real TSV input controls, because it can test whether
-Rift helps high-volume event objects with lower per-event token fanout.
+Next benchmark direction: keep generated WET-shaped q1/q2 as the page/window
+pressure detector, while prioritizing true streaming-input real datasets where
+objects naturally survive to epoch/window close.
