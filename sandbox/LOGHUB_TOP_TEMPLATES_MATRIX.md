@@ -1,7 +1,7 @@
 # LogHub Top Templates Matrix
 
 Date: 2026-05-09
-Last updated: 2026-05-15 22:14 CEST
+Last updated: 2026-05-16 17:45 CEST
 
 Status: focused top-k/rank candidate matrix with retained-object controls and
 the first reusable `EpochTopKByKey` checked API gate. L1 final-clean support
@@ -599,6 +599,99 @@ Interpretation:
   this is retained-object/RSS streaming evidence rather than the missing
   flagship GC-heavy streaming result.
 
+## Real Windows Streaming-File 1M Gate
+
+The local LogHub Windows dataset is much larger than the current HDFS row:
+`/Users/siyaoliu/rift/cache/benchmark-data/loghub/Windows/Windows.log` has
+`114,608,388` lines. This gate streams the first 1M lines from the file during
+each benchmark run; no parsed replay arrays proportional to the full input are
+retained.
+
+20k smoke command:
+
+```sh
+RIFT_FINAL_CLEAN=1 \
+LOGHUB_TOP_BUILD=0 \
+LOGHUB_TOP_INPUT_MODE=streaming-file \
+LOGHUB_TOP_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/loghub/Windows/Windows.log \
+LOGHUB_TOP_LINES=20000 \
+LOGHUB_TOP_LINES_PER_EPOCH=5000 \
+LOGHUB_TOP_BENCHMARK_RUNS=1 \
+LOGHUB_TOP_WARMUPS=0 \
+LOGHUB_TOP_MODES="heap-natural heap-retained-drop-anchor checked-scoped-epoch-retained-no-traverse checked-scoped-epoch-topk-retained-no-traverse" \
+LOGHUB_TOP_OUTPUT_DIR=/private/tmp/rift-loghub-windows-streaming-smoke-20260516 \
+zsh sandbox/run_loghub_top_templates_matrix.sh
+```
+
+1M L1 command:
+
+```sh
+RIFT_FINAL_CLEAN=1 \
+LOGHUB_TOP_BUILD=0 \
+LOGHUB_TOP_INPUT_MODE=streaming-file \
+LOGHUB_TOP_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/loghub/Windows/Windows.log \
+LOGHUB_TOP_LINES=1000000 \
+LOGHUB_TOP_LINES_PER_EPOCH=25000 \
+LOGHUB_TOP_BENCHMARK_RUNS=3 \
+LOGHUB_TOP_WARMUPS=0 \
+LOGHUB_TOP_MODES="heap-natural heap-retained-drop-anchor checked-scoped-epoch-retained-no-traverse checked-scoped-epoch-topk-retained-no-traverse" \
+LOGHUB_TOP_OUTPUT_DIR=/private/tmp/rift-loghub-windows-streaming-1m-l1-20260516 \
+zsh sandbox/run_loghub_top_templates_matrix.sh
+```
+
+1M L2 command:
+
+```sh
+LOGHUB_TOP_BUILD=0 \
+LOGHUB_TOP_INPUT_MODE=streaming-file \
+LOGHUB_TOP_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/loghub/Windows/Windows.log \
+LOGHUB_TOP_LINES=1000000 \
+LOGHUB_TOP_LINES_PER_EPOCH=25000 \
+LOGHUB_TOP_BENCHMARK_RUNS=3 \
+LOGHUB_TOP_WARMUPS=1 \
+LOGHUB_TOP_MODES="heap-natural heap-retained-drop-anchor checked-scoped-epoch-retained-no-traverse checked-scoped-epoch-topk-retained-no-traverse" \
+LOGHUB_TOP_OUTPUT_DIR=/private/tmp/rift-loghub-windows-streaming-1m-l2-20260516 \
+zsh sandbox/run_loghub_top_templates_matrix.sh
+```
+
+All modes matched checksum `-164656507663075219`, output count `1280`, loaded
+`1,000,000` real Windows log lines, read `242,221,056` buffered source bytes,
+and reported `0` parse errors.
+
+| Mode | Class | L1 external s | L1 RSS bytes | L2 median ms | Median GC ms | Max GC ms | Runs with GC |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `heap-natural` | natural heap streaming baseline | `12.68` | `147046400` | `4240.088` | `26.020` | `28.598` | `3/3` |
+| `heap-retained-drop-anchor` | retained heap streaming control | `12.68` | `147013632` | `4255.379` | `30.532` | `55.161` | `3/3` |
+| `checked-scoped-epoch-retained-no-traverse` | checked retained scoped streaming | `12.64` | `14499840` | `4235.391` | `0.000` | `0.000` | `0/3` |
+| `checked-scoped-epoch-topk-retained-no-traverse` | reusable checked top-k scoped streaming | `12.64` | `14483456` | `4226.219` | `0.000` | `0.000` | `0/3` |
+
+Heap-cap follow-up:
+
+| Mode | Heap cap | Status | L1 external s | RSS bytes | Checksum | Output |
+|---|---:|---|---:|---:|---:|---:|
+| `heap-natural` | `128M` | completed | `13.29` | `138133504` | `-164656507663075219` | `1280` |
+| `heap-natural` | `64M` | completed | `13.20` | `71106560` | `-164656507663075219` | `1280` |
+| `heap-retained-drop-anchor` | `64M` | completed | `13.20` | `71122944` | `-164656507663075219` | `1280` |
+| `checked-scoped-epoch-topk-retained-no-traverse` | uncapped | completed | `12.73` | `14499840` | `-164656507663075219` | `1280` |
+
+Interpretation:
+
+- The Windows row is stronger than HDFS on L1 RSS because the checked scoped
+  rows use about `14.5 MB` RSS versus about `147 MB` for uncapped heap while
+  matching elapsed time. This is a real-streaming-input RSS/fixed-memory row,
+  not a throughput headline.
+- Heap GC is still small relative to the streaming parse/query loop:
+  `26-31 ms` inside about `4.24 s` L2 median, or below `1%` of measured work.
+  Larger line count alone is therefore still not enough to make this a
+  GC-heavy flagship.
+- Heap completes at a `64M` cap, but remains slower and uses about `71 MB`
+  external RSS, roughly five times the checked top-k row. This is a bounded
+  memory/RSS advantage rather than an OOM/failure result.
+- L2 external RSS for checked rows is not used as the headline RSS because the
+  L2 harness computes a heap baseline for checksum validation in the same
+  process before each checked mode. Use the L1 RSS column for presentation
+  RSS.
+
 ## Decision
 
 LogHub top templates advances from "candidate" to a passed reusable checked
@@ -606,6 +699,8 @@ top-k API gate with an overhead caveat. `EpochTopKByKey` beats retained heap on
 generated and real-preloaded HDFS rows while preserving the retained-object
 comparison. After the increment hot-path follow-up, the benchmark-local manual
 path remains slightly faster, but the L1 API overhead on real HDFS is down to
-about `1.7%`. The new `streaming-file` row moves the same retained/top-k shape
-into true streaming-input evidence. DEBS ranking and generic mutable rank
-remain gated.
+about `1.7%`. The new HDFS `streaming-file` row moves the same retained/top-k
+shape into true streaming-input evidence. The Windows streaming-file follow-up
+adds a much larger local real log source and shows a strong checked
+RSS/fixed-memory advantage with near-tie elapsed, but still not material GC
+share. DEBS ranking and generic mutable rank remain gated.
