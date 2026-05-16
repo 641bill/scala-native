@@ -1,7 +1,7 @@
 # Checked Overhead Removal Matrix
 
 Date: 2026-05-03
-Last updated: 2026-05-13 00:33 CEST
+Last updated: 2026-05-16 16:45 CEST
 
 Status: overhead-removal contract plus implementation checkpoint. This matrix
 separates three states:
@@ -41,6 +41,7 @@ separates three states:
 | Extra superclass hop in final open-region `allocUncheckedImpl` | Final `OpenStreamingRegion` implementations call the Rift/SafeZone allocator directly for operator-owned `allocOpen`, while public defensive `allocImpl` stays unchanged. | Validation passes. Clean focused final-clean 1M page-token rows are heap `38.378 ms`, checked Rift `25.007 ms`, and checked SafeZone-backed `25.591 ms`. Clean StreamFlex-design 20M x3 L1 rerun is heap `31.26 s`, checked scoped `24.39 s`, checked stream `22.81 s`; generated Common Crawl-shaped q1/q2 checked Rift page-token is `10.88/11.49 s` versus heap `17.49/16.73 s`. |
 | Per-allocation allocation-stats enabled lookup in final-clean Rift regions | `scalanative_rift_region` now caches allocation-stats mode at open, so raw/object/slow allocation paths read the region flag instead of calling `scalanative_rift_alloc_stats_enabled()` per allocation. `RIFT_ALLOC_STATS=1` still forces diagnostic counters. | The post-change L4 profiles for StreamFlex-design checked stream and Common Crawl-shaped q2 no longer sample `scalanative_rift_alloc_stats_enabled`. Focused 5M allocation is mixed (`71.702 ms` versus the earlier object-fast `69.912 ms`), so this is not a focused allocation win. It modestly helps application gates: page-token checked Rift `25.007 -> 24.618 ms`, StreamFlex-design checked stream `22.81 -> 22.55 s`, Common Crawl-shaped q2 checked Rift `11.49 -> 11.39 s`. |
 | Per-allocation current-slab zeroed flag load | `scalanative_rift_region` now caches whether the current slab is zeroed when a slab is opened, appended, or reset. Object allocation reads the cached region field before deciding whether `_platform_memset` is required, preserving zeroing semantics while avoiding a current-slab flag load on every object. | Runtime checked tests pass. Focused 5M checked Rift allocation improves from the earlier object-fast `69.912 ms` and cached-stats `71.702 ms` to `68.998 ms`, same checksum and zero GC. Focused page-token checked Rift improves `24.618 -> 23.930 ms`; StreamFlex-design checked stream improves `22.55 -> 22.31 s`; generated Common Crawl-shaped q2 checked Rift improves `11.39 -> 11.17 s`. |
+| Proof-gated no-zero for definitely initialized record objects | The Scala Native lowerer may call `scalanative_rift_region_alloc_nozero` for `RiftOpenStreamingHandle` class allocations only when the local NIR proof shows a concrete/non-module/no-subclass record, all fields are stored before first use/control-flow exit/non-pure operation, and the backend is Rift-owned. The proof now covers primitive-field records and definitely initialized reference-field records; unsafe no-zero remains a lower-bound control. | Focused primitive 5M/10M rows improve normal checked open-handle allocation to the unsafe no-zero ceiling (`65.528 ms` at 5M, `139.832 ms` at 10M). A 2026-05-16 5M reference-record closure rerun keeps normal checked open-handle allocation at the ceiling (`67.109 ms`, `0` zeroed objects, `5,000,001` zero-skipped objects) with matching checksum. Compiler safety passes `141/141`; runtime checked tests pass `65/65`. |
 | SafeZone root tracking in unsafe lower-bound mode | `safezone-rootless-32k` disables root add/remove. | Useful lower bound only; not a safety result. |
 
 ## Safe But Not Yet Removed
@@ -80,6 +81,21 @@ These should not be removed by safety claims alone:
 | Checked rank/table overhead | TableRank and long-key rank fail focused 1M gates. | Keep out of application claims; profile only after append/page/token path is fixed. |
 | Checked fold/aggregate overhead | `StreamWindowFold` lowers RSS/GC but loses elapsed at 1M. | Do not integrate into Common Crawl/NEXMark until focused gate passes. |
 | SafeZone trace overhead | `SAFEZONE_TRACE=1` creates a severe `safezone-rootless-32k` Common Crawl q1 pathology not reproduced without tracing. | Never use trace elapsed as headline; use only counters. |
+
+## Five-Optimization Closure Status
+
+This closes the current pass on the five requested optimization targets. Items
+are marked complete only when the safe/general path is implemented and
+validated; otherwise they remain explicit gates rather than speculative runtime
+changes.
+
+| Target | Status | Evidence / next rule |
+|---|---|---|
+| Constructor / field-store lowering | Partially complete through the no-zero proof: constructor semantics and field stores are preserved, while redundant object-body zeroing is removed only after all fields are proven assigned before first use. | Do not elide constructors or stores. Any deeper constructor lowering needs a separate NIR proof for no `this` escape, superclass initialization, and no virtual-call side effects. |
+| Proof-gated no-zero expansion | Complete for current safe record families: primitive-field records and definitely initialized reference-field records allocated through `RiftOpenStreamingHandle`. | Arrays, subclassable classes, module classes, non-local construction, control-flow exits before full initialization, impure calls, and `this` escape remain excluded. |
+| Traversal / cursor / capsule simplification | Implemented where ownership already proves safety: page-token cursor APIs use single-call owned cursors and no-drain close where query work is complete on append; StreamFlex capsules use bounded array transfer. | No further generic removal is justified by current profiles. Query/capsule/traversal CPU is real application/operator work unless a reusable API changes the computation shape. |
+| Operator/topology specialization | Implemented as reusable checked topologies rather than benchmark-local rewrites: direct epoch, retained epoch, page-token/window, and same-shape summary-on-append controls. | Summary-on-append rows are topology/operator evidence unless the natural heap/GC comparison also shows retained-object GC/RSS pressure. |
+| Root-free checked scoped backend | Still gated. Rootless/root-free rows remain lower-bound controls only. | No safe root-free claim until mixed-reference rejection covers `HeapRoot`, unrooted dynamic heap refs, heap-retains-region, outer-retains-inner, closure escape, ReML-style generic hiding, and mutable metadata hazards, and a benchmark row exists. |
 
 ## Latest Measurement
 

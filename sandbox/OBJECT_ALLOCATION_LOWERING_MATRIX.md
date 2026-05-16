@@ -1,7 +1,7 @@
 # Object Allocation Lowering Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-15 14:45 CEST
+Last updated: 2026-05-16 16:45 CEST
 
 Status: refined retained-region-array matrix validated at 20k smoke, 100k, 1M,
 and 10M, plus focused final-clean allocator-counter, cached-stats,
@@ -692,6 +692,21 @@ against heap and legacy, but it is not a new application speedup over the
 previous noisy 1M StreamFlexDesign row. That workload is now limited more by
 stable-state/query CPU, linked traversal, capsule add/drain, and allocation
 body outside memset than by reference-field zeroing alone.
+
+Closure rerun, 2026-05-16 16:30 CEST: the reference-record proof gate was
+rerun with the same 5M x 5 shape before closing the five-optimization pass.
+The normal checked open-handle row again zero-skipped every object and stayed
+at the unsafe no-zero ceiling:
+
+| Mode | Median ms | Median GC ms | Region op ms | Slow alloc ms | Region objects | Zeroed objects | Zero-skipped objects | RSS bytes | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-immix` | 311.085 | 234.608 | 0.000 | 0.000 | 0 | 0 | 0 | 640221184 | 3953966985786210233 |
+| `rift-checked-rift-open-handle` | 67.109 | 0.082 | 2.321 | 1.147 | 5000001 | 0 | 5000001 | 203866112 | 3953966985786210233 |
+| `rift-checked-rift-open-handle-nozero-unsafe` | 69.435 | 0.087 | 2.428 | 1.149 | 5000001 | 0 | 5000001 | 203866112 | 3953966985786210233 |
+| `rift-checked-safezone-improved-32k` | 72.053 | 0.000 | 0.000 | 0.000 | 0 | 0 | 0 | 204226560 | 3953966985786210233 |
+
+Validation for the closure pass: `RiftRegionCheckedCompilerTest` passed
+`141/141`, and `RiftRegionCheckedTest` passed `65/65`.
 
 ## Throughput/RSS Reuse Policy Gate
 
