@@ -667,11 +667,281 @@ object BroomRetainedDataflowMatrixHelpers {
     Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
   }
 
+  private def runCheckedScopedAggregate(): Outcome = {
+    val cfg = BroomRetainedDataflowConfig
+    val tableSize = nextPowerOfTwo(math.max(16, cfg.keySpace * 2))
+    val tableMask = tableSize - 1
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedObjects = 0L
+    var regionFreedObjects = 0L
+    var maxLiveObjects = 0L
+    var processed = 0
+    var group = 0
+
+    RiftRegion.streamingSafeZone { stream ?=>
+      while (processed < cfg.records) {
+        val remaining = cfg.records - processed
+        val slots = groupSlots(remaining, cfg)
+        val groupRecords = math.min(remaining, slots * cfg.recordsPerTimestamp)
+
+        val groupOutcome = RiftRegion.epoch { region ?=>
+          final class CheckedEvent(
+              val recordId: Int,
+              val timestamp: Int,
+              val key: Int,
+              val value: Int,
+              val hash: Long
+          ) {
+            var next: CheckedEvent^{region} = null
+          }
+
+          final class CheckedAggregateEntry(
+              val key: Int,
+              var count: Int,
+              var sum: Long
+          ) {
+            var next: CheckedAggregateEntry^{region} = null
+          }
+
+          val heads: Array[CheckedEvent^{region}]^{region} =
+            RiftRegion.allocOpen(new Array[CheckedEvent^{region}](slots))
+          val tails: Array[CheckedEvent^{region}]^{region} =
+            RiftRegion.allocOpen(new Array[CheckedEvent^{region}](slots))
+          val tables: Array[CheckedAggregateEntry^{region}]^{region} =
+            RiftRegion.allocOpen(
+              new Array[CheckedAggregateEntry^{region}](slots * tableSize)
+            )
+          val counts = new Array[Int](slots)
+          var localChecksum = checksum
+          var localOutput = 0L
+          var localRetained = 0L
+          var liveObjects = 3L
+          var local = 0
+
+          while (local < groupRecords) {
+            val slot = local % slots
+            val timestamp = group * cfg.activeTimestamps + slot
+            val recordId = processed + local
+            val key = generatedKey(recordId, timestamp)
+            val value = generatedValue(recordId, timestamp)
+            val hash = mix(recordId ^ (timestamp * 65537)).toLong
+            val event: CheckedEvent^{region} =
+              RiftRegion.allocOpen(
+                new CheckedEvent(recordId, timestamp, key, value, hash)
+              )
+            event.next = heads(slot)
+            if (heads(slot) == null) tails(slot) = event
+            heads(slot) = event
+            counts(slot) += 1
+            localRetained += 1L
+            liveObjects += 1L
+
+            val bucket = slot * tableSize + (mix(key) & tableMask)
+            var entry: CheckedAggregateEntry^{region} = tables(bucket)
+            var found: CheckedAggregateEntry^{region} = null
+            while (entry != null && found == null) {
+              if (entry.key == key) found = entry
+              entry = entry.next
+            }
+            if (found == null) {
+              found = RiftRegion.allocOpen(new CheckedAggregateEntry(key, 0, 0L))
+              found.next = tables(bucket)
+              tables(bucket) = found
+              localRetained += 1L
+              liveObjects += 1L
+            }
+            found.count += 1
+            found.sum += value.toLong
+
+            if (recordId % cfg.sampleEvery == 0)
+              localChecksum = fold(localChecksum, 11, timestamp, key, 1, hash)
+            local += 1
+          }
+
+          var slot = 0
+          while (slot < slots) {
+            val timestamp = group * cfg.activeTimestamps + slot
+            val head = heads(slot)
+            val tail = tails(slot)
+            if (head != null && tail != null)
+              localChecksum =
+                fold(localChecksum, 17, timestamp, head.key ^ tail.key, counts(slot), head.hash ^ tail.hash)
+            var bucket = 0
+            while (bucket < tableSize) {
+              var entry: CheckedAggregateEntry^{region} = tables(slot * tableSize + bucket)
+              while (entry != null) {
+                localChecksum =
+                  fold(localChecksum, 23, timestamp, entry.key, entry.count, entry.sum)
+                localOutput += 1L
+                entry = entry.next
+              }
+              bucket += 1
+            }
+            slot += 1
+          }
+
+          Outcome(localChecksum, localOutput, localRetained, localRetained + 3L, liveObjects)
+        }
+
+        checksum = groupOutcome.checksum
+        outputCount += groupOutcome.outputCount
+        retainedObjects += groupOutcome.retainedObjectProxy
+        regionFreedObjects += groupOutcome.regionFreedObjectProxy
+        if (groupOutcome.maxLiveObjectProxy > maxLiveObjects)
+          maxLiveObjects = groupOutcome.maxLiveObjectProxy
+        processed += groupRecords
+        group += 1
+      }
+    }
+
+    checksumSink = checksum
+    outputSink = outputCount
+    retainedSink = retainedObjects
+    Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
+  }
+
+  private def runCheckedScopedJoin(): Outcome = {
+    val cfg = BroomRetainedDataflowConfig
+    val tableSize = nextPowerOfTwo(math.max(16, cfg.keySpace * 2))
+    val tableMask = tableSize - 1
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedObjects = 0L
+    var regionFreedObjects = 0L
+    var maxLiveObjects = 0L
+    var processed = 0
+    var group = 0
+
+    RiftRegion.streamingSafeZone { stream ?=>
+      while (processed < cfg.records) {
+        val remaining = cfg.records - processed
+        val slots = groupSlots(remaining, cfg)
+        val groupRecords = math.min(remaining, slots * cfg.recordsPerTimestamp)
+
+        val groupOutcome = RiftRegion.epoch { region ?=>
+          final class CheckedJoinRecord(
+              val recordId: Int,
+              val timestamp: Int,
+              val key: Int,
+              val value: Int,
+              val hash: Long
+          ) {
+            var next: CheckedJoinRecord^{region} = null
+          }
+
+          val left: Array[CheckedJoinRecord^{region}]^{region} =
+            RiftRegion.allocOpen(new Array[CheckedJoinRecord^{region}](slots * tableSize))
+          val right: Array[CheckedJoinRecord^{region}]^{region} =
+            RiftRegion.allocOpen(new Array[CheckedJoinRecord^{region}](slots * tableSize))
+          var localChecksum = checksum
+          var localOutput = 0L
+          var localRetained = 0L
+          var liveObjects = 2L
+          var local = 0
+
+          while (local < groupRecords) {
+            val slot = local % slots
+            val timestamp = group * cfg.activeTimestamps + slot
+            val recordId = processed + local
+            val ordinal = local / slots
+            val side = ordinal & 1
+            val key = generatedKey(ordinal / 2, timestamp)
+            val value = generatedValue(recordId, timestamp)
+            val hash = mix(recordId ^ (key * 1000003) ^ (side * 17)).toLong
+            val bucket = slot * tableSize + (mix(key) & tableMask)
+            if (side == 0) {
+              val oldLeft: CheckedJoinRecord^{region} = left(bucket)
+              var cursor: CheckedJoinRecord^{region} = right(bucket)
+              while (cursor != null) {
+                if (cursor.key == key) {
+                  localChecksum =
+                    fold(localChecksum, 31, timestamp, key, 1, hash ^ cursor.hash)
+                  localOutput += 1L
+                }
+                cursor = cursor.next
+              }
+              left(bucket) =
+                RiftRegion.allocOpen(
+                  new CheckedJoinRecord(recordId, timestamp, key, value, hash)
+                )
+              left(bucket).next = oldLeft
+            } else {
+              val oldRight: CheckedJoinRecord^{region} = right(bucket)
+              var cursor: CheckedJoinRecord^{region} = left(bucket)
+              while (cursor != null) {
+                if (cursor.key == key) {
+                  localChecksum =
+                    fold(localChecksum, 37, timestamp, key, 1, hash ^ cursor.hash)
+                  localOutput += 1L
+                }
+                cursor = cursor.next
+              }
+              right(bucket) =
+                RiftRegion.allocOpen(
+                  new CheckedJoinRecord(recordId, timestamp, key, value, hash)
+                )
+              right(bucket).next = oldRight
+            }
+            localRetained += 1L
+            liveObjects += 1L
+            if (recordId % cfg.sampleEvery == 0)
+              localChecksum = fold(localChecksum, 41, timestamp, key, side, hash)
+            local += 1
+          }
+
+          var slot = 0
+          while (slot < slots) {
+            val timestamp = group * cfg.activeTimestamps + slot
+            var bucket = 0
+            var leftCount = 0
+            var rightCount = 0
+            while (bucket < tableSize) {
+              var l: CheckedJoinRecord^{region} = left(slot * tableSize + bucket)
+              while (l != null) {
+                leftCount += 1
+                l = l.next
+              }
+              var r: CheckedJoinRecord^{region} = right(slot * tableSize + bucket)
+              while (r != null) {
+                rightCount += 1
+                r = r.next
+              }
+              bucket += 1
+            }
+            localChecksum =
+              fold(localChecksum, 43, timestamp, leftCount, rightCount, leftCount.toLong + rightCount)
+            slot += 1
+          }
+
+          Outcome(localChecksum, localOutput, localRetained, localRetained + 2L, liveObjects)
+        }
+
+        checksum = groupOutcome.checksum
+        outputCount += groupOutcome.outputCount
+        retainedObjects += groupOutcome.retainedObjectProxy
+        regionFreedObjects += groupOutcome.regionFreedObjectProxy
+        if (groupOutcome.maxLiveObjectProxy > maxLiveObjects)
+          maxLiveObjects = groupOutcome.maxLiveObjectProxy
+        processed += groupRecords
+        group += 1
+      }
+    }
+
+    checksumSink = checksum
+    outputSink = outputCount
+    retainedSink = retainedObjects
+    Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
+  }
+
   private def canonicalMode(mode: String): String =
     mode match {
       case "heap-gc" | "gc-heap" | "heap-immix" | "heap" => "heap-gc"
       case "checked-rift" | "checked-epoch-stream" | "checked-region-stream" =>
         "checked-rift"
+      case "checked-region-scoped" | "checked-epoch-scoped" |
+          "best-safe-region" | "checked-rift-scoped" =>
+        "checked-region-scoped"
       case other =>
         throw new IllegalArgumentException(s"unknown Broom retained mode '$other'")
     }
@@ -692,6 +962,8 @@ object BroomRetainedDataflowMatrixHelpers {
       case ("heap-gc", "join")          => runHeapJoin()
       case ("checked-rift", "aggregate") => runCheckedAggregate()
       case ("checked-rift", "join")      => runCheckedJoin()
+      case ("checked-region-scoped", "aggregate") => runCheckedScopedAggregate()
+      case ("checked-region-scoped", "join")      => runCheckedScopedJoin()
       case other =>
         throw new IllegalArgumentException(
           s"unsupported Broom retained run selection $other"
@@ -699,7 +971,7 @@ object BroomRetainedDataflowMatrixHelpers {
     }
 
   private def usesRift(mode: String): Boolean =
-    canonicalMode(mode) == "checked-rift"
+    canonicalMode(mode) != "heap-gc"
 
   def runBenchmark(mode: String, workload: String): Unit = {
     val cfg = BroomRetainedDataflowConfig

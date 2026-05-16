@@ -9,7 +9,7 @@ summary=${BROOM_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${BROOM_BUILD:-1}
 platform=$(uname -s)
 workloads=(${(z)${BROOM_WORKLOADS:-"aggregate join"}})
-modes=(${(z)${BROOM_MODES:-"heap-gc checked-rift"}})
+modes=(${(z)${BROOM_MODES:-"heap-gc checked-rift checked-region-scoped"}})
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"
