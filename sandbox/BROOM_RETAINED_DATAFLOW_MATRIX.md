@@ -1,6 +1,6 @@
 # Broom Retained Dataflow Matrix
 
-Last updated: 2026-05-16 03:52 CEST
+Last updated: 2026-05-16 17:05 CEST
 
 Status: new prior-work-style retained-object dataflow benchmark. This matrix
 compares the natural heap/GC program against the checked Rift region program,
@@ -98,14 +98,18 @@ allocation attribution are enabled.
 
 | Records | Active timestamps | Workload | Mode | L1 real s | RSS bytes | Checksum | Output count | Claim |
 |---:|---:|---|---|---:|---:|---:|---:|---|
-| 1M | 4 | aggregate | `heap-gc` | `0.40` | `75644928` | `2843352872537677199` | `708604` | Natural heap baseline. |
-| 1M | 4 | aggregate | `checked-rift` | `0.24` | `13451264` | `2843352872537677199` | `708604` | Checked Rift is about `40.0%` faster and `82%` lower RSS. |
-| 1M | 4 | join | `heap-gc` | `0.31` | `74694656` | `-5733395378394929899` | `681426` | Natural heap baseline. |
-| 1M | 4 | join | `checked-rift` | `0.28` | `12713984` | `-5733395378394929899` | `681426` | Checked Rift is about `9.7%` faster and `83%` lower RSS. |
-| 5M | 4 | aggregate | `heap-gc` | `1.71` | `75759616` | `1129059544353065479` | `3546626` | Natural heap baseline. |
-| 5M | 4 | aggregate | `checked-rift` | `0.94` | `13484032` | `1129059544353065479` | `3546626` | Checked Rift is about `45.0%` faster and `82%` lower RSS. |
-| 5M | 4 | join | `heap-gc` | `1.35` | `74891264` | `8970609240165110799` | `3404170` | Natural heap baseline. |
-| 5M | 4 | join | `checked-rift` | `1.22` | `12730368` | `8970609240165110799` | `3404170` | Checked Rift is about `9.6%` faster and `83%` lower RSS. |
+| 1M | 4 | aggregate | `heap-gc` | `0.59` | `75710464` | `2843352872537677199` | `708604` | Natural heap baseline. |
+| 1M | 4 | aggregate | `checked-rift` | `0.18` | `13500416` | `2843352872537677199` | `708604` | Checked Rift is about `69.5%` faster and `82%` lower RSS. |
+| 1M | 4 | aggregate | `checked-region-scoped` | `0.23` | `13615104` | `2843352872537677199` | `708604` | Checked scoped backend is about `61.0%` faster than heap and about `27.8%` slower than checked Rift, with comparable RSS. |
+| 1M | 4 | join | `heap-gc` | `0.27` | `74743808` | `-5733395378394929899` | `681426` | Natural heap baseline. |
+| 1M | 4 | join | `checked-rift` | `0.22` | `12763136` | `-5733395378394929899` | `681426` | Checked Rift is about `18.5%` faster and `83%` lower RSS. |
+| 1M | 4 | join | `checked-region-scoped` | `0.23` | `12877824` | `-5733395378394929899` | `681426` | Checked scoped backend is about `14.8%` faster than heap and about `4.5%` slower than checked Rift, with comparable RSS. |
+| 5M | 4 | aggregate | `heap-gc` | `1.60` | `75808768` | `1129059544353065479` | `3546626` | Natural heap baseline. |
+| 5M | 4 | aggregate | `checked-rift` | `1.18` | `13533184` | `1129059544353065479` | `3546626` | Checked Rift is about `26.3%` faster and `82%` lower RSS. |
+| 5M | 4 | aggregate | `checked-region-scoped` | `1.31` | `13697024` | `1129059544353065479` | `3546626` | Checked scoped backend is about `18.1%` faster than heap and about `11.0%` slower than checked Rift, with comparable RSS. |
+| 5M | 4 | join | `heap-gc` | `1.46` | `74940416` | `8970609240165110799` | `3404170` | Natural heap baseline. |
+| 5M | 4 | join | `checked-rift` | `1.21` | `12779520` | `8970609240165110799` | `3404170` | Checked Rift is about `17.1%` faster and `83%` lower RSS. |
+| 5M | 4 | join | `checked-region-scoped` | `1.18` | `12943360` | `8970609240165110799` | `3404170` | Checked scoped backend is about `19.2%` faster than heap and slightly faster than checked Rift in this L1 rerun, with comparable RSS. |
 | 20M | 4 | aggregate | `heap-gc` | `5.27` | `75792384` | `-6213795708380666256` | `14180644` | Natural heap baseline. |
 | 20M | 4 | aggregate | `checked-rift` | `3.59` | `13565952` | `-6213795708380666256` | `14180644` | Checked Rift is about `31.9%` faster and `82%` lower RSS. |
 | 20M | 4 | aggregate | `checked-region-scoped` | `4.55` | `13729792` | `-6213795708380666256` | `14180644` | Checked scoped backend is about `13.7%` faster than heap and about `26.7%` slower than checked Rift, with comparable RSS. |
@@ -124,14 +128,18 @@ as final-clean headline elapsed timing.
 
 | Records | Active timestamps | Workload | Mode | Median ms | GC median ms | GC max ms | Runs with GC | RSS bytes | Region op ms | Region objects | Region resets |
 |---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1M | 4 | aggregate | `heap-gc` | `114.180` | `24.266` | `31.708` | `3/3` | `75644928` | `0.000` | `0` | `0` |
-| 1M | 4 | aggregate | `checked-rift` | `83.703` | `0.000` | `0.000` | `0/3` | `13451264` | `0.674` | `1708634` | `10` |
-| 1M | 4 | join | `heap-gc` | `106.751` | `13.470` | `17.351` | `3/3` | `74694656` | `0.000` | `0` | `0` |
-| 1M | 4 | join | `checked-rift` | `82.532` | `0.000` | `0.000` | `0/3` | `12713984` | `0.586` | `1000020` | `10` |
-| 5M | 4 | aggregate | `heap-gc` | `545.521` | `134.111` | `135.310` | `3/3` | `75759616` | `0.000` | `0` | `0` |
-| 5M | 4 | aggregate | `checked-rift` | `333.294` | `0.000` | `0.000` | `0/3` | `13484032` | `1.792` | `8546776` | `50` |
-| 5M | 4 | join | `heap-gc` | `502.627` | `57.235` | `70.762` | `3/3` | `74891264` | `0.000` | `0` | `0` |
-| 5M | 4 | join | `checked-rift` | `426.691` | `0.000` | `0.000` | `0/3` | `12730368` | `3.194` | `5000100` | `50` |
+| 1M | 4 | aggregate | `heap-gc` | `106.309` | `27.412` | `27.824` | `3/3` | `75808768` | `0.000` | `0` | `0` |
+| 1M | 4 | aggregate | `checked-rift` | `65.975` | `0.000` | `0.000` | `0/3` | `13631488` | `0.339` | `1708634` | `10` |
+| 1M | 4 | aggregate | `checked-region-scoped` | `79.657` | `0.000` | `0.000` | `0/3` | `13893632` | `0.000` | `0` | `0` |
+| 1M | 4 | join | `heap-gc` | `91.569` | `11.680` | `15.825` | `3/3` | `75448320` | `0.000` | `0` | `0` |
+| 1M | 4 | join | `checked-rift` | `76.459` | `0.000` | `0.000` | `0/3` | `12894208` | `0.402` | `1000020` | `10` |
+| 1M | 4 | join | `checked-region-scoped` | `76.802` | `0.000` | `0.000` | `0/3` | `13139968` | `0.000` | `0` | `0` |
+| 5M | 4 | aggregate | `heap-gc` | `439.733` | `104.789` | `107.161` | `3/3` | `75923456` | `0.000` | `0` | `0` |
+| 5M | 4 | aggregate | `checked-rift` | `316.369` | `0.000` | `0.000` | `0/3` | `13664256` | `1.320` | `8546776` | `50` |
+| 5M | 4 | aggregate | `checked-region-scoped` | `380.395` | `0.000` | `0.000` | `0/3` | `13860864` | `0.000` | `0` | `0` |
+| 5M | 4 | join | `heap-gc` | `413.254` | `54.116` | `64.931` | `3/3` | `75431936` | `0.000` | `0` | `0` |
+| 5M | 4 | join | `checked-rift` | `370.018` | `0.000` | `0.000` | `0/3` | `12910592` | `1.945` | `5000100` | `50` |
+| 5M | 4 | join | `checked-region-scoped` | `377.139` | `0.000` | `0.000` | `0/3` | `13139968` | `0.000` | `0` | `0` |
 | 20M | 4 | aggregate | `heap-gc` | `1728.037` | `410.002` | `414.132` | `3/3` | `75907072` | `0.000` | `0` | `0` |
 | 20M | 4 | aggregate | `checked-rift` | `1248.788` | `0.000` | `0.000` | `0/3` | `13729792` | `5.475` | `34181244` | `200` |
 | 20M | 4 | aggregate | `checked-region-scoped` | `1496.342` | `0.000` | `0.000` | `0/3` | `14041088` | `0.000` | `0` | `0` |
@@ -151,11 +159,12 @@ as final-clean headline elapsed timing.
 - Checked Rift removes timed heap GC and bulk-closes timestamp regions with
   low region-op time: about `5-8 ms` region op for 20M records and 200 resets
   in the latest scoped-comparison rerun.
-- The checked scoped backend now has a Broom comparison row. It matches
-  checksums and removes timed heap GC. On 20M aggregate it is faster than heap
-  but slower than checked Rift; on 20M join it is also faster than heap but
-  slightly slower than checked Rift in L1. It should be reported as a
-  backend/topology comparison under the unified Rift story.
+- The checked scoped backend now has Broom comparison rows at 1M, 5M, and 20M.
+  It matches checksums and removes timed heap GC throughout. It is faster than
+  heap and usually slower than checked Rift on aggregate; join is closer, with
+  checked scoped essentially tied with checked Rift at 1M/5M and slightly
+  behind at 20M. It should be reported as a backend/topology comparison under
+  the unified Rift story.
 - The high-active-timestamp variant confirms the expected RSS behavior:
   keeping more timestamp states live raises heap RSS to `232-239 MB`, while
   checked Rift stays near `53-56 MB`.
@@ -200,11 +209,21 @@ At `256M`, heap completes but is slower and uses about `232-239 MB` RSS. At
 with matching checksum/output and about `53-56 MB` total RSS because the
 timestamp-local retained records are region-owned and bulk-closed.
 
+## Scoped Backend Completion Follow-Up
+
+The 1M/5M checked scoped completion rows were rerun on 2026-05-16 after the
+optimization-closure checkpoint:
+
+- L1 1M: `/private/tmp/broom-retained-scoped-1m-20260516/summary.tsv`
+- L2 1M: `/private/tmp/broom-retained-scoped-1m-l2-20260516/summary.tsv`
+- L1 5M: `/private/tmp/broom-retained-scoped-5m-20260516/summary.tsv`
+- L2 5M: `/private/tmp/broom-retained-scoped-5m-l2-20260516/summary.tsv`
+
+These rows fill the safe-backend scale curve; no full Broom rerun is required
+unless the benchmark implementation changes.
+
 ## Next Work
 
-- Add 1M/5M checked scoped rows only if the presentation needs the full scale
-  curve for the safe backend comparison; the 20M row already covers the
-  headline backend comparison.
 - Use this benchmark as the first retained-object GC-heavy dataflow case study
   while continuing the real-input search for sessions, joins, timestamp
   dictionaries, transaction-local objects, graph epochs, and text/top-k
