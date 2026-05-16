@@ -1,7 +1,7 @@
 # LogHub Region Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-16 15:20 CEST
+Last updated: 2026-05-16 16:30 CEST
 
 Status: implemented real-input candidate. The matrix has a generated fallback
 for compile/smoke validation, a file-backed byte-line path for extracted
@@ -80,6 +80,8 @@ The runner accepts:
 - `rift-trusted-hp`
 - `rift-trusted-streaming`
 - `rift-checked-page-token`
+- `rift-checked-page-token-open-handle`
+- `rift-checked-page-token-legacy`
 - `rift-checked-safezone-page-token`
 - `heap-direct-epoch`
 - `rift-checked-direct-epoch`
@@ -100,6 +102,12 @@ generated/indexable q2/q3. `rift-checked-direct-epoch-legacy` preserves the
 old generic checked allocation lowering as a mechanism control, and
 `rift-checked-direct-epoch-open-handle` is an explicit alias for the new
 handle-backed path.
+
+For page-token rows, `rift-checked-page-token-open-handle` is available as an
+experimental handle-backed allocation control. The default
+`rift-checked-page-token` remains on the legacy/generic path in this matrix
+because the 1M q2/q3 gate below was only a small/noisy mechanism win and did
+not consistently beat the better topology/backend rows.
 
 ## Commands
 
@@ -226,6 +234,49 @@ Interpretation:
   epoch and `4.0%` faster than checked scoped direct epoch. The q3 row remains
   query/CPU heavy, so this is a smaller allocation-lowering transfer.
 - Checksums and output counts match across all modes.
+
+## Generated Page-Token Open-Handle Gate
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+LOGHUB_LINES=1000000 \
+LOGHUB_BENCHMARK_RUNS=3 \
+LOGHUB_WARMUPS=1 \
+LOGHUB_QUERIES="q2-window-counts q3-template-session" \
+LOGHUB_MODES="heap-immix rift-checked-page-token rift-checked-page-token-open-handle rift-checked-page-token-legacy rift-checked-safezone-page-token" \
+LOGHUB_OUTPUT_DIR=/private/tmp/loghub-page-token-open-handle-gate-1m-20260516 \
+zsh sandbox/run_loghub_region_matrix.sh
+```
+
+This is a mechanism-control gate for the Rift-backed page-token allocator. It
+is not promoted to the LogHub default because the improvement is small and the
+direct-epoch topology is the better generated/indexable q2/q3 shape.
+
+| Query | Mode | Median ms | GC ms | RSS | Checksum | Output |
+|---|---|---:|---:|---:|---:|---:|
+| q2-window-counts | heap-immix | 518.300 | 126.070 | 812777472 | -7709990302891202320 | 163487 |
+| q2-window-counts | rift-checked-page-token | 566.360 | 0.000 | 801882112 | -7709990302891202320 | 163487 |
+| q2-window-counts | rift-checked-page-token-open-handle | 548.894 | 0.000 | 801865728 | -7709990302891202320 | 163487 |
+| q2-window-counts | rift-checked-page-token-legacy | 558.582 | 0.000 | 801882112 | -7709990302891202320 | 163487 |
+| q2-window-counts | rift-checked-safezone-page-token | 543.155 | 0.000 | 801996800 | -7709990302891202320 | 163487 |
+| q3-template-session | heap-immix | 2229.223 | 160.218 | 2291154944 | -1899680319541187710 | 312151 |
+| q3-template-session | rift-checked-page-token | 2407.616 | 0.000 | 2375516160 | -1899680319541187710 | 312151 |
+| q3-template-session | rift-checked-page-token-open-handle | 2310.891 | 0.000 | 2375516160 | -1899680319541187710 | 312151 |
+| q3-template-session | rift-checked-page-token-legacy | 2357.261 | 0.000 | 2375532544 | -1899680319541187710 | 312151 |
+| q3-template-session | rift-checked-safezone-page-token | 2448.068 | 0.000 | 2374762496 | -1899680319541187710 | 312151 |
+
+Interpretation:
+
+- q2: the explicit open-handle row is `1.7%` faster than the legacy control,
+  but checked SafeZone page-token is still slightly faster and the direct-epoch
+  topology is much faster on generated/indexable q2.
+- q3: the explicit open-handle row is `2.0%` faster than the legacy control,
+  but the row is CPU/query dominated and still slower than the direct-epoch
+  generated q3 row.
+- Checksums and output counts match across all modes. Keep this as an
+  appendix/control row unless later page-token workloads show a larger win.
 
 ## Real BGL Results
 
