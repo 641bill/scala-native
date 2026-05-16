@@ -1,6 +1,6 @@
 # Stancu Region Matrix
 
-Last updated: 2026-05-08 21:07 CEST
+Last updated: 2026-05-16 14:55 CEST
 
 Status: Stancu-style annotation/accounting probe with validated smoke, default
 median, pressure median, heavier-object median, boundary-sensitivity runs, and
@@ -33,8 +33,10 @@ The current workload is a small warehouse transaction shape:
 Heap mode allocates transaction objects with `new`; SafeZone mode allocates
 them in Scala Native SafeZone; Rift modes allocate them with `region.alloc`.
 Checked direct epoch modes allocate transaction line/order objects inside one
-`RiftRegion.epoch { ... }` per transaction batch while durable stock/revenue
-metadata stays on the heap.
+transaction-batch epoch while durable stock/revenue metadata stays on the heap.
+The default Rift-backed checked direct epoch path now uses the backend-known
+open-handle lowering; `rift-checked-direct-epoch-legacy` keeps the previous
+generic `RiftRegion.epoch`/`allocOpen` path as a mechanism control.
 
 ## Default Configuration
 
@@ -81,6 +83,45 @@ STANCU_OUTPUT_DIR=/tmp/stancu-region-instrumented \
 Compile, smoke, default local medians, and one transaction-pressure run have
 been recorded. These are local Stancu-style accounting numbers, not an exact
 Stancu et al. implementation or SPECjbb2005 reproduction.
+
+The 2026-05-16 allocation-lowering follow-up promotes the Rift-backed checked
+direct epoch path to `RiftRegion.streamingOpenHandle` plus
+`RiftAllocator.allocateOpenHandle`. The old generic checked path remains
+available as `rift-checked-direct-epoch-legacy`.
+
+Validation commands run on 2026-05-16:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile
+
+STANCU_TRANSACTIONS=20000 STANCU_BENCHMARK_RUNS=2 STANCU_WARMUPS=0 \
+STANCU_MODES="heap rift-checked-direct-epoch rift-checked-direct-epoch-legacy rift-checked-safezone-direct-epoch" \
+STANCU_OUTPUT_DIR=/private/tmp/stancu-handle-gate-20260516 \
+  zsh sandbox/run_stancu_region_instrumented_matrix.sh
+
+STANCU_BUILD=0 STANCU_TRANSACTIONS=200000 STANCU_BENCHMARK_RUNS=3 \
+STANCU_WARMUPS=1 \
+STANCU_MODES="heap rift-checked-direct-epoch rift-checked-direct-epoch-legacy rift-checked-safezone-direct-epoch" \
+STANCU_OUTPUT_DIR=/private/tmp/stancu-handle-gate-200k-20260516 \
+  zsh sandbox/run_stancu_region_instrumented_matrix.sh
+```
+
+All modes matched checksum `-1953196317317355226` in the 200k gate.
+
+| Mode | Median elapsed ms | Median GC ms | Median Rift op ms | Median slow alloc ms | Region objects | Opens / closes / resets | Peak RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| heap | 44.144 | 4.837 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 7962624 |
+| rift-checked-direct-epoch | 28.554 | 0.000 | 0.219 | 0.088 | 1600000 | 1 / 1 / 3125 | 7995392 |
+| rift-checked-direct-epoch-legacy | 29.687 | 0.000 | 0.239 | 0.108 | 1600000 | 1 / 1 / 3125 | 8011776 |
+| rift-checked-safezone-direct-epoch | 26.405 | 0.000 | 0.000 | 0.000 | 0 | 0 / 0 / 0 | 8044544 |
+
+Interpretation: the backend-known checked direct epoch path is `3.8%` faster
+than the legacy generic checked path at the 200k gate and removes heap's
+`4.837 ms` median timed GC. The checked SafeZone-backed scoped row is still
+fastest for this small local Stancu probe, so the result is a general
+allocation-lowering transfer gate, not a new headline replacement for the
+SPECjbb2005-workload port.
 
 Validation commands run on 2026-04-25:
 
