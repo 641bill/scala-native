@@ -247,6 +247,12 @@ run_case() {
     checked-epoch-stream|checked-region-stream-epoch|rift-checked-direct-epoch)
       binary_mode="rift-checked-direct-epoch"
       ;;
+    checked-epoch-stream-open-handle|checked-region-stream-epoch-open-handle|rift-checked-direct-epoch-open-handle)
+      binary_mode="rift-checked-direct-epoch-open-handle"
+      ;;
+    checked-epoch-stream-legacy|checked-region-stream-epoch-legacy|rift-checked-direct-epoch-legacy)
+      binary_mode="rift-checked-direct-epoch-legacy"
+      ;;
     checked-epoch-scoped|checked-region-scoped-epoch|rift-checked-safezone-direct-epoch)
       binary_mode="rift-checked-safezone-direct-epoch"
       roots_mode="1"

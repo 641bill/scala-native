@@ -1,7 +1,7 @@
 # LogHub Region Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-13 16:44 CEST
+Last updated: 2026-05-16 15:20 CEST
 
 Status: implemented real-input candidate. The matrix has a generated fallback
 for compile/smoke validation, a file-backed byte-line path for extracted
@@ -83,6 +83,8 @@ The runner accepts:
 - `rift-checked-safezone-page-token`
 - `heap-direct-epoch`
 - `rift-checked-direct-epoch`
+- `rift-checked-direct-epoch-open-handle`
+- `rift-checked-direct-epoch-legacy`
 - `rift-checked-safezone-direct-epoch`
 
 Default runs include heap, improved SafeZone-32k, and checked scoped
@@ -92,6 +94,12 @@ include rootless/trusted controls.
 The direct-epoch modes currently support generated/indexable q2/q3 rows only.
 Real file-backed and streaming-file LogHub rows remain page-token rows until a
 preloaded real-log path or indexable streaming bucket iterator is added.
+
+`rift-checked-direct-epoch` is now the handle-backed checked Rift default for
+generated/indexable q2/q3. `rift-checked-direct-epoch-legacy` preserves the
+old generic checked allocation lowering as a mechanism control, and
+`rift-checked-direct-epoch-open-handle` is an explicit alias for the new
+handle-backed path.
 
 ## Commands
 
@@ -176,6 +184,48 @@ The generated smoke compiled and ran successfully. Heap and checked
 SafeZone-backed page-token rows matched checksums and output counts for q0/q1/q2.
 At 20k generated rows, heap timed GC was zero and elapsed differences are not
 headline evidence.
+
+## Generated Direct-Epoch Allocation-Lowering Gate
+
+Command:
+
+```sh
+cd /Users/siyaoliu/rift/scala-native-rift
+LOGHUB_BUILD=0 \
+LOGHUB_LINES=1000000 \
+LOGHUB_BENCHMARK_RUNS=3 \
+LOGHUB_WARMUPS=1 \
+LOGHUB_QUERIES="q2-window-counts q3-template-session" \
+LOGHUB_MODES="heap-immix rift-checked-direct-epoch rift-checked-direct-epoch-legacy rift-checked-safezone-direct-epoch" \
+LOGHUB_OUTPUT_DIR=/private/tmp/loghub-direct-epoch-handle-gate-1m-20260516 \
+zsh sandbox/run_loghub_region_matrix.sh
+```
+
+This is remaining-path allocation-lowering evidence, not a new real-input
+headline row. It validates that generated/indexable LogHub direct-epoch rows can
+use the same active-handle lowering already used by Dataflow, Broom,
+StreamFlexDesign, Theodolite, Stancu, and the SPECjbb2005-style port.
+
+| Query | Mode | Median ms | GC ms | RSS | Checksum | Output |
+|---|---|---:|---:|---:|---:|---:|
+| q2-window-counts | heap-immix | 542.854 | 143.713 | 812761088 | -7709990302891202320 | 163487 |
+| q2-window-counts | rift-checked-direct-epoch | 192.452 | 0.000 | 678756352 | -7709990302891202320 | 163487 |
+| q2-window-counts | rift-checked-direct-epoch-legacy | 222.544 | 0.000 | 678772736 | -7709990302891202320 | 163487 |
+| q2-window-counts | rift-checked-safezone-direct-epoch | 222.620 | 0.000 | 678789120 | -7709990302891202320 | 163487 |
+| q3-template-session | heap-immix | 2161.937 | 140.570 | 2291171328 | -1899680319541187710 | 312151 |
+| q3-template-session | rift-checked-direct-epoch | 1794.369 | 0.000 | 2291056640 | -1899680319541187710 | 312151 |
+| q3-template-session | rift-checked-direct-epoch-legacy | 1837.885 | 0.000 | 2291073024 | -1899680319541187710 | 312151 |
+| q3-template-session | rift-checked-safezone-direct-epoch | 1869.150 | 0.000 | 2291089408 | -1899680319541187710 | 312151 |
+
+Interpretation:
+
+- q2: handle-backed direct epoch is `13.5%` faster than legacy checked direct
+  epoch, and faster than the checked scoped direct-epoch backend on this
+  generated/indexable row.
+- q3: handle-backed direct epoch is `2.4%` faster than legacy checked direct
+  epoch and `4.0%` faster than checked scoped direct epoch. The q3 row remains
+  query/CPU heavy, so this is a smaller allocation-lowering transfer.
+- Checksums and output counts match across all modes.
 
 ## Real BGL Results
 
