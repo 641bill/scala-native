@@ -1,6 +1,6 @@
 # Broom Retained Dataflow Matrix
 
-Last updated: 2026-05-17 14:12 CEST
+Last updated: 2026-05-17 15:55 CEST
 
 Status: new prior-work-style retained-object dataflow benchmark. This matrix
 compares the natural heap/GC program against the checked Rift region program,
@@ -556,6 +556,74 @@ spends about `28.7%` of L2 elapsed in timed GC; checked Rift removes that GC,
 is about `33.1%` faster in L1, about `29.9%` faster in L2, and cuts RSS by
 about `78%`. Heap caps down to `256M` complete, so this row is not a
 fixed-memory failure case; the evidence is throughput, GC, and RSS.
+
+## Q17 TPC-H DBGEN Input
+
+This is the extraction-free TPC-H-shaped follow-up. The runner uses
+`BROOM_Q17_INPUT_MODE=tpch-dbgen` to generate `part.tbl` and `lineitem.tbl` in
+a temporary directory before each matrix case, then streams those generated
+tables through the existing TPC-H file mode. The temporary tables are deleted
+after the case, so no `cache/tpch-sf*` table directories are required.
+
+Important classification: this is still methodology evidence, not an official
+TPC-H benchmark result and not an exact Broom artifact reproduction. It is more
+realistic than the deterministic q17 generator because it uses DBGEN table
+shapes, keys, brands, containers, quantities, and extended prices.
+
+20k SF0.01 smoke:
+
+```sh
+BROOM_BUILD=0 \
+BROOM_WORKLOADS=q17 \
+BROOM_MODES="heap-gc checked-rift checked-region-scoped" \
+BROOM_RECORDS=20000 \
+BROOM_RECORDS_PER_TIMESTAMP=5000 \
+BROOM_ACTIVE_TIMESTAMPS=4 \
+BROOM_BENCHMARK_RUNS=1 \
+BROOM_WARMUPS=0 \
+BROOM_Q17_INPUT_MODE=tpch-dbgen \
+BROOM_TPCH_SCALE=0.01 \
+BROOM_OUTPUT_DIR=/private/tmp/broom-q17-tpch-smoke-20260517 \
+zsh sandbox/run_broom_retained_dataflow_matrix.sh
+```
+
+All modes matched checksum/output. SF0.01 produced no selected Q17 output rows,
+so the first meaningful scale row used SF0.1.
+
+1M SF0.1 L2 rows:
+
+| Mode | External real s | Median ms | GC median ms | GC max ms | Runs with GC | Checksum | Output count | Retained proxy | Region-freed proxy |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `8.35` | `2081.398` | `115.209` | `127.583` | `3/3` | `-6444010205600032488` | `19` | `1287368` | `0` |
+| `checked-rift` | `7.90` | `1985.524` | `41.541` | `41.835` | `3/3` | `-6444010205600032488` | `19` | `1287368` | `1287375` |
+| `checked-region-scoped` | `8.09` | `2016.432` | `91.229` | `92.115` | `3/3` | `-6444010205600032488` | `19` | `1287368` | `1287375` |
+
+The attempted 5M SF0.1 row exhausted the finite lineitem source and therefore
+repeated the effective 1M source size. The real 5M row used SF1.
+
+5M SF1 L1 final-clean rows:
+
+| Mode | L1 real s | RSS bytes | Checksum | Output count | Retained proxy | Region-freed proxy |
+|---|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `19.29` | `309035008` | `2197972896625943876` | `33` | `14400804` | `0` |
+| `checked-rift` | `18.03` | `42909696` | `2197972896625943876` | `33` | `14400804` | `14400854` |
+| `checked-region-scoped` | `19.56` | `43106304` | `2197972896625943876` | `33` | `14400804` | `14400854` |
+
+5M SF1 L2 standard-stat rows:
+
+| Mode | Median ms | Min ms | Max ms | GC median ms | GC max ms | Runs with GC | Region op ms | Region objects | Region resets | Max live proxy |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `20421.183` | `18599.484` | `21937.133` | `796.563` | `847.157` | `3/3` | `0.000` | `0` | `0` | `288440` |
+| `checked-rift` | `17213.110` | `17168.249` | `17268.576` | `441.747` | `467.670` | `3/3` | `4.231` | `14400854` | `50` | `288441` |
+| `checked-region-scoped` | `19234.068` | `18676.390` | `20082.614` | `866.379` | `995.698` | `3/3` | `0.000` | `0` | `0` | `288441` |
+
+Interpretation: DBGEN-backed q17 confirms the retained join/aggregate shape on
+a TPC-H-style table source. At 5M SF1, checked Rift is about `6.5%` faster than
+natural heap in L1, about `15.7%` faster in L2, cuts max RSS by about `86%`,
+and reduces timed GC from `796.563 ms` to `441.747 ms`. This is a useful
+prior-work-style retained-object row, but it is not as strong as the generated
+active-16 q17 row. Checked scoped keeps the same low RSS but does not beat heap
+on L1 elapsed in this DBGEN-backed configuration.
 
 ## Next Work
 
