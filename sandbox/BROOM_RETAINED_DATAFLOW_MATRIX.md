@@ -1,6 +1,6 @@
 # Broom Retained Dataflow Matrix
 
-Last updated: 2026-05-16 17:05 CEST
+Last updated: 2026-05-16 18:20 CEST
 
 Status: new prior-work-style retained-object dataflow benchmark. This matrix
 compares the natural heap/GC program against the checked Rift region program,
@@ -151,6 +151,84 @@ as final-clean headline elapsed timing.
 | 1M | 16 | join | `heap-gc` | `166.912` | `28.080` | `28.779` | `3/3` | `163004416` | `0.000` | `0` | `0` |
 | 1M | 16 | join | `checked-rift` | `143.453` | `0.000` | `0.000` | `0/3` | `56623104` | `0.883` | `1000006` | `3` |
 
+## Active-16 Scale Follow-Up
+
+Date/time: 2026-05-16 17:55 CEST.
+
+This follow-up extends the high-live-state row from 1M to 5M records while
+keeping `BROOM_ACTIVE_TIMESTAMPS=16`, `BROOM_RECORDS_PER_TIMESTAMP=25000`,
+and `BROOM_KEY_SPACE=65536`. It is the next promising benchmark after the
+LogHub q3 active-window triage because it spends a much larger share of the
+work loop in heap GC while retaining ordinary timestamp-local objects.
+
+L1 final-clean, 5M records x3:
+
+| Workload | Mode | L1 real s | RSS bytes | Checksum | Output count | Claim |
+|---|---|---:|---:|---:|---:|---|
+| aggregate | `heap-gc` | `2.84` | `235880448` | `-5905754216353393596` | `4203692` | Natural heap baseline. |
+| aggregate | `checked-rift` | `2.06` | `53248000` | `-5905754216353393596` | `4203692` | Checked Rift is about `27.5%` faster and about `77%` lower RSS. |
+| aggregate | `checked-region-scoped` | `2.91` | `53641216` | `-5905754216353393596` | `4203692` | Safe scoped backend removes GC/RSS pressure but is slightly slower than heap on elapsed in this high-active aggregate row. |
+| join | `heap-gc` | `2.72` | `362315776` | `-7727222760792553569` | `2955614` | Natural heap baseline. |
+| join | `checked-rift` | `2.04` | `56557568` | `-7727222760792553569` | `2955614` | Checked Rift is about `25.0%` faster and about `84%` lower RSS. |
+| join | `checked-region-scoped` | `2.24` | `56819712` | `-7727222760792553569` | `2955614` | Safe scoped backend is about `17.6%` faster than heap and about `84%` lower RSS. |
+
+L2 standard stats, 5M records x3:
+
+| Workload | Mode | Median ms | GC median ms | GC max ms | Runs with GC | Region op ms | Region objects | Region resets |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| aggregate | `heap-gc` | `869.384` | `176.734` | `203.724` | `3/3` | `0.000` | `0` | `0` |
+| aggregate | `checked-rift` | `715.297` | `0.000` | `0.000` | `0/3` | `4.524` | `9203731` | `13` |
+| aggregate | `checked-region-scoped` | `923.846` | `0.000` | `0.000` | `0/3` | `0.000` | `0` | `0` |
+| join | `heap-gc` | `791.787` | `147.124` | `155.291` | `3/3` | `0.000` | `0` | `0` |
+| join | `checked-rift` | `690.092` | `0.000` | `0.000` | `0/3` | `5.578` | `5000026` | `13` |
+| join | `checked-region-scoped` | `753.323` | `0.000` | `0.000` | `0/3` | `0.000` | `0` | `0` |
+
+Interpretation: the 5M active-16 row strengthens the Broom-style case study.
+Heap spends about `20.3%` of aggregate L2 time and `18.6%` of join L2 time in
+timed GC. Checked Rift removes that GC, stays low-RSS, and has small region-op
+time relative to elapsed. This is a stronger GC-heavy data-processing row than
+the LogHub q3 active-window triage.
+
+### 20M Active-16 Follow-Up
+
+Date/time: 2026-05-16 18:20 CEST.
+
+This follow-up scales the same high-live-state configuration to 20M records.
+Raw summaries:
+
+- `/Users/siyaoliu/rift/cache/broom-retained-20m-active16-20260516/summary.tsv`
+- `/Users/siyaoliu/rift/cache/broom-retained-20m-active16-heapcaps-20260516/summary.tsv`
+
+L1 final-clean and L2 standard-stat rows, 20M records x3:
+
+| Workload | Mode | L1 real s | RSS bytes | Median ms | GC median ms | GC max ms | Runs with GC | Region op ms | Region objects | Region resets | Checksum | Output count |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| aggregate | `heap-gc` | `10.78` | `236240896` | `4235.563` | `953.153` | `2241.709` | `3/3` | `0.000` | `0` | `0` | `-1247762236770718130` | `16814775` |
+| aggregate | `checked-rift` | `8.48` | `53264384` | `2904.092` | `0.000` | `0.000` | `0/3` | `15.371` | `36814925` | `50` | `-1247762236770718130` | `16814775` |
+| aggregate | `checked-region-scoped` | `11.51` | `53657600` | `3905.089` | `0.000` | `0.000` | `0/3` | `0.000` | `0` | `0` | `-1247762236770718130` | `16814775` |
+| join | `heap-gc` | `9.88` | `438140928` | `3133.932` | `486.649` | `490.029` | `3/3` | `0.000` | `0` | `0` | `8550799944693742972` | `11813690` |
+| join | `checked-rift` | `8.09` | `56557568` | `2864.439` | `0.000` | `0.000` | `0/3` | `20.990` | `20000100` | `50` | `8550799944693742972` | `11813690` |
+| join | `checked-region-scoped` | `9.15` | `56901632` | `3141.022` | `0.000` | `0.000` | `0/3` | `0.000` | `0` | `0` | `8550799944693742972` | `11813690` |
+
+Heap-cap rows, 20M records x3:
+
+| Workload | Mode | Heap cap | Status | L1 real s | RSS bytes | Median ms | GC median ms | GC max ms | GC collections | Checksum | Output count |
+|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| aggregate | `heap-gc` | `512M` | completed | `15.85` | `398475264` | `3802.005` | `912.593` | `1574.844` | `32` | `-1247762236770718130` | `16814775` |
+| aggregate | `heap-gc` | `384M` | OOM after two timed runs | `15.41` | `314228736` | n/a | n/a | n/a | n/a |  |  |
+| aggregate | `heap-gc` | `256M` | OOM after two timed runs | `13.29` | `258031616` | n/a | n/a | n/a | n/a |  |  |
+| join | `heap-gc` | `512M` | completed | `14.30` | `473513984` | `3249.380` | `455.743` | `494.576` | `14` | `8550799944693742972` | `11813690` |
+| join | `heap-gc` | `384M` | OOM before timed output | `1.29` | `273088512` | n/a | n/a | n/a | n/a |  |  |
+| join | `heap-gc` | `256M` | OOM before timed output | `0.93` | `222494720` | n/a | n/a | n/a | n/a |  |  |
+
+Interpretation: this is the strongest Broom-style retained-object row so far.
+At 20M active-16, heap spends about `22.5%` of aggregate median L2 time and
+`15.5%` of join median L2 time in timed GC. Checked Rift removes that GC,
+improves L1 elapsed by about `21.3%` on aggregate and `18.1%` on join, and
+cuts RSS by about `77.5%` and `87.1%`, respectively. The heap-cap rows add a
+fixed-memory signal: heap completes at `512M` but fails at `384M`/`256M`,
+while the checked Rift rows complete uncapped at about `53-57 MB` RSS.
+
 ## Interpretation
 
 - This matrix finally gives a Broom-like retained-object row where heap GC is
@@ -166,8 +244,8 @@ as final-clean headline elapsed timing.
   behind at 20M. It should be reported as a backend/topology comparison under
   the unified Rift story.
 - The high-active-timestamp variant confirms the expected RSS behavior:
-  keeping more timestamp states live raises heap RSS to `232-239 MB`, while
-  checked Rift stays near `53-56 MB`.
+  keeping more timestamp states live raises heap RSS to hundreds of MB
+  (`236-438 MB` at 20M active-16), while checked Rift stays near `53-57 MB`.
 - The headline comparison is natural heap/GC versus checked Rift. Same-shape
   retained heap/drop-anchor controls are still valuable appendix evidence, but
   they are not the main prior-work-style comparison for this benchmark.
