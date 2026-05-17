@@ -1,6 +1,6 @@
 # Broom Retained Dataflow Matrix
 
-Last updated: 2026-05-16 18:20 CEST
+Last updated: 2026-05-17 02:54 CEST
 
 Status: new prior-work-style retained-object dataflow benchmark. This matrix
 compares the natural heap/GC program against the checked Rift region program,
@@ -22,6 +22,10 @@ records are retained until a notification/epoch boundary:
 - `join`: allocate left/right ordinary records in per-timestamp per-key
   dictionaries, emit matches while retaining active timestamp state, then
   notify/close the timestamp.
+- `q17` / `tpch-q17` / `q17-retained`: allocate deterministic `Part` and
+  `LineItem`-like records, retain lineitems in per-timestamp per-part
+  dictionaries, retain per-part aggregate entries, then compute a
+  TPC-H-Q17-style below-average quantity/revenue filter at timestamp close.
 - high-cardinality/active-timestamp variants keep multiple timestamp states
   live to increase heap traversal and RSS pressure.
 
@@ -300,9 +304,134 @@ optimization-closure checkpoint:
 These rows fill the safe-backend scale curve; no full Broom rerun is required
 unless the benchmark implementation changes.
 
+## TPC-H Q17-Style Retained Follow-Up
+
+Date/time: 2026-05-17 02:54 CEST.
+
+This follow-up adds a third Broom/Naiad-style workload, `q17`, with aliases
+`tpch-q17` and `q17-retained`. It is deterministic generated methodology
+evidence, not an exact TPC-H artifact reproduction. The workload keeps the
+prior-work headline comparison style: natural heap/GC versus checked Rift, with
+`checked-region-scoped` as the best-safe-backend comparison row.
+
+Query shape:
+
+- generate deterministic `Part` metadata and `LineItem`-like records;
+- retain ordinary lineitem objects per timestamp and part key;
+- retain per-part aggregate entries with quantity count and sum;
+- at timestamp notify/close, select rows whose quantity is below one fifth of
+  that part's average quantity and accumulate revenue/checksum;
+- keep durable constants and primitive counters as heap/control metadata.
+
+20k smoke:
+
+```sh
+RIFT_FINAL_CLEAN=1 \
+BROOM_OUTPUT_DIR=/private/tmp/broom-q17-smoke-20260517 \
+BROOM_BUILD=1 \
+BROOM_RECORDS=20000 \
+BROOM_RECORDS_PER_TIMESTAMP=2500 \
+BROOM_ACTIVE_TIMESTAMPS=4 \
+BROOM_KEY_SPACE=4096 \
+BROOM_BENCHMARK_RUNS=1 \
+BROOM_WARMUPS=0 \
+BROOM_WORKLOADS="q17" \
+BROOM_MODES="heap-gc checked-rift checked-region-scoped" \
+zsh sandbox/run_broom_retained_dataflow_matrix.sh
+```
+
+The smoke matched checksum/output across all modes:
+
+| Mode | Checksum | Output count | Retained object proxy | Region-freed proxy | Max live proxy |
+|---|---:|---:|---:|---:|---:|
+| `heap-gc` | `-4880530136591270732` | `44` | `29354` | `0` | `14678` |
+| `checked-rift` | `-4880530136591270732` | `44` | `29354` | `29356` | `14679` |
+| `checked-region-scoped` | `-4880530136591270732` | `44` | `29354` | `29356` | `14679` |
+
+### Q17 Active-4 Scale
+
+Active-4 rows use `BROOM_RECORDS_PER_TIMESTAMP=25000`,
+`BROOM_ACTIVE_TIMESTAMPS=4`, and `BROOM_KEY_SPACE=32768`.
+
+L1 final-clean rows:
+
+| Records | Mode | L1 real s | RSS bytes | Checksum | Output count | Claim |
+|---:|---|---:|---:|---:|---:|---|
+| 1M | `heap-gc` | `0.46` | `39354368` | `-4578452102221460627` | `2203` | Natural heap baseline. |
+| 1M | `checked-rift` | `0.39` | `13139968` | `-4578452102221460627` | `2203` | Checked Rift is about `15.2%` faster and about `67%` lower RSS. |
+| 1M | `checked-region-scoped` | `0.46` | `13303808` | `-4578452102221460627` | `2203` | Safe scoped backend removes timed GC in L2 and lowers RSS, but is an elapsed tie at 1M L1. |
+| 5M | `heap-gc` | `1.90` | `39354368` | `-7339711446398030577` | `11380` | Natural heap baseline. |
+| 5M | `checked-rift` | `1.52` | `13156352` | `-7339711446398030577` | `11380` | Checked Rift is about `20.0%` faster and about `67%` lower RSS. |
+| 5M | `checked-region-scoped` | `1.73` | `13369344` | `-7339711446398030577` | `11380` | Safe scoped backend is about `8.9%` faster than heap and lower RSS. |
+| 20M | `heap-gc` | `5.89` | `39354368` | `2928417581136374388` | `45638` | Natural heap baseline. |
+| 20M | `checked-rift` | `4.76` | `13221888` | `2928417581136374388` | `45638` | Checked Rift is about `19.2%` faster and about `66%` lower RSS. |
+| 20M | `checked-region-scoped` | `5.91` | `13434880` | `2928417581136374388` | `45638` | Safe scoped backend removes timed GC and lowers RSS, but is an elapsed tie at 20M L1. |
+
+L2 standard-stat rows:
+
+| Records | Mode | Median ms | GC median ms | GC max ms | Runs with GC | RSS bytes | Region op ms | Region objects | Region resets |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1M | `heap-gc` | `128.172` | `6.405` | `8.543` | `3/3` | `39469056` | `0.000` | `0` | `0` |
+| 1M | `checked-rift` | `100.773` | `0.000` | `0.000` | `0/3` | `13271040` | `0.561` | `1457534` | `10` |
+| 1M | `checked-region-scoped` | `106.511` | `0.000` | `0.000` | `0/3` | `13500416` | `0.000` | `0` | `0` |
+| 5M | `heap-gc` | `659.428` | `36.395` | `37.794` | `3/3` | `39469056` | `0.000` | `0` | `0` |
+| 5M | `checked-rift` | `575.189` | `0.000` | `0.000` | `0/3` | `13287424` | `3.162` | `7287508` | `50` |
+| 5M | `checked-region-scoped` | `602.648` | `0.000` | `0.000` | `0/3` | `13615104` | `0.000` | `0` | `0` |
+| 20M | `heap-gc` | `2840.837` | `213.555` | `215.215` | `3/3` | `75317248` | `0.000` | `0` | `0` |
+| 20M | `checked-rift` | `1892.916` | `0.000` | `0.000` | `0/3` | `13369344` | `10.774` | `29150830` | `200` |
+| 20M | `checked-region-scoped` | `2200.976` | `0.000` | `0.000` | `0/3` | `13713408` | `0.000` | `0` | `0` |
+
+Interpretation: active-4 `q17` becomes material at 20M. Heap spends about
+`7.5%` of L2 elapsed in timed GC, while checked Rift is about `19.2%` faster
+in L1, about `33.4%` faster in L2, and much lower RSS.
+
+### Q17 Active-16 Scale
+
+Active-16 rows use `BROOM_RECORDS_PER_TIMESTAMP=25000`,
+`BROOM_ACTIVE_TIMESTAMPS=16`, and `BROOM_KEY_SPACE=65536`.
+
+L1 final-clean rows:
+
+| Records | Mode | L1 real s | RSS bytes | Checksum | Output count | Claim |
+|---:|---|---:|---:|---:|---:|---|
+| 5M | `heap-gc` | `3.17` | `231342080` | `-7464756659937277476` | `11211` | High-live-state heap baseline. |
+| 5M | `checked-rift` | `2.25` | `49905664` | `-7464756659937277476` | `11211` | Checked Rift is about `29.0%` faster and about `78%` lower RSS. |
+| 5M | `checked-region-scoped` | `3.09` | `50249728` | `-7464756659937277476` | `11211` | Safe scoped backend removes timed GC and lowers RSS, but is near heap elapsed at 5M. |
+| 20M | `heap-gc` | `14.45` | `231686144` | `-4910137671593411349` | `44550` | High-live-state heap baseline. |
+| 20M | `checked-rift` | `9.67` | `49905664` | `-4910137671593411349` | `44550` | Checked Rift is about `33.1%` faster and about `78%` lower RSS. |
+| 20M | `checked-region-scoped` | `13.02` | `50282496` | `-4910137671593411349` | `44550` | Safe scoped backend is about `9.9%` faster than heap and about `78%` lower RSS. |
+
+L2 standard-stat rows:
+
+| Records | Mode | Median ms | GC median ms | GC max ms | Runs with GC | RSS bytes | Region op ms | Region objects | Region resets |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 5M | `heap-gc` | `1095.721` | `264.054` | `292.139` | `3/3` | `231555072` | `0.000` | `0` | `0` |
+| 5M | `checked-rift` | `776.136` | `0.000` | `0.000` | `0/3` | `50036736` | `4.615` | `7390099` | `13` |
+| 5M | `checked-region-scoped` | `1031.661` | `0.000` | `0.000` | `0/3` | `50462720` | `0.000` | `0` | `0` |
+| 20M | `heap-gc` | `4781.079` | `1370.380` | `1519.456` | `3/3` | `231800832` | `0.000` | `0` | `0` |
+| 20M | `checked-rift` | `3349.128` | `0.000` | `0.000` | `0/3` | `50036736` | `17.687` | `29559430` | `50` |
+| 20M | `checked-region-scoped` | `4269.248` | `0.000` | `0.000` | `0/3` | `50528256` | `0.000` | `0` | `0` |
+
+Heap-cap rows for 20M active-16:
+
+| Mode | Heap cap | Status | L1 real s | RSS bytes | Checksum | Output count |
+|---|---:|---|---:|---:|---:|---:|
+| `heap-gc` | `512M` | completed | `14.74` | `231686144` | `-4910137671593411349` | `44550` |
+| `heap-gc` | `384M` | completed | `14.66` | `231669760` | `-4910137671593411349` | `44550` |
+| `heap-gc` | `256M` | completed | `14.72` | `231669760` | `-4910137671593411349` | `44550` |
+
+Interpretation: active-16 `q17` is the strongest q17 case. At 20M, heap
+spends about `28.7%` of L2 elapsed in timed GC; checked Rift removes that GC,
+is about `33.1%` faster in L1, about `29.9%` faster in L2, and cuts RSS by
+about `78%`. Heap caps down to `256M` complete, so this row is not a
+fixed-memory failure case; the evidence is throughput, GC, and RSS.
+
 ## Next Work
 
-- Use this benchmark as the first retained-object GC-heavy dataflow case study
-  while continuing the real-input search for sessions, joins, timestamp
-  dictionaries, transaction-local objects, graph epochs, and text/top-k
-  candidates.
+- Use aggregate/join and q17 as the current retained-object GC-heavy dataflow
+  case studies while continuing the real-input search for sessions, joins,
+  timestamp dictionaries, transaction-local objects, graph epochs, and
+  text/top-k candidates.
+- If another Broom/Naiad-style shape is needed, implement shopper
+  JOIN-SELECT-JOIN as a separate slice rather than mixing it into this q17
+  checkpoint.

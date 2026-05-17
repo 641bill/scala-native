@@ -73,6 +73,31 @@ object BroomRetainedDataflowMatrixHelpers {
       var next: HeapJoinRecord
   )
 
+  private final class HeapQ17Part(
+      val key: Int,
+      val brand: Int,
+      val container: Int,
+      val selected: Boolean
+  )
+
+  private final class HeapQ17LineItem(
+      val recordId: Int,
+      val timestamp: Int,
+      val partKey: Int,
+      val quantity: Int,
+      val revenue: Long,
+      val hash: Long,
+      var next: HeapQ17LineItem
+  )
+
+  private final class HeapQ17PartEntry(
+      val part: HeapQ17Part,
+      var quantityCount: Int,
+      var quantitySum: Long,
+      var lineHead: HeapQ17LineItem,
+      var next: HeapQ17PartEntry
+  )
+
   final case class Outcome(
       checksum: Long,
       outputCount: Long,
@@ -195,6 +220,37 @@ object BroomRetainedDataflowMatrixHelpers {
 
   private def generatedValue(recordId: Int, timestamp: Int): Int =
     (mix(recordId * 1664525 + timestamp * 9176 + 1013904223) & 0xffff) + 1
+
+  private def generatedQ17PartKey(seed: Int, timestamp: Int): Int =
+    mix(seed * 1103515245 + timestamp * 4099 + 31337) %
+      BroomRetainedDataflowConfig.keySpace
+
+  private def generatedQ17Quantity(
+      recordId: Int,
+      timestamp: Int,
+      partKey: Int
+  ): Int =
+    (mix(recordId * 1664525 + timestamp * 97 + partKey * 31) % 50) + 1
+
+  private def generatedQ17Revenue(
+      recordId: Int,
+      partKey: Int,
+      quantity: Int
+  ): Long =
+    ((mix(recordId ^ (partKey * 1000003)) & 0xffff) + 100).toLong *
+      quantity.toLong
+
+  private def generatedQ17Brand(partKey: Int): Int =
+    mix(partKey * 17 + 3) & 15
+
+  private def generatedQ17Container(partKey: Int): Int =
+    mix(partKey * 29 + 11) & 7
+
+  private def selectedQ17Part(partKey: Int): Boolean =
+    generatedQ17Brand(partKey) == 3 && generatedQ17Container(partKey) <= 3
+
+  private def q17BelowAverageThreshold(quantity: Int, count: Int, sum: Long): Boolean =
+    count > 0 && quantity.toLong * count.toLong * 5L < sum
 
   private def runHeapAggregate(): Outcome = {
     val cfg = BroomRetainedDataflowConfig
@@ -526,6 +582,137 @@ object BroomRetainedDataflowMatrixHelpers {
     Outcome(checksum, outputCount, retainedObjects, 0L, maxLiveObjects)
   }
 
+  private def runHeapQ17(): Outcome = {
+    val cfg = BroomRetainedDataflowConfig
+    val tableSize = nextPowerOfTwo(math.max(16, cfg.keySpace * 2))
+    val tableMask = tableSize - 1
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedObjects = 0L
+    var maxLiveObjects = 0L
+    var processed = 0
+    var group = 0
+
+    while (processed < cfg.records) {
+      val remaining = cfg.records - processed
+      val slots = groupSlots(remaining, cfg)
+      val groupRecords = math.min(remaining, slots * cfg.recordsPerTimestamp)
+      val tables = new Array[HeapQ17PartEntry](slots * tableSize)
+      var liveObjects = 0L
+      var local = 0
+
+      while (local < groupRecords) {
+        val slot = local % slots
+        val timestamp = group * cfg.activeTimestamps + slot
+        val recordId = processed + local
+        val ordinal = local / slots
+        val partKey = generatedQ17PartKey(ordinal / 4, timestamp)
+        val quantity = generatedQ17Quantity(recordId, timestamp, partKey)
+        val revenue = generatedQ17Revenue(recordId, partKey, quantity)
+        val hash =
+          mix(recordId ^ (timestamp * 65537) ^ (partKey * 1000003)).toLong
+        val bucket = slot * tableSize + (mix(partKey) & tableMask)
+        var entry = tables(bucket)
+        var found: HeapQ17PartEntry = null
+        while (entry != null && found == null) {
+          if (entry.part.key == partKey) found = entry
+          entry = entry.next
+        }
+        if (found == null) {
+          val part =
+            new HeapQ17Part(
+              partKey,
+              generatedQ17Brand(partKey),
+              generatedQ17Container(partKey),
+              selectedQ17Part(partKey)
+            )
+          found = new HeapQ17PartEntry(part, 0, 0L, null, tables(bucket))
+          tables(bucket) = found
+          retainedObjects += 2L
+          liveObjects += 2L
+        }
+        val line =
+          new HeapQ17LineItem(
+            recordId,
+            timestamp,
+            partKey,
+            quantity,
+            revenue,
+            hash,
+            found.lineHead
+          )
+        found.lineHead = line
+        found.quantityCount += 1
+        found.quantitySum += quantity.toLong
+        retainedObjects += 1L
+        liveObjects += 1L
+        if (recordId % cfg.sampleEvery == 0)
+          checksum = fold(checksum, 51, timestamp, partKey, quantity, hash)
+        local += 1
+      }
+
+      if (liveObjects > maxLiveObjects) maxLiveObjects = liveObjects
+
+      var slot = 0
+      while (slot < slots) {
+        val timestamp = group * cfg.activeTimestamps + slot
+        var bucket = 0
+        while (bucket < tableSize) {
+          var entry = tables(slot * tableSize + bucket)
+          while (entry != null) {
+            var selectedCount = 0
+            var selectedRevenue = 0L
+            var line = entry.lineHead
+            while (line != null) {
+              if (
+                entry.part.selected &&
+                  q17BelowAverageThreshold(
+                    line.quantity,
+                    entry.quantityCount,
+                    entry.quantitySum
+                  )
+              ) {
+                selectedCount += 1
+                selectedRevenue += line.revenue
+                outputCount += 1L
+                checksum =
+                  fold(
+                    checksum,
+                    53,
+                    timestamp,
+                    entry.part.key,
+                    line.quantity,
+                    line.revenue ^ entry.quantitySum
+                  )
+              }
+              line = line.next
+            }
+            checksum =
+              fold(
+                checksum,
+                59,
+                timestamp,
+                entry.part.key,
+                selectedCount,
+                selectedRevenue + entry.quantitySum
+              )
+            entry = entry.next
+          }
+          bucket += 1
+        }
+        slot += 1
+      }
+
+      processed += groupRecords
+      group += 1
+    }
+
+    checksumSink = checksum
+    outputSink = outputCount
+    retainedSink = retainedObjects
+    Outcome(checksum, outputCount, retainedObjects, 0L, maxLiveObjects)
+  }
+
   private def runCheckedJoin(): Outcome = {
     val cfg = BroomRetainedDataflowConfig
     val tableSize = nextPowerOfTwo(math.max(16, cfg.keySpace * 2))
@@ -648,6 +835,196 @@ object BroomRetainedDataflowMatrixHelpers {
           }
 
           Outcome(localChecksum, localOutput, localRetained, localRetained + 2L, liveObjects)
+        }
+
+        checksum = groupOutcome.checksum
+        outputCount += groupOutcome.outputCount
+        retainedObjects += groupOutcome.retainedObjectProxy
+        regionFreedObjects += groupOutcome.regionFreedObjectProxy
+        if (groupOutcome.maxLiveObjectProxy > maxLiveObjects)
+          maxLiveObjects = groupOutcome.maxLiveObjectProxy
+        processed += groupRecords
+        group += 1
+      }
+    }
+
+    checksumSink = checksum
+    outputSink = outputCount
+    retainedSink = retainedObjects
+    Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
+  }
+
+  private def runCheckedQ17(): Outcome = {
+    val cfg = BroomRetainedDataflowConfig
+    val tableSize = nextPowerOfTwo(math.max(16, cfg.keySpace * 2))
+    val tableMask = tableSize - 1
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedObjects = 0L
+    var regionFreedObjects = 0L
+    var maxLiveObjects = 0L
+    var processed = 0
+    var group = 0
+
+    RiftRegion.streamingOpenHandle {
+      while (processed < cfg.records) {
+        val remaining = cfg.records - processed
+        val slots = groupSlots(remaining, cfg)
+        val groupRecords = math.min(remaining, slots * cfg.recordsPerTimestamp)
+
+        val groupOutcome = RiftRegion.resetOpenHandle { region ?=>
+          final class CheckedQ17Part(
+              val key: Int,
+              val brand: Int,
+              val container: Int,
+              val selected: Boolean
+          )
+
+          final class CheckedQ17LineItem(
+              val recordId: Int,
+              val timestamp: Int,
+              val partKey: Int,
+              val quantity: Int,
+              val revenue: Long,
+              val hash: Long
+          ) {
+            var next: CheckedQ17LineItem^{region} = null
+          }
+
+          final class CheckedQ17PartEntry(
+              val part: CheckedQ17Part^{region},
+              var quantityCount: Int,
+              var quantitySum: Long
+          ) {
+            var lineHead: CheckedQ17LineItem^{region} = null
+            var next: CheckedQ17PartEntry^{region} = null
+          }
+
+          val tables: Array[CheckedQ17PartEntry^{region}]^{region} =
+            RiftAllocator.allocateOpenHandle(
+              region,
+              new Array[CheckedQ17PartEntry^{region}](slots * tableSize)
+            )
+          var localChecksum = checksum
+          var localOutput = 0L
+          var localRetained = 0L
+          var liveObjects = 1L
+          var local = 0
+
+          while (local < groupRecords) {
+            val slot = local % slots
+            val timestamp = group * cfg.activeTimestamps + slot
+            val recordId = processed + local
+            val ordinal = local / slots
+            val partKey = generatedQ17PartKey(ordinal / 4, timestamp)
+            val quantity = generatedQ17Quantity(recordId, timestamp, partKey)
+            val revenue = generatedQ17Revenue(recordId, partKey, quantity)
+            val hash =
+              mix(recordId ^ (timestamp * 65537) ^ (partKey * 1000003)).toLong
+            val bucket = slot * tableSize + (mix(partKey) & tableMask)
+            var entry: CheckedQ17PartEntry^{region} = tables(bucket)
+            var found: CheckedQ17PartEntry^{region} = null
+            while (entry != null && found == null) {
+              if (entry.part.key == partKey) found = entry
+              entry = entry.next
+            }
+            if (found == null) {
+              val part: CheckedQ17Part^{region} =
+                RiftAllocator.allocateOpenHandle(
+                  region,
+                  new CheckedQ17Part(
+                    partKey,
+                    generatedQ17Brand(partKey),
+                    generatedQ17Container(partKey),
+                    selectedQ17Part(partKey)
+                  )
+                )
+              found =
+                RiftAllocator.allocateOpenHandle(
+                  region,
+                  new CheckedQ17PartEntry(part, 0, 0L)
+                )
+              found.next = tables(bucket)
+              tables(bucket) = found
+              localRetained += 2L
+              liveObjects += 2L
+            }
+            val line: CheckedQ17LineItem^{region} =
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new CheckedQ17LineItem(
+                  recordId,
+                  timestamp,
+                  partKey,
+                  quantity,
+                  revenue,
+                  hash
+                )
+              )
+            line.next = found.lineHead
+            found.lineHead = line
+            found.quantityCount += 1
+            found.quantitySum += quantity.toLong
+            localRetained += 1L
+            liveObjects += 1L
+            if (recordId % cfg.sampleEvery == 0)
+              localChecksum =
+                fold(localChecksum, 51, timestamp, partKey, quantity, hash)
+            local += 1
+          }
+
+          var slot = 0
+          while (slot < slots) {
+            val timestamp = group * cfg.activeTimestamps + slot
+            var bucket = 0
+            while (bucket < tableSize) {
+              var entry: CheckedQ17PartEntry^{region} =
+                tables(slot * tableSize + bucket)
+              while (entry != null) {
+                var selectedCount = 0
+                var selectedRevenue = 0L
+                var line: CheckedQ17LineItem^{region} = entry.lineHead
+                while (line != null) {
+                  if (
+                    entry.part.selected &&
+                      q17BelowAverageThreshold(
+                        line.quantity,
+                        entry.quantityCount,
+                        entry.quantitySum
+                      )
+                  ) {
+                    selectedCount += 1
+                    selectedRevenue += line.revenue
+                    localOutput += 1L
+                    localChecksum =
+                      fold(
+                        localChecksum,
+                        53,
+                        timestamp,
+                        entry.part.key,
+                        line.quantity,
+                        line.revenue ^ entry.quantitySum
+                      )
+                  }
+                  line = line.next
+                }
+                localChecksum =
+                  fold(
+                    localChecksum,
+                    59,
+                    timestamp,
+                    entry.part.key,
+                    selectedCount,
+                    selectedRevenue + entry.quantitySum
+                  )
+                entry = entry.next
+              }
+              bucket += 1
+            }
+            slot += 1
+          }
+
+          Outcome(localChecksum, localOutput, localRetained, localRetained + 1L, liveObjects)
         }
 
         checksum = groupOutcome.checksum
@@ -934,6 +1311,189 @@ object BroomRetainedDataflowMatrixHelpers {
     Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
   }
 
+  private def runCheckedScopedQ17(): Outcome = {
+    val cfg = BroomRetainedDataflowConfig
+    val tableSize = nextPowerOfTwo(math.max(16, cfg.keySpace * 2))
+    val tableMask = tableSize - 1
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedObjects = 0L
+    var regionFreedObjects = 0L
+    var maxLiveObjects = 0L
+    var processed = 0
+    var group = 0
+
+    RiftRegion.streamingSafeZone { stream ?=>
+      while (processed < cfg.records) {
+        val remaining = cfg.records - processed
+        val slots = groupSlots(remaining, cfg)
+        val groupRecords = math.min(remaining, slots * cfg.recordsPerTimestamp)
+
+        val groupOutcome = RiftRegion.epoch { region ?=>
+          final class CheckedQ17Part(
+              val key: Int,
+              val brand: Int,
+              val container: Int,
+              val selected: Boolean
+          )
+
+          final class CheckedQ17LineItem(
+              val recordId: Int,
+              val timestamp: Int,
+              val partKey: Int,
+              val quantity: Int,
+              val revenue: Long,
+              val hash: Long
+          ) {
+            var next: CheckedQ17LineItem^{region} = null
+          }
+
+          final class CheckedQ17PartEntry(
+              val part: CheckedQ17Part^{region},
+              var quantityCount: Int,
+              var quantitySum: Long
+          ) {
+            var lineHead: CheckedQ17LineItem^{region} = null
+            var next: CheckedQ17PartEntry^{region} = null
+          }
+
+          val tables: Array[CheckedQ17PartEntry^{region}]^{region} =
+            RiftRegion.allocOpen(
+              new Array[CheckedQ17PartEntry^{region}](slots * tableSize)
+            )
+          var localChecksum = checksum
+          var localOutput = 0L
+          var localRetained = 0L
+          var liveObjects = 1L
+          var local = 0
+
+          while (local < groupRecords) {
+            val slot = local % slots
+            val timestamp = group * cfg.activeTimestamps + slot
+            val recordId = processed + local
+            val ordinal = local / slots
+            val partKey = generatedQ17PartKey(ordinal / 4, timestamp)
+            val quantity = generatedQ17Quantity(recordId, timestamp, partKey)
+            val revenue = generatedQ17Revenue(recordId, partKey, quantity)
+            val hash =
+              mix(recordId ^ (timestamp * 65537) ^ (partKey * 1000003)).toLong
+            val bucket = slot * tableSize + (mix(partKey) & tableMask)
+            var entry: CheckedQ17PartEntry^{region} = tables(bucket)
+            var found: CheckedQ17PartEntry^{region} = null
+            while (entry != null && found == null) {
+              if (entry.part.key == partKey) found = entry
+              entry = entry.next
+            }
+            if (found == null) {
+              val part: CheckedQ17Part^{region} =
+                RiftRegion.allocOpen(
+                  new CheckedQ17Part(
+                    partKey,
+                    generatedQ17Brand(partKey),
+                    generatedQ17Container(partKey),
+                    selectedQ17Part(partKey)
+                  )
+                )
+              found = RiftRegion.allocOpen(new CheckedQ17PartEntry(part, 0, 0L))
+              found.next = tables(bucket)
+              tables(bucket) = found
+              localRetained += 2L
+              liveObjects += 2L
+            }
+            val line: CheckedQ17LineItem^{region} =
+              RiftRegion.allocOpen(
+                new CheckedQ17LineItem(
+                  recordId,
+                  timestamp,
+                  partKey,
+                  quantity,
+                  revenue,
+                  hash
+                )
+              )
+            line.next = found.lineHead
+            found.lineHead = line
+            found.quantityCount += 1
+            found.quantitySum += quantity.toLong
+            localRetained += 1L
+            liveObjects += 1L
+            if (recordId % cfg.sampleEvery == 0)
+              localChecksum =
+                fold(localChecksum, 51, timestamp, partKey, quantity, hash)
+            local += 1
+          }
+
+          var slot = 0
+          while (slot < slots) {
+            val timestamp = group * cfg.activeTimestamps + slot
+            var bucket = 0
+            while (bucket < tableSize) {
+              var entry: CheckedQ17PartEntry^{region} =
+                tables(slot * tableSize + bucket)
+              while (entry != null) {
+                var selectedCount = 0
+                var selectedRevenue = 0L
+                var line: CheckedQ17LineItem^{region} = entry.lineHead
+                while (line != null) {
+                  if (
+                    entry.part.selected &&
+                      q17BelowAverageThreshold(
+                        line.quantity,
+                        entry.quantityCount,
+                        entry.quantitySum
+                      )
+                  ) {
+                    selectedCount += 1
+                    selectedRevenue += line.revenue
+                    localOutput += 1L
+                    localChecksum =
+                      fold(
+                        localChecksum,
+                        53,
+                        timestamp,
+                        entry.part.key,
+                        line.quantity,
+                        line.revenue ^ entry.quantitySum
+                      )
+                  }
+                  line = line.next
+                }
+                localChecksum =
+                  fold(
+                    localChecksum,
+                    59,
+                    timestamp,
+                    entry.part.key,
+                    selectedCount,
+                    selectedRevenue + entry.quantitySum
+                  )
+                entry = entry.next
+              }
+              bucket += 1
+            }
+            slot += 1
+          }
+
+          Outcome(localChecksum, localOutput, localRetained, localRetained + 1L, liveObjects)
+        }
+
+        checksum = groupOutcome.checksum
+        outputCount += groupOutcome.outputCount
+        retainedObjects += groupOutcome.retainedObjectProxy
+        regionFreedObjects += groupOutcome.regionFreedObjectProxy
+        if (groupOutcome.maxLiveObjectProxy > maxLiveObjects)
+          maxLiveObjects = groupOutcome.maxLiveObjectProxy
+        processed += groupRecords
+        group += 1
+      }
+    }
+
+    checksumSink = checksum
+    outputSink = outputCount
+    retainedSink = retainedObjects
+    Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
+  }
+
   private def canonicalMode(mode: String): String =
     mode match {
       case "heap-gc" | "gc-heap" | "heap-immix" | "heap" => "heap-gc"
@@ -950,6 +1510,7 @@ object BroomRetainedDataflowMatrixHelpers {
     workload match {
       case "aggregate" | "agg" => "aggregate"
       case "join"              => "join"
+      case "q17" | "tpch-q17" | "q17-retained" => "q17"
       case other =>
         throw new IllegalArgumentException(
           s"unknown Broom retained workload '$other'"
@@ -960,10 +1521,13 @@ object BroomRetainedDataflowMatrixHelpers {
     (canonicalMode(mode), canonicalWorkload(workload)) match {
       case ("heap-gc", "aggregate")     => runHeapAggregate()
       case ("heap-gc", "join")          => runHeapJoin()
+      case ("heap-gc", "q17")           => runHeapQ17()
       case ("checked-rift", "aggregate") => runCheckedAggregate()
       case ("checked-rift", "join")      => runCheckedJoin()
+      case ("checked-rift", "q17")       => runCheckedQ17()
       case ("checked-region-scoped", "aggregate") => runCheckedScopedAggregate()
       case ("checked-region-scoped", "join")      => runCheckedScopedJoin()
+      case ("checked-region-scoped", "q17")       => runCheckedScopedQ17()
       case other =>
         throw new IllegalArgumentException(
           s"unsupported Broom retained run selection $other"
