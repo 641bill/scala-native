@@ -111,6 +111,47 @@ object BroomRetainedDataflowMatrixHelpers {
       var next: HeapQ17PartEntry
   )
 
+  private final class HeapShopperView(
+      val recordId: Int,
+      val timestamp: Int,
+      val user: Int,
+      val item: Int,
+      val campaign: Int,
+      val value: Int,
+      val hash: Long,
+      var next: HeapShopperView
+  )
+
+  private final class HeapShopperCart(
+      val recordId: Int,
+      val timestamp: Int,
+      val user: Int,
+      val item: Int,
+      val value: Int,
+      val hash: Long,
+      var next: HeapShopperCart
+  )
+
+  private final class HeapShopperPurchase(
+      val recordId: Int,
+      val timestamp: Int,
+      val user: Int,
+      val item: Int,
+      val value: Int,
+      val hash: Long,
+      var next: HeapShopperPurchase
+  )
+
+  private final class HeapShopperCandidate(
+      val timestamp: Int,
+      val user: Int,
+      val item: Int,
+      val campaign: Int,
+      val value: Int,
+      val hash: Long,
+      var next: HeapShopperCandidate
+  )
+
   final case class Outcome(
       checksum: Long,
       outputCount: Long,
@@ -267,6 +308,27 @@ object BroomRetainedDataflowMatrixHelpers {
 
   private def selectedQ17Part(partKey: Int): Boolean =
     generatedQ17Brand(partKey) == 3 && generatedQ17Container(partKey) <= 3
+
+  private def generatedShopperUser(logical: Int, timestamp: Int): Int =
+    mix(logical * 1103515245 + timestamp * 1009 + 271828) %
+      BroomRetainedDataflowConfig.keySpace
+
+  private def generatedShopperItem(logical: Int, timestamp: Int): Int =
+    mix(logical * 1664525 + timestamp * 4099 + 314159) %
+      BroomRetainedDataflowConfig.keySpace
+
+  private def generatedShopperValue(
+      recordId: Int,
+      user: Int,
+      item: Int
+  ): Int =
+    (mix(recordId ^ (user * 1000003) ^ (item * 9176)) & 0x3ff) + 1
+
+  private def generatedShopperCampaign(user: Int, item: Int): Int =
+    mix(user * 31 + item * 17 + 7) & 7
+
+  private def selectedShopperCandidate(campaign: Int, value: Int): Boolean =
+    (campaign & 1) == 0 && (value % 7) != 0
 
   private def q17BelowAverageThreshold(quantity: Int, count: Int, sum: Long): Boolean =
     count > 0 && quantity.toLong * count.toLong * 5L < sum
@@ -739,6 +801,173 @@ object BroomRetainedDataflowMatrixHelpers {
     Outcome(checksum, outputCount, retainedObjects, 0L, maxLiveObjects)
   }
 
+  private def runHeapShopper(): Outcome = {
+    val cfg = BroomRetainedDataflowConfig
+    val tableSize = nextPowerOfTwo(math.max(16, cfg.keySpace * 2))
+    val tableMask = tableSize - 1
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedObjects = 0L
+    var maxLiveObjects = 0L
+    var processed = 0
+    var group = 0
+
+    while (processed < cfg.records) {
+      val remaining = cfg.records - processed
+      val slots = groupSlots(remaining, cfg)
+      val groupRecords = math.min(remaining, slots * cfg.recordsPerTimestamp)
+      val views = new Array[HeapShopperView](slots * tableSize)
+      val carts = new Array[HeapShopperCart](slots * tableSize)
+      val purchases = new Array[HeapShopperPurchase](slots * tableSize)
+      val candidates = new Array[HeapShopperCandidate](slots * tableSize)
+      var liveObjects = 0L
+      var local = 0
+
+      while (local < groupRecords) {
+        val slot = local % slots
+        val timestamp = group * cfg.activeTimestamps + slot
+        val recordId = processed + local
+        val ordinal = local / slots
+        val phase = ordinal % 3
+        val logical = ordinal / 3
+        val user = generatedShopperUser(logical, timestamp)
+        val item = generatedShopperItem(logical, timestamp)
+        val value = generatedShopperValue(recordId, user, item)
+        val campaign = generatedShopperCampaign(user, item)
+        val hash =
+          mix(recordId ^ (timestamp * 65537) ^ (user * 1000003) ^ item).toLong
+        val bucket = slot * tableSize + (mix(user ^ (item * 1000003)) & tableMask)
+
+        if (phase == 0) {
+          views(bucket) =
+            new HeapShopperView(
+              recordId,
+              timestamp,
+              user,
+              item,
+              campaign,
+              value,
+              hash,
+              views(bucket)
+            )
+          retainedObjects += 1L
+          liveObjects += 1L
+        } else if (phase == 1) {
+          carts(bucket) =
+            new HeapShopperCart(recordId, timestamp, user, item, value, hash, carts(bucket))
+          retainedObjects += 1L
+          liveObjects += 1L
+          var view = views(bucket)
+          while (view != null) {
+            if (
+              view.user == user &&
+                view.item == item &&
+                selectedShopperCandidate(view.campaign, value)
+            ) {
+              val candidateHash = hash ^ view.hash ^ (value.toLong << 17)
+              candidates(bucket) =
+                new HeapShopperCandidate(
+                  timestamp,
+                  user,
+                  item,
+                  view.campaign,
+                  value + view.value,
+                  candidateHash,
+                  candidates(bucket)
+                )
+              retainedObjects += 1L
+              liveObjects += 1L
+              checksum =
+                fold(checksum, 61, timestamp, user ^ item, view.campaign, candidateHash)
+            }
+            view = view.next
+          }
+        } else {
+          purchases(bucket) =
+            new HeapShopperPurchase(
+              recordId,
+              timestamp,
+              user,
+              item,
+              value,
+              hash,
+              purchases(bucket)
+            )
+          retainedObjects += 1L
+          liveObjects += 1L
+          var candidate = candidates(bucket)
+          while (candidate != null) {
+            if (candidate.user == user && candidate.item == item) {
+              val joined = hash ^ candidate.hash ^ (value.toLong << 9)
+              checksum =
+                fold(checksum, 67, timestamp, user ^ item, candidate.campaign, joined)
+              outputCount += 1L
+            }
+            candidate = candidate.next
+          }
+        }
+
+        if (recordId % cfg.sampleEvery == 0)
+          checksum = fold(checksum, 71, timestamp, user ^ item, phase, hash)
+        local += 1
+      }
+
+      if (liveObjects > maxLiveObjects) maxLiveObjects = liveObjects
+
+      var slot = 0
+      while (slot < slots) {
+        val timestamp = group * cfg.activeTimestamps + slot
+        var bucket = 0
+        var viewCount = 0
+        var cartCount = 0
+        var purchaseCount = 0
+        var candidateCount = 0
+        while (bucket < tableSize) {
+          val index = slot * tableSize + bucket
+          var view = views(index)
+          while (view != null) {
+            viewCount += 1
+            view = view.next
+          }
+          var cart = carts(index)
+          while (cart != null) {
+            cartCount += 1
+            cart = cart.next
+          }
+          var purchase = purchases(index)
+          while (purchase != null) {
+            purchaseCount += 1
+            purchase = purchase.next
+          }
+          var candidate = candidates(index)
+          while (candidate != null) {
+            candidateCount += 1
+            candidate = candidate.next
+          }
+          bucket += 1
+        }
+        checksum =
+          fold(
+            checksum,
+            73,
+            timestamp,
+            viewCount ^ cartCount,
+            purchaseCount ^ candidateCount,
+            viewCount.toLong + cartCount + purchaseCount + candidateCount
+          )
+        slot += 1
+      }
+
+      processed += groupRecords
+      group += 1
+    }
+
+    checksumSink = checksum
+    outputSink = outputCount
+    retainedSink = retainedObjects
+    Outcome(checksum, outputCount, retainedObjects, 0L, maxLiveObjects)
+  }
+
   private def runHeapQ17(): Outcome = {
     if (q17UsesTpchFileInput()) return runHeapTpchQ17()
 
@@ -1135,6 +1364,275 @@ object BroomRetainedDataflowMatrixHelpers {
           }
 
           Outcome(localChecksum, localOutput, localRetained, localRetained + 2L, liveObjects)
+        }
+
+        checksum = groupOutcome.checksum
+        outputCount += groupOutcome.outputCount
+        retainedObjects += groupOutcome.retainedObjectProxy
+        regionFreedObjects += groupOutcome.regionFreedObjectProxy
+        if (groupOutcome.maxLiveObjectProxy > maxLiveObjects)
+          maxLiveObjects = groupOutcome.maxLiveObjectProxy
+        processed += groupRecords
+        group += 1
+      }
+    }
+
+    checksumSink = checksum
+    outputSink = outputCount
+    retainedSink = retainedObjects
+    Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
+  }
+
+  private def runCheckedShopper(): Outcome = {
+    val cfg = BroomRetainedDataflowConfig
+    val tableSize = nextPowerOfTwo(math.max(16, cfg.keySpace * 2))
+    val tableMask = tableSize - 1
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedObjects = 0L
+    var regionFreedObjects = 0L
+    var maxLiveObjects = 0L
+    var processed = 0
+    var group = 0
+
+    RiftRegion.streamingOpenHandle {
+      while (processed < cfg.records) {
+        val remaining = cfg.records - processed
+        val slots = groupSlots(remaining, cfg)
+        val groupRecords = math.min(remaining, slots * cfg.recordsPerTimestamp)
+
+        val groupOutcome = RiftRegion.resetOpenHandle { region ?=>
+          final class CheckedShopperView(
+              val recordId: Int,
+              val timestamp: Int,
+              val user: Int,
+              val item: Int,
+              val campaign: Int,
+              val value: Int,
+              val hash: Long
+          ) {
+            var next: CheckedShopperView^{region} = null
+          }
+
+          final class CheckedShopperCart(
+              val recordId: Int,
+              val timestamp: Int,
+              val user: Int,
+              val item: Int,
+              val value: Int,
+              val hash: Long
+          ) {
+            var next: CheckedShopperCart^{region} = null
+          }
+
+          final class CheckedShopperPurchase(
+              val recordId: Int,
+              val timestamp: Int,
+              val user: Int,
+              val item: Int,
+              val value: Int,
+              val hash: Long
+          ) {
+            var next: CheckedShopperPurchase^{region} = null
+          }
+
+          final class CheckedShopperCandidate(
+              val timestamp: Int,
+              val user: Int,
+              val item: Int,
+              val campaign: Int,
+              val value: Int,
+              val hash: Long
+          ) {
+            var next: CheckedShopperCandidate^{region} = null
+          }
+
+          val views: Array[CheckedShopperView^{region}]^{region} =
+            RiftAllocator.allocateOpenHandle(
+              region,
+              new Array[CheckedShopperView^{region}](slots * tableSize)
+            )
+          val carts: Array[CheckedShopperCart^{region}]^{region} =
+            RiftAllocator.allocateOpenHandle(
+              region,
+              new Array[CheckedShopperCart^{region}](slots * tableSize)
+            )
+          val purchases: Array[CheckedShopperPurchase^{region}]^{region} =
+            RiftAllocator.allocateOpenHandle(
+              region,
+              new Array[CheckedShopperPurchase^{region}](slots * tableSize)
+            )
+          val candidates: Array[CheckedShopperCandidate^{region}]^{region} =
+            RiftAllocator.allocateOpenHandle(
+              region,
+              new Array[CheckedShopperCandidate^{region}](slots * tableSize)
+            )
+          var localChecksum = checksum
+          var localOutput = 0L
+          var localRetained = 0L
+          var liveObjects = 4L
+          var local = 0
+
+          while (local < groupRecords) {
+            val slot = local % slots
+            val timestamp = group * cfg.activeTimestamps + slot
+            val recordId = processed + local
+            val ordinal = local / slots
+            val phase = ordinal % 3
+            val logical = ordinal / 3
+            val user = generatedShopperUser(logical, timestamp)
+            val item = generatedShopperItem(logical, timestamp)
+            val value = generatedShopperValue(recordId, user, item)
+            val campaign = generatedShopperCampaign(user, item)
+            val hash =
+              mix(recordId ^ (timestamp * 65537) ^ (user * 1000003) ^ item).toLong
+            val bucket =
+              slot * tableSize + (mix(user ^ (item * 1000003)) & tableMask)
+
+            if (phase == 0) {
+              val oldView: CheckedShopperView^{region} = views(bucket)
+              views(bucket) =
+                RiftAllocator.allocateOpenHandle(
+                  region,
+                  new CheckedShopperView(
+                    recordId,
+                    timestamp,
+                    user,
+                    item,
+                    campaign,
+                    value,
+                    hash
+                  )
+                )
+              views(bucket).next = oldView
+              localRetained += 1L
+              liveObjects += 1L
+            } else if (phase == 1) {
+              val oldCart: CheckedShopperCart^{region} = carts(bucket)
+              carts(bucket) =
+                RiftAllocator.allocateOpenHandle(
+                  region,
+                  new CheckedShopperCart(recordId, timestamp, user, item, value, hash)
+                )
+              carts(bucket).next = oldCart
+              localRetained += 1L
+              liveObjects += 1L
+              var view: CheckedShopperView^{region} = views(bucket)
+              while (view != null) {
+                if (
+                  view.user == user &&
+                    view.item == item &&
+                    selectedShopperCandidate(view.campaign, value)
+                ) {
+                  val candidateHash = hash ^ view.hash ^ (value.toLong << 17)
+                  val oldCandidate: CheckedShopperCandidate^{region} =
+                    candidates(bucket)
+                  candidates(bucket) =
+                    RiftAllocator.allocateOpenHandle(
+                      region,
+                      new CheckedShopperCandidate(
+                        timestamp,
+                        user,
+                        item,
+                        view.campaign,
+                        value + view.value,
+                        candidateHash
+                      )
+                    )
+                  candidates(bucket).next = oldCandidate
+                  localRetained += 1L
+                  liveObjects += 1L
+                  localChecksum =
+                    fold(
+                      localChecksum,
+                      61,
+                      timestamp,
+                      user ^ item,
+                      view.campaign,
+                      candidateHash
+                    )
+                }
+                view = view.next
+              }
+            } else {
+              val oldPurchase: CheckedShopperPurchase^{region} = purchases(bucket)
+              purchases(bucket) =
+                RiftAllocator.allocateOpenHandle(
+                  region,
+                  new CheckedShopperPurchase(recordId, timestamp, user, item, value, hash)
+                )
+              purchases(bucket).next = oldPurchase
+              localRetained += 1L
+              liveObjects += 1L
+              var candidate: CheckedShopperCandidate^{region} = candidates(bucket)
+              while (candidate != null) {
+                if (candidate.user == user && candidate.item == item) {
+                  val joined = hash ^ candidate.hash ^ (value.toLong << 9)
+                  localChecksum =
+                    fold(
+                      localChecksum,
+                      67,
+                      timestamp,
+                      user ^ item,
+                      candidate.campaign,
+                      joined
+                    )
+                  localOutput += 1L
+                }
+                candidate = candidate.next
+              }
+            }
+
+            if (recordId % cfg.sampleEvery == 0)
+              localChecksum = fold(localChecksum, 71, timestamp, user ^ item, phase, hash)
+            local += 1
+          }
+
+          var slot = 0
+          while (slot < slots) {
+            val timestamp = group * cfg.activeTimestamps + slot
+            var bucket = 0
+            var viewCount = 0
+            var cartCount = 0
+            var purchaseCount = 0
+            var candidateCount = 0
+            while (bucket < tableSize) {
+              val index = slot * tableSize + bucket
+              var view: CheckedShopperView^{region} = views(index)
+              while (view != null) {
+                viewCount += 1
+                view = view.next
+              }
+              var cart: CheckedShopperCart^{region} = carts(index)
+              while (cart != null) {
+                cartCount += 1
+                cart = cart.next
+              }
+              var purchase: CheckedShopperPurchase^{region} = purchases(index)
+              while (purchase != null) {
+                purchaseCount += 1
+                purchase = purchase.next
+              }
+              var candidate: CheckedShopperCandidate^{region} = candidates(index)
+              while (candidate != null) {
+                candidateCount += 1
+                candidate = candidate.next
+              }
+              bucket += 1
+            }
+            localChecksum =
+              fold(
+                localChecksum,
+                73,
+                timestamp,
+                viewCount ^ cartCount,
+                purchaseCount ^ candidateCount,
+                viewCount.toLong + cartCount + purchaseCount + candidateCount
+              )
+            slot += 1
+          }
+
+          Outcome(localChecksum, localOutput, localRetained, localRetained + 4L, liveObjects)
         }
 
         checksum = groupOutcome.checksum
@@ -1819,6 +2317,259 @@ object BroomRetainedDataflowMatrixHelpers {
     Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
   }
 
+  private def runCheckedScopedShopper(): Outcome = {
+    val cfg = BroomRetainedDataflowConfig
+    val tableSize = nextPowerOfTwo(math.max(16, cfg.keySpace * 2))
+    val tableMask = tableSize - 1
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedObjects = 0L
+    var regionFreedObjects = 0L
+    var maxLiveObjects = 0L
+    var processed = 0
+    var group = 0
+
+    RiftRegion.streamingSafeZone { stream ?=>
+      while (processed < cfg.records) {
+        val remaining = cfg.records - processed
+        val slots = groupSlots(remaining, cfg)
+        val groupRecords = math.min(remaining, slots * cfg.recordsPerTimestamp)
+
+        val groupOutcome = RiftRegion.epoch { region ?=>
+          final class CheckedShopperView(
+              val recordId: Int,
+              val timestamp: Int,
+              val user: Int,
+              val item: Int,
+              val campaign: Int,
+              val value: Int,
+              val hash: Long
+          ) {
+            var next: CheckedShopperView^{region} = null
+          }
+
+          final class CheckedShopperCart(
+              val recordId: Int,
+              val timestamp: Int,
+              val user: Int,
+              val item: Int,
+              val value: Int,
+              val hash: Long
+          ) {
+            var next: CheckedShopperCart^{region} = null
+          }
+
+          final class CheckedShopperPurchase(
+              val recordId: Int,
+              val timestamp: Int,
+              val user: Int,
+              val item: Int,
+              val value: Int,
+              val hash: Long
+          ) {
+            var next: CheckedShopperPurchase^{region} = null
+          }
+
+          final class CheckedShopperCandidate(
+              val timestamp: Int,
+              val user: Int,
+              val item: Int,
+              val campaign: Int,
+              val value: Int,
+              val hash: Long
+          ) {
+            var next: CheckedShopperCandidate^{region} = null
+          }
+
+          val views: Array[CheckedShopperView^{region}]^{region} =
+            RiftRegion.allocOpen(new Array[CheckedShopperView^{region}](slots * tableSize))
+          val carts: Array[CheckedShopperCart^{region}]^{region} =
+            RiftRegion.allocOpen(new Array[CheckedShopperCart^{region}](slots * tableSize))
+          val purchases: Array[CheckedShopperPurchase^{region}]^{region} =
+            RiftRegion.allocOpen(new Array[CheckedShopperPurchase^{region}](slots * tableSize))
+          val candidates: Array[CheckedShopperCandidate^{region}]^{region} =
+            RiftRegion.allocOpen(new Array[CheckedShopperCandidate^{region}](slots * tableSize))
+          var localChecksum = checksum
+          var localOutput = 0L
+          var localRetained = 0L
+          var liveObjects = 4L
+          var local = 0
+
+          while (local < groupRecords) {
+            val slot = local % slots
+            val timestamp = group * cfg.activeTimestamps + slot
+            val recordId = processed + local
+            val ordinal = local / slots
+            val phase = ordinal % 3
+            val logical = ordinal / 3
+            val user = generatedShopperUser(logical, timestamp)
+            val item = generatedShopperItem(logical, timestamp)
+            val value = generatedShopperValue(recordId, user, item)
+            val campaign = generatedShopperCampaign(user, item)
+            val hash =
+              mix(recordId ^ (timestamp * 65537) ^ (user * 1000003) ^ item).toLong
+            val bucket =
+              slot * tableSize + (mix(user ^ (item * 1000003)) & tableMask)
+
+            if (phase == 0) {
+              val oldView: CheckedShopperView^{region} = views(bucket)
+              views(bucket) =
+                RiftRegion.allocOpen(
+                  new CheckedShopperView(
+                    recordId,
+                    timestamp,
+                    user,
+                    item,
+                    campaign,
+                    value,
+                    hash
+                  )
+                )
+              views(bucket).next = oldView
+              localRetained += 1L
+              liveObjects += 1L
+            } else if (phase == 1) {
+              val oldCart: CheckedShopperCart^{region} = carts(bucket)
+              carts(bucket) =
+                RiftRegion.allocOpen(
+                  new CheckedShopperCart(recordId, timestamp, user, item, value, hash)
+                )
+              carts(bucket).next = oldCart
+              localRetained += 1L
+              liveObjects += 1L
+              var view: CheckedShopperView^{region} = views(bucket)
+              while (view != null) {
+                if (
+                  view.user == user &&
+                    view.item == item &&
+                    selectedShopperCandidate(view.campaign, value)
+                ) {
+                  val candidateHash = hash ^ view.hash ^ (value.toLong << 17)
+                  val oldCandidate: CheckedShopperCandidate^{region} =
+                    candidates(bucket)
+                  candidates(bucket) =
+                    RiftRegion.allocOpen(
+                      new CheckedShopperCandidate(
+                        timestamp,
+                        user,
+                        item,
+                        view.campaign,
+                        value + view.value,
+                        candidateHash
+                      )
+                    )
+                  candidates(bucket).next = oldCandidate
+                  localRetained += 1L
+                  liveObjects += 1L
+                  localChecksum =
+                    fold(
+                      localChecksum,
+                      61,
+                      timestamp,
+                      user ^ item,
+                      view.campaign,
+                      candidateHash
+                    )
+                }
+                view = view.next
+              }
+            } else {
+              val oldPurchase: CheckedShopperPurchase^{region} = purchases(bucket)
+              purchases(bucket) =
+                RiftRegion.allocOpen(
+                  new CheckedShopperPurchase(recordId, timestamp, user, item, value, hash)
+                )
+              purchases(bucket).next = oldPurchase
+              localRetained += 1L
+              liveObjects += 1L
+              var candidate: CheckedShopperCandidate^{region} = candidates(bucket)
+              while (candidate != null) {
+                if (candidate.user == user && candidate.item == item) {
+                  val joined = hash ^ candidate.hash ^ (value.toLong << 9)
+                  localChecksum =
+                    fold(
+                      localChecksum,
+                      67,
+                      timestamp,
+                      user ^ item,
+                      candidate.campaign,
+                      joined
+                    )
+                  localOutput += 1L
+                }
+                candidate = candidate.next
+              }
+            }
+
+            if (recordId % cfg.sampleEvery == 0)
+              localChecksum = fold(localChecksum, 71, timestamp, user ^ item, phase, hash)
+            local += 1
+          }
+
+          var slot = 0
+          while (slot < slots) {
+            val timestamp = group * cfg.activeTimestamps + slot
+            var bucket = 0
+            var viewCount = 0
+            var cartCount = 0
+            var purchaseCount = 0
+            var candidateCount = 0
+            while (bucket < tableSize) {
+              val index = slot * tableSize + bucket
+              var view: CheckedShopperView^{region} = views(index)
+              while (view != null) {
+                viewCount += 1
+                view = view.next
+              }
+              var cart: CheckedShopperCart^{region} = carts(index)
+              while (cart != null) {
+                cartCount += 1
+                cart = cart.next
+              }
+              var purchase: CheckedShopperPurchase^{region} = purchases(index)
+              while (purchase != null) {
+                purchaseCount += 1
+                purchase = purchase.next
+              }
+              var candidate: CheckedShopperCandidate^{region} = candidates(index)
+              while (candidate != null) {
+                candidateCount += 1
+                candidate = candidate.next
+              }
+              bucket += 1
+            }
+            localChecksum =
+              fold(
+                localChecksum,
+                73,
+                timestamp,
+                viewCount ^ cartCount,
+                purchaseCount ^ candidateCount,
+                viewCount.toLong + cartCount + purchaseCount + candidateCount
+              )
+            slot += 1
+          }
+
+          Outcome(localChecksum, localOutput, localRetained, localRetained + 4L, liveObjects)
+        }
+
+        checksum = groupOutcome.checksum
+        outputCount += groupOutcome.outputCount
+        retainedObjects += groupOutcome.retainedObjectProxy
+        regionFreedObjects += groupOutcome.regionFreedObjectProxy
+        if (groupOutcome.maxLiveObjectProxy > maxLiveObjects)
+          maxLiveObjects = groupOutcome.maxLiveObjectProxy
+        processed += groupRecords
+        group += 1
+      }
+    }
+
+    checksumSink = checksum
+    outputSink = outputCount
+    retainedSink = retainedObjects
+    Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
+  }
+
   private def runCheckedScopedQ17(): Outcome = {
     if (q17UsesTpchFileInput()) return runCheckedScopedTpchQ17()
 
@@ -2220,6 +2971,8 @@ object BroomRetainedDataflowMatrixHelpers {
     workload match {
       case "aggregate" | "agg" => "aggregate"
       case "join"              => "join"
+      case "shopper" | "shopper-join-select-join" | "shopper-jsj" =>
+        "shopper"
       case "q17" | "tpch-q17" | "q17-retained" => "q17"
       case other =>
         throw new IllegalArgumentException(
@@ -2231,12 +2984,15 @@ object BroomRetainedDataflowMatrixHelpers {
     (canonicalMode(mode), canonicalWorkload(workload)) match {
       case ("heap-gc", "aggregate")     => runHeapAggregate()
       case ("heap-gc", "join")          => runHeapJoin()
+      case ("heap-gc", "shopper")       => runHeapShopper()
       case ("heap-gc", "q17")           => runHeapQ17()
       case ("checked-rift", "aggregate") => runCheckedAggregate()
       case ("checked-rift", "join")      => runCheckedJoin()
+      case ("checked-rift", "shopper")   => runCheckedShopper()
       case ("checked-rift", "q17")       => runCheckedQ17()
       case ("checked-region-scoped", "aggregate") => runCheckedScopedAggregate()
       case ("checked-region-scoped", "join")      => runCheckedScopedJoin()
+      case ("checked-region-scoped", "shopper")   => runCheckedScopedShopper()
       case ("checked-region-scoped", "q17")       => runCheckedScopedQ17()
       case other =>
         throw new IllegalArgumentException(

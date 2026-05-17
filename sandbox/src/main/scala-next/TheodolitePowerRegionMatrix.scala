@@ -418,13 +418,60 @@ object TheodolitePowerRegionMatrixHelpers {
 
   private def queryOutputMultiplier(query: String): Int =
     query match {
-      case "q1-downsample"    => 1
-      case "q2-hierarchical" => 4
+      case "q1-downsample"                      => 1
+      case "q2-hierarchical"                   => 4
+      case "q3-retained-uc4" | "uc4-retained" |
+          "q3-uc4-retained" =>
+        13
       case other =>
         throw new IllegalArgumentException(
           s"unknown Theodolite power query '$other'"
         )
     }
+
+  private def isRetainedUc4(query: String): Boolean =
+    query == "q3-retained-uc4" || query == "uc4-retained" ||
+      query == "q3-uc4-retained"
+
+  private def uc4ContributionCount: Int = 12
+
+  private def uc4Node(index: Int, group: Int): Int =
+    if (index < 3) group
+    else if (index < 6) group >>> 1
+    else if (index < 9) group >>> 3
+    else if (index < 11) group >>> 4
+    else group >>> 5
+
+  private def uc4Offset(index: Int): Int =
+    if (index < 3) 1 + index
+    else if (index < 6) 4 + (index - 3)
+    else if (index < 9) 7 + (index - 6)
+    else if (index == 9) 10
+    else if (index == 10) 11
+    else 12
+
+  private def uc4Circuit(index: Int): Int =
+    if (index < 9) (index % 3) + 1
+    else if (index == 9) 10
+    else if (index == 10) 11
+    else 12
+
+  private def uc4Watt(
+      index: Int,
+      totalMilliW: Int,
+      sub1Watt: Int,
+      sub2Watt: Int,
+      sub3Watt: Int
+  ): Int =
+    if (index == 0 || index == 3 || index == 6) sub1Watt
+    else if (index == 1 || index == 4 || index == 7) sub2Watt
+    else if (index == 2 || index == 5 || index == 8) sub3Watt
+    else if (index == 10) sub1Watt + sub2Watt + sub3Watt
+    else totalMilliW / 1000
+
+  private def uc4Slot(index: Int, group: Int): Int =
+    uc4Offset(index) * TheodolitePowerRegionConfig.groupCount +
+      uc4Node(index, group)
 
   private def canonicalMode(mode: String): String =
     mode match {
@@ -543,6 +590,37 @@ object TheodolitePowerRegionMatrixHelpers {
               sums(base * 3 + group) += c3.watt.toLong
               counts(base * 3 + group) += 1
               checksum = fold(checksum, c1.minute, c2.watt, c3.watt, c1.watt.toLong)
+            } else if (isRetainedUc4(query)) {
+              var k = 0
+              while (k < uc4ContributionCount) {
+                val node = uc4Node(k, group)
+                val watt = uc4Watt(
+                  k,
+                  parsedTotalMilliW,
+                  parsedSub1Watt,
+                  parsedSub2Watt,
+                  parsedSub3Watt
+                )
+                val contribution = new HeapContribution(
+                  index,
+                  node,
+                  uc4Circuit(k),
+                  watt,
+                  contributionHead
+                )
+                contributionHead = contribution
+                val slot = uc4Slot(k, group)
+                sums(slot) += contribution.watt.toLong
+                counts(slot) += 1
+                checksum = fold(
+                  checksum,
+                  contribution.minute,
+                  contribution.group,
+                  contribution.circuit,
+                  contribution.watt.toLong
+                )
+                k += 1
+              }
             }
             index += 1
             inEpoch += 1
@@ -614,6 +692,32 @@ object TheodolitePowerRegionMatrixHelpers {
           sums(base * 3 + group) += c3.watt.toLong
           counts(base * 3 + group) += 1
           checksum = fold(checksum, c1.minute, c2.watt, c3.watt, c1.watt.toLong)
+        } else if (isRetainedUc4(query)) {
+          var k = 0
+          while (k < uc4ContributionCount) {
+            val node = uc4Node(k, group)
+            val watt = uc4Watt(
+              k,
+              input.totalMilliW(i),
+              input.sub1Watt(i),
+              input.sub2Watt(i),
+              input.sub3Watt(i)
+            )
+            val contribution =
+              new HeapContribution(i, node, uc4Circuit(k), watt, contributionHead)
+            contributionHead = contribution
+            val slot = uc4Slot(k, group)
+            sums(slot) += contribution.watt.toLong
+            counts(slot) += 1
+            checksum = fold(
+              checksum,
+              contribution.minute,
+              contribution.group,
+              contribution.circuit,
+              contribution.watt.toLong
+            )
+            k += 1
+          }
         }
         i += 1
       }
@@ -712,6 +816,40 @@ object TheodolitePowerRegionMatrixHelpers {
                 sums(base * 3 + group) += c3.watt.toLong
                 counts(base * 3 + group) += 1
                 checksum = fold(checksum, c1.minute, c2.watt, c3.watt, c1.watt.toLong)
+              } else if (isRetainedUc4(query)) {
+                var k = 0
+                while (k < uc4ContributionCount) {
+                  val node = uc4Node(k, group)
+                  val watt = uc4Watt(
+                    k,
+                    parsedTotalMilliW,
+                    parsedSub1Watt,
+                    parsedSub2Watt,
+                    parsedSub3Watt
+                  )
+                  val contribution = SafeZoneAllocator.allocate(
+                    sz,
+                    new SZContribution(
+                      index,
+                      node,
+                      uc4Circuit(k),
+                      watt,
+                      contributionHead
+                    )
+                  )
+                  contributionHead = contribution
+                  val slot = uc4Slot(k, group)
+                  sums(slot) += contribution.watt.toLong
+                  counts(slot) += 1
+                  checksum = fold(
+                    checksum,
+                    contribution.minute,
+                    contribution.group,
+                    contribution.circuit,
+                    contribution.watt.toLong
+                  )
+                  k += 1
+                }
               }
               index += 1
               inEpoch += 1
@@ -813,6 +951,34 @@ object TheodolitePowerRegionMatrixHelpers {
             sums(base * 3 + group) += c3.watt.toLong
             counts(base * 3 + group) += 1
             checksum = fold(checksum, c1.minute, c2.watt, c3.watt, c1.watt.toLong)
+          } else if (isRetainedUc4(query)) {
+            var k = 0
+            while (k < uc4ContributionCount) {
+              val node = uc4Node(k, group)
+              val watt = uc4Watt(
+                k,
+                input.totalMilliW(i),
+                input.sub1Watt(i),
+                input.sub2Watt(i),
+                input.sub3Watt(i)
+              )
+              val contribution = SafeZoneAllocator.allocate(
+                sz,
+                new SZContribution(i, node, uc4Circuit(k), watt, contributionHead)
+              )
+              contributionHead = contribution
+              val slot = uc4Slot(k, group)
+              sums(slot) += contribution.watt.toLong
+              counts(slot) += 1
+              checksum = fold(
+                checksum,
+                contribution.minute,
+                contribution.group,
+                contribution.circuit,
+                contribution.watt.toLong
+              )
+              k += 1
+            }
           }
           i += 1
         }
@@ -890,6 +1056,32 @@ object TheodolitePowerRegionMatrixHelpers {
             sums(base * 3 + group) += c3.watt.toLong
             counts(base * 3 + group) += 1
             checksum = fold(checksum, c1.minute, c2.watt, c3.watt, c1.watt.toLong)
+          } else if (isRetainedUc4(query)) {
+            var k = 0
+            while (k < uc4ContributionCount) {
+              val node = uc4Node(k, group)
+              val watt = uc4Watt(
+                k,
+                input.totalMilliW(i),
+                input.sub1Watt(i),
+                input.sub2Watt(i),
+                input.sub3Watt(i)
+              )
+              val contribution =
+                region.alloc(new TrustedContribution(i, node, uc4Circuit(k), watt, contributionHead))
+              contributionHead = contribution
+              val slot = uc4Slot(k, group)
+              sums(slot) += contribution.watt.toLong
+              counts(slot) += 1
+              checksum = fold(
+                checksum,
+                contribution.minute,
+                contribution.group,
+                contribution.circuit,
+                contribution.watt.toLong
+              )
+              k += 1
+            }
           }
           i += 1
         }
@@ -1017,6 +1209,40 @@ object TheodolitePowerRegionMatrixHelpers {
                     c3.watt,
                     c1.watt.toLong
                   )
+                } else if (isRetainedUc4(query)) {
+                  var k = 0
+                  while (k < uc4ContributionCount) {
+                    val node = uc4Node(k, group)
+                    val watt = uc4Watt(
+                      k,
+                      parsedTotalMilliW,
+                      parsedSub1Watt,
+                      parsedSub2Watt,
+                      parsedSub3Watt
+                    )
+                    val contribution = RiftAllocator.allocateOpenHandle(
+                      region,
+                      new CheckedContribution(
+                        index,
+                        node,
+                        uc4Circuit(k),
+                        watt,
+                        contributionHead
+                      )
+                    )
+                    contributionHead = contribution
+                    val slot = uc4Slot(k, group)
+                    sums(slot) += contribution.watt.toLong
+                    counts(slot) += 1
+                    checksum = fold(
+                      checksum,
+                      contribution.minute,
+                      contribution.group,
+                      contribution.circuit,
+                      contribution.watt.toLong
+                    )
+                    k += 1
+                  }
                 }
                 index += 1
                 inEpoch += 1
@@ -1151,6 +1377,39 @@ object TheodolitePowerRegionMatrixHelpers {
                     c3.watt,
                     c1.watt.toLong
                   )
+                } else if (isRetainedUc4(query)) {
+                  var k = 0
+                  while (k < uc4ContributionCount) {
+                    val node = uc4Node(k, group)
+                    val watt = uc4Watt(
+                      k,
+                      parsedTotalMilliW,
+                      parsedSub1Watt,
+                      parsedSub2Watt,
+                      parsedSub3Watt
+                    )
+                    val contribution = RiftRegion.allocOpen(
+                      new CheckedContribution(
+                        index,
+                        node,
+                        uc4Circuit(k),
+                        watt,
+                        contributionHead
+                      )
+                    )
+                    contributionHead = contribution
+                    val slot = uc4Slot(k, group)
+                    sums(slot) += contribution.watt.toLong
+                    counts(slot) += 1
+                    checksum = fold(
+                      checksum,
+                      contribution.minute,
+                      contribution.group,
+                      contribution.circuit,
+                      contribution.watt.toLong
+                    )
+                    k += 1
+                  }
                 }
                 index += 1
                 inEpoch += 1
@@ -1278,6 +1537,34 @@ object TheodolitePowerRegionMatrixHelpers {
               sums(base * 3 + group) += c3.watt.toLong
               counts(base * 3 + group) += 1
               checksum = fold(checksum, c1.minute, c2.watt, c3.watt, c1.watt.toLong)
+            } else if (isRetainedUc4(query)) {
+              var k = 0
+              while (k < uc4ContributionCount) {
+                val node = uc4Node(k, group)
+                val watt = uc4Watt(
+                  k,
+                  input.totalMilliW(i),
+                  input.sub1Watt(i),
+                  input.sub2Watt(i),
+                  input.sub3Watt(i)
+                )
+                val contribution = RiftAllocator.allocateOpenHandle(
+                  region,
+                  new CheckedContribution(i, node, uc4Circuit(k), watt, contributionHead)
+                )
+                contributionHead = contribution
+                val slot = uc4Slot(k, group)
+                sums(slot) += contribution.watt.toLong
+                counts(slot) += 1
+                checksum = fold(
+                  checksum,
+                  contribution.minute,
+                  contribution.group,
+                  contribution.circuit,
+                  contribution.watt.toLong
+                )
+                k += 1
+              }
             }
             i += 1
           }
@@ -1395,6 +1682,33 @@ object TheodolitePowerRegionMatrixHelpers {
               sums(base * 3 + group) += c3.watt.toLong
               counts(base * 3 + group) += 1
               checksum = fold(checksum, c1.minute, c2.watt, c3.watt, c1.watt.toLong)
+            } else if (isRetainedUc4(query)) {
+              var k = 0
+              while (k < uc4ContributionCount) {
+                val node = uc4Node(k, group)
+                val watt = uc4Watt(
+                  k,
+                  input.totalMilliW(i),
+                  input.sub1Watt(i),
+                  input.sub2Watt(i),
+                  input.sub3Watt(i)
+                )
+                val contribution = RiftRegion.allocOpen(
+                  new CheckedContribution(i, node, uc4Circuit(k), watt, contributionHead)
+                )
+                contributionHead = contribution
+                val slot = uc4Slot(k, group)
+                sums(slot) += contribution.watt.toLong
+                counts(slot) += 1
+                checksum = fold(
+                  checksum,
+                  contribution.minute,
+                  contribution.group,
+                  contribution.circuit,
+                  contribution.watt.toLong
+                )
+                k += 1
+              }
             }
             i += 1
           }

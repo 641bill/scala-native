@@ -1,7 +1,7 @@
 # Theodolite Power Region Matrix
 
 Date: 2026-05-11
-Last updated: 2026-05-15 13:38 CEST
+Last updated: 2026-05-17 17:45 CEST
 
 Status: implemented a local single-process Theodolite UC2/UC4-style real-input
 kernel over the UCI Household Electric Power Consumption trace. This is not an
@@ -19,6 +19,13 @@ does not manufacture a `String[]` per record. The checked stream epoch path now
 also has a handle-backed allocation lowering; the old generic checked path is
 retained as `checked-epoch-stream-legacy`.
 
+The current retained-object real-streaming row is `q3-retained-uc4`: it keeps
+the UCI power trace compressed on disk, streams the archive member during each
+run, and allocates one measurement plus twelve hierarchy contribution objects
+per usable record. This models the Theodolite UC4 hierarchical aggregation
+shape more directly than `q2-hierarchical`, which retains only three
+contribution objects per record.
+
 ## Input
 
 Real input:
@@ -26,6 +33,9 @@ Real input:
 
 Source archive:
 `/Users/siyaoliu/rift/cache/benchmark-data/theodolite/real-power/household_power_consumption.zip`
+
+Archive-member input spec:
+`zip:/Users/siyaoliu/rift/cache/benchmark-data/theodolite/real-power/household_power_consumption.zip!household_power_consumption.txt`
 
 SHA-256:
 `9f84b46ade8a2d8e1286ec4b2b6c2987a45a755c59f263be3b3b3d10dfbda3ff`
@@ -40,6 +50,7 @@ usable measurements.
 |---|---|---|
 | `q1-downsample` | Allocate one ordinary measurement record per real input line; aggregate by group/window. | Epoch/window batch; durable aggregate arrays stay heap/primitive metadata. |
 | `q2-hierarchical` | Allocate one measurement plus three hierarchy contribution records per real input line; aggregate by group/window and hierarchy level. | Epoch/window batch; hierarchy/group state stays heap/primitive metadata. |
+| `q3-retained-uc4` | Allocate one measurement plus twelve UC4-style hierarchy contribution records per real input line; aggregate circuit, room, floor, building, and site-level windows. | Epoch/window batch; retained measurement/contribution objects close in bulk while hierarchy/group arrays stay heap/primitive metadata. |
 
 ## Commands
 
@@ -176,6 +187,87 @@ zsh sandbox/run_theodolite_power_region_matrix.sh
 ## 20k Smoke
 
 All modes matched checksums/output counts.
+
+## Retained UC4 Hierarchy Windows
+
+Date/time: 2026-05-17 17:45 CEST.
+
+This row is the next investigation-driven real-streaming candidate. It uses
+the compressed UCI household-power archive directly:
+
+`THEODOLITE_POWER_INPUT_MODE=streaming-file`
+
+`THEODOLITE_POWER_INPUT=zip:/Users/siyaoliu/rift/cache/benchmark-data/theodolite/real-power/household_power_consumption.zip!household_power_consumption.txt`
+
+Query: `q3-retained-uc4`.
+
+Shape: one retained measurement plus twelve retained hierarchy contribution
+objects per usable record. Durable aggregate arrays remain heap/control
+metadata. No parsed full-input array is retained in the timed path.
+
+Smoke source:
+`/private/tmp/rift-theodolite-uc4-smoke-20260517`.
+
+1M L1 source:
+`/private/tmp/rift-theodolite-uc4-1m-l1-20260517`.
+
+1M L2 source:
+`/private/tmp/rift-theodolite-uc4-1m-l2-20260517`.
+
+Full local L1 source:
+`/private/tmp/rift-theodolite-uc4-full-l1-20260517`.
+
+Full local L2 source:
+`/private/tmp/rift-theodolite-uc4-full-l2-20260517`.
+
+Heap-cap probes:
+`/private/tmp/rift-theodolite-uc4-full-l1-heapcap128m-20260517`,
+`/private/tmp/rift-theodolite-uc4-full-l1-heapcap64m-20260517`,
+and `/private/tmp/rift-theodolite-uc4-full-l1-checked-cap64m-20260517`.
+
+20k smoke matched checksum `-2895454912458695581` and output count `6176`
+for heap, checked stream, checked scoped, and rooted scoped.
+
+### 1M Streaming-File Gate
+
+All rows matched checksum `5496025699187626461` and output count `61760`.
+
+| Mode | L1 real s | L1 RSS bytes | L2 median ms | L2 median GC ms | L2 max GC ms | L2 runs with GC | L2 Rift op ms | L2 region objects | Claim |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `heap-immix` | 9.42 | 183,566,336 | 2712.028 | 376.791 | 393.169 | 3/3 | 0.000 | 0 | Natural heap/GC baseline. |
+| `checked-epoch-stream` | 7.77 | 31,064,064 | 2143.809 | 38.516 | 41.907 | 3/3 | 1.420 | 13,000,000 | Checked Rift stream epoch. |
+| `checked-epoch-scoped` | 7.99 | 31,113,216 | 2189.232 | 43.837 | 48.301 | 3/3 | 0.000 | 0 | Checked SafeZone-backed scoped comparison. |
+| `region-scoped-rooted` | 8.21 | 31,129,600 | 2299.931 | 44.424 | 49.323 | 3/3 | 0.000 | 0 | Rooted scoped backend baseline. |
+
+### Full Local Streaming-File Gate
+
+The full local row requested `2075259` records and processed `2049280` usable
+measurements after skipping missing/malformed rows. All rows matched checksum
+`6053646443718331766` and output count `126608`.
+
+| Mode | L1 real s | L1 RSS bytes | L2 median ms | L2 median GC ms | L2 max GC ms | L2 runs with GC | L2 Rift op ms | L2 region objects | Claim |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `heap-immix` | 16.85 | 207,077,376 | 4504.438 | 335.309 | 482.380 | 3/3 | 0.000 | 0 | Natural heap/GC baseline. |
+| `checked-epoch-stream` | 14.06 | 26,607,616 | 3769.962 | 31.570 | 33.884 | 3/3 | 3.175 | 26,640,640 | Checked Rift stream epoch. |
+| `checked-epoch-scoped` | 14.88 | 26,689,536 | 3865.198 | 39.062 | 54.579 | 3/3 | 0.000 | 0 | Checked SafeZone-backed scoped comparison. |
+| `region-scoped-rooted` | 15.54 | 26,640,384 | 4104.244 | 37.961 | 37.991 | 3/3 | 0.000 | 0 | Rooted scoped backend baseline. |
+
+Heap fixed-memory probes:
+
+| Mode | Heap cap | L1 status | L1 real s | L1 RSS bytes | Notes |
+|---|---:|---|---:|---:|---|
+| `heap-immix` | uncapped | pass | 16.85 | 207,077,376 | Baseline. |
+| `heap-immix` | 128M | pass | 17.90 | 138,821,632 | Slower under cap. |
+| `heap-immix` | 64M | fail | 9.87 | 72,204,288 | Out of heap before result row. |
+| `checked-epoch-stream` | 64M | pass | 14.27 | 26,591,232 | Same checksum/output as uncapped checked row. |
+
+Interpretation: `q3-retained-uc4` is the strongest Theodolite real-streaming
+row so far. Unlike the older q2 row, heap GC is material at 1M and full local
+scale, and the checked Rift row improves both L1 real time and clean RSS. It
+also gives a fixed-memory signal: the natural heap row fails at `64M`, while
+checked Rift completes under the same cap. This is still a local
+Theodolite-style kernel paired with a real UCI power trace, not an exact
+Theodolite artifact reproduction.
 
 ## Handle-Backed Checked Epoch Promotion
 

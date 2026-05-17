@@ -1,6 +1,6 @@
 # Broom Retained Dataflow Matrix
 
-Last updated: 2026-05-17 15:55 CEST
+Last updated: 2026-05-17 16:43 CEST
 
 Status: new prior-work-style retained-object dataflow benchmark. This matrix
 compares the natural heap/GC program against the checked Rift region program,
@@ -28,6 +28,11 @@ records are retained until a notification/epoch boundary:
   TPC-H-Q17-style below-average quantity/revenue filter at timestamp close.
   The same workload can also consume DBGEN-style `part.tbl` and
   `lineitem.tbl` via `BROOM_Q17_INPUT_MODE=tpch-file`.
+- `shopper` / `shopper-join-select-join` / `shopper-jsj`: allocate retained
+  view/cart/purchase objects, join carts against retained views, select
+  campaign-qualified candidates, retain those intermediate candidates, then
+  join purchases against candidates before timestamp close. This is the
+  separate Broom shopper-style JOIN-SELECT-JOIN methodology row.
 - high-cardinality/active-timestamp variants keep multiple timestamp states
   live to increase heap traversal and RSS pressure.
 
@@ -625,12 +630,75 @@ prior-work-style retained-object row, but it is not as strong as the generated
 active-16 q17 row. Checked scoped keeps the same low RSS but does not beat heap
 on L1 elapsed in this DBGEN-backed configuration.
 
+## Shopper JOIN-SELECT-JOIN
+
+This is the next Broom/Naiad-style methodology slice after q17. It is generated
+methodology evidence, not real-input proof. The query retains ordinary
+view/cart/purchase objects plus selected intermediate candidate objects until
+the timestamp notification boundary:
+
+1. view events populate a per-timestamp keyed view table;
+2. cart events join against retained views and materialize selected candidate
+   objects;
+3. purchase events join against retained candidates and emit output rows;
+4. all retained objects are released when the timestamp group closes.
+
+20k L1 smoke, 2026-05-17 16:38 CEST, matched checksum/output across all
+headline modes:
+
+| Mode | L1 real s | RSS bytes | Checksum | Output count | Retained proxy | Region-freed proxy |
+|---|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `0.28` | `8912896` | `4783974746496726137` | `2803` | `22803` | `0` |
+| `checked-rift` | `0.00` | `6864896` | `4783974746496726137` | `2803` | `22803` | `22811` |
+| `checked-region-scoped` | `0.00` | `6963200` | `4783974746496726137` | `2803` | `22803` | `22811` |
+
+1M L1/L2 classification:
+
+| Mode | L1 real s | L1 RSS bytes | L2 median ms | L2 GC median ms | L2 GC max ms | Runs with GC | Region op ms |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `0.55` | `93831168` | `191.980` | `47.857` | `53.608` | `3/3` | `0.000` |
+| `checked-rift` | `0.38` | `20217856` | `246.524` | `0.000` | `0.000` | `0/3` | `2.213` |
+| `checked-region-scoped` | `0.46` | `20398080` | `205.800` | `0.000` | `0.000` | `0/3` | `0.000` |
+
+5M L1/L2 scale row:
+
+| Mode | L1 real s | L1 RSS bytes | L2 median ms | L2 GC median ms | L2 GC max ms | Runs with GC | Region op ms |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `3.09` | `106397696` | `772.300` | `112.871` | `168.832` | `3/3` | `0.000` |
+| `checked-rift` | `2.39` | `20250624` | `762.007` | `0.000` | `0.000` | `0/3` | `7.377` |
+| `checked-region-scoped` | `2.12` | `20480000` | `839.780` | `0.000` | `0.000` | `0/3` | `0.000` |
+
+20M L1/L2 scale row:
+
+| Mode | L1 real s | L1 RSS bytes | L2 median ms | L2 GC median ms | L2 GC max ms | Runs with GC | Region op ms | Output count |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `10.41` | `94273536` | `3507.557` | `601.284` | `661.054` | `3/3` | `0.000` | `2856428` |
+| `checked-rift` | `8.28` | `20316160` | `2917.572` | `0.000` | `0.000` | `0/3` | `18.997` | `2856428` |
+| `checked-region-scoped` | `8.56` | `20611072` | `3069.260` | `0.000` | `0.000` | `0/3` | `0.000` | `2856428` |
+
+20M heap-cap follow-up, one L2 run per cap:
+
+| Mode | Heap cap | Status | Median ms | GC median ms | RSS bytes | Checksum | Output count |
+|---|---:|---|---:|---:|---:|---:|---:|
+| `heap-gc` | `128M` | completed | `3369.102` | `671.298` | `94404608` | `1518365760215947551` | `2856428` |
+| `heap-gc` | `64M` | failed/OOM | n/a | n/a | `68386816` | n/a | n/a |
+| `heap-gc` | `32M` | failed/OOM | n/a | n/a | `28295168` | n/a | n/a |
+| `checked-rift` | uncapped | completed | `2686.298` | `0.000` | `20283392` | `1518365760215947551` | `2856428` |
+
+Interpretation: shopper JOIN-SELECT-JOIN is now a second completed
+Broom/Naiad-style retained-object methodology row after q17. At 20M,
+checked Rift is about `20.5%` faster in L1, about `16.8%` faster in L2, cuts
+RSS by about `78%`, removes `601.284 ms` median timed heap GC, and completes
+comfortably where heap fails under a `64M` cap. Checked scoped also gives a
+low-RSS, zero-timed-GC safe backend comparison row and is about `17.8%` faster
+than heap in L1.
+
 ## Next Work
 
 - Use aggregate/join and q17 as the current retained-object GC-heavy dataflow
-  case studies while continuing the real-input search for sessions, joins,
-  timestamp dictionaries, transaction-local objects, graph epochs, and
-  text/top-k candidates.
-- If another Broom/Naiad-style shape is needed, implement shopper
-  JOIN-SELECT-JOIN as a separate slice rather than mixing it into this q17
-  checkpoint.
+  case studies; shopper JOIN-SELECT-JOIN is now also complete as a separate
+  generated methodology row.
+- Continue the real-input search for sessions, joins, timestamp dictionaries,
+  transaction-local objects, graph epochs, and text/top-k candidates, with
+  Theodolite UC4 retained hierarchy windows and high-cardinality LogHub
+  session/template joins as the next real-streaming candidates.
