@@ -10,6 +10,12 @@ build=${BROOM_BUILD:-1}
 platform=$(uname -s)
 workloads=(${(z)${BROOM_WORKLOADS:-"aggregate join"}})
 modes=(${(z)${BROOM_MODES:-"heap-gc checked-rift checked-region-scoped"}})
+tpch_input_mode=${BROOM_Q17_INPUT_MODE:-generated}
+tpch_dbgen_dir=${BROOM_TPCH_DBGEN_DIR:-"/Users/siyaoliu/rift/cache/tpch-dbgen"}
+tpch_dbgen_binary=${BROOM_TPCH_DBGEN_BINARY:-"${tpch_dbgen_dir}/dbgen"}
+tpch_dbgen_dists=${BROOM_TPCH_DBGEN_DISTS:-"${tpch_dbgen_dir}/dists.dss"}
+tpch_dbgen_scale=${BROOM_TPCH_SCALE:-1}
+tpch_keep_temp=${BROOM_TPCH_KEEP_TEMP:-0}
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"
@@ -146,6 +152,39 @@ write_failed_row() {
     "${max_rss_bytes}" >> "${summary}"
 }
 
+should_generate_tpch_q17() {
+  local workload="$1"
+  case "${tpch_input_mode}" in
+    tpch-dbgen|dbgen|generate|regenerate)
+      [[ "${workload}" == "q17" || "${workload}" == "tpch-q17" || "${workload}" == "q17-retained" ]]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+generate_tpch_q17_tables() {
+  local target_dir="$1"
+  if [[ ! -x "${tpch_dbgen_binary}" ]]; then
+    echo "missing executable TPC-H dbgen at ${tpch_dbgen_binary}; set BROOM_TPCH_DBGEN_BINARY" >&2
+    exit 1
+  fi
+  if [[ ! -f "${tpch_dbgen_dists}" ]]; then
+    echo "missing TPC-H distribution file at ${tpch_dbgen_dists}; set BROOM_TPCH_DBGEN_DISTS" >&2
+    exit 1
+  fi
+  (
+    cd "${target_dir}"
+    "${tpch_dbgen_binary}" -q -f -s "${tpch_dbgen_scale}" -T P -b "${tpch_dbgen_dists}" >/dev/null
+    "${tpch_dbgen_binary}" -q -f -s "${tpch_dbgen_scale}" -T L -b "${tpch_dbgen_dists}" >/dev/null
+  )
+  if [[ ! -f "${target_dir}/part.tbl" || ! -f "${target_dir}/lineitem.tbl" ]]; then
+    echo "TPC-H dbgen did not produce part.tbl and lineitem.tbl in ${target_dir}" >&2
+    exit 1
+  fi
+}
+
 run_case() {
   local workload="$1"
   local mode="$2"
@@ -158,12 +197,22 @@ run_case() {
   local external_user_s
   local external_sys_s
   local command_status
+  local tpch_tmp=""
 
   echo
   local -a env_args
   env_args=()
   if [[ -n "${heap_cap}" && "${heap_cap}" != "uncapped" ]]; then
     env_args+=(GC_MAXIMUM_HEAP_SIZE="${heap_cap}")
+  fi
+  if should_generate_tpch_q17 "${workload}"; then
+    tpch_tmp=$(mktemp -d "${TMPDIR:-/tmp}/rift-tpch-q17.XXXXXX")
+    generate_tpch_q17_tables "${tpch_tmp}"
+    env_args+=(
+      BROOM_Q17_INPUT_MODE="tpch-file"
+      BROOM_TPCH_PART_INPUT="${tpch_tmp}/part.tbl"
+      BROOM_TPCH_LINEITEM_INPUT="${tpch_tmp}/lineitem.tbl"
+    )
   fi
 
   echo "== ${workload} / ${mode} heap_cap=${heap_cap} =="
@@ -175,6 +224,12 @@ run_case() {
   fi
   command_status=$?
   set -e
+
+  if [[ -n "${tpch_tmp}" && "${tpch_keep_temp}" != "1" ]]; then
+    rm -rf "${tpch_tmp}"
+  elif [[ -n "${tpch_tmp}" ]]; then
+    echo "kept TPC-H temporary tables at ${tpch_tmp}"
+  fi
 
   max_rss_bytes=$(read_max_rss_bytes "${time_log}")
   external_real_s=$(read_time_seconds "${time_log}" real)

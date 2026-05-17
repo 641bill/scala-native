@@ -5,9 +5,11 @@ set -euo pipefail
 script_dir=${0:A:h}
 repo_dir=${script_dir:h}
 parent_dir=${repo_dir:h}
-default_spike_input="${parent_dir}/cache/benchmark-data/dspbench/source/dspbench-threads/data/sensors.dat"
-default_fraud_input="${parent_dir}/cache/benchmark-data/dspbench/source/dspbench-threads/data/credit-card.dat"
-default_log_input="${parent_dir}/cache/benchmark-data/dspbench/source/dspbench-spark/data/logprocessing/http-server.log"
+dspbench_source_archive=${DSPBENCH_SOURCE_ARCHIVE:-"${parent_dir}/cache/benchmark-data/dspbench/DSPBench-00c20da828faf2b960fdb697c61d34cb25461875.zip"}
+dspbench_source_archive_prefix=${DSPBENCH_SOURCE_ARCHIVE_PREFIX:-"DSPBench-00c20da828faf2b960fdb697c61d34cb25461875"}
+default_spike_input="zip:${dspbench_source_archive}!${dspbench_source_archive_prefix}/dspbench-threads/data/sensors.dat"
+default_fraud_input="zip:${dspbench_source_archive}!${dspbench_source_archive_prefix}/dspbench-threads/data/credit-card.dat"
+default_log_input="zip:${dspbench_source_archive}!${dspbench_source_archive_prefix}/dspbench-spark/data/logprocessing/http-server.log"
 output_dir=${DSPBENCH_OUTPUT_DIR:-"/tmp/dspbench-region-matrix"}
 summary=${DSPBENCH_SUMMARY:-"${output_dir}/summary.tsv"}
 build=${DSPBENCH_BUILD:-1}
@@ -96,6 +98,18 @@ read_time_seconds() {
       }
       END { if (!found) print "" }
     ' "${time_log}"
+  fi
+}
+
+input_source_exists() {
+  local spec="$1"
+  local archive
+  if [[ "${spec}" == *:*"!"* ]]; then
+    archive="${spec#*:}"
+    archive="${archive%%!*}"
+    [[ -e "${archive}" ]]
+  else
+    [[ -e "${spec}" ]]
   fi
 }
 
@@ -284,11 +298,11 @@ run_case() {
     env_args+=(GC_MAXIMUM_HEAP_SIZE="${heap_cap}")
   fi
   if [[ -z "${query_input}" && "${binary_mode}" != "heap-direct-epoch" && "${binary_mode}" != "heap-epoch-retained-no-traverse" && "${binary_mode}" != "checked-epoch-retained-no-traverse" && "${binary_mode}" != "checked-scoped-epoch-retained-no-traverse" ]]; then
-    if [[ "${query}" == fraud-* && -e "${default_fraud_input}" ]]; then
+    if [[ "${query}" == fraud-* ]] && input_source_exists "${default_fraud_input}"; then
       query_input="${default_fraud_input}"
-    elif [[ "${query}" == log-* && -e "${default_log_input}" ]]; then
+    elif [[ "${query}" == log-* ]] && input_source_exists "${default_log_input}"; then
       query_input="${default_log_input}"
-    elif [[ -e "${default_spike_input}" ]]; then
+    elif input_source_exists "${default_spike_input}"; then
       query_input="${default_spike_input}"
     fi
   fi

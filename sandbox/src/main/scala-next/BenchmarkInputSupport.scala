@@ -4,6 +4,8 @@ import java.io.FileInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.InputStreamReader
+import java.util.ArrayList
+import java.util.Collections
 import java.util.zip.GZIPInputStream
 import java.util.zip.ZipInputStream
 
@@ -23,6 +25,9 @@ object BenchmarkInputSupport {
     } else if (path.startsWith("zip:")) {
       val (archive, member) = splitArchiveSpec(path, "zip:")
       openZipMember(archive, member)
+    } else if (path.startsWith("7z:")) {
+      val (archive, member) = splitArchiveSpec(path, "7z:")
+      openBsdtarMember(archive, member)
     } else {
       val raw: InputStream = new FileInputStream(path)
       if (path.endsWith(".gz")) new GZIPInputStream(raw, 1024 * 1024)
@@ -51,6 +56,7 @@ object BenchmarkInputSupport {
       catch {
         case t: Throwable => closeError = t
       }
+      if (process.isAlive()) process.destroy()
       val exit =
         try process.waitFor()
         catch {
@@ -60,7 +66,9 @@ object BenchmarkInputSupport {
             -1
         }
       if (closeError != null) throw closeError
-      if (exit != 0 && exit != 141 && exit != 143)
+      // Archive readers are often closed early after a benchmark reaches its
+      // record limit. bsdtar reports that as exit 1 on macOS instead of SIGPIPE.
+      if (exit != 0 && exit != 1 && exit != 141 && exit != 143)
         throw new IOException(s"$description exited with status $exit")
     }
   }
@@ -71,6 +79,14 @@ object BenchmarkInputSupport {
         .redirectError(ProcessBuilder.Redirect.INHERIT)
         .start()
     new ProcessInput(process, process.getInputStream, s"tar member $member")
+  }
+
+  private def openBsdtarMember(archive: String, member: String): InputStream = {
+    val process =
+      new ProcessBuilder("bsdtar", "-xOf", archive, member)
+        .redirectError(ProcessBuilder.Redirect.INHERIT)
+        .start()
+    new ProcessInput(process, process.getInputStream, s"archive member $member")
   }
 
   private final class ZipEntryInput(
@@ -98,6 +114,43 @@ object BenchmarkInputSupport {
     }
     zip.close()
     throw new IOException(s"zip member $member not found in $archive")
+  }
+
+  def zipDirectoryMembers(archive: String, prefix: String): Array[String] = {
+    val normalizedPrefix =
+      if (prefix.endsWith("/")) prefix else prefix + "/"
+    val zip = new ZipInputStream(new FileInputStream(archive))
+    val members = new ArrayList[String]()
+    try {
+      var entry = zip.getNextEntry()
+      while (entry != null) {
+        val name = entry.getName
+        if (!entry.isDirectory && name.startsWith(normalizedPrefix))
+          members.add(name)
+        zip.closeEntry()
+        entry = zip.getNextEntry()
+      }
+    } finally zip.close()
+    Collections.sort(members)
+    val out = new Array[String](members.size())
+    var i = 0
+    while (i < out.length) {
+      out(i) = members.get(i)
+      i += 1
+    }
+    out
+  }
+
+  def zipDirectorySpecs(spec: String): Array[String] = {
+    val (archive, prefix) = splitArchiveSpec(spec, "zipdir:")
+    val members = zipDirectoryMembers(archive, prefix)
+    val specs = new Array[String](members.length)
+    var i = 0
+    while (i < members.length) {
+      specs(i) = s"zip:$archive!${members(i)}"
+      i += 1
+    }
+    specs
   }
 
   final class ByteLineReader(path: String) {

@@ -1,6 +1,6 @@
 # Broom Retained Dataflow Matrix
 
-Last updated: 2026-05-17 12:22 CEST
+Last updated: 2026-05-17 14:12 CEST
 
 Status: new prior-work-style retained-object dataflow benchmark. This matrix
 compares the natural heap/GC program against the checked Rift region program,
@@ -103,6 +103,24 @@ selected-part and below-average filters at timestamp close. It is a
 DBGEN/TPC-H workload input mode, not an audited official TPC-H result and not
 real-world production input. SF0.1 and SF1 rows below were generated locally
 with the public `electrum/tpch-dbgen` mirror.
+
+Extraction-free DBGEN q17 mode:
+
+```sh
+BROOM_Q17_INPUT_MODE=tpch-dbgen \
+BROOM_TPCH_SCALE=1 \
+BROOM_WORKLOADS="q17" \
+BROOM_MODES="heap-gc checked-rift checked-region-scoped" \
+zsh sandbox/run_broom_retained_dataflow_matrix.sh
+```
+
+This runner mode generates `part.tbl` and `lineitem.tbl` into a temporary
+directory before the timed benchmark process, rewrites the child process to
+`BROOM_Q17_INPUT_MODE=tpch-file`, streams the generated tables through the same
+file-backed parser, and deletes the temporary directory after the matrix case.
+It avoids keeping `cache/tpch-sf*` table directories while preserving the same
+benchmark semantics. A 1k smoke with `BROOM_TPCH_SCALE=0.01` matched
+checksum/output across heap, checked Rift, and checked scoped.
 
 ## Correctness Smoke
 

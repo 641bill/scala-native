@@ -1,7 +1,7 @@
 # RIoTBench Region Matrix
 
 Date: 2026-05-01
-Last updated: 2026-05-08 10:04 CEST
+Last updated: 2026-05-17 14:12 CEST
 
 Status: new RIoTBench-style local memory-management probe. This is not an
 exact RIoTBench distributed stream-processing artifact. It is a generated or
@@ -66,10 +66,10 @@ RIOTBENCH_BUILD=0 \
 zsh sandbox/run_riotbench_region_matrix.sh
 ```
 
-Real MHEALTH 1M medians:
+Real MHEALTH 1M medians from the original ZIP:
 
 ```bash
-RIOTBENCH_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/riot-bench/mhealth/MHEALTHDATASET \
+RIOTBENCH_INPUT='zipdir:/Users/siyaoliu/rift/cache/benchmark-data/riot-bench/mhealth/mhealth_dataset.zip!MHEALTHDATASET' \
 RIOTBENCH_INPUT_KIND=mhealth \
 RIOTBENCH_EVENTS=1000000 \
 RIOTBENCH_BENCHMARK_RUNS=3 \
@@ -80,6 +80,11 @@ RIOTBENCH_OUTPUT_DIR=/tmp/riotbench-mhealth-1m \
 RIOTBENCH_BUILD=0 \
 zsh sandbox/run_riotbench_region_matrix.sh
 ```
+
+The older extracted-directory form still works, including `.log.gz` subject
+logs, but it is now a derived local cache. Use the `zipdir:` form for
+extraction-free runs. A 1k smoke over the original ZIP matched checksum/output
+for heap and `safezone-improved` on q1/q2.
 
 ## Current Results
 

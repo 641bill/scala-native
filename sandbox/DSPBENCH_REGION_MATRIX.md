@@ -1,7 +1,7 @@
 # DSPBench Region Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-13 03:13 CEST
+Last updated: 2026-05-17 15:08 CEST
 
 Status: implemented three local DSPBench-family real-input candidates: Spike
 Detection, Fraud Detection, and Log Processing. This is not an exact DSPBench
@@ -14,11 +14,12 @@ for GC/counter interpretation.
 ## Spike Input And Queries
 
 Input source:
-`/Users/siyaoliu/rift/cache/benchmark-data/dspbench/source/dspbench-threads/data/sensors.dat`
+`zip:/Users/siyaoliu/rift/cache/benchmark-data/dspbench/DSPBench-00c20da828faf2b960fdb697c61d34cb25461875.zip!DSPBench-00c20da828faf2b960fdb697c61d34cb25461875/dspbench-threads/data/sensors.dat`
 
 Provenance:
-`GMAP/DSPBench` clone at commit
-`00c20da828faf2b960fdb697c61d34cb25461875`.
+`GMAP/DSPBench` source archive pinned to commit
+`00c20da828faf2b960fdb697c61d34cb25461875`. The expanded checkout is no
+longer required for these sample inputs.
 
 The file has `79999` usable sensor lines after header/parse filtering. Runs
 larger than that replay the same real sample and report `input_replays`.
@@ -157,7 +158,7 @@ shape may force more intermediate object materialization than Spike.
 ## Fraud Detection Input And Queries
 
 Input source:
-`/Users/siyaoliu/rift/cache/benchmark-data/dspbench/source/dspbench-threads/data/credit-card.dat`
+`zip:/Users/siyaoliu/rift/cache/benchmark-data/dspbench/DSPBench-00c20da828faf2b960fdb697c61d34cb25461875.zip!DSPBench-00c20da828faf2b960fdb697c61d34cb25461875/dspbench-threads/data/credit-card.dat`
 
 The file has `185000` comma-separated transaction rows. Runs larger than that
 replay the same real sample and report `input_replays`.
@@ -754,7 +755,7 @@ case-study claim.
 ## Log Processing Input And Queries
 
 Input source:
-`/Users/siyaoliu/rift/cache/benchmark-data/dspbench/source/dspbench-spark/data/logprocessing/http-server.log`
+`zip:/Users/siyaoliu/rift/cache/benchmark-data/dspbench/DSPBench-00c20da828faf2b960fdb697c61d34cb25461875.zip!DSPBench-00c20da828faf2b960fdb697c61d34cb25461875/dspbench-spark/data/logprocessing/http-server.log`
 
 The file has `55000` Apache/common-log lines. Runs larger than that replay the
 same real sample and report `input_replays`.

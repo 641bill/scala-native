@@ -1,7 +1,7 @@
 # Yak Region Matrix
 
 Date: 2026-04-25
-Last updated: 2026-05-15 20:57 CEST
+Last updated: 2026-05-17 14:12 CEST
 
 Status: Yak-style methodology reproduction harness with validated smoke,
 default median, pressure median, external-sort-shaped median, top-word/filter
@@ -707,13 +707,18 @@ L1 interpretation:
 ## Stack Exchange AskUbuntu `topwordreal` Rows
 
 Input:
-`/Users/siyaoliu/rift/cache/benchmark-data/yak/stackexchange/askubuntu-Posts.xml`.
-This file was extracted from the public Stack Exchange data dump
-`askubuntu.com.7z`. The extracted XML is `1,400,891,844` bytes with `945,113`
-lines. The local loader scans `Title` and `Body` attributes, tokenizes ASCII
+`7z:/Users/siyaoliu/rift/cache/benchmark-data/yak/stackexchange/askubuntu.com.7z!Posts.xml`
+for extraction-free streaming-file runs. Older runs used the derived local
+`askubuntu-Posts.xml`/`.gz` copy extracted from the same public Stack Exchange
+data dump. The XML has `945,113` lines. The local loader scans `Title` and
+`Body` attributes, tokenizes ASCII
 alphanumeric words of length at least three, hashes them into the Yak key
 space, and stores token keys/weights in primitive control arrays. The benchmark
 then replays those real tokens as ordinary epoch-local `WordRecord` objects.
+
+A 1k streaming-file smoke over the original `.7z` archive matched
+checksum/output for `heap` and `checked-epoch-scoped`; the derived
+`askubuntu-Posts.xml.gz` cache is now optional.
 
 This is real-input Yak/Hadoop top-word-shaped evidence. It is not exact Yak:
 there is no Hadoop/Hyracks runtime, distributed scheduling, or Yak JVM

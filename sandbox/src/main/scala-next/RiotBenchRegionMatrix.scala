@@ -384,8 +384,20 @@ object RiotBenchRegionMatrixHelpers {
       }
     }
 
-    val inputFile = new File(cfg.inputPath)
-    if (inputFile.isDirectory) {
+    if (cfg.inputPath.startsWith("zipdir:")) {
+      val files = BenchmarkInputSupport.zipDirectorySpecs(cfg.inputPath)
+        .filter { path =>
+          path.endsWith(".log") || path.endsWith(".log.gz")
+        }
+        .sorted
+      var fileIndex = 0
+      while (fileIndex < files.length && sensors.length < cfg.events) {
+        readFile(files(fileIndex), fileIndex)
+        fileIndex += 1
+      }
+    } else {
+      val inputFile = new File(cfg.inputPath)
+      if (inputFile.isDirectory) {
       val files = inputFile
         .listFiles()
         .filter { file =>
@@ -398,8 +410,9 @@ object RiotBenchRegionMatrixHelpers {
         readFile(files(fileIndex).getPath, fileIndex)
         fileIndex += 1
       }
-    } else {
-      readFile(cfg.inputPath, 0)
+      } else {
+        readFile(cfg.inputPath, 0)
+      }
     }
 
     if (sensors.isEmpty)
