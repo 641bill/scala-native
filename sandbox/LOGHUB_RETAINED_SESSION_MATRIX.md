@@ -1,6 +1,6 @@
 # LogHub Retained Session Matrix
 
-Last updated: 2026-05-17 23:36 CEST
+Last updated: 2026-05-18 00:44 CEST
 
 Status: real streaming-input retained session/join triage. This matrix was
 added after the active-window LogHub q3 row showed heap-cap pressure but not a
@@ -230,3 +230,81 @@ retained-object row where checked modes cut RSS by about `81%`, checked Rift
 is modestly faster in L2, and heap fails below `128M` while checked rows
 complete around `73 MB` RSS. Use it as real-input retained-state evidence, not
 as an exact LogHub paper benchmark.
+
+## Wikimedia Enwiki Clickstream Retained Line-Session Triage
+
+Date/time: 2026-05-18 00:44 CEST.
+
+This row reuses `LogHubRetainedSessionMatrix` as a generic retained
+line-session benchmark over a different real compressed stream. It is not a
+LogHub row and not a final named Wikimedia operator. The purpose is to test the
+investigation hypothesis that a large real stream with retained ordinary
+per-line/session objects is stronger than primitive/preloaded clickstream
+counting.
+
+Input:
+
+`LOGHUB_SESSION_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/wikimedia/clickstream-enwiki-2026-03.tsv.gz`
+
+Configuration:
+
+`records=1000000`, `records_per_epoch=25000`, `active_epochs=16`,
+`key_space=262144`, workload `session`.
+
+Raw summaries:
+
+- `/private/tmp/wikimedia-retained-line-session-smoke-20260518/summary.tsv`
+- `/private/tmp/wikimedia-retained-line-session-1m-l1-20260518/summary.tsv`
+- `/private/tmp/wikimedia-retained-line-session-1m-l2-20260518/summary.tsv`
+- `/private/tmp/wikimedia-retained-line-session-1m-heapcaps-20260518/summary.tsv`
+- `/private/tmp/wikimedia-retained-line-session-1m-region-cap-128m-20260518/summary.tsv`
+- `/private/tmp/wikimedia-retained-line-session-1m-region-cap-64m-20260518/summary.tsv`
+
+20k smoke:
+
+| Mode | Median ms | GC ms | RSS bytes | Checksum | Output |
+|---|---:|---:|---:|---:|---:|
+| `heap-gc` | `117.290` | `0.254` | `21807104` | `-6891630890320843875` | `19623` |
+| `checked-rift` | `110.601` | `0.266` | `19824640` | `-6891630890320843875` | `19623` |
+| `checked-region-scoped` | `98.366` | `2.348` | `20021248` | `-6891630890320843875` | `19623` |
+
+1M L1 final-clean:
+
+| Mode | External real s | User s | Sys s | RSS bytes | Checksum | Output | Retained proxy | Max live proxy |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `15.54` | `15.02` | `0.14` | `864436224` | `-6192260257488813902` | `953730` | `1953730` | `781552` |
+| `checked-rift` | `14.15` | `13.99` | `0.13` | `136462336` | `-6192260257488813902` | `953730` | `1953730` | `781555` |
+| `checked-region-scoped` | `14.98` | `14.74` | `0.08` | `136642560` | `-6192260257488813902` | `953730` | `1953730` | `781555` |
+
+1M L2 standard stats:
+
+| Mode | Median ms | Min ms | Max ms | GC median ms | GC max ms | Runs with GC | Region op ms | Region objects | RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `4826.234` | `4797.992` | `4890.285` | `166.100` | `217.036` | `2/3` | `0.000` | `0` | `870252544` |
+| `checked-rift` | `5058.376` | `4949.777` | `5218.312` | `11.537` | `21.435` | `3/3` | `3.121` | `1953739` | `136511488` |
+| `checked-region-scoped` | `5216.981` | `5195.984` | `5261.575` | `197.466` | `215.615` | `3/3` | `0.000` | `0` | `138821632` |
+
+Heap-cap probes:
+
+| Mode | Cap | Status | External real s | RSS bytes | Notes |
+|---|---:|---|---:|---:|---|
+| `heap-gc` | `512M` | pass | `5.21` | `437026816` | checksum/output matched |
+| `heap-gc` | `256M` | fail | `2.22` | `201654272` | OOM in heap array allocation |
+| `heap-gc` | `128M` | fail | `0.00` | `5619712` | OOM at startup/allocation |
+| `checked-rift` | `128M` | pass | `5.04` | `136331264` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
+| `checked-region-scoped` | `128M` | pass | `5.22` | `136626176` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
+| `checked-rift` | `64M` | pass | `4.96` | `136331264` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
+| `checked-region-scoped` | `64M` | pass | `5.64` | `136511488` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
+
+Decision: keep as a useful real-streaming retained-state RSS/fixed-memory row.
+
+- The input remains compressed and is consumed as a stream; no preloaded
+  clickstream row array is used.
+- L1 checked Rift is `14.15 s` versus heap `15.54 s`, with RSS reduced from
+  `864 MB` to `136 MB`.
+- Heap fails at `256M` and `128M`, while checked rows complete under `128M`
+  and `64M` caps.
+- This is still not a GC-time flagship: heap L2 GC is `166.100 ms` inside
+  `4826.234 ms`, about `3.4%`. The L2 checked row is slower than heap because
+  parser/hash/session work and standard-stat measurement dominate; use L1 for
+  headline elapsed and L2 only for interpretation.
