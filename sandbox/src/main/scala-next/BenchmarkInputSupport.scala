@@ -1,8 +1,11 @@
 import java.io.BufferedReader
+import java.io.FilterInputStream
 import java.io.FileInputStream
+import java.io.IOException
 import java.io.InputStream
 import java.io.InputStreamReader
 import java.util.zip.GZIPInputStream
+import java.util.zip.ZipInputStream
 
 object BenchmarkInputSupport {
   def envString(name: String): String =
@@ -14,9 +17,87 @@ object BenchmarkInputSupport {
   }
 
   def openBinary(path: String): InputStream = {
-    val raw: InputStream = new FileInputStream(path)
-    if (path.endsWith(".gz")) new GZIPInputStream(raw, 1024 * 1024)
-    else raw
+    if (path.startsWith("tar.gz:")) {
+      val (archive, member) = splitArchiveSpec(path, "tar.gz:")
+      openTarGzMember(archive, member)
+    } else if (path.startsWith("zip:")) {
+      val (archive, member) = splitArchiveSpec(path, "zip:")
+      openZipMember(archive, member)
+    } else {
+      val raw: InputStream = new FileInputStream(path)
+      if (path.endsWith(".gz")) new GZIPInputStream(raw, 1024 * 1024)
+      else raw
+    }
+  }
+
+  private def splitArchiveSpec(spec: String, prefix: String): (String, String) = {
+    val body = spec.substring(prefix.length)
+    val bang = body.indexOf('!')
+    if (bang <= 0 || bang == body.length - 1)
+      throw new IllegalArgumentException(
+        s"archive input '$spec' must use ${prefix}/path/archive!member"
+      )
+    (body.substring(0, bang), body.substring(bang + 1))
+  }
+
+  private final class ProcessInput(
+      process: Process,
+      input: InputStream,
+      description: String
+  ) extends FilterInputStream(input) {
+    override def close(): Unit = {
+      var closeError: Throwable = null
+      try super.close()
+      catch {
+        case t: Throwable => closeError = t
+      }
+      val exit =
+        try process.waitFor()
+        catch {
+          case _: InterruptedException =>
+            Thread.currentThread().interrupt()
+            process.destroy()
+            -1
+        }
+      if (closeError != null) throw closeError
+      if (exit != 0 && exit != 141 && exit != 143)
+        throw new IOException(s"$description exited with status $exit")
+    }
+  }
+
+  private def openTarGzMember(archive: String, member: String): InputStream = {
+    val process =
+      new ProcessBuilder("tar", "-xOzf", archive, member)
+        .redirectError(ProcessBuilder.Redirect.INHERIT)
+        .start()
+    new ProcessInput(process, process.getInputStream, s"tar member $member")
+  }
+
+  private final class ZipEntryInput(
+      zip: ZipInputStream,
+      archive: String,
+      member: String
+  ) extends FilterInputStream(zip) {
+    override def close(): Unit = {
+      try super.close()
+      catch {
+        case e: IOException =>
+          throw new IOException(s"failed closing zip member $member in $archive", e)
+      }
+    }
+  }
+
+  private def openZipMember(archive: String, member: String): InputStream = {
+    val zip = new ZipInputStream(new FileInputStream(archive))
+    var entry = zip.getNextEntry()
+    while (entry != null) {
+      if (!entry.isDirectory && entry.getName == member)
+        return new ZipEntryInput(zip, archive, member)
+      zip.closeEntry()
+      entry = zip.getNextEntry()
+    }
+    zip.close()
+    throw new IOException(s"zip member $member not found in $archive")
   }
 
   final class ByteLineReader(path: String) {
