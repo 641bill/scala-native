@@ -1,7 +1,7 @@
 # Yak Region Matrix
 
 Date: 2026-04-25
-Last updated: 2026-05-17 14:12 CEST
+Last updated: 2026-05-17 23:38 CEST
 
 Status: Yak-style methodology reproduction harness with validated smoke,
 default median, pressure median, external-sort-shaped median, top-word/filter
@@ -876,15 +876,41 @@ Raw summaries: `/tmp/rift-yak-topwordreal-streaming-1m-l1/summary.tsv`,
 | `topwordreal` | `checked-epoch-scoped` | streaming file + `RiftRegion.epoch` | `0.91` | `0.88` | `0.97` | `12943360` | `8501908365116000626` |
 | `topwordreal` | `checked-epoch-stream` | streaming file + `RiftRegion.epoch` | `0.90` | `0.90` | `0.91` | `12943360` | `8501908365116000626` |
 
+5M L1 final-clean row, streaming-file input from the compressed
+`askubuntu.com.7z` archive:
+
+Raw summary: `/private/tmp/rift-yak-askubuntu-streaming-5m-l1-20260517/summary.tsv`.
+
+| Workload | Mode | Topology/operator | Real s | User s | Sys s | Max RSS bytes | Checksum |
+|---|---|---|---:|---:|---:|---:|---:|
+| `topwordreal` | `gc-heap` | streaming file + retained epoch records | `6.74` | `7.59` | `0.09` | `41091072` | `-1661295494911249805` |
+| `topwordreal` | `region-scoped-rooted` | streaming file + rooted epoch records | `6.39` | `7.52` | `0.11` | `15122432` | `-1661295494911249805` |
+| `topwordreal` | `checked-epoch-stream` | streaming file + `RiftRegion.epoch` | `6.42` | `7.62` | `0.09` | `15040512` | `-1661295494911249805` |
+| `topwordreal` | `checked-epoch-scoped` | streaming file + `RiftRegion.epoch` | `6.23` | `7.36` | `0.07` | `15007744` | `-1661295494911249805` |
+
+5M L2 standard-stats row, same compressed streaming input:
+
+Raw summary: `/private/tmp/rift-yak-askubuntu-streaming-5m-l2-20260517/summary.tsv`.
+
+| Workload | Mode | Topology/operator | Median elapsed ms | Median GC ms | Median Rift op ms | Logical objects | Max RSS bytes | Checksum |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| `topwordreal` | `gc-heap` | streaming file + retained epoch records | `2109.524` | `27.237` | `0.000` | `5000000` | `41123840` | `-1661295494911249805` |
+| `topwordreal` | `region-scoped-rooted` | streaming file + rooted epoch records | `2075.720` | `0.000` | `0.000` | `5000000` | `44269568` | `-1661295494911249805` |
+| `topwordreal` | `checked-epoch-stream` | streaming file + `RiftRegion.epoch` | `2066.016` | `0.000` | `0.264` | `5000000` | `44236800` | `-1661295494911249805` |
+| `topwordreal` | `checked-epoch-scoped` | streaming file + `RiftRegion.epoch` | `2061.736` | `0.000` | `0.000` | `5000000` | `44236800` | `-1661295494911249805` |
+
 Streaming-file interpretation:
 
 - This is the first true streaming-input Yak text row: the input is consumed
   incrementally from a file and no full token replay array is retained.
 - The row is not GC-heavy. At 1M tokens, heap timed GC is only `3.677 ms` on a
-  `301.923 ms` L2 loop, so this should be reported as a modest
-  real-streaming-input RSS/fixed-memory row, not a flagship GC-pressure row.
+  `301.923 ms` L2 loop; at 5M compressed-streaming tokens, heap timed GC rises
+  to `27.237 ms` on a `2109.524 ms` L2 loop, still only about `1.3%`.
+  This should be reported as a modest real-streaming-input RSS/fixed-memory
+  row, not a flagship GC-pressure row.
 - The checked epoch rows still remove timed heap GC and cut L1 RSS from about
-  `39.6 MB` to `13.0 MB`, while improving median L1 elapsed by about `5-6%`.
+  `39.6 MB` to `13.0 MB` at 1M and from about `41 MB` to `15 MB` at 5M,
+  while improving L1 elapsed by about `5-8%`.
 
 Interpretation:
 
