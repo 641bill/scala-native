@@ -6,11 +6,17 @@ month=${DEBS2015_MONTH:-1}
 limit=${DEBS2015_LIMIT:-100000}
 data_default="/Users/siyaoliu/rift/trip_data/trip_data_${month}.csv"
 fare_default="/Users/siyaoliu/rift/trip_fare/trip_fare_${month}.csv"
+data_archive=${DEBS2015_TRIP_DATA_ARCHIVE:-"/Users/siyaoliu/rift/cache/benchmark-data/debs2015/trip_data.7z"}
+fare_archive=${DEBS2015_TRIP_FARE_ARCHIVE:-"/Users/siyaoliu/rift/cache/benchmark-data/debs2015/trip_fare.7z"}
 if [[ ! -f "${data_default}" && -f "${data_default}.gz" ]]; then
   data_default="${data_default}.gz"
+elif [[ ! -f "${data_default}" && -f "${data_archive}" ]]; then
+  data_default="7z:${data_archive}!trip_data_${month}.csv"
 fi
 if [[ ! -f "${fare_default}" && -f "${fare_default}.gz" ]]; then
   fare_default="${fare_default}.gz"
+elif [[ ! -f "${fare_default}" && -f "${fare_archive}" ]]; then
+  fare_default="7z:${fare_archive}!trip_fare_${month}.csv"
 fi
 data_file=${DEBS2015_TRIP_DATA:-"${data_default}"}
 fare_file=${DEBS2015_TRIP_FARE:-"${fare_default}"}
@@ -24,6 +30,16 @@ trap 'rm -f "${tmp}"' EXIT
 stream_csv_body() {
   local input=$1
   case "${input}" in
+    7z:*)
+      local spec=${input#7z:}
+      local archive=${spec%%!*}
+      local member=${spec#*!}
+      if [[ "${spec}" == "${member}" ]]; then
+        echo "invalid 7z input spec: ${input}" >&2
+        return 2
+      fi
+      bsdtar -xOf "${archive}" "${member}" | tail -n +2
+      ;;
     *.gz) gzip -dc -- "${input}" | tail -n +2 ;;
     *) tail -n +2 -- "${input}" ;;
   esac
