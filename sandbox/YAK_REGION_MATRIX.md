@@ -1,7 +1,7 @@
 # Yak Region Matrix
 
 Date: 2026-04-25
-Last updated: 2026-05-18 00:09 CEST
+Last updated: 2026-05-18 00:22 CEST
 
 Status: Yak-style methodology reproduction harness with validated smoke,
 default median, pressure median, external-sort-shaped median, top-word/filter
@@ -420,6 +420,30 @@ Raw summaries:
 | `checked-epoch-stream` | `17.59` | `101564416` | `5530.190` | `0.000` | `2.869` | `20000000` | `-5977224669223427032` |
 | `checked-epoch-scoped` | `17.15` | `101679104` | `5812.138` | `0.000` | `0.000` | `20000000` | `-5977224669223427032` |
 
+20M streaming-file heap-cap probe:
+
+Raw summaries:
+`/private/tmp/rift-yak-livejournal-streaming-20m-cap-512m-20260518-rerun/summary.tsv`,
+`/private/tmp/rift-yak-livejournal-streaming-20m-cap-384m-20260518/summary.tsv`,
+`/private/tmp/rift-yak-livejournal-streaming-20m-cap-256m-20260518/summary.tsv`,
+`/private/tmp/rift-yak-livejournal-streaming-20m-cap-128m-20260518/summary.tsv`,
+`/private/tmp/rift-yak-livejournal-streaming-20m-cap-64m-20260518/summary.tsv`,
+`/private/tmp/rift-yak-livejournal-streaming-20m-region-cap-64m-20260518/summary.tsv`,
+and
+`/private/tmp/rift-yak-livejournal-streaming-20m-region-cap-32m-20260518/summary.tsv`.
+
+| Mode | `GC_MAXIMUM_HEAP_SIZE` | Status | L1 real s | L1 RSS bytes | Checksum |
+|---|---:|---|---:|---:|---:|
+| `gc-heap` | `512M` | ok | `6.88` | `408551424` | `-5977224669223427032` |
+| `gc-heap` | `384M` | ok | `6.67` | `405979136` | `-5977224669223427032` |
+| `gc-heap` | `256M` | ok | `6.45` | `272433152` | `-5977224669223427032` |
+| `gc-heap` | `128M` | ok | `6.76` | `138182656` | `-5977224669223427032` |
+| `gc-heap` | `64M` | failed OOM | `0.41` | `71548928` | n/a |
+| `checked-epoch-stream` | `64M` | ok | `6.16` | `97140736` | `-5977224669223427032` |
+| `checked-epoch-scoped` | `64M` | ok | `7.14` | `97173504` | `-5977224669223427032` |
+| `checked-epoch-stream` | `32M` | ok | `6.72` | `98222080` | `-5977224669223427032` |
+| `checked-epoch-scoped` | `32M` | ok | `6.00` | `98467840` | `-5977224669223427032` |
+
 Streaming-file interpretation:
 
 - This is now a true real-streaming-input Yak graph row: it consumes the
@@ -433,6 +457,10 @@ Streaming-file interpretation:
   `165.387 ms` inside `6333.745 ms` at 20M, about `2.6%`. Treat this as a
   real-streaming graph RSS/fixed-memory and throughput row, not as a
   GC-time-heavy flagship.
+- The heap-cap probe adds fixed-memory evidence: heap completes down to
+  `128M` but fails at `64M`; checked epoch rows complete under `64M` and
+  `32M` caps with matching checksums. These are one-run cap probes rather than
+  full 3-run L1 medians.
 - The preloaded 50M LiveJournal rows remain stronger for raw epoch
   memory-management evidence because they remove streaming parser/source cost
   from the timed loop. The streaming rows are the right evidence for the
