@@ -1,6 +1,6 @@
 # LogHub Retained Session Matrix
 
-Last updated: 2026-05-16 18:20 CEST
+Last updated: 2026-05-17 22:20 CEST
 
 Status: real streaming-input retained session/join triage. This matrix was
 added after the active-window LogHub q3 row showed heap-cap pressure but not a
@@ -116,3 +116,44 @@ Park this as real-streaming-input retained-object control evidence.
 - The next stronger row remains the Broom/Naiad-style retained dataflow ladder,
   which spends a much larger share of elapsed time in heap GC at 5M/20M
   active-16.
+
+## Windows Archive-Member Follow-Up
+
+Date/time: 2026-05-17 22:20 CEST.
+
+The next high-cardinality LogHub check used the larger local Windows archive
+without extracting it:
+
+`LOGHUB_SESSION_INPUT=tar.gz:/Users/siyaoliu/rift/cache/benchmark-data/loghub/Windows.tar.gz!Windows.log`
+
+The first smoke had to be rerun after relinking `LogHubRetainedSessionMatrix`;
+the stale binary did not yet include archive-member input support.
+
+20k smoke:
+
+| Workload | Mode | Median ms | GC ms | RSS bytes | Checksum | Output |
+|---|---|---:|---:|---:|---:|---:|
+| session | `heap-gc` | `228.033` | `0.223` | `21118976` | `7807814513177854722` | `13871` |
+| session | `checked-rift` | `217.695` | `0.332` | `19726336` | `7807814513177854722` | `13871` |
+| session | `checked-region-scoped` | `225.719` | `2.119` | `19857408` | `7807814513177854722` | `13871` |
+| join | `heap-gc` | `218.939` | `2.421` | `28049408` | `-9158567952398434248` | `0` |
+| join | `checked-rift` | `224.693` | `0.350` | `27295744` | `-9158567952398434248` | `0` |
+| join | `checked-region-scoped` | `230.593` | `3.474` | `27426816` | `-9158567952398434248` | `0` |
+
+The join workload is not useful on this input because it emits zero matches.
+The 1M follow-up therefore scaled only `session`.
+
+1M Windows session source:
+`/private/tmp/loghub-retained-session-windows-1m-session-l2-20260517`.
+
+| Mode | External real s | RSS bytes | Median ms | Median GC ms | Max GC ms | Runs with GC | Retained proxy | Max live proxy | Output |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `51.90` | `318111744` | `17059.969` | `125.783` | `153.059` | `3/3` | `1443591` | `589737` | `443861` |
+| `checked-rift` | `54.92` | `63389696` | `17808.808` | `14.753` | `15.408` | `3/3` | `1443591` | `589740` | `443861` |
+| `checked-region-scoped` | `51.58` | `63881216` | `17187.744` | `169.069` | `171.963` | `3/3` | `1443591` | `589740` | `443861` |
+
+Decision: park as real-streaming-input RSS/control evidence. The larger
+Windows stream confirms a large RSS reduction for region rows, but heap GC is
+only about `0.7%` of L2 elapsed and the checked Rift row loses throughput.
+The checked scoped row is an external-time near-tie, not a clear win. Parser,
+archive, and hash/session CPU dominate.
