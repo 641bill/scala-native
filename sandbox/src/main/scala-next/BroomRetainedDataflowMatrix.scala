@@ -910,38 +910,41 @@ object BroomRetainedDataflowMatrixHelpers {
             if (recordId % cfg.sampleEvery == 0)
               checksum = fold(checksum, 51, timestamp, partKey, quantity, hash)
 
-            if (selectedPartKeys.contains(JInteger.valueOf(partKey))) {
-              val bucket = slot * tableSize + (mix(partKey) & tableMask)
-              var entry = tables(bucket)
-              var found: HeapQ17PartEntry = null
-              while (entry != null && found == null) {
-                if (entry.part.key == partKey) found = entry
-                entry = entry.next
-              }
-              if (found == null) {
-                val part =
-                  new HeapQ17Part(partKey, 0, 0, selected = true)
-                found = new HeapQ17PartEntry(part, 0, 0L, null, tables(bucket))
-                tables(bucket) = found
-                retainedObjects += 2L
-                liveObjects += 2L
-              }
-              val lineItem =
-                new HeapQ17LineItem(
-                  recordId,
-                  timestamp,
-                  partKey,
-                  quantity,
-                  revenue,
-                  hash,
-                  found.lineHead
-                )
-              found.lineHead = lineItem
-              found.quantityCount += 1
-              found.quantitySum += quantity.toLong
-              retainedObjects += 1L
-              liveObjects += 1L
+            val bucket = slot * tableSize + (mix(partKey) & tableMask)
+            var entry = tables(bucket)
+            var found: HeapQ17PartEntry = null
+            while (entry != null && found == null) {
+              if (entry.part.key == partKey) found = entry
+              entry = entry.next
             }
+            if (found == null) {
+              val part =
+                new HeapQ17Part(
+                  partKey,
+                  0,
+                  0,
+                  selectedPartKeys.contains(JInteger.valueOf(partKey))
+                )
+              found = new HeapQ17PartEntry(part, 0, 0L, null, tables(bucket))
+              tables(bucket) = found
+              retainedObjects += 2L
+              liveObjects += 2L
+            }
+            val lineItem =
+              new HeapQ17LineItem(
+                recordId,
+                timestamp,
+                partKey,
+                quantity,
+                revenue,
+                hash,
+                found.lineHead
+              )
+            found.lineHead = lineItem
+            found.quantityCount += 1
+            found.quantitySum += quantity.toLong
+            retainedObjects += 1L
+            liveObjects += 1L
 
             processed += 1
             local += 1
@@ -1421,49 +1424,52 @@ object BroomRetainedDataflowMatrixHelpers {
                   localChecksum =
                     fold(localChecksum, 51, timestamp, partKey, quantity, hash)
 
-                if (selectedPartKeys.contains(JInteger.valueOf(partKey))) {
-                  val bucket = slot * tableSize + (mix(partKey) & tableMask)
-                  var entry: CheckedQ17PartEntry^{region} = tables(bucket)
-                  var found: CheckedQ17PartEntry^{region} = null
-                  while (entry != null && found == null) {
-                    if (entry.part.key == partKey) found = entry
-                    entry = entry.next
-                  }
-                  if (found == null) {
-                    val part: CheckedQ17Part^{region} =
-                      RiftAllocator.allocateOpenHandle(
-                        region,
-                        new CheckedQ17Part(partKey, 0, 0, selected = true)
-                      )
-                    found =
-                      RiftAllocator.allocateOpenHandle(
-                        region,
-                        new CheckedQ17PartEntry(part, 0, 0L)
-                      )
-                    found.next = tables(bucket)
-                    tables(bucket) = found
-                    localRetained += 2L
-                    liveObjects += 2L
-                  }
-                  val lineItem: CheckedQ17LineItem^{region} =
+                val bucket = slot * tableSize + (mix(partKey) & tableMask)
+                var entry: CheckedQ17PartEntry^{region} = tables(bucket)
+                var found: CheckedQ17PartEntry^{region} = null
+                while (entry != null && found == null) {
+                  if (entry.part.key == partKey) found = entry
+                  entry = entry.next
+                }
+                if (found == null) {
+                  val part: CheckedQ17Part^{region} =
                     RiftAllocator.allocateOpenHandle(
                       region,
-                      new CheckedQ17LineItem(
-                        recordId,
-                        timestamp,
+                      new CheckedQ17Part(
                         partKey,
-                        quantity,
-                        revenue,
-                        hash
+                        0,
+                        0,
+                        selectedPartKeys.contains(JInteger.valueOf(partKey))
                       )
                     )
-                  lineItem.next = found.lineHead
-                  found.lineHead = lineItem
-                  found.quantityCount += 1
-                  found.quantitySum += quantity.toLong
-                  localRetained += 1L
-                  liveObjects += 1L
+                  found =
+                    RiftAllocator.allocateOpenHandle(
+                      region,
+                      new CheckedQ17PartEntry(part, 0, 0L)
+                    )
+                  found.next = tables(bucket)
+                  tables(bucket) = found
+                  localRetained += 2L
+                  liveObjects += 2L
                 }
+                val lineItem: CheckedQ17LineItem^{region} =
+                  RiftAllocator.allocateOpenHandle(
+                    region,
+                    new CheckedQ17LineItem(
+                      recordId,
+                      timestamp,
+                      partKey,
+                      quantity,
+                      revenue,
+                      hash
+                    )
+                  )
+                lineItem.next = found.lineHead
+                found.lineHead = lineItem
+                found.quantityCount += 1
+                found.quantitySum += quantity.toLong
+                localRetained += 1L
+                liveObjects += 1L
 
                 local += 1
               }
@@ -2075,44 +2081,47 @@ object BroomRetainedDataflowMatrixHelpers {
                   localChecksum =
                     fold(localChecksum, 51, timestamp, partKey, quantity, hash)
 
-                if (selectedPartKeys.contains(JInteger.valueOf(partKey))) {
-                  val bucket = slot * tableSize + (mix(partKey) & tableMask)
-                  var entry: CheckedQ17PartEntry^{region} = tables(bucket)
-                  var found: CheckedQ17PartEntry^{region} = null
-                  while (entry != null && found == null) {
-                    if (entry.part.key == partKey) found = entry
-                    entry = entry.next
-                  }
-                  if (found == null) {
-                    val part: CheckedQ17Part^{region} =
-                      RiftRegion.allocOpen(
-                        new CheckedQ17Part(partKey, 0, 0, selected = true)
-                      )
-                    found =
-                      RiftRegion.allocOpen(new CheckedQ17PartEntry(part, 0, 0L))
-                    found.next = tables(bucket)
-                    tables(bucket) = found
-                    localRetained += 2L
-                    liveObjects += 2L
-                  }
-                  val lineItem: CheckedQ17LineItem^{region} =
+                val bucket = slot * tableSize + (mix(partKey) & tableMask)
+                var entry: CheckedQ17PartEntry^{region} = tables(bucket)
+                var found: CheckedQ17PartEntry^{region} = null
+                while (entry != null && found == null) {
+                  if (entry.part.key == partKey) found = entry
+                  entry = entry.next
+                }
+                if (found == null) {
+                  val part: CheckedQ17Part^{region} =
                     RiftRegion.allocOpen(
-                      new CheckedQ17LineItem(
-                        recordId,
-                        timestamp,
+                      new CheckedQ17Part(
                         partKey,
-                        quantity,
-                        revenue,
-                        hash
+                        0,
+                        0,
+                        selectedPartKeys.contains(JInteger.valueOf(partKey))
                       )
                     )
-                  lineItem.next = found.lineHead
-                  found.lineHead = lineItem
-                  found.quantityCount += 1
-                  found.quantitySum += quantity.toLong
-                  localRetained += 1L
-                  liveObjects += 1L
+                  found =
+                    RiftRegion.allocOpen(new CheckedQ17PartEntry(part, 0, 0L))
+                  found.next = tables(bucket)
+                  tables(bucket) = found
+                  localRetained += 2L
+                  liveObjects += 2L
                 }
+                val lineItem: CheckedQ17LineItem^{region} =
+                  RiftRegion.allocOpen(
+                    new CheckedQ17LineItem(
+                      recordId,
+                      timestamp,
+                      partKey,
+                      quantity,
+                      revenue,
+                      hash
+                    )
+                  )
+                lineItem.next = found.lineHead
+                found.lineHead = lineItem
+                found.quantityCount += 1
+                found.quantitySum += quantity.toLong
+                localRetained += 1L
+                liveObjects += 1L
 
                 local += 1
               }
