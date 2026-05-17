@@ -388,7 +388,10 @@ object RiotBenchRegionMatrixHelpers {
     if (inputFile.isDirectory) {
       val files = inputFile
         .listFiles()
-        .filter(file => file.isFile && file.getName.endsWith(".log"))
+        .filter { file =>
+          file.isFile &&
+            (file.getName.endsWith(".log") || file.getName.endsWith(".log.gz"))
+        }
         .sortBy(_.getName)
       var fileIndex = 0
       while (fileIndex < files.length && sensors.length < cfg.events) {

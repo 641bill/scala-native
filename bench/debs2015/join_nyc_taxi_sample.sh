@@ -4,8 +4,16 @@ set -euo pipefail
 
 month=${DEBS2015_MONTH:-1}
 limit=${DEBS2015_LIMIT:-100000}
-data_file=${DEBS2015_TRIP_DATA:-"/Users/siyaoliu/rift/trip_data/trip_data_${month}.csv"}
-fare_file=${DEBS2015_TRIP_FARE:-"/Users/siyaoliu/rift/trip_fare/trip_fare_${month}.csv"}
+data_default="/Users/siyaoliu/rift/trip_data/trip_data_${month}.csv"
+fare_default="/Users/siyaoliu/rift/trip_fare/trip_fare_${month}.csv"
+if [[ ! -f "${data_default}" && -f "${data_default}.gz" ]]; then
+  data_default="${data_default}.gz"
+fi
+if [[ ! -f "${fare_default}" && -f "${fare_default}.gz" ]]; then
+  fare_default="${fare_default}.gz"
+fi
+data_file=${DEBS2015_TRIP_DATA:-"${data_default}"}
+fare_file=${DEBS2015_TRIP_FARE:-"${fare_default}"}
 output=${DEBS2015_JOINED_OUTPUT:-"/tmp/debs2015-month${month}-${limit}.csv"}
 sort_output=${DEBS2015_SORT:-1}
 
@@ -13,10 +21,18 @@ mkdir -p "${output:h}"
 tmp=$(mktemp "${TMPDIR:-/tmp}/debs2015-joined.XXXXXX")
 trap 'rm -f "${tmp}"' EXIT
 
+stream_csv_body() {
+  local input=$1
+  case "${input}" in
+    *.gz) gzip -dc -- "${input}" | tail -n +2 ;;
+    *) tail -n +2 -- "${input}" ;;
+  esac
+}
+
 set +o pipefail
 paste -d '\t' \
-  <(tail -n +2 "${data_file}") \
-  <(tail -n +2 "${fare_file}") |
+  <(stream_csv_body "${data_file}") \
+  <(stream_csv_body "${fare_file}") |
 awk -F '\t' -v limit="${limit}" -v output="${tmp}" '
 function trim(value) {
   gsub(/^[ \t\r]+|[ \t\r]+$/, "", value)

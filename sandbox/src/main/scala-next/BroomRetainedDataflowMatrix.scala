@@ -1,6 +1,6 @@
 import scala.language.experimental.captureChecking
 
-import java.io.{BufferedReader, FileReader}
+import java.io.BufferedReader
 import java.lang.Integer as JInteger
 import java.util.HashSet as JHashSet
 
@@ -284,7 +284,7 @@ object BroomRetainedDataflowMatrixHelpers {
       )
 
   private def openInput(path: String, name: String): BufferedReader =
-    new BufferedReader(new FileReader(requirePath(path, name)), 1 << 20)
+    BenchmarkInputSupport.openText(requirePath(path, name))
 
   private def parseIntField(line: String, targetField: Int): Int = {
     val n = line.length
