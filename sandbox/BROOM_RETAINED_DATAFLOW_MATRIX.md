@@ -1,6 +1,6 @@
 # Broom Retained Dataflow Matrix
 
-Last updated: 2026-05-17 12:03 CEST
+Last updated: 2026-05-17 12:22 CEST
 
 Status: new prior-work-style retained-object dataflow benchmark. This matrix
 compares the natural heap/GC program against the checked Rift region program,
@@ -101,8 +101,8 @@ This mode reads `part.tbl` and `lineitem.tbl` incrementally and uses
 all lineitems in the active timestamp/part dictionaries, then applies the Q17
 selected-part and below-average filters at timestamp close. It is a
 DBGEN/TPC-H workload input mode, not an audited official TPC-H result and not
-real-world production input. SF0.1 rows below were generated locally with the
-public `electrum/tpch-dbgen` mirror; SF1/full TPC-H rows are still pending.
+real-world production input. SF0.1 and SF1 rows below were generated locally
+with the public `electrum/tpch-dbgen` mirror.
 
 ## Correctness Smoke
 
@@ -130,7 +130,7 @@ headline modes. The goal was parser/integration correctness, not performance.
 | q17 | `checked-rift` | L1 | `-3582489220934111213` | `1` | `14` | `15` | `8585216` |
 | q17 | `checked-region-scoped` | L1 | `-3582489220934111213` | `1` | `14` | `15` | `8585216` |
 
-DBGEN SF0.1 file-backed q17 smoke/scale, 2026-05-17 12:03 CEST:
+DBGEN file-backed q17 smoke/scale, 2026-05-17 12:22 CEST:
 
 Provenance:
 
@@ -138,9 +138,12 @@ Provenance:
   `https://github.com/electrum/tpch-dbgen`.
 - Generation command shape:
   `DSS_PATH=/Users/siyaoliu/rift/cache/tpch-sf0.1 ./dbgen -f -s 0.1 -T P`
-  and the same command with `-T L`.
-- Generated input: `part.tbl` has `20000` rows and `lineitem.tbl` has
+  and the same command with `-T L`; SF1 used `-s 1` and
+  `DSS_PATH=/Users/siyaoliu/rift/cache/tpch-sf1`.
+- Generated SF0.1 input: `part.tbl` has `20000` rows and `lineitem.tbl` has
   `600572` rows (`71 MB` lineitem file).
+- Generated SF1 input: `part.tbl` has `200000` rows and `lineitem.tbl` has
+  `6001215` rows (`725 MB` lineitem file).
 - Q17 parameters: QGEN in this checkout produced `Brand#13` / `SM PKG`; those
   parameters match `26` part rows and `782` lineitems, but the retained
   dataflow implementation keeps all lineitems until timestamp close.
@@ -170,13 +173,40 @@ Heap-cap follow-up, SF0.1:
 | `heap-gc` | `64M` | failed/OOM | n/a | n/a | `71909376` | n/a | n/a |
 | `checked-rift` | uncapped | completed | `1697.607` | `36.855` | `50954240` | `-5130892219889863805` | `25` |
 
-Interpretation: SF0.1 is now a standardized DBGEN-generated input row, not a
-hand-written generator row. It is still not real-world input and still smaller
-than SF1, but it reproduces the retained-object shape over DBGEN tables. The
-headline signal is mostly RSS/fixed-memory plus modest L1 throughput: checked
-Rift lowers RSS from about `257 MB` to about `51 MB`, and heap fails at `64M`.
-The L2 elapsed rows are near-ties because file parsing and line scanning still
-dominate at SF0.1.
+SF1 L1 final-clean, 6001215 lineitems, 3 repeats:
+
+| Workload | Mode | L1 real s | RSS bytes | Checksum | Output count | Retained objects | Region-freed proxy | Claim |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| q17 | `heap-gc` | `55.44` | `433291264` | `2919462578996881752` | `37` | `17283725` | `0` | Natural heap baseline over DBGEN SF1 input. |
+| q17 | `checked-rift` | `51.47` | `48676864` | `2919462578996881752` | `37` | `17283725` | `17283786` | Checked Rift is about `7.2%` faster and about `88.8%` lower RSS. |
+| q17 | `checked-region-scoped` | `53.35` | `48889856` | `2919462578996881752` | `37` | `17283725` | `17283786` | Checked scoped is about `3.8%` faster than heap and about `88.7%` lower RSS. |
+
+SF1 L2 standard stats, 6001215 lineitems, 3 repeats:
+
+| Workload | Mode | Median ms | GC median ms | GC max ms | Runs with GC | Region op ms | Region objects | Region resets | RSS bytes |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| q17 | `heap-gc` | `17583.930` | `877.190` | `953.049` | `3/3` | `0.000` | `0` | `0` | `434126848` |
+| q17 | `checked-rift` | `17721.174` | `503.444` | `513.573` | `3/3` | `5.922` | `17283786` | `61` | `52674560` |
+| q17 | `checked-region-scoped` | `17849.059` | `877.978` | `975.317` | `3/3` | `0.000` | `0` | `0` | `53051392` |
+
+SF1 heap-cap follow-up:
+
+| Mode | Heap cap | Status | L2 median ms | GC median ms | RSS bytes | Checksum | Output count |
+|---|---:|---|---:|---:|---:|---:|---:|
+| `heap-gc` | `384M` | completed | `18274.548` | `572.880` | `406732800` | `2919462578996881752` | `37` |
+| `heap-gc` | `256M` | completed | `17444.538` | `533.905` | `273154048` | `2919462578996881752` | `37` |
+| `heap-gc` | `128M` | failed/OOM | n/a | n/a | `139231232` | n/a | n/a |
+
+Interpretation: SF0.1 and SF1 are now standardized DBGEN-generated input rows,
+not hand-written generator rows. They are still not real-world input, but they
+reproduce the retained-object TPC-H Q17 shape over DBGEN tables. SF1 is the
+stronger row: heap spends about `5%` of L2 median time in timed GC, checked
+Rift cuts L1 elapsed by about `7.2%`, and checked Rift cuts RSS from about
+`433 MB` to about `49 MB`. The fixed-memory signal also strengthens at SF1:
+heap fails at `128M`, while checked Rift completed the same logical query at
+about `49-53 MB` RSS. The remaining elapsed work is dominated by file parsing
+and line scanning, so DBGEN q17 is mostly RSS/fixed-memory plus modest
+throughput evidence rather than a large throughput-only win.
 
 ## L1 Final-Clean Rows
 
