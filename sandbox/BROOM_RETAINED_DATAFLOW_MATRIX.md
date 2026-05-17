@@ -1,6 +1,6 @@
 # Broom Retained Dataflow Matrix
 
-Last updated: 2026-05-17 02:54 CEST
+Last updated: 2026-05-17 03:21 CEST
 
 Status: new prior-work-style retained-object dataflow benchmark. This matrix
 compares the natural heap/GC program against the checked Rift region program,
@@ -26,6 +26,8 @@ records are retained until a notification/epoch boundary:
   `LineItem`-like records, retain lineitems in per-timestamp per-part
   dictionaries, retain per-part aggregate entries, then compute a
   TPC-H-Q17-style below-average quantity/revenue filter at timestamp close.
+  The same workload can also consume DBGEN-style `part.tbl` and
+  `lineitem.tbl` via `BROOM_Q17_INPUT_MODE=tpch-file`.
 - high-cardinality/active-timestamp variants keep multiple timestamp states
   live to increase heap traversal and RSS pressure.
 
@@ -81,6 +83,25 @@ BROOM_MODES="heap-gc checked-rift" \
 zsh sandbox/run_broom_retained_dataflow_matrix.sh
 ```
 
+DBGEN/TPC-H file-backed q17 mode:
+
+```sh
+BROOM_Q17_INPUT_MODE=tpch-file \
+BROOM_TPCH_PART_INPUT=/path/to/part.tbl \
+BROOM_TPCH_LINEITEM_INPUT=/path/to/lineitem.tbl \
+BROOM_TPCH_BRAND='Brand#23' \
+BROOM_TPCH_CONTAINER='MED BOX' \
+BROOM_WORKLOADS="q17" \
+BROOM_MODES="heap-gc checked-rift checked-region-scoped" \
+zsh sandbox/run_broom_retained_dataflow_matrix.sh
+```
+
+This mode reads `part.tbl` and `lineitem.tbl` incrementally and uses
+`BROOM_RECORDS` as the maximum number of lineitem rows to consume. It is a
+DBGEN/TPC-H workload input mode, not an audited official TPC-H result and not
+real-world production input. No full DBGEN dataset is currently checked into
+the Rift workspace; scale rows require supplying local TPC-H files.
+
 ## Correctness Smoke
 
 20k L1 smoke matched checksum/output for heap, checked Rift, and the checked
@@ -94,6 +115,18 @@ scoped backend:
 | join | `heap-gc` | `-4534341871053622537` | `12934` | `5996544` |
 | join | `checked-rift` | `-4534341871053622537` | `12934` | `5767168` |
 | join | `checked-region-scoped` | `-4534341871053622537` | `12934` | `5996544` |
+
+Tiny DBGEN-shape file-backed q17 smoke, 2026-05-17 03:20 CEST:
+
+Command used a hand-sized `/private/tmp` `part.tbl`/`lineitem.tbl` fixture
+with `BROOM_Q17_INPUT_MODE=tpch-file`, `BROOM_RECORDS=8`, and the three
+headline modes. The goal was parser/integration correctness, not performance.
+
+| Workload | Mode | Measurement level | Checksum | Output count | Retained objects | Region-freed proxy | RSS bytes |
+|---|---|---|---:|---:|---:|---:|---:|
+| q17 | `heap-gc` | L1 | `-3582489220934111213` | `1` | `14` | `0` | `8536064` |
+| q17 | `checked-rift` | L1 | `-3582489220934111213` | `1` | `14` | `15` | `8585216` |
+| q17 | `checked-region-scoped` | L1 | `-3582489220934111213` | `1` | `14` | `15` | `8585216` |
 
 ## L1 Final-Clean Rows
 

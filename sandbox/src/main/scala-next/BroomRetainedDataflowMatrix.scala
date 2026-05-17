@@ -1,5 +1,9 @@
 import scala.language.experimental.captureChecking
 
+import java.io.{BufferedReader, FileReader}
+import java.lang.Integer as JInteger
+import java.util.HashSet as JHashSet
+
 import scala.scalanative.memory.RiftRegion
 import scala.scalanative.runtime.{fromRawUSize, GC, RawSize, RiftAllocator}
 
@@ -38,6 +42,15 @@ object BroomRetainedDataflowConfig {
   val sampleEvery: Int = envInt("BROOM_SAMPLE_EVERY", 4096)
   val warmupRuns: Int = envNonNegativeInt("BROOM_WARMUPS", 1)
   val benchmarkRuns: Int = envInt("BROOM_BENCHMARK_RUNS", 3)
+  val q17InputMode: String =
+    sys.env.getOrElse("BROOM_Q17_INPUT_MODE", "generated")
+      .toLowerCase
+  val tpchPartInput: String = sys.env.getOrElse("BROOM_TPCH_PART_INPUT", "")
+  val tpchLineItemInput: String =
+    sys.env.getOrElse("BROOM_TPCH_LINEITEM_INPUT", "")
+  val tpchBrand: String = sys.env.getOrElse("BROOM_TPCH_BRAND", "Brand#23")
+  val tpchContainer: String =
+    sys.env.getOrElse("BROOM_TPCH_CONTAINER", "MED BOX")
   val finalClean: Boolean =
     sys.env.get("RIFT_FINAL_CLEAN").exists(truthy) ||
       sys.env.get("RIFT_EVAL_MEASUREMENT_LEVEL").exists(_.equalsIgnoreCase("L1"))
@@ -104,6 +117,12 @@ object BroomRetainedDataflowMatrixHelpers {
       retainedObjectProxy: Long,
       regionFreedObjectProxy: Long,
       maxLiveObjectProxy: Long
+  )
+
+  private final case class FileGroupOutcome(
+      outcome: Outcome,
+      recordsRead: Int,
+      eof: Boolean
   )
 
   final case class RuntimeSample(
@@ -251,6 +270,144 @@ object BroomRetainedDataflowMatrixHelpers {
 
   private def q17BelowAverageThreshold(quantity: Int, count: Int, sum: Long): Boolean =
     count > 0 && quantity.toLong * count.toLong * 5L < sum
+
+  private def q17UsesTpchFileInput(): Boolean = {
+    val mode = BroomRetainedDataflowConfig.q17InputMode
+    mode == "tpch-file" || mode == "tpch" || mode == "file"
+  }
+
+  private def requirePath(path: String, name: String): String =
+    if (path.nonEmpty) path
+    else
+      throw new IllegalArgumentException(
+        s"$name must be set when BROOM_Q17_INPUT_MODE=tpch-file"
+      )
+
+  private def openInput(path: String, name: String): BufferedReader =
+    new BufferedReader(new FileReader(requirePath(path, name)), 1 << 20)
+
+  private def parseIntField(line: String, targetField: Int): Int = {
+    val n = line.length
+    var i = 0
+    var field = 0
+    while (field < targetField && i < n) {
+      if (line.charAt(i) == '|') field += 1
+      i += 1
+    }
+    var sign = 1
+    if (i < n && line.charAt(i) == '-') {
+      sign = -1
+      i += 1
+    }
+    var value = 0
+    while (i < n) {
+      val ch = line.charAt(i)
+      if (ch == '|' || ch == '.') return value * sign
+      if (ch >= '0' && ch <= '9') value = value * 10 + (ch - '0')
+      i += 1
+    }
+    value * sign
+  }
+
+  private def parseDecimal2Field(line: String, targetField: Int): Long = {
+    val n = line.length
+    var i = 0
+    var field = 0
+    while (field < targetField && i < n) {
+      if (line.charAt(i) == '|') field += 1
+      i += 1
+    }
+    var sign = 1L
+    if (i < n && line.charAt(i) == '-') {
+      sign = -1L
+      i += 1
+    }
+    var whole = 0L
+    var fraction = 0
+    var fractionDigits = 0
+    var afterDot = false
+    while (i < n) {
+      val ch = line.charAt(i)
+      if (ch == '|') {
+        i = n
+      } else if (ch == '.') {
+        afterDot = true
+      } else if (ch >= '0' && ch <= '9') {
+        val digit = ch - '0'
+        if (afterDot) {
+          if (fractionDigits < 2) {
+            fraction = fraction * 10 + digit
+            fractionDigits += 1
+          }
+        } else {
+          whole = whole * 10L + digit.toLong
+        }
+      }
+      i += 1
+    }
+    while (fractionDigits < 2) {
+      fraction *= 10
+      fractionDigits += 1
+    }
+    sign * (whole * 100L + fraction.toLong)
+  }
+
+  private def fieldEquals(line: String, targetField: Int, expected: String): Boolean = {
+    val n = line.length
+    var i = 0
+    var field = 0
+    while (field < targetField && i < n) {
+      if (line.charAt(i) == '|') field += 1
+      i += 1
+    }
+    val start = i
+    while (i < n && line.charAt(i) != '|') i += 1
+    val length = i - start
+    length == expected.length &&
+      line.regionMatches(start, expected, 0, expected.length)
+  }
+
+  private def loadTpchSelectedPartKeys(): JHashSet[JInteger] = {
+    val cfg = BroomRetainedDataflowConfig
+    val selected = new JHashSet[JInteger]()
+    val reader = openInput(cfg.tpchPartInput, "BROOM_TPCH_PART_INPUT")
+    try {
+      var line = reader.readLine()
+      while (line != null) {
+        if (
+          line.nonEmpty &&
+            fieldEquals(line, 3, cfg.tpchBrand) &&
+            fieldEquals(line, 6, cfg.tpchContainer)
+        ) {
+          selected.add(JInteger.valueOf(parseIntField(line, 0)))
+        }
+        line = reader.readLine()
+      }
+    } finally reader.close()
+    selected
+  }
+
+  private def q17TpchTableSize(selectedPartCount: Int): Int = {
+    val cfg = BroomRetainedDataflowConfig
+    val selectedSized =
+      if (selectedPartCount <= 0) 16
+      else if (selectedPartCount > (1 << 27)) Int.MaxValue / 2
+      else selectedPartCount * 4
+    nextPowerOfTwo(math.max(16, math.max(cfg.keySpace * 2, selectedSized)))
+  }
+
+  private def tpchQ17Hash(
+      recordId: Int,
+      timestamp: Int,
+      partKey: Int,
+      quantity: Int
+  ): Long =
+    mix(
+      recordId ^
+        (timestamp * 65537) ^
+        (partKey * 1000003) ^
+        (quantity * 8191)
+    ).toLong
 
   private def runHeapAggregate(): Outcome = {
     val cfg = BroomRetainedDataflowConfig
@@ -583,6 +740,8 @@ object BroomRetainedDataflowMatrixHelpers {
   }
 
   private def runHeapQ17(): Outcome = {
+    if (q17UsesTpchFileInput()) return runHeapTpchQ17()
+
     val cfg = BroomRetainedDataflowConfig
     val tableSize = nextPowerOfTwo(math.max(16, cfg.keySpace * 2))
     val tableMask = tableSize - 1
@@ -706,6 +865,144 @@ object BroomRetainedDataflowMatrixHelpers {
       processed += groupRecords
       group += 1
     }
+
+    checksumSink = checksum
+    outputSink = outputCount
+    retainedSink = retainedObjects
+    Outcome(checksum, outputCount, retainedObjects, 0L, maxLiveObjects)
+  }
+
+  private def runHeapTpchQ17(): Outcome = {
+    val cfg = BroomRetainedDataflowConfig
+    val selectedPartKeys = loadTpchSelectedPartKeys()
+    val tableSize = q17TpchTableSize(selectedPartKeys.size())
+    val tableMask = tableSize - 1
+    val reader = openInput(cfg.tpchLineItemInput, "BROOM_TPCH_LINEITEM_INPUT")
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedObjects = 0L
+    var maxLiveObjects = 0L
+    var processed = 0
+    var group = 0
+    var eof = false
+
+    try {
+      while (processed < cfg.records && !eof) {
+        val remaining = cfg.records - processed
+        val slots = groupSlots(remaining, cfg)
+        val groupRecords = math.min(remaining, slots * cfg.recordsPerTimestamp)
+        val tables = new Array[HeapQ17PartEntry](slots * tableSize)
+        var liveObjects = 0L
+        var local = 0
+
+        while (local < groupRecords && !eof) {
+          val line = reader.readLine()
+          if (line == null) eof = true
+          else {
+            val slot = local % slots
+            val timestamp = group * cfg.activeTimestamps + slot
+            val recordId = processed
+            val partKey = parseIntField(line, 1)
+            val quantity = parseDecimal2Field(line, 4).toInt
+            val revenue = parseDecimal2Field(line, 5)
+            val hash = tpchQ17Hash(recordId, timestamp, partKey, quantity)
+
+            if (recordId % cfg.sampleEvery == 0)
+              checksum = fold(checksum, 51, timestamp, partKey, quantity, hash)
+
+            if (selectedPartKeys.contains(JInteger.valueOf(partKey))) {
+              val bucket = slot * tableSize + (mix(partKey) & tableMask)
+              var entry = tables(bucket)
+              var found: HeapQ17PartEntry = null
+              while (entry != null && found == null) {
+                if (entry.part.key == partKey) found = entry
+                entry = entry.next
+              }
+              if (found == null) {
+                val part =
+                  new HeapQ17Part(partKey, 0, 0, selected = true)
+                found = new HeapQ17PartEntry(part, 0, 0L, null, tables(bucket))
+                tables(bucket) = found
+                retainedObjects += 2L
+                liveObjects += 2L
+              }
+              val lineItem =
+                new HeapQ17LineItem(
+                  recordId,
+                  timestamp,
+                  partKey,
+                  quantity,
+                  revenue,
+                  hash,
+                  found.lineHead
+                )
+              found.lineHead = lineItem
+              found.quantityCount += 1
+              found.quantitySum += quantity.toLong
+              retainedObjects += 1L
+              liveObjects += 1L
+            }
+
+            processed += 1
+            local += 1
+          }
+        }
+
+        if (liveObjects > maxLiveObjects) maxLiveObjects = liveObjects
+
+        var slot = 0
+        while (slot < slots) {
+          val timestamp = group * cfg.activeTimestamps + slot
+          var bucket = 0
+          while (bucket < tableSize) {
+            var entry = tables(slot * tableSize + bucket)
+            while (entry != null) {
+              var selectedCount = 0
+              var selectedRevenue = 0L
+              var line = entry.lineHead
+              while (line != null) {
+                if (
+                  entry.part.selected &&
+                    q17BelowAverageThreshold(
+                      line.quantity,
+                      entry.quantityCount,
+                      entry.quantitySum
+                    )
+                ) {
+                  selectedCount += 1
+                  selectedRevenue += line.revenue
+                  outputCount += 1L
+                  checksum =
+                    fold(
+                      checksum,
+                      53,
+                      timestamp,
+                      entry.part.key,
+                      line.quantity,
+                      line.revenue ^ entry.quantitySum
+                    )
+                }
+                line = line.next
+              }
+              checksum =
+                fold(
+                  checksum,
+                  59,
+                  timestamp,
+                  entry.part.key,
+                  selectedCount,
+                  selectedRevenue + entry.quantitySum
+                )
+              entry = entry.next
+            }
+            bucket += 1
+          }
+          slot += 1
+        }
+
+        group += 1
+      }
+    } finally reader.close()
 
     checksumSink = checksum
     outputSink = outputCount
@@ -855,6 +1152,8 @@ object BroomRetainedDataflowMatrixHelpers {
   }
 
   private def runCheckedQ17(): Outcome = {
+    if (q17UsesTpchFileInput()) return runCheckedTpchQ17()
+
     val cfg = BroomRetainedDataflowConfig
     val tableSize = nextPowerOfTwo(math.max(16, cfg.keySpace * 2))
     val tableMask = tableSize - 1
@@ -1037,6 +1336,209 @@ object BroomRetainedDataflowMatrixHelpers {
         group += 1
       }
     }
+
+    checksumSink = checksum
+    outputSink = outputCount
+    retainedSink = retainedObjects
+    Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
+  }
+
+  private def runCheckedTpchQ17(): Outcome = {
+    val cfg = BroomRetainedDataflowConfig
+    val selectedPartKeys = loadTpchSelectedPartKeys()
+    val tableSize = q17TpchTableSize(selectedPartKeys.size())
+    val tableMask = tableSize - 1
+    val reader = openInput(cfg.tpchLineItemInput, "BROOM_TPCH_LINEITEM_INPUT")
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedObjects = 0L
+    var regionFreedObjects = 0L
+    var maxLiveObjects = 0L
+    var processed = 0
+    var group = 0
+    var eof = false
+
+    try {
+      RiftRegion.streamingOpenHandle {
+        while (processed < cfg.records && !eof) {
+          val remaining = cfg.records - processed
+          val slots = groupSlots(remaining, cfg)
+          val groupRecords = math.min(remaining, slots * cfg.recordsPerTimestamp)
+
+          val fileGroup = RiftRegion.resetOpenHandle { region ?=>
+            final class CheckedQ17Part(
+                val key: Int,
+                val brand: Int,
+                val container: Int,
+                val selected: Boolean
+            )
+
+            final class CheckedQ17LineItem(
+                val recordId: Int,
+                val timestamp: Int,
+                val partKey: Int,
+                val quantity: Int,
+                val revenue: Long,
+                val hash: Long
+            ) {
+              var next: CheckedQ17LineItem^{region} = null
+            }
+
+            final class CheckedQ17PartEntry(
+                val part: CheckedQ17Part^{region},
+                var quantityCount: Int,
+                var quantitySum: Long
+            ) {
+              var lineHead: CheckedQ17LineItem^{region} = null
+              var next: CheckedQ17PartEntry^{region} = null
+            }
+
+            val tables: Array[CheckedQ17PartEntry^{region}]^{region} =
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new Array[CheckedQ17PartEntry^{region}](slots * tableSize)
+              )
+            var localChecksum = checksum
+            var localOutput = 0L
+            var localRetained = 0L
+            var liveObjects = 1L
+            var local = 0
+            var localEof = false
+
+            while (local < groupRecords && !localEof) {
+              val line = reader.readLine()
+              if (line == null) localEof = true
+              else {
+                val slot = local % slots
+                val timestamp = group * cfg.activeTimestamps + slot
+                val recordId = processed + local
+                val partKey = parseIntField(line, 1)
+                val quantity = parseDecimal2Field(line, 4).toInt
+                val revenue = parseDecimal2Field(line, 5)
+                val hash = tpchQ17Hash(recordId, timestamp, partKey, quantity)
+
+                if (recordId % cfg.sampleEvery == 0)
+                  localChecksum =
+                    fold(localChecksum, 51, timestamp, partKey, quantity, hash)
+
+                if (selectedPartKeys.contains(JInteger.valueOf(partKey))) {
+                  val bucket = slot * tableSize + (mix(partKey) & tableMask)
+                  var entry: CheckedQ17PartEntry^{region} = tables(bucket)
+                  var found: CheckedQ17PartEntry^{region} = null
+                  while (entry != null && found == null) {
+                    if (entry.part.key == partKey) found = entry
+                    entry = entry.next
+                  }
+                  if (found == null) {
+                    val part: CheckedQ17Part^{region} =
+                      RiftAllocator.allocateOpenHandle(
+                        region,
+                        new CheckedQ17Part(partKey, 0, 0, selected = true)
+                      )
+                    found =
+                      RiftAllocator.allocateOpenHandle(
+                        region,
+                        new CheckedQ17PartEntry(part, 0, 0L)
+                      )
+                    found.next = tables(bucket)
+                    tables(bucket) = found
+                    localRetained += 2L
+                    liveObjects += 2L
+                  }
+                  val lineItem: CheckedQ17LineItem^{region} =
+                    RiftAllocator.allocateOpenHandle(
+                      region,
+                      new CheckedQ17LineItem(
+                        recordId,
+                        timestamp,
+                        partKey,
+                        quantity,
+                        revenue,
+                        hash
+                      )
+                    )
+                  lineItem.next = found.lineHead
+                  found.lineHead = lineItem
+                  found.quantityCount += 1
+                  found.quantitySum += quantity.toLong
+                  localRetained += 1L
+                  liveObjects += 1L
+                }
+
+                local += 1
+              }
+            }
+
+            var slot = 0
+            while (slot < slots) {
+              val timestamp = group * cfg.activeTimestamps + slot
+              var bucket = 0
+              while (bucket < tableSize) {
+                var entry: CheckedQ17PartEntry^{region} =
+                  tables(slot * tableSize + bucket)
+                while (entry != null) {
+                  var selectedCount = 0
+                  var selectedRevenue = 0L
+                  var line: CheckedQ17LineItem^{region} = entry.lineHead
+                  while (line != null) {
+                    if (
+                      entry.part.selected &&
+                        q17BelowAverageThreshold(
+                          line.quantity,
+                          entry.quantityCount,
+                          entry.quantitySum
+                        )
+                    ) {
+                      selectedCount += 1
+                      selectedRevenue += line.revenue
+                      localOutput += 1L
+                      localChecksum =
+                        fold(
+                          localChecksum,
+                          53,
+                          timestamp,
+                          entry.part.key,
+                          line.quantity,
+                          line.revenue ^ entry.quantitySum
+                        )
+                    }
+                    line = line.next
+                  }
+                  localChecksum =
+                    fold(
+                      localChecksum,
+                      59,
+                      timestamp,
+                      entry.part.key,
+                      selectedCount,
+                      selectedRevenue + entry.quantitySum
+                    )
+                  entry = entry.next
+                }
+                bucket += 1
+              }
+              slot += 1
+            }
+
+            FileGroupOutcome(
+              Outcome(localChecksum, localOutput, localRetained, localRetained + 1L, liveObjects),
+              local,
+              localEof
+            )
+          }
+
+          checksum = fileGroup.outcome.checksum
+          outputCount += fileGroup.outcome.outputCount
+          retainedObjects += fileGroup.outcome.retainedObjectProxy
+          regionFreedObjects += fileGroup.outcome.regionFreedObjectProxy
+          if (fileGroup.outcome.maxLiveObjectProxy > maxLiveObjects)
+            maxLiveObjects = fileGroup.outcome.maxLiveObjectProxy
+          processed += fileGroup.recordsRead
+          eof = fileGroup.eof
+          group += 1
+        }
+      }
+    } finally reader.close()
 
     checksumSink = checksum
     outputSink = outputCount
@@ -1312,6 +1814,8 @@ object BroomRetainedDataflowMatrixHelpers {
   }
 
   private def runCheckedScopedQ17(): Outcome = {
+    if (q17UsesTpchFileInput()) return runCheckedScopedTpchQ17()
+
     val cfg = BroomRetainedDataflowConfig
     val tableSize = nextPowerOfTwo(math.max(16, cfg.keySpace * 2))
     val tableMask = tableSize - 1
@@ -1494,6 +1998,203 @@ object BroomRetainedDataflowMatrixHelpers {
     Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
   }
 
+  private def runCheckedScopedTpchQ17(): Outcome = {
+    val cfg = BroomRetainedDataflowConfig
+    val selectedPartKeys = loadTpchSelectedPartKeys()
+    val tableSize = q17TpchTableSize(selectedPartKeys.size())
+    val tableMask = tableSize - 1
+    val reader = openInput(cfg.tpchLineItemInput, "BROOM_TPCH_LINEITEM_INPUT")
+    var checksum = 0L
+    var outputCount = 0L
+    var retainedObjects = 0L
+    var regionFreedObjects = 0L
+    var maxLiveObjects = 0L
+    var processed = 0
+    var group = 0
+    var eof = false
+
+    try {
+      RiftRegion.streamingSafeZone { stream ?=>
+        while (processed < cfg.records && !eof) {
+          val remaining = cfg.records - processed
+          val slots = groupSlots(remaining, cfg)
+          val groupRecords = math.min(remaining, slots * cfg.recordsPerTimestamp)
+
+          val fileGroup = RiftRegion.epoch { region ?=>
+            final class CheckedQ17Part(
+                val key: Int,
+                val brand: Int,
+                val container: Int,
+                val selected: Boolean
+            )
+
+            final class CheckedQ17LineItem(
+                val recordId: Int,
+                val timestamp: Int,
+                val partKey: Int,
+                val quantity: Int,
+                val revenue: Long,
+                val hash: Long
+            ) {
+              var next: CheckedQ17LineItem^{region} = null
+            }
+
+            final class CheckedQ17PartEntry(
+                val part: CheckedQ17Part^{region},
+                var quantityCount: Int,
+                var quantitySum: Long
+            ) {
+              var lineHead: CheckedQ17LineItem^{region} = null
+              var next: CheckedQ17PartEntry^{region} = null
+            }
+
+            val tables: Array[CheckedQ17PartEntry^{region}]^{region} =
+              RiftRegion.allocOpen(
+                new Array[CheckedQ17PartEntry^{region}](slots * tableSize)
+              )
+            var localChecksum = checksum
+            var localOutput = 0L
+            var localRetained = 0L
+            var liveObjects = 1L
+            var local = 0
+            var localEof = false
+
+            while (local < groupRecords && !localEof) {
+              val line = reader.readLine()
+              if (line == null) localEof = true
+              else {
+                val slot = local % slots
+                val timestamp = group * cfg.activeTimestamps + slot
+                val recordId = processed + local
+                val partKey = parseIntField(line, 1)
+                val quantity = parseDecimal2Field(line, 4).toInt
+                val revenue = parseDecimal2Field(line, 5)
+                val hash = tpchQ17Hash(recordId, timestamp, partKey, quantity)
+
+                if (recordId % cfg.sampleEvery == 0)
+                  localChecksum =
+                    fold(localChecksum, 51, timestamp, partKey, quantity, hash)
+
+                if (selectedPartKeys.contains(JInteger.valueOf(partKey))) {
+                  val bucket = slot * tableSize + (mix(partKey) & tableMask)
+                  var entry: CheckedQ17PartEntry^{region} = tables(bucket)
+                  var found: CheckedQ17PartEntry^{region} = null
+                  while (entry != null && found == null) {
+                    if (entry.part.key == partKey) found = entry
+                    entry = entry.next
+                  }
+                  if (found == null) {
+                    val part: CheckedQ17Part^{region} =
+                      RiftRegion.allocOpen(
+                        new CheckedQ17Part(partKey, 0, 0, selected = true)
+                      )
+                    found =
+                      RiftRegion.allocOpen(new CheckedQ17PartEntry(part, 0, 0L))
+                    found.next = tables(bucket)
+                    tables(bucket) = found
+                    localRetained += 2L
+                    liveObjects += 2L
+                  }
+                  val lineItem: CheckedQ17LineItem^{region} =
+                    RiftRegion.allocOpen(
+                      new CheckedQ17LineItem(
+                        recordId,
+                        timestamp,
+                        partKey,
+                        quantity,
+                        revenue,
+                        hash
+                      )
+                    )
+                  lineItem.next = found.lineHead
+                  found.lineHead = lineItem
+                  found.quantityCount += 1
+                  found.quantitySum += quantity.toLong
+                  localRetained += 1L
+                  liveObjects += 1L
+                }
+
+                local += 1
+              }
+            }
+
+            var slot = 0
+            while (slot < slots) {
+              val timestamp = group * cfg.activeTimestamps + slot
+              var bucket = 0
+              while (bucket < tableSize) {
+                var entry: CheckedQ17PartEntry^{region} =
+                  tables(slot * tableSize + bucket)
+                while (entry != null) {
+                  var selectedCount = 0
+                  var selectedRevenue = 0L
+                  var line: CheckedQ17LineItem^{region} = entry.lineHead
+                  while (line != null) {
+                    if (
+                      entry.part.selected &&
+                        q17BelowAverageThreshold(
+                          line.quantity,
+                          entry.quantityCount,
+                          entry.quantitySum
+                        )
+                    ) {
+                      selectedCount += 1
+                      selectedRevenue += line.revenue
+                      localOutput += 1L
+                      localChecksum =
+                        fold(
+                          localChecksum,
+                          53,
+                          timestamp,
+                          entry.part.key,
+                          line.quantity,
+                          line.revenue ^ entry.quantitySum
+                        )
+                    }
+                    line = line.next
+                  }
+                  localChecksum =
+                    fold(
+                      localChecksum,
+                      59,
+                      timestamp,
+                      entry.part.key,
+                      selectedCount,
+                      selectedRevenue + entry.quantitySum
+                    )
+                  entry = entry.next
+                }
+                bucket += 1
+              }
+              slot += 1
+            }
+
+            FileGroupOutcome(
+              Outcome(localChecksum, localOutput, localRetained, localRetained + 1L, liveObjects),
+              local,
+              localEof
+            )
+          }
+
+          checksum = fileGroup.outcome.checksum
+          outputCount += fileGroup.outcome.outputCount
+          retainedObjects += fileGroup.outcome.retainedObjectProxy
+          regionFreedObjects += fileGroup.outcome.regionFreedObjectProxy
+          if (fileGroup.outcome.maxLiveObjectProxy > maxLiveObjects)
+            maxLiveObjects = fileGroup.outcome.maxLiveObjectProxy
+          processed += fileGroup.recordsRead
+          eof = fileGroup.eof
+          group += 1
+        }
+      }
+    } finally reader.close()
+
+    checksumSink = checksum
+    outputSink = outputCount
+    retainedSink = retainedObjects
+    Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
+  }
+
   private def canonicalMode(mode: String): String =
     mode match {
       case "heap-gc" | "gc-heap" | "heap-immix" | "heap" => "heap-gc"
@@ -1555,6 +2256,7 @@ object BroomRetainedDataflowMatrixHelpers {
           s"measurement_level=L1 final_clean=1 workload=$query mode=$canonical " +
           s"records=${cfg.records} records_per_timestamp=${cfg.recordsPerTimestamp} " +
           s"active_timestamps=${cfg.activeTimestamps} key_space=${cfg.keySpace} " +
+          s"q17_input_mode=${cfg.q17InputMode} " +
           s"runs=${cfg.benchmarkRuns} checksum=${outcome.checksum} " +
           s"output_count=${outcome.outputCount} " +
           s"retained_object_proxy=${outcome.retainedObjectProxy} " +
@@ -1635,6 +2337,7 @@ object BroomRetainedDataflowMatrixHelpers {
         f"workload=$query mode=$canonical records=${cfg.records}%d " +
         f"records_per_timestamp=${cfg.recordsPerTimestamp}%d " +
         f"active_timestamps=${cfg.activeTimestamps}%d key_space=${cfg.keySpace}%d " +
+        f"q17_input_mode=${cfg.q17InputMode} " +
         f"runs=${cfg.benchmarkRuns}%d median_ms=$medianMs%.3f min_ms=$minMs%.3f max_ms=$maxMs%.3f " +
         f"records_per_sec=$recordsPerSec%.3f median_gc_ms=$medianGcMs%.3f max_gc_ms=$maxGcMs%.3f " +
         f"runs_with_gc=$runsWithGc%d max_gc_collections=$maxGcCollections%d " +
@@ -1652,7 +2355,9 @@ object BroomRetainedDataflowMatrixHelpers {
       s"CONFIG mode=${canonicalMode(mode)} workload=${canonicalWorkload(workload)} " +
         s"records=${cfg.records} records_per_timestamp=${cfg.recordsPerTimestamp} " +
         s"active_timestamps=${cfg.activeTimestamps} key_space=${cfg.keySpace} " +
-        s"warmups=${cfg.warmupRuns} runs=${cfg.benchmarkRuns} final_clean=${cfg.finalClean}"
+        s"warmups=${cfg.warmupRuns} runs=${cfg.benchmarkRuns} final_clean=${cfg.finalClean} " +
+        s"q17_input_mode=${cfg.q17InputMode} tpch_part_input=${cfg.tpchPartInput} " +
+        s"tpch_lineitem_input=${cfg.tpchLineItemInput}"
     )
   }
 }
