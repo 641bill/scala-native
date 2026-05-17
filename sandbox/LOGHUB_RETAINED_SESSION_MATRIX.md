@@ -1,11 +1,12 @@
 # LogHub Retained Session Matrix
 
-Last updated: 2026-05-17 22:20 CEST
+Last updated: 2026-05-17 23:36 CEST
 
 Status: real streaming-input retained session/join triage. This matrix was
 added after the active-window LogHub q3 row showed heap-cap pressure but not a
 clean throughput/RSS win. The goal is to test whether a more naturally retained
-session/join shape over real LogHub HDFS lines creates material heap GC.
+session/join shape over real LogHub HDFS/Spark/Windows lines creates material
+heap GC or fixed-memory/RSS pressure.
 
 This is not an exact LogHub paper benchmark. It is a local single-process
 streaming replay over the public HDFS log.
@@ -157,3 +158,75 @@ Windows stream confirms a large RSS reduction for region rows, but heap GC is
 only about `0.7%` of L2 elapsed and the checked Rift row loses throughput.
 The checked scoped row is an external-time near-tie, not a clear win. Parser,
 archive, and hash/session CPU dominate.
+
+## Spark Archive-Wide Streaming Follow-Up
+
+Date/time: 2026-05-17 23:36 CEST.
+
+The Spark archive contains thousands of small log files. A first attempt using
+`tar.gzdir:/archive!prefix` was functionally correct but not useful: each
+member was opened with a separate `tar -xOzf archive member`, so the 20k heap
+smoke spent about `55 s` mostly rescanning the compressed tarball. The useful
+Spark row therefore uses archive-wide streaming:
+
+`LOGHUB_SESSION_INPUT=tar.gzcat:/Users/siyaoliu/rift/cache/benchmark-data/loghub/Spark.tar.gz`
+
+This keeps the source compressed and streams the concatenated archive contents
+without extracting the archive. The archive-wide stream reports `input_files=1`
+because it is one streaming source, even though the original tar contains many
+members.
+
+Raw summaries:
+
+- `/Users/siyaoliu/rift/cache/loghub-retained-session-spark-cat-20260517/smoke-20k/summary.tsv`
+- `/Users/siyaoliu/rift/cache/loghub-retained-session-spark-cat-20260517/l1-1m/summary.tsv`
+- `/Users/siyaoliu/rift/cache/loghub-retained-session-spark-cat-20260517/l2-1m/summary.tsv`
+- `/Users/siyaoliu/rift/cache/loghub-retained-session-spark-cat-20260517/heapcaps-1m/summary.tsv`
+
+20k smoke:
+
+| Workload | Mode | Median ms | GC ms | RSS bytes | Checksum | Output |
+|---|---|---:|---:|---:|---:|---:|
+| session | `heap-gc` | `206.572` | `4.140` | `21544960` | `-435595809917860422` | `17689` |
+| session | `checked-rift` | `219.635` | `0.397` | `14843904` | `-435595809917860422` | `17689` |
+| session | `checked-region-scoped` | `204.379` | `1.276` | `14974976` | `-435595809917860422` | `17689` |
+| join | `heap-gc` | `190.694` | `5.544` | `28131328` | `8799025668600574012` | `0` |
+| join | `checked-rift` | `220.861` | `0.458` | `18464768` | `8799025668600574012` | `0` |
+| join | `checked-region-scoped` | `215.222` | `4.526` | `18563072` | `8799025668600574012` | `0` |
+
+The Spark join emits zero matches under the current parity/key query, so only
+`session` was scaled.
+
+1M L1 final-clean session:
+
+| Mode | External real s | User s | Sys s | RSS bytes | Checksum | Output | Retained proxy | Max live proxy |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `27.62` | `21.94` | `0.28` | `390561792` | `-1938898183938054371` | `770310` | `1770310` | `714833` |
+| `checked-rift` | `20.30` | `19.76` | `0.10` | `72908800` | `-1938898183938054371` | `770310` | `1770310` | `714836` |
+| `checked-region-scoped` | `19.85` | `19.86` | `0.06` | `73023488` | `-1938898183938054371` | `770310` | `1770310` | `714836` |
+
+1M L2 session:
+
+| Mode | Median ms | Min ms | Max ms | GC median ms | GC max ms | Runs with GC | Region op ms | Region objects | RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `6642.276` | `6550.577` | `6643.644` | `140.639` | `169.764` | `3/3` | `0.000` | `0` | `508149760` |
+| `checked-rift` | `6396.869` | `6385.812` | `6434.709` | `14.407` | `14.889` | `3/3` | `1.121` | `1770319` | `72941568` |
+| `checked-region-scoped` | `6615.206` | `6575.994` | `6670.608` | `196.520` | `199.531` | `3/3` | `0.000` | `0` | `73138176` |
+
+Heap-cap probes:
+
+| Heap cap | Status | External real s | RSS bytes | Notes |
+|---|---|---:|---:|---|
+| `384M` | pass | `19.91` | `344850432` | checksum/output matched |
+| `256M` | pass | `19.85` | `277676032` | checksum/output matched |
+| `128M` | fail | `3.05` | `143409152` | out of heap space |
+| `96M` | fail | `2.16` | `107020288` | out of heap space |
+| `64M` | fail | `1.23` | `72761344` | out of heap space |
+
+Decision: keep Spark session as the strongest LogHub real-streaming
+fixed-memory/RSS row so far. It is not a pure GC-time flagship: heap median GC
+is about `2.1%` of L2 elapsed. It is, however, a real compressed-stream
+retained-object row where checked modes cut RSS by about `81%`, checked Rift
+is modestly faster in L2, and heap fails below `128M` while checked rows
+complete around `73 MB` RSS. Use it as real-input retained-state evidence, not
+as an exact LogHub paper benchmark.

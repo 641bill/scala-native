@@ -53,7 +53,10 @@ object LogHubRetainedSessionConfig {
 
   val inputPaths: Array[String] =
     if (inputRaw.isEmpty) Array.empty
-    else inputRaw.split(",").map(_.trim).filter(_.nonEmpty)
+    else
+      BenchmarkInputSupport.expandArchiveDirectorySpecs(
+        inputRaw.split(",").map(_.trim).filter(_.nonEmpty)
+      )
 
   val inputPath: String = inputPaths.mkString(",")
 }

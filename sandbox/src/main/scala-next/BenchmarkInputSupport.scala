@@ -22,6 +22,8 @@ object BenchmarkInputSupport {
     if (path.startsWith("tar.gz:")) {
       val (archive, member) = splitArchiveSpec(path, "tar.gz:")
       openTarGzMember(archive, member)
+    } else if (path.startsWith("tar.gzcat:")) {
+      openTarGzContents(path.substring("tar.gzcat:".length))
     } else if (path.startsWith("zip:")) {
       val (archive, member) = splitArchiveSpec(path, "zip:")
       openZipMember(archive, member)
@@ -79,6 +81,14 @@ object BenchmarkInputSupport {
         .redirectError(ProcessBuilder.Redirect.INHERIT)
         .start()
     new ProcessInput(process, process.getInputStream, s"tar member $member")
+  }
+
+  private def openTarGzContents(archive: String): InputStream = {
+    val process =
+      new ProcessBuilder("tar", "-xOzf", archive)
+        .redirectError(ProcessBuilder.Redirect.INHERIT)
+        .start()
+    new ProcessInput(process, process.getInputStream, s"tar archive $archive")
   }
 
   private def openBsdtarMember(archive: String, member: String): InputStream = {
@@ -151,6 +161,87 @@ object BenchmarkInputSupport {
       i += 1
     }
     specs
+  }
+
+  def tarGzDirectoryMembers(archive: String, prefix: String): Array[String] = {
+    val process =
+      new ProcessBuilder("tar", "-tzf", archive)
+        .redirectError(ProcessBuilder.Redirect.INHERIT)
+        .start()
+    val members = new ArrayList[String]()
+    val reader =
+      new BufferedReader(new InputStreamReader(process.getInputStream, "UTF-8"))
+    try {
+      var line = reader.readLine()
+      while (line != null) {
+        if (!line.endsWith("/") && line.startsWith(prefix))
+          members.add(line)
+        line = reader.readLine()
+      }
+    } finally reader.close()
+
+    val exit =
+      try process.waitFor()
+      catch {
+        case _: InterruptedException =>
+          Thread.currentThread().interrupt()
+          process.destroy()
+          -1
+      }
+    if (exit != 0)
+      throw new IOException(s"tar listing for $archive exited with status $exit")
+
+    Collections.sort(members)
+    val out = new Array[String](members.size())
+    var i = 0
+    while (i < out.length) {
+      out(i) = members.get(i)
+      i += 1
+    }
+    out
+  }
+
+  def tarGzDirectorySpecs(spec: String): Array[String] = {
+    val (archive, prefix) = splitArchiveSpec(spec, "tar.gzdir:")
+    val members = tarGzDirectoryMembers(archive, prefix)
+    val specs = new Array[String](members.length)
+    var i = 0
+    while (i < members.length) {
+      specs(i) = s"tar.gz:$archive!${members(i)}"
+      i += 1
+    }
+    specs
+  }
+
+  def expandArchiveDirectorySpecs(paths: Array[String]): Array[String] = {
+    val expanded = new ArrayList[String]()
+    var i = 0
+    while (i < paths.length) {
+      val path = paths(i)
+      if (path.startsWith("zipdir:")) {
+        val specs = zipDirectorySpecs(path)
+        var j = 0
+        while (j < specs.length) {
+          expanded.add(specs(j))
+          j += 1
+        }
+      } else if (path.startsWith("tar.gzdir:")) {
+        val specs = tarGzDirectorySpecs(path)
+        var j = 0
+        while (j < specs.length) {
+          expanded.add(specs(j))
+          j += 1
+        }
+      } else expanded.add(path)
+      i += 1
+    }
+    val out = new Array[String](expanded.size())
+    var k = 0
+    while (k < out.length) {
+      out(k) = expanded.get(k)
+      k += 1
+    }
+    out
   }
 
   final class ByteLineReader(path: String) {
