@@ -48,6 +48,19 @@ object YakRegionConfig {
     envInt("YAK_GRAPH_INPUT_VERTICES", vertices)
   val graphInputEdgesPerEpoch: Int =
     envInt("YAK_GRAPH_INPUT_EDGES_PER_EPOCH", messagesPerEpoch)
+  val graphInputMode: String = {
+    val value = BenchmarkInputSupport.envString("YAK_GRAPH_INPUT_MODE")
+    if (value.isEmpty) "preloaded"
+    else
+      value match {
+        case "preloaded" | "streaming-file" => value
+        case other =>
+          throw new IllegalArgumentException(
+            s"unknown YAK_GRAPH_INPUT_MODE '$other'; expected preloaded or streaming-file"
+          )
+      }
+  }
+  val graphStreamingInput: Boolean = graphInputMode == "streaming-file"
   val textInputPath: String = BenchmarkInputSupport.envString("YAK_TEXT_INPUT")
   val textInputTokens: Int = envInt("YAK_TEXT_INPUT_TOKENS", 1000000)
   val textInputTokensPerEpoch: Int =
@@ -191,6 +204,59 @@ object YakRegionMatrixHelpers {
       if (found < 2) -1L
       else ((src.toLong & 0xffffffffL) << 32) | (dst.toLong & 0xffffffffL)
     }
+
+    final class EdgeSource(limit: Long, vertices: Int) {
+      private val cfg = YakRegionConfig
+      private val reader = BenchmarkInputSupport.openByteLines(cfg.graphInputPath)
+      private var emitted = 0L
+      private var closed = false
+
+      var src: Int = 0
+      var dst: Int = 0
+
+      def nextEdge(): Boolean =
+        if (emitted >= limit) false
+        else {
+          var length = reader.readLine()
+          while (length >= 0) {
+            val packed = parseEdge(reader.bytes, length, vertices)
+            if (packed >= 0L) {
+              src = (packed >>> 32).toInt
+              dst = packed.toInt
+              emitted += 1L
+              return true
+            }
+            length = reader.readLine()
+          }
+          false
+        }
+
+      def close(): Unit =
+        if (!closed) {
+          closed = true
+          reader.close()
+        }
+    }
+
+    def openEdgeSource(): EdgeSource = {
+      val cfg = YakRegionConfig
+      if (cfg.graphInputPath.isEmpty)
+        throw new IllegalArgumentException(
+          "YAK_WORKLOAD=graphreal requires YAK_GRAPH_INPUT"
+        )
+      val limit = cfg.epochs.toLong * cfg.graphInputEdgesPerEpoch.toLong
+      new EdgeSource(limit, cfg.graphInputVertices)
+    }
+
+    def requireNextEdge(
+        source: EdgeSource,
+        epoch: Int,
+        edge: Int
+    ): Unit =
+      if (!source.nextEdge())
+        throw new IllegalArgumentException(
+          s"YAK_GRAPH_INPUT '${YakRegionConfig.graphInputPath}' ended before streaming graphreal could read epoch=$epoch edge=$edge"
+        )
 
     def load(): RealGraphInput = this.synchronized {
       val cfg = YakRegionConfig
@@ -1334,6 +1400,52 @@ object YakRegionMatrixHelpers {
     checksum
   }
 
+  def runHeapOrRiftGraphRealStreaming(modeName: String): Long = {
+    val cfg = YakRegionConfig
+    val source = RealGraphInput.openEdgeSource()
+    val mode = new ModeState(modeName)
+    val values = new Array[Long](cfg.graphInputVertices)
+    var vertex = 0
+    while (vertex < values.length) {
+      values(vertex) = mix(vertex + 131).toLong & 0xffffL
+      vertex += 1
+    }
+
+    var epoch = 0
+    try {
+      while (epoch < cfg.epochs) {
+        val region = mode.beginEpoch()
+        var updates: EdgeUpdate = null
+        var edge = 0
+        while (edge < cfg.graphInputEdgesPerEpoch) {
+          RealGraphInput.requireNextEdge(source, epoch, edge)
+          val src = source.src
+          val dst = source.dst
+          val delta = ((src ^ dst ^ epoch ^ edge) & 31) - 15
+          updates = mode.allocEdgeUpdate(region, src, dst, delta, updates)
+          edge += 1
+        }
+
+        var current = updates
+        while (current != null) {
+          val contribution =
+            (values(current.src) + current.delta.toLong + epoch) & 0xffL
+          values(current.dst) =
+            (values(current.dst) + contribution) & 0xffffffffL
+          current = current.next
+        }
+        mode.endEpoch(region)
+        epoch += 1
+      }
+    } finally {
+      source.close()
+      mode.finish()
+    }
+    val checksum = checksumLongs(values)
+    checksumSink = checksum
+    checksum
+  }
+
   def runCheckedWordCountEpoch(safeZoneBackend: Boolean): Long = {
     val cfg = YakRegionConfig
     val counts = new Array[Long](cfg.keySpace)
@@ -2125,6 +2237,79 @@ object YakRegionMatrixHelpers {
     }
   }
 
+  private def runCheckedGraphRealLinkedEpochStreaming(
+      source: RealGraphInput.EdgeSource,
+      values: Array[Long],
+      currentEpoch: Int
+  )(using region: RiftRegion.OpenStreamingRegion^): Unit = {
+    val cfg = YakRegionConfig
+    final class CheckedEdgeUpdate(
+        val src: Int,
+        val dst: Int,
+        val delta: Int,
+        val next: CheckedEdgeUpdate^{region}
+    )
+
+    var updates: CheckedEdgeUpdate^{region} = null
+    var edge = 0
+    while (edge < cfg.graphInputEdgesPerEpoch) {
+      RealGraphInput.requireNextEdge(source, currentEpoch, edge)
+      val src = source.src
+      val dst = source.dst
+      val delta = ((src ^ dst ^ currentEpoch ^ edge) & 31) - 15
+      updates =
+        RiftRegion.allocOpen(new CheckedEdgeUpdate(src, dst, delta, updates))
+      edge += 1
+    }
+
+    var current = updates
+    while (current != null) {
+      val contribution =
+        (values(current.src) + current.delta.toLong + currentEpoch) & 0xffL
+      values(current.dst) =
+        (values(current.dst) + contribution) & 0xffffffffL
+      current = current.next
+    }
+  }
+
+  private def runCheckedGraphRealLinkedEpochStreamingHandle(
+      source: RealGraphInput.EdgeSource,
+      values: Array[Long],
+      currentEpoch: Int
+  )(using region: RiftOpenStreamingHandle^): Unit = {
+    val cfg = YakRegionConfig
+    final class CheckedEdgeUpdate(
+        val src: Int,
+        val dst: Int,
+        val delta: Int,
+        val next: CheckedEdgeUpdate^{region}
+    )
+
+    var updates: CheckedEdgeUpdate^{region} = null
+    var edge = 0
+    while (edge < cfg.graphInputEdgesPerEpoch) {
+      RealGraphInput.requireNextEdge(source, currentEpoch, edge)
+      val src = source.src
+      val dst = source.dst
+      val delta = ((src ^ dst ^ currentEpoch ^ edge) & 31) - 15
+      updates =
+        RiftAllocator.allocateOpenHandle(
+          region,
+          new CheckedEdgeUpdate(src, dst, delta, updates)
+        )
+      edge += 1
+    }
+
+    var current = updates
+    while (current != null) {
+      val contribution =
+        (values(current.src) + current.delta.toLong + currentEpoch) & 0xffL
+      values(current.dst) =
+        (values(current.dst) + contribution) & 0xffffffffL
+      current = current.next
+    }
+  }
+
   private def runCheckedGraphRealWholeRunBody()(using
       region: RiftRegion.StreamingRegion^
   ): Long = {
@@ -2214,6 +2399,55 @@ object YakRegionMatrixHelpers {
         }
       }
     }
+
+    val checksum = checksumLongs(values)
+    checksumSink = checksum
+    checksum
+  }
+
+  def runCheckedGraphRealEpochStreaming(safeZoneBackend: Boolean): Long = {
+    val cfg = YakRegionConfig
+    val source = RealGraphInput.openEdgeSource()
+    val values = new Array[Long](cfg.graphInputVertices)
+    var vertex = 0
+    while (vertex < values.length) {
+      values(vertex) = mix(vertex + 131).toLong & 0xffffL
+      vertex += 1
+    }
+
+    try {
+      if (safeZoneBackend) {
+        RiftRegion.streamingSafeZone { stream ?=>
+          var epoch = 0
+          while (epoch < cfg.epochs) {
+            val currentEpoch = epoch
+            RiftRegion.epoch { region ?=>
+              runCheckedGraphRealLinkedEpochStreaming(
+                source,
+                values,
+                currentEpoch
+              )
+            }
+            epoch += 1
+          }
+        }
+      } else {
+        RiftRegion.streamingOpenHandle { stream ?=>
+          var epoch = 0
+          while (epoch < cfg.epochs) {
+            val currentEpoch = epoch
+            RiftRegion.resetOpenHandle {
+              runCheckedGraphRealLinkedEpochStreamingHandle(
+                source,
+                values,
+                currentEpoch
+              )
+            }
+            epoch += 1
+          }
+        }
+      }
+    } finally source.close()
 
     val checksum = checksumLongs(values)
     checksumSink = checksum
@@ -2954,6 +3188,60 @@ object YakRegionMatrixHelpers {
     checksum
   }
 
+  def runSafeZoneGraphRealStreaming(): Long = {
+    val cfg = YakRegionConfig
+    val source = RealGraphInput.openEdgeSource()
+    val values = new Array[Long](cfg.graphInputVertices)
+    var vertex = 0
+    while (vertex < values.length) {
+      values(vertex) = mix(vertex + 131).toLong & 0xffffL
+      vertex += 1
+    }
+
+    var epoch = 0
+    try {
+      while (epoch < cfg.epochs) {
+        val currentEpoch = epoch
+        SafeZone { sz ?=>
+          final class SZEdgeUpdate(
+              val src: Int,
+              val dst: Int,
+              val delta: Int,
+              val next: SZEdgeUpdate^{sz}
+          )
+
+          var updates: SZEdgeUpdate^{sz} = null
+          var edge = 0
+          while (edge < cfg.graphInputEdgesPerEpoch) {
+            RealGraphInput.requireNextEdge(source, currentEpoch, edge)
+            val src = source.src
+            val dst = source.dst
+            val delta = ((src ^ dst ^ currentEpoch ^ edge) & 31) - 15
+            updates = SafeZoneAllocator.allocate(
+              sz,
+              new SZEdgeUpdate(src, dst, delta, updates)
+            )
+            edge += 1
+          }
+
+          var current = updates
+          while (current != null) {
+            val contribution =
+              (values(current.src) + current.delta.toLong + currentEpoch) & 0xffL
+            values(current.dst) =
+              (values(current.dst) + contribution) & 0xffffffffL
+            current = current.next
+          }
+        }
+        epoch += 1
+      }
+    } finally source.close()
+
+    val checksum = checksumLongs(values)
+    checksumSink = checksum
+    checksum
+  }
+
   private def medianDouble(values: Array[Double]): Double = {
     val sorted = values.clone()
     scala.util.Sorting.quickSort(sorted)
@@ -3058,8 +3346,29 @@ object YakRegionMatrixHelpers {
           else runHeapOrRiftGraphChi(mode)
         new WorkloadResult(checksum, 0L, 0L, 0L)
       case "graphreal" =>
+        val cfg = YakRegionConfig
         val checksum =
-          if (mode == "safezone") runSafeZoneGraphReal()
+          if (cfg.graphStreamingInput && mode == "safezone")
+            runSafeZoneGraphRealStreaming()
+          else if (mode == "safezone") runSafeZoneGraphReal()
+          else if (
+            cfg.graphStreamingInput &&
+              (mode == "checked-region-stream" ||
+                mode == "checked-page-token-stream" ||
+                mode == "checked-region-scoped" ||
+                mode == "checked-page-token-scoped" ||
+                mode == "checked-whole-run-stream" ||
+                mode == "checked-whole-run-scoped" ||
+                mode == "checked-epoch-buffer-stream" ||
+                mode == "checked-epoch-buffer-scoped")
+          )
+            throw new IllegalArgumentException(
+              "YAK_GRAPH_INPUT_MODE=streaming-file is wired for heap, region-scoped-rooted, checked-epoch-stream, and checked-epoch-scoped; use preloaded mode for page-token, whole-run, or buffer graphreal controls"
+            )
+          else if (mode == "checked-epoch-stream" && cfg.graphStreamingInput)
+            runCheckedGraphRealEpochStreaming(false)
+          else if (mode == "checked-epoch-scoped" && cfg.graphStreamingInput)
+            runCheckedGraphRealEpochStreaming(true)
           else if (
             mode == "checked-region-stream" ||
             mode == "checked-page-token-stream"
@@ -3082,6 +3391,8 @@ object YakRegionMatrixHelpers {
             runCheckedGraphRealEpochBuffer(false)
           else if (mode == "checked-epoch-buffer-scoped")
             runCheckedGraphRealEpochBuffer(true)
+          else if (cfg.graphStreamingInput)
+            runHeapOrRiftGraphRealStreaming(mode)
           else runHeapOrRiftGraphReal(mode)
         new WorkloadResult(checksum, 0L, 0L, 0L)
       case "promotion" =>
@@ -3257,7 +3568,7 @@ object YakRegionMatrixHelpers {
     val cfg = YakRegionConfig
     val rootsMode = sys.env.getOrElse("SAFEZONE_ROOTS_MODE", "0")
     println(
-      s"CONFIG mode=$mode workload=$workload runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} epochs=${cfg.epochs} records_per_epoch=${cfg.recordsPerEpoch} key_space=${cfg.keySpace} vertices=${cfg.vertices} messages_per_epoch=${cfg.messagesPerEpoch} sort_records_per_epoch=${cfg.sortRecordsPerEpoch} graphchi_subintervals=${cfg.graphChiSubintervals} graphchi_edges_per_subinterval=${cfg.graphChiEdgesPerSubinterval} graph_input='${cfg.graphInputPath}' graph_input_edges=${cfg.graphInputEdges} graph_input_vertices=${cfg.graphInputVertices} graph_input_edges_per_epoch=${cfg.graphInputEdgesPerEpoch} text_input='${cfg.textInputPath}' text_input_tokens=${cfg.textInputTokens} text_tokens_per_epoch=${cfg.textInputTokensPerEpoch} text_input_mode=${cfg.textInputMode} escape_modulo=${cfg.escapeModulo} scratch_slots=${cfg.scratchSlots} safezone_roots_mode=$rootsMode"
+      s"CONFIG mode=$mode workload=$workload runs=${cfg.benchmarkRuns} warmups=${cfg.warmupRuns} epochs=${cfg.epochs} records_per_epoch=${cfg.recordsPerEpoch} key_space=${cfg.keySpace} vertices=${cfg.vertices} messages_per_epoch=${cfg.messagesPerEpoch} sort_records_per_epoch=${cfg.sortRecordsPerEpoch} graphchi_subintervals=${cfg.graphChiSubintervals} graphchi_edges_per_subinterval=${cfg.graphChiEdgesPerSubinterval} graph_input='${cfg.graphInputPath}' graph_input_edges=${cfg.graphInputEdges} graph_input_vertices=${cfg.graphInputVertices} graph_input_edges_per_epoch=${cfg.graphInputEdgesPerEpoch} graph_input_mode=${cfg.graphInputMode} text_input='${cfg.textInputPath}' text_input_tokens=${cfg.textInputTokens} text_tokens_per_epoch=${cfg.textInputTokensPerEpoch} text_input_mode=${cfg.textInputMode} escape_modulo=${cfg.escapeModulo} scratch_slots=${cfg.scratchSlots} safezone_roots_mode=$rootsMode"
     )
   }
 

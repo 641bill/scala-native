@@ -1,7 +1,7 @@
 # Yak Region Matrix
 
 Date: 2026-04-25
-Last updated: 2026-05-17 23:38 CEST
+Last updated: 2026-05-18 00:09 CEST
 
 Status: Yak-style methodology reproduction harness with validated smoke,
 default median, pressure median, external-sort-shaped median, top-word/filter
@@ -21,6 +21,10 @@ The latest graphreal follow-up promotes the `checked-epoch-stream` LiveJournal
 path from generic `RiftRegion.allocOpen` to backend-known
 `RiftAllocator.allocateOpenHandle`, while keeping
 `checked-epoch-stream-legacy` as a graphreal-only control.
+The latest streaming-input graph follow-up adds
+`YAK_GRAPH_INPUT_MODE=streaming-file`, which consumes compressed SNAP edge
+lists inside the timed run instead of preloading all edge pairs into primitive
+arrays.
 
 The harness is implemented in
 `sandbox/src/main/scala-next/YakRegionMatrix.scala` and run with
@@ -73,10 +77,13 @@ The current local workloads are:
   stay on the heap; each subinterval allocates ordinary edge-update objects,
   applies them to the current vertex interval, and releases the subinterval
   region.
-- `graphreal`: real graph edge replay. The input edge list is loaded into
-  primitive heap/control arrays, then real source/destination pairs are
-  replayed as epoch-local `EdgeUpdate` objects. This keeps the Yak
-  data/control split but does not implement GraphChi scheduling.
+- `graphreal`: real graph edge replay. In preloaded mode, the input edge list
+  is loaded into primitive heap/control arrays, then real source/destination
+  pairs are replayed as epoch-local `EdgeUpdate` objects. In
+  `YAK_GRAPH_INPUT_MODE=streaming-file`, the compressed edge list is consumed
+  directly inside each timed run and no full edge array is retained. Both
+  paths keep the Yak data/control split but do not implement GraphChi
+  scheduling.
 - `promotion`: durable heap counters plus rare retained data objects. Region
   escape handling is routed through `RiftRegion.RuntimeEpoch`, which owns
   barrier checks, remembered-reference counts, and promoted-object counts.
@@ -109,6 +116,7 @@ or a distributed runtime.
 | `YAK_GRAPH_INPUT_EDGES` | `1000000` |
 | `YAK_GRAPH_INPUT_VERTICES` | `YAK_VERTICES` |
 | `YAK_GRAPH_INPUT_EDGES_PER_EPOCH` | `YAK_MESSAGES_PER_EPOCH` |
+| `YAK_GRAPH_INPUT_MODE` | `preloaded` |
 | `YAK_TEXT_INPUT` | empty |
 | `YAK_TEXT_INPUT_TOKENS` | `1000000` |
 | `YAK_TEXT_TOKENS_PER_EPOCH` | `YAK_RECORDS_PER_EPOCH` |
@@ -342,6 +350,93 @@ YAK_OUTPUT_DIR=/Users/siyaoliu/rift/cache/yak-checked-livejournal-50m-2026-05-08
 | `region-stream-rootless` | trusted streaming reset | `1401.406` | `0.000` | `25.217` | `50000000` | `1 / 1 / 9` | `1534738432` |
 | `checked-region-scoped` | checked page-token over scoped backend | `1436.514` | `0.000` | `0.000` | `50000000` | `0 / 0 / 0` | `1534967808` |
 | `checked-region-stream` | checked page-token over streaming backend | `1575.633` | `0.000` | `28.075` | `50000000` | `11 / 11 / 0` | `1534803968` |
+
+### SNAP LiveJournal `graphreal` Streaming-File Rows
+
+Date: 2026-05-18
+
+This follow-up runs the same LiveJournal edge-update workload with
+`YAK_GRAPH_INPUT_MODE=streaming-file`. The benchmark consumes
+`soc-LiveJournal1.txt.gz` inside each timed run through `BenchmarkInputSupport`
+and does not preload all edge pairs into primitive arrays. The supported
+streaming modes in this slice are:
+
+- `gc-heap`
+- `region-scoped-rooted`
+- `checked-epoch-stream`
+- `checked-epoch-scoped`
+
+Page-token, whole-run, and `EpochBuffer` graph controls remain preloaded-only
+because they require indexed replay over a bounded edge array.
+
+20k smoke:
+
+Raw summary:
+`/private/tmp/rift-yak-livejournal-streaming-20k-smoke-20260518/summary.tsv`.
+
+| Mode | L1 real s | RSS bytes | Checksum |
+|---|---:|---:|---:|
+| `gc-heap` | `0.32` | `16220160` | `-31772606416651040` |
+| `region-scoped-rooted` | `0.02` | `16318464` | `-31772606416651040` |
+| `checked-epoch-stream` | `0.01` | `16220160` | `-31772606416651040` |
+| `checked-epoch-scoped` | `0.01` | `16318464` | `-31772606416651040` |
+
+1M streaming-file row:
+
+Raw summaries:
+`/private/tmp/rift-yak-livejournal-streaming-1m-l1-20260518/summary.tsv` and
+`/private/tmp/rift-yak-livejournal-streaming-1m-l2-20260518/summary.tsv`.
+
+| Mode | L1 real s | L1 RSS bytes | L2 median ms | L2 GC ms | Region op ms | Logical objects | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `gc-heap` | `0.88` | `76038144` | `287.882` | `8.190` | `0.000` | `1000000` | `3675910048719095437` |
+| `region-scoped-rooted` | `0.85` | `22347776` | `281.376` | `0.000` | `0.000` | `1000000` | `3675910048719095437` |
+| `checked-epoch-stream` | `0.81` | `22233088` | `283.582` | `0.000` | `0.116` | `1000000` | `3675910048719095437` |
+| `checked-epoch-scoped` | `0.81` | `22331392` | `276.629` | `0.000` | `0.000` | `1000000` | `3675910048719095437` |
+
+5M streaming-file row:
+
+Raw summaries:
+`/private/tmp/rift-yak-livejournal-streaming-5m-l1-20260518/summary.tsv` and
+`/private/tmp/rift-yak-livejournal-streaming-5m-l2-20260518/summary.tsv`.
+
+| Mode | L1 real s | L1 RSS bytes | L2 median ms | L2 GC ms | Region op ms | Logical objects | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `gc-heap` | `4.46` | `206307328` | `1416.564` | `42.500` | `0.000` | `5000000` | `978899966951504355` |
+| `region-scoped-rooted` | `4.18` | `40091648` | `1358.500` | `0.000` | `0.000` | `5000000` | `978899966951504355` |
+| `checked-epoch-stream` | `4.10` | `39911424` | `1327.994` | `0.000` | `0.440` | `5000000` | `978899966951504355` |
+| `checked-epoch-scoped` | `4.07` | `40108032` | `1337.058` | `0.000` | `0.000` | `5000000` | `978899966951504355` |
+
+20M streaming-file row:
+
+Raw summaries:
+`/private/tmp/rift-yak-livejournal-streaming-20m-l1-20260518/summary.tsv` and
+`/private/tmp/rift-yak-livejournal-streaming-20m-l2-20260518/summary.tsv`.
+
+| Mode | L1 real s | L1 RSS bytes | L2 median ms | L2 GC ms | Region op ms | Logical objects | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `gc-heap` | `18.32` | `577028096` | `6333.745` | `165.387` | `0.000` | `20000000` | `-5977224669223427032` |
+| `region-scoped-rooted` | `17.78` | `101924864` | `5644.025` | `0.000` | `0.000` | `20000000` | `-5977224669223427032` |
+| `checked-epoch-stream` | `17.59` | `101564416` | `5530.190` | `0.000` | `2.869` | `20000000` | `-5977224669223427032` |
+| `checked-epoch-scoped` | `17.15` | `101679104` | `5812.138` | `0.000` | `0.000` | `20000000` | `-5977224669223427032` |
+
+Streaming-file interpretation:
+
+- This is now a true real-streaming-input Yak graph row: it consumes the
+  compressed SNAP LiveJournal edge list inside the timed benchmark path and
+  does not retain a full edge replay array.
+- The row gives strong RSS/fixed-memory evidence and a modest-to-material
+  throughput win. At 20M streamed edges, checked scoped L1 is `17.15 s` versus
+  heap `18.32 s`, and checked stream L2 is `5530.190 ms` versus heap
+  `6333.745 ms`.
+- Heap timed GC is visible but still below the `5%` flagship gate:
+  `165.387 ms` inside `6333.745 ms` at 20M, about `2.6%`. Treat this as a
+  real-streaming graph RSS/fixed-memory and throughput row, not as a
+  GC-time-heavy flagship.
+- The preloaded 50M LiveJournal rows remain stronger for raw epoch
+  memory-management evidence because they remove streaming parser/source cost
+  from the timed loop. The streaming rows are the right evidence for the
+  stream-processing story.
 
 ## SNAP LiveJournal `graphreal` Checked Topology Follow-Up
 
