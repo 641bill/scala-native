@@ -1,13 +1,15 @@
 # SPECjbb2005 Workload Port Matrix
 
-Last updated: 2026-05-14 12:48 CEST
+Last updated: 2026-05-17 22:27 CEST
 
 Status: clean initial Scala Native workload-port rows plus an L1 final-clean
 8-warehouse representative row from child commit `678a6eb41`, plus a
 fresh all-optimizations 4-warehouse gate after the handle-backed allocation
 promotion. The default checked stream epoch path now uses handle-backed
 allocation; the old generic `allocOpen` path is retained as
-`checked-epoch-stream-legacy`.
+`checked-epoch-stream-legacy`. The newest current-runtime scale row uses
+8 warehouses and 1,000,000 transactions per warehouse, giving a longer
+Stancu-style transaction-local object workload for the prior-work metric table.
 
 This is **not** an official SPECjbb2005 result. It is a deterministic
 single-process Scala Native workload port that preserves the memory-management
@@ -30,6 +32,7 @@ Raw logs:
 - `/Users/siyaoliu/rift/cache/specjbb-allopts-20260513/`
 - `/Users/siyaoliu/rift/cache/specjbb-handle-promotion-20260514/`
 - `/Users/siyaoliu/rift/cache/specjbb-handle-promotion-l2-20260514/`
+- `/Users/siyaoliu/rift/cache/specjbb-stancu-8w-8m-20260517/`
 
 ## Workload
 
@@ -46,6 +49,53 @@ The transaction mix is deterministic and includes new-order, payment,
 order-status, delivery, and stock-level-style cases. The port records Stancu-like
 axes: elapsed, GC time/count, RSS, transaction-local object proxy, region-freed
 object/byte proxy, max live region payload proxy, and API-boundary count.
+
+## Current Optimized 8M Transaction Row
+
+Date/time: 2026-05-17 22:27 CEST.
+
+Source:
+`/Users/siyaoliu/rift/cache/specjbb-stancu-8w-8m-20260517`.
+
+Configuration:
+
+- measurement: L1 final-clean plus matching L2 standard-stats row;
+- warehouses: 8;
+- iterations: 1,000,000 transactions per warehouse;
+- total transactions: 8,000,000 per timed inner run;
+- runs: 3;
+- transaction epoch: 64 transactions per region;
+- logical temporary objects: 41,585,448;
+- region-freed byte proxy: 1,919,417,920;
+- max live region payload proxy: 480 objects / 21,248 bytes;
+- checksum: `1409753817421957370` across all modes.
+
+L1 final-clean headline timing/RSS:
+
+| Mode | L1 real s | L1 user s | L1 sys s | L1 RSS bytes | Claim |
+|---|---:|---:|---:|---:|---|
+| `gc-heap` | 4.89 | 4.84 | 0.01 | 7,897,088 | Natural heap baseline. |
+| `region-scoped-rooted` | 4.60 | 4.44 | 0.01 | 7,979,008 | Rooted scoped safe-region baseline. |
+| `checked-epoch-stream` | 4.35 | 3.44 | 0.00 | 7,962,624 | Checked Rift epoch row; faster than heap and rooted baseline. |
+| `checked-epoch-scoped` | 3.95 | 3.93 | 0.00 | 8,028,160 | Best safe checked row in this L1 run. |
+
+L2 interpretation:
+
+| Mode | L2 median ms | L2 min ms | L2 max ms | GC ms | Max GC ms | GC count | Region op ms | Region objects | RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `gc-heap` | 1379.590 | 1374.630 | 1439.181 | 164.932 | 170.289 | 520 | 0.000 | 0 | 8,011,776 |
+| `region-scoped-rooted` | 1254.614 | 1237.447 | 1298.437 | 0.821 | 0.837 | 3 | 0.000 | 0 | 8,011,776 |
+| `checked-epoch-stream` | 996.765 | 994.159 | 1022.379 | 0.515 | 0.545 | 2 | 4.075 | 41,585,448 | 8,044,544 |
+| `checked-epoch-scoped` | 1086.906 | 1082.758 | 1098.626 | 0.818 | 0.927 | 3 | 0.000 | 0 | 8,126,464 |
+
+Interpretation: the scaled transaction row is a better current Stancu-style
+case study than the earlier sub-second 4w/8w rows. Heap spends about `12%` of
+the L2 median in GC (`164.932 / 1379.590 ms`) across `520` collections.
+Checked epoch stream removes the heap GC path and is about `28%` faster than
+heap in L2; checked scoped is about `21%` faster than heap in L2 and is the
+fastest L1 final-clean row in this run. RSS is similar across rows because
+the transaction region is deliberately short-lived and max live payload is
+small; the gain is mainly real time/GC count, not lower peak RSS.
 
 ## L1 Final-Clean 8-Warehouse Row
 
