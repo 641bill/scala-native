@@ -64,6 +64,19 @@ read_time_seconds() {
   fi
 }
 
+result_name() {
+  local workload="$1"
+  local mode="$2"
+  case "${workload}" in
+    wikimedia-clickstream-session|clickstream-session|clickstream)
+      printf "wikimedia-retained-clickstream-session-%s" "${mode}"
+      ;;
+    *)
+      printf "loghub-retained-session-%s-%s" "${workload}" "${mode}"
+      ;;
+  esac
+}
+
 write_summary_header() {
   printf "workload\tmode\theap_cap\tstatus\texternal_real_s\texternal_user_s\texternal_sys_s\tmeasurement_level\tinput_type\trecords\trecords_read\tbytes_read\tinput_files\trecords_per_epoch\tactive_epochs\tkey_space\tmedian_ms\tmin_ms\tmax_ms\trecords_per_sec\tmedian_gc_ms\tmax_gc_ms\truns_with_gc\tmax_gc_collections\tmedian_rift_op_ms\tmedian_rift_alloc_object_total\tmedian_rift_open_total\tmedian_rift_close_total\tmedian_rift_reset_total\tchecksum\toutput_count\tretained_object_proxy\tregion_freed_object_proxy\tmax_live_object_proxy\tmax_rss_bytes\n" > "${summary}"
 }
@@ -81,7 +94,7 @@ write_result_row() {
   local line token key value level
   typeset -A fields
 
-  line=$(grep "^RESULT name=loghub-retained-session-${workload}-${mode} " "${run_log}" | tail -n 1)
+  line=$(grep "^RESULT name=$(result_name "${workload}" "${mode}") " "${run_log}" | tail -n 1)
   fields=()
   for token in ${(z)line}; do
     if [[ "${token}" == *=* ]]; then
@@ -189,7 +202,7 @@ run_case() {
   external_user_s=$(read_time_seconds "${time_log}" user)
   external_sys_s=$(read_time_seconds "${time_log}" sys)
 
-  if ! grep -q "^RESULT name=loghub-retained-session-${workload}-${mode} " "${run_log}"; then
+  if ! grep -q "^RESULT name=$(result_name "${workload}" "${mode}") " "${run_log}"; then
     cat "${run_log}" >&2
     cat "${time_log}" >&2
     echo "LOGHUB_RETAINED_SESSION_RESULT workload=${workload} mode=${mode} heap_cap=${heap_cap} status=failed exit_status=${command_status} external_real_s=${external_real_s} external_user_s=${external_user_s} external_sys_s=${external_sys_s} max_rss_bytes=${max_rss_bytes}" >&2
@@ -197,7 +210,7 @@ run_case() {
     return 0
   fi
 
-  grep "^RESULT name=loghub-retained-session-${workload}-${mode} " "${run_log}"
+  grep "^RESULT name=$(result_name "${workload}" "${mode}") " "${run_log}"
   echo "LOGHUB_RETAINED_SESSION_EXTERNAL_RESULT workload=${workload} mode=${mode} heap_cap=${heap_cap} exit_status=${command_status} external_real_s=${external_real_s} external_user_s=${external_user_s} external_sys_s=${external_sys_s} max_rss_bytes=${max_rss_bytes}"
   write_result_row "${workload}" "${mode}" "${heap_cap}" "ok" "${run_log}" "${max_rss_bytes}" "${external_real_s}" "${external_user_s}" "${external_sys_s}"
 }

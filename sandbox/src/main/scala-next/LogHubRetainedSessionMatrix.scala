@@ -300,11 +300,56 @@ object LogHubRetainedSessionMatrixHelpers {
     )
   }
 
+  private def tsvFieldHash(
+      bytes: Array[Byte],
+      length: Int,
+      fieldIndex: Int
+  ): Int = {
+    var field = 0
+    var start = 0
+    var i = 0
+    while (i <= length) {
+      if (i == length || bytes(i) == '\t'.toByte) {
+        if (field == fieldIndex)
+          return BenchmarkInputSupport.stableHash(bytes, start, i - start)
+        field += 1
+        start = i + 1
+      }
+      i += 1
+    }
+    0
+  }
+
+  private def tsvFieldInt(
+      bytes: Array[Byte],
+      length: Int,
+      fieldIndex: Int
+  ): Int = {
+    var field = 0
+    var value = 0
+    var inTarget = fieldIndex == 0
+    var i = 0
+    while (i < length) {
+      val b = bytes(i)
+      if (b == '\t'.toByte) {
+        if (inTarget) return value
+        field += 1
+        inTarget = field == fieldIndex
+      } else if (inTarget && b >= '0'.toByte && b <= '9'.toByte) {
+        val digit = b - '0'.toByte
+        if (value <= (Int.MaxValue - digit) / 10)
+          value = value * 10 + digit
+      }
+      i += 1
+    }
+    value
+  }
+
   private def valueFor(bytes: Array[Byte], length: Int, severity: Int): Int =
     ((BenchmarkInputSupport.stableHash(bytes, 0, length) ^ (severity * 65537)) &
       0xffff) + 1
 
-  private def readLineFields(
+  private def readLogLineFields(
       source: BenchmarkInputSupport.StreamingByteLineSource
   ): (Int, Int, Long) = {
     val bytes = source.bytes
@@ -317,6 +362,40 @@ object LogHubRetainedSessionMatrixHelpers {
         (severity.toLong * 1099511628211L) ^
         (key.toLong << 17)
     (key, value, hash)
+  }
+
+  private def readClickstreamFields(
+      source: BenchmarkInputSupport.StreamingByteLineSource
+  ): (Int, Int, Long) = {
+    val bytes = source.bytes
+    val length = source.length
+    val sourceHash = tsvFieldHash(bytes, length, 0)
+    val targetHash = tsvFieldHash(bytes, length, 1)
+    val linkKindHash = tsvFieldHash(bytes, length, 2)
+    val count = math.max(1, tsvFieldInt(bytes, length, 3))
+    val key = BenchmarkInputSupport.positiveModulo(
+      (sourceHash.toLong << 32) ^
+        targetHash.toLong ^
+        (linkKindHash.toLong << 17),
+      LogHubRetainedSessionConfig.keySpace
+    )
+    val value = count
+    val hash =
+      BenchmarkInputSupport.stableHash(bytes, 0, length).toLong ^
+        (sourceHash.toLong << 7) ^
+        (targetHash.toLong << 19) ^
+        (linkKindHash.toLong << 31) ^
+        count.toLong
+    (key, value, hash)
+  }
+
+  private def readLineFields(
+      source: BenchmarkInputSupport.StreamingByteLineSource,
+      workload: String
+  ): (Int, Int, Long) = {
+    if (workload == "wikimedia-clickstream-session")
+      readClickstreamFields(source)
+    else readLogLineFields(source)
   }
 
   private def openSource(): BenchmarkInputSupport.StreamingByteLineSource = {
@@ -333,7 +412,7 @@ object LogHubRetainedSessionMatrixHelpers {
     nextPowerOfTwo(math.max(16, cfg.keySpace * cfg.tableMultiplier))
   }
 
-  private def runHeapSession(): Outcome = {
+  private def runHeapSession(workload: String): Outcome = {
     val cfg = LogHubRetainedSessionConfig
     val tableSize = tableSizeFor()
     val tableMask = tableSize - 1
@@ -365,7 +444,7 @@ object LogHubRetainedSessionMatrixHelpers {
             val slot = local % slots
             val epoch = group * cfg.activeEpochs + slot
             val recordId = processed + local
-            val (key, value, hash) = readLineFields(source)
+            val (key, value, hash) = readLineFields(source, workload)
             val event = new HeapSessionEvent(recordId, epoch, key, value, hash, null)
             if (heads(slot) == null) {
               heads(slot) = event
@@ -449,7 +528,7 @@ object LogHubRetainedSessionMatrixHelpers {
     )
   }
 
-  private def runHeapJoin(): Outcome = {
+  private def runHeapJoin(workload: String): Outcome = {
     val cfg = LogHubRetainedSessionConfig
     val tableSize = tableSizeFor()
     val tableMask = tableSize - 1
@@ -479,7 +558,7 @@ object LogHubRetainedSessionMatrixHelpers {
             val slot = local % slots
             val epoch = group * cfg.activeEpochs + slot
             val recordId = processed + local
-            val (rawKey, value, rawHash) = readLineFields(source)
+            val (rawKey, value, rawHash) = readLineFields(source, workload)
             val key = rawKey
             val side = recordId & 1
             val hash = rawHash ^ (side.toLong * 1315423911L)
@@ -566,7 +645,7 @@ object LogHubRetainedSessionMatrixHelpers {
     )
   }
 
-  private def runCheckedSession(): Outcome = {
+  private def runCheckedSession(workload: String): Outcome = {
     val cfg = LogHubRetainedSessionConfig
     val tableSize = tableSizeFor()
     val tableMask = tableSize - 1
@@ -637,7 +716,7 @@ object LogHubRetainedSessionMatrixHelpers {
                 val slot = local % slots
                 val epoch = group * cfg.activeEpochs + slot
                 val recordId = processed + local
-                val (key, value, hash) = readLineFields(source)
+                val (key, value, hash) = readLineFields(source, workload)
                 val event: CheckedSessionEvent^{region} =
                   RiftAllocator.allocateOpenHandle(
                     region,
@@ -747,7 +826,7 @@ object LogHubRetainedSessionMatrixHelpers {
     )
   }
 
-  private def runCheckedJoin(): Outcome = {
+  private def runCheckedJoin(workload: String): Outcome = {
     val cfg = LogHubRetainedSessionConfig
     val tableSize = tableSizeFor()
     val tableMask = tableSize - 1
@@ -801,7 +880,7 @@ object LogHubRetainedSessionMatrixHelpers {
                 val slot = local % slots
                 val epoch = group * cfg.activeEpochs + slot
                 val recordId = processed + local
-                val (rawKey, value, rawHash) = readLineFields(source)
+                val (rawKey, value, rawHash) = readLineFields(source, workload)
                 val key = rawKey
                 val side = recordId & 1
                 val hash = rawHash ^ (side.toLong * 1315423911L)
@@ -915,7 +994,7 @@ object LogHubRetainedSessionMatrixHelpers {
     )
   }
 
-  private def runCheckedScopedSession(): Outcome = {
+  private def runCheckedScopedSession(workload: String): Outcome = {
     val cfg = LogHubRetainedSessionConfig
     val tableSize = tableSizeFor()
     val tableMask = tableSize - 1
@@ -979,7 +1058,7 @@ object LogHubRetainedSessionMatrixHelpers {
                 val slot = local % slots
                 val epoch = group * cfg.activeEpochs + slot
                 val recordId = processed + local
-                val (key, value, hash) = readLineFields(source)
+                val (key, value, hash) = readLineFields(source, workload)
                 val event: CheckedSessionEvent^{region} =
                   RiftRegion.allocOpen(
                     new CheckedSessionEvent(recordId, epoch, key, value, hash)
@@ -1087,7 +1166,7 @@ object LogHubRetainedSessionMatrixHelpers {
     )
   }
 
-  private def runCheckedScopedJoin(): Outcome = {
+  private def runCheckedScopedJoin(workload: String): Outcome = {
     val cfg = LogHubRetainedSessionConfig
     val tableSize = tableSizeFor()
     val tableMask = tableSize - 1
@@ -1139,7 +1218,7 @@ object LogHubRetainedSessionMatrixHelpers {
                 val slot = local % slots
                 val epoch = group * cfg.activeEpochs + slot
                 val recordId = processed + local
-                val (rawKey, value, rawHash) = readLineFields(source)
+                val (rawKey, value, rawHash) = readLineFields(source, workload)
                 val key = rawKey
                 val side = recordId & 1
                 val hash = rawHash ^ (side.toLong * 1315423911L)
@@ -1269,20 +1348,38 @@ object LogHubRetainedSessionMatrixHelpers {
     workload match {
       case "session" | "sessions" => "session"
       case "join"                 => "join"
+      case "wikimedia-clickstream-session" | "clickstream-session" |
+          "clickstream" =>
+        "wikimedia-clickstream-session"
       case other =>
         throw new IllegalArgumentException(
           s"unknown LogHub retained session workload '$other'"
         )
     }
 
+  private def sessionLike(workload: String): Boolean =
+    workload == "session" || workload == "wikimedia-clickstream-session"
+
+  private def inputType(workload: String): String =
+    if (workload == "wikimedia-clickstream-session")
+      "real-wikimedia-clickstream-streaming-file"
+    else "real-loghub-streaming-file"
+
+  private def resultName(workload: String, mode: String): String =
+    if (workload == "wikimedia-clickstream-session")
+      s"wikimedia-retained-clickstream-session-$mode"
+    else s"loghub-retained-session-$workload-$mode"
+
   private def runOnce(mode: String, workload: String): Outcome =
     (canonicalMode(mode), canonicalWorkload(workload)) match {
-      case ("heap-gc", "session")             => runHeapSession()
-      case ("heap-gc", "join")                => runHeapJoin()
-      case ("checked-rift", "session")        => runCheckedSession()
-      case ("checked-rift", "join")           => runCheckedJoin()
-      case ("checked-region-scoped", "session") => runCheckedScopedSession()
-      case ("checked-region-scoped", "join")    => runCheckedScopedJoin()
+      case ("heap-gc", query) if sessionLike(query) => runHeapSession(query)
+      case ("heap-gc", "join")                     => runHeapJoin("join")
+      case ("checked-rift", query) if sessionLike(query) =>
+        runCheckedSession(query)
+      case ("checked-rift", "join") => runCheckedJoin("join")
+      case ("checked-region-scoped", query) if sessionLike(query) =>
+        runCheckedScopedSession(query)
+      case ("checked-region-scoped", "join") => runCheckedScopedJoin("join")
       case other =>
         throw new IllegalArgumentException(
           s"unsupported LogHub retained session run selection $other"
@@ -1306,9 +1403,9 @@ object LogHubRetainedSessionMatrixHelpers {
         run += 1
       }
       println(
-        s"RESULT name=loghub-retained-session-$query-$canonical " +
+        s"RESULT name=${resultName(query, canonical)} " +
           s"measurement_level=L1 final_clean=1 workload=$query mode=$canonical " +
-          s"input=real-loghub-streaming-file records=${cfg.records} " +
+          s"input=${inputType(query)} records=${cfg.records} " +
           s"records_read=${outcome.recordsRead} bytes_read=${outcome.bytesRead} " +
           s"input_files=${outcome.inputFiles} records_per_epoch=${cfg.recordsPerEpoch} " +
           s"active_epochs=${cfg.activeEpochs} key_space=${cfg.keySpace} " +
@@ -1346,7 +1443,7 @@ object LogHubRetainedSessionMatrixHelpers {
     var run = 0
 
     println(
-      s"Running loghub-retained-session-$query-$canonical for ${cfg.benchmarkRuns} timed runs"
+      s"Running ${resultName(query, canonical)} for ${cfg.benchmarkRuns} timed runs"
     )
     while (run < cfg.benchmarkRuns) {
       val before = RuntimeSample.capture(includeRift)
@@ -1394,8 +1491,8 @@ object LogHubRetainedSessionMatrixHelpers {
       if (medianMs <= 0.0) 0.0 else recordsRead.toDouble / (medianMs / 1000.0)
 
     println(
-      f"RESULT name=loghub-retained-session-$query-$canonical " +
-        f"workload=$query mode=$canonical input=real-loghub-streaming-file " +
+      f"RESULT name=${resultName(query, canonical)} " +
+        f"workload=$query mode=$canonical input=${inputType(query)} " +
         f"records=${cfg.records}%d records_read=$recordsRead%d bytes_read=$bytesRead%d " +
         f"input_files=$inputFiles%d records_per_epoch=${cfg.recordsPerEpoch}%d " +
         f"active_epochs=${cfg.activeEpochs}%d key_space=${cfg.keySpace}%d " +

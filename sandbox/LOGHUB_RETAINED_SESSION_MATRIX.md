@@ -1,12 +1,13 @@
 # LogHub Retained Session Matrix
 
-Last updated: 2026-05-18 00:44 CEST
+Last updated: 2026-05-18 03:49 CEST
 
-Status: real streaming-input retained session/join triage. This matrix was
-added after the active-window LogHub q3 row showed heap-cap pressure but not a
-clean throughput/RSS win. The goal is to test whether a more naturally retained
-session/join shape over real LogHub HDFS/Spark/Windows lines creates material
-heap GC or fixed-memory/RSS pressure.
+Status: real streaming-input retained session/join triage plus the first named
+Wikimedia clickstream retained-session workload. This matrix was added after
+the active-window LogHub q3 row showed heap-cap pressure but not a clean
+throughput/RSS win. The goal is to test whether a more naturally retained
+session/join shape over real LogHub HDFS/Spark/Windows lines or Wikimedia
+clickstream rows creates material heap GC or fixed-memory/RSS pressure.
 
 This is not an exact LogHub paper benchmark. It is a local single-process
 streaming replay over the public HDFS log.
@@ -25,6 +26,11 @@ Queries:
 - `join`: stream the same lines, route records into left/right retained
   per-key tables by record parity, emit join matches, and close/drop
   timestamp-local state after the active-epoch boundary.
+- `wikimedia-clickstream-session`: stream Wikimedia clickstream TSV rows,
+  derive session keys from source article, target article, and link kind,
+  retain ordinary session events plus per-key aggregate entries, and close/drop
+  epoch-local state at the active-epoch boundary. This is a named retained
+  clickstream workload, not a generic line-session stress row.
 
 Headline modes:
 
@@ -308,3 +314,87 @@ Decision: keep as a useful real-streaming retained-state RSS/fixed-memory row.
   `4826.234 ms`, about `3.4%`. The L2 checked row is slower than heap because
   parser/hash/session work and standard-stat measurement dominate; use L1 for
   headline elapsed and L2 only for interpretation.
+
+## Wikimedia Enwiki Clickstream Retained Session, Named Workload
+
+Date/time: 2026-05-18 03:49 CEST.
+
+This row promotes the generic clickstream triage into a named retained
+workload: `wikimedia-clickstream-session`. The input is still the compressed
+real Wikimedia clickstream TSV file, but keys and values now come from TSV
+fields instead of the generic log-token extractor:
+
+- session key: source article, target article, and link kind;
+- value: click count;
+- retained objects: one clickstream session event per row plus per-key
+  aggregate entries, retained until epoch close.
+
+Input:
+
+`LOGHUB_SESSION_INPUT=/Users/siyaoliu/rift/cache/benchmark-data/wikimedia/clickstream-enwiki-2026-03.tsv.gz`
+
+Configuration:
+
+`records=1000000`, `records_per_epoch=25000`, `active_epochs=16`,
+`key_space=262144`, workload `wikimedia-clickstream-session`.
+
+Raw summaries:
+
+- `/private/tmp/wikimedia-named-clickstream-smoke-20260518/summary.tsv`
+- `/private/tmp/wikimedia-named-clickstream-1m-l1-seq-20260518/summary.tsv`
+- `/private/tmp/wikimedia-named-clickstream-1m-l2-seq-20260518/summary.tsv`
+- `/private/tmp/wikimedia-named-clickstream-1m-heapcaps-20260518/summary.tsv`
+- `/private/tmp/wikimedia-named-clickstream-1m-regioncap-128m-20260518/summary.tsv`
+- `/private/tmp/wikimedia-named-clickstream-1m-regioncap-64m-20260518/summary.tsv`
+
+20k smoke:
+
+| Mode | Median ms | GC ms | RSS bytes | Checksum | Output |
+|---|---:|---:|---:|---:|---:|
+| `heap-gc` | `55.070` | `0.141` | `21413888` | `5515862501352978002` | `18983` |
+| `checked-rift` | `42.434` | `0.227` | `19759104` | `5515862501352978002` | `18983` |
+| `checked-region-scoped` | `44.434` | `2.572` | `19972096` | `5515862501352978002` | `18983` |
+
+1M L1 final-clean, sequential:
+
+| Mode | External real s | User s | Sys s | RSS bytes | Checksum | Output | Retained proxy | Max live proxy |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `6.50` | `6.36` | `0.12` | `783663104` | `250002331971566003` | `922453` | `1922453` | `771045` |
+| `checked-rift` | `5.81` | `5.71` | `0.08` | `137871360` | `250002331971566003` | `922453` | `1922453` | `771048` |
+| `checked-region-scoped` | `6.47` | `6.38` | `0.07` | `138018816` | `250002331971566003` | `922453` | `1922453` | `771048` |
+
+1M L2 standard stats, sequential:
+
+| Mode | Median ms | Min ms | Max ms | GC median ms | GC max ms | Runs with GC | Region op ms | Region objects | RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `2038.262` | `1889.303` | `2071.888` | `150.157` | `178.978` | `3/3` | `0.000` | `0` | `785203200` |
+| `checked-rift` | `1952.438` | `1946.964` | `1953.228` | `9.237` | `9.805` | `3/3` | `1.871` | `1922462` | `137887744` |
+| `checked-region-scoped` | `2109.767` | `2102.079` | `2111.042` | `146.274` | `160.154` | `3/3` | `0.000` | `0` | `138149888` |
+
+Heap-cap probes:
+
+| Mode | Cap | Status | External real s | RSS bytes | Notes |
+|---|---:|---|---:|---:|---|
+| `heap-gc` | `512M` | fail | `2.34` | `437813248` | OOM in heap array allocation |
+| `heap-gc` | `256M` | fail | `0.97` | `193314816` | OOM in heap array allocation |
+| `heap-gc` | `128M` | fail | `0.00` | `5570560` | OOM at startup/allocation |
+| `heap-gc` | `64M` | fail | `0.00` | `5570560` | OOM at startup/allocation |
+| `checked-rift` | `128M` | pass | `5.87` | `137871360` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
+| `checked-region-scoped` | `128M` | pass | `6.41` | `138035200` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
+| `checked-rift` | `64M` | pass | `5.81` | `137854976` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
+| `checked-region-scoped` | `64M` | pass | `6.55` | `138067968` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
+
+Decision: promote this named workload above the earlier generic line-session
+triage row.
+
+- L1 checked Rift is `5.81 s` versus heap `6.50 s`, about `10.6%` faster, and
+  RSS drops from `784 MB` to `138 MB`.
+- L2 checked Rift is also faster (`1952.438 ms` versus heap `2038.262 ms`)
+  while reducing median timed GC from `150.157 ms` to `9.237 ms`.
+- Heap fails even at a `512M` cap for this active-state setting; checked rows
+  complete under `128M` and `64M` external heap caps because the retained
+  clickstream objects are region-managed.
+- Heap GC is `7.4%` of L2 elapsed, so this now passes the material-GC gate.
+  Use it as real-streaming retained clickstream throughput/RSS/GC/fixed-memory
+  evidence, with the caveat that it is a local named workload over public
+  Wikimedia data, not an official Wikimedia benchmark artifact.
