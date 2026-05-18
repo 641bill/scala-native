@@ -1,6 +1,6 @@
 # LogHub Retained Session Matrix
 
-Last updated: 2026-05-18 03:49 CEST
+Last updated: 2026-05-18 12:55 CEST
 
 Status: real streaming-input retained session/join triage plus the first named
 Wikimedia clickstream retained-session workload. This matrix was added after
@@ -346,6 +346,10 @@ Raw summaries:
 - `/private/tmp/wikimedia-named-clickstream-1m-heapcaps-20260518/summary.tsv`
 - `/private/tmp/wikimedia-named-clickstream-1m-regioncap-128m-20260518/summary.tsv`
 - `/private/tmp/wikimedia-named-clickstream-1m-regioncap-64m-20260518/summary.tsv`
+- `/private/tmp/wikimedia-named-clickstream-5m-l1-rss-20260518/summary.tsv`
+- `/private/tmp/wikimedia-named-clickstream-5m-l2-20260518/summary.tsv`
+- `/private/tmp/wikimedia-named-clickstream-5m-heapcaps-20260518/summary.tsv`
+- `/private/tmp/wikimedia-named-clickstream-5m-regioncap-64m-20260518/summary.tsv`
 
 20k smoke:
 
@@ -384,8 +388,34 @@ Heap-cap probes:
 | `checked-rift` | `64M` | pass | `5.81` | `137854976` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
 | `checked-region-scoped` | `64M` | pass | `6.55` | `138067968` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
 
+5M scale-up, L1 final-clean, sequential:
+
+| Mode | External real s | User s | Sys s | RSS bytes | Checksum | Output | Retained proxy | Max live proxy |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `28.77` | `28.52` | `0.22` | `1539489792` | `-5539074761685310486` | `4649530` | `9649530` | `778586` |
+| `checked-rift` | `27.86` | `27.61` | `0.24` | `138412032` | `-5539074761685310486` | `4649530` | `9649530` | `778589` |
+| `checked-region-scoped` | `30.23` | `30.10` | `0.12` | `140886016` | `-5539074761685310486` | `4649530` | `9649530` | `778589` |
+
+5M scale-up, L2 standard stats, sequential:
+
+| Mode | Median ms | Min ms | Max ms | GC median ms | GC max ms | Runs with GC | Region op ms | Region objects | RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `9459.416` | `9293.328` | `10215.546` | `334.176` | `1066.487` | `3/3` | `0.000` | `0` | `1953153024` |
+| `checked-rift` | `9486.647` | `9451.145` | `9534.568` | `46.492` | `46.991` | `3/3` | `10.699` | `9649569` | `138428416` |
+| `checked-region-scoped` | `10156.911` | `10145.822` | `10162.828` | `733.741` | `740.655` | `3/3` | `0.000` | `0` | `138838016` |
+
+5M heap-cap and checked-cap probes:
+
+| Mode | Cap | Status | External real s | RSS bytes | Notes |
+|---|---:|---|---:|---:|---|
+| `heap-gc` | `1G` | fail | `7.63` | `831127552` | OOM in heap array allocation |
+| `heap-gc` | `768M` | fail | `3.48` | `527319040` | OOM in heap array allocation |
+| `heap-gc` | `512M` | fail | `1.83` | `374325248` | OOM in heap array allocation |
+| `checked-rift` | `64M` | pass | `9.37` | `136101888` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
+| `checked-region-scoped` | `64M` | pass | `10.49` | `136298496` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
+
 Decision: promote this named workload above the earlier generic line-session
-triage row.
+triage row and keep the 5M scale-up as stronger RSS/fixed-memory evidence.
 
 - L1 checked Rift is `5.81 s` versus heap `6.50 s`, about `10.6%` faster, and
   RSS drops from `784 MB` to `138 MB`.
@@ -398,3 +428,9 @@ triage row.
   Use it as real-streaming retained clickstream throughput/RSS/GC/fixed-memory
   evidence, with the caveat that it is a local named workload over public
   Wikimedia data, not an official Wikimedia benchmark artifact.
+- At 5M, checked Rift remains L1 faster (`27.86 s` versus heap `28.77 s`) and
+  cuts RSS from `1.54 GB` to `138 MB`, but the L2 timed loop is essentially
+  tied (`9486.647 ms` versus heap `9459.416 ms`). Treat the 5M row primarily
+  as scale-up RSS/fixed-memory and GC-tail evidence: heap max GC reaches
+  `1066.487 ms` and heap fails at `1G`, `768M`, and `512M`, while checked Rift
+  completes under a `64M` GC heap cap.
