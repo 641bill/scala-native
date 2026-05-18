@@ -1,6 +1,6 @@
 # LogHub Retained Session Matrix
 
-Last updated: 2026-05-18 12:55 CEST
+Last updated: 2026-05-18 15:45 CEST
 
 Status: real streaming-input retained session/join triage plus the first named
 Wikimedia clickstream retained-session workload. This matrix was added after
@@ -350,6 +350,10 @@ Raw summaries:
 - `/private/tmp/wikimedia-named-clickstream-5m-l2-20260518/summary.tsv`
 - `/private/tmp/wikimedia-named-clickstream-5m-heapcaps-20260518/summary.tsv`
 - `/private/tmp/wikimedia-named-clickstream-5m-regioncap-64m-20260518/summary.tsv`
+- `/private/tmp/wikimedia-named-clickstream-10m-l1-20260518/summary.tsv`
+- `/private/tmp/wikimedia-named-clickstream-10m-l2-20260518/summary.tsv`
+- `/private/tmp/wikimedia-named-clickstream-10m-heapcaps-20260518/summary.tsv`
+- `/private/tmp/wikimedia-named-clickstream-10m-regioncap-64m-20260518/summary.tsv`
 
 20k smoke:
 
@@ -414,8 +418,35 @@ Heap-cap probes:
 | `checked-rift` | `64M` | pass | `9.37` | `136101888` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
 | `checked-region-scoped` | `64M` | pass | `10.49` | `136298496` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
 
+10M feasibility scale-up, one-run L1 final-clean:
+
+| Mode | External real s | User s | Sys s | RSS bytes | Checksum | Output | Retained proxy | Max live proxy |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `24.23` | `22.84` | `0.56` | `1155743744` | `8006060730683441349` | `9323019` | `19323019` | `778835` |
+| `checked-rift` | `19.96` | `19.37` | `0.43` | `136118272` | `8006060730683441349` | `9323019` | `19323019` | `778838` |
+| `checked-region-scoped` | `21.43` | `21.02` | `0.29` | `136396800` | `8006060730683441349` | `9323019` | `19323019` | `778838` |
+
+10M feasibility scale-up, one-run L2 standard stats:
+
+| Mode | Median ms | GC median ms | GC max ms | Runs with GC | Region op ms | Region objects | RSS bytes | Records/sec |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `22877.820` | `4058.998` | `4058.998` | `1/1` | `0.000` | `0` | `1138147328` | `437104.591` |
+| `checked-rift` | `19716.840` | `99.708` | `99.708` | `1/1` | `31.049` | `19323094` | `136151040` | `507180.666` |
+| `checked-region-scoped` | `21079.678` | `1703.489` | `1703.489` | `1/1` | `0.000` | `0` | `136511488` | `474390.556` |
+
+10M heap-cap and checked-cap probes:
+
+| Mode | Cap | Status | External real s | RSS bytes | Notes |
+|---|---:|---|---:|---:|---|
+| `heap-gc` | `1G` | fail | `7.97` | `831127552` | OOM in heap array allocation |
+| `heap-gc` | `768M` | fail | `3.69` | `527335424` | OOM in heap array allocation |
+| `heap-gc` | `512M` | fail | `1.92` | `374358016` | OOM in heap array allocation |
+| `checked-rift` | `64M` | pass | `19.39` | `136151040` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
+| `checked-region-scoped` | `64M` | pass | `21.08` | `136364032` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
+
 Decision: promote this named workload above the earlier generic line-session
-triage row and keep the 5M scale-up as stronger RSS/fixed-memory evidence.
+triage row and keep the 5M/10M scale-ups as stronger RSS/fixed-memory
+evidence.
 
 - L1 checked Rift is `5.81 s` versus heap `6.50 s`, about `10.6%` faster, and
   RSS drops from `784 MB` to `138 MB`.
@@ -434,3 +465,11 @@ triage row and keep the 5M scale-up as stronger RSS/fixed-memory evidence.
   as scale-up RSS/fixed-memory and GC-tail evidence: heap max GC reaches
   `1066.487 ms` and heap fails at `1G`, `768M`, and `512M`, while checked Rift
   completes under a `64M` GC heap cap.
+- At 10M, the one-run feasibility probe becomes material-GC evidence again:
+  checked Rift is L1 `19.96 s` versus heap `24.23 s` and cuts RSS from about
+  `1.16 GB` to `136 MB`. L2 checked Rift is `19716.840 ms` with `99.708 ms`
+  GC and `31.049 ms` region-op, versus heap `22877.820 ms` with
+  `4058.998 ms` timed GC. Heap fails at `1G`, `768M`, and `512M`; checked
+  Rift and checked scoped complete under a `64M` GC heap cap. This is still a
+  one-run feasibility row, so use it to justify a future 3-run/full-input
+  follow-up rather than as a final median.
