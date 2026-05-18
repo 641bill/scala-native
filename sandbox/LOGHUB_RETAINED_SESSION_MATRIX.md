@@ -1,6 +1,6 @@
 # LogHub Retained Session Matrix
 
-Last updated: 2026-05-18 15:45 CEST
+Last updated: 2026-05-18 16:01 CEST
 
 Status: real streaming-input retained session/join triage plus the first named
 Wikimedia clickstream retained-session workload. This matrix was added after
@@ -352,6 +352,8 @@ Raw summaries:
 - `/private/tmp/wikimedia-named-clickstream-5m-regioncap-64m-20260518/summary.tsv`
 - `/private/tmp/wikimedia-named-clickstream-10m-l1-20260518/summary.tsv`
 - `/private/tmp/wikimedia-named-clickstream-10m-l2-20260518/summary.tsv`
+- `/private/tmp/wikimedia-named-clickstream-10m-l1-3run-20260518/summary.tsv`
+- `/private/tmp/wikimedia-named-clickstream-10m-l2-3run-20260518/summary.tsv`
 - `/private/tmp/wikimedia-named-clickstream-10m-heapcaps-20260518/summary.tsv`
 - `/private/tmp/wikimedia-named-clickstream-10m-regioncap-64m-20260518/summary.tsv`
 
@@ -418,7 +420,7 @@ Heap-cap probes:
 | `checked-rift` | `64M` | pass | `9.37` | `136101888` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
 | `checked-region-scoped` | `64M` | pass | `10.49` | `136298496` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
 
-10M feasibility scale-up, one-run L1 final-clean:
+10M initial feasibility scale-up, one-run L1 final-clean:
 
 | Mode | External real s | User s | Sys s | RSS bytes | Checksum | Output | Retained proxy | Max live proxy |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -426,13 +428,29 @@ Heap-cap probes:
 | `checked-rift` | `19.96` | `19.37` | `0.43` | `136118272` | `8006060730683441349` | `9323019` | `19323019` | `778838` |
 | `checked-region-scoped` | `21.43` | `21.02` | `0.29` | `136396800` | `8006060730683441349` | `9323019` | `19323019` | `778838` |
 
-10M feasibility scale-up, one-run L2 standard stats:
+10M initial feasibility scale-up, one-run L2 standard stats:
 
 | Mode | Median ms | GC median ms | GC max ms | Runs with GC | Region op ms | Region objects | RSS bytes | Records/sec |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | `heap-gc` | `22877.820` | `4058.998` | `4058.998` | `1/1` | `0.000` | `0` | `1138147328` | `437104.591` |
 | `checked-rift` | `19716.840` | `99.708` | `99.708` | `1/1` | `31.049` | `19323094` | `136151040` | `507180.666` |
 | `checked-region-scoped` | `21079.678` | `1703.489` | `1703.489` | `1/1` | `0.000` | `0` | `136511488` | `474390.556` |
+
+10M scale-up, 3-run L1 final-clean:
+
+| Mode | External real s | User s | Sys s | RSS bytes | Checksum | Output | Retained proxy | Max live proxy |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `62.52` | `60.07` | `1.32` | `1796128768` | `8006060730683441349` | `9323019` | `19323019` | `778835` |
+| `checked-rift` | `59.37` | `58.10` | `1.08` | `138412032` | `8006060730683441349` | `9323019` | `19323019` | `778838` |
+| `checked-region-scoped` | `62.33` | `61.35` | `0.78` | `138706944` | `8006060730683441349` | `9323019` | `19323019` | `778838` |
+
+10M scale-up, 3-run L2 standard stats:
+
+| Mode | Median ms | Min ms | Max ms | GC median ms | GC max ms | Runs with GC | Region op ms | Region objects | RSS bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `20103.863` | `19813.540` | `20848.839` | `851.023` | `885.434` | `3/3` | `0.000` | `0` | `1943896064` |
+| `checked-rift` | `19635.995` | `19557.128` | `19753.105` | `96.069` | `96.128` | `3/3` | `24.329` | `19323094` | `140689408` |
+| `checked-region-scoped` | `21396.025` | `21376.874` | `21566.522` | `1490.661` | `1525.790` | `3/3` | `0.000` | `0` | `138854400` |
 
 10M heap-cap and checked-cap probes:
 
@@ -465,11 +483,11 @@ evidence.
   as scale-up RSS/fixed-memory and GC-tail evidence: heap max GC reaches
   `1066.487 ms` and heap fails at `1G`, `768M`, and `512M`, while checked Rift
   completes under a `64M` GC heap cap.
-- At 10M, the one-run feasibility probe becomes material-GC evidence again:
-  checked Rift is L1 `19.96 s` versus heap `24.23 s` and cuts RSS from about
-  `1.16 GB` to `136 MB`. L2 checked Rift is `19716.840 ms` with `99.708 ms`
-  GC and `31.049 ms` region-op, versus heap `22877.820 ms` with
-  `4058.998 ms` timed GC. Heap fails at `1G`, `768M`, and `512M`; checked
-  Rift and checked scoped complete under a `64M` GC heap cap. This is still a
-  one-run feasibility row, so use it to justify a future 3-run/full-input
-  follow-up rather than as a final median.
+- At 10M, the 3-run L1 row keeps checked Rift ahead (`59.37 s` versus heap
+  `62.52 s`) and cuts RSS from about `1.80 GB` to `138 MB`. The 3-run L2 row
+  reports checked Rift `19635.995 ms` with `96.069 ms` GC and `24.329 ms`
+  region-op, versus heap `20103.863 ms` with `851.023 ms` timed GC. Heap
+  fails at `1G`, `768M`, and `512M`; checked Rift and checked scoped complete
+  under a `64M` GC heap cap. Promote 10M from feasibility to report-grade
+  scale-up evidence; attempt the full 35.8M-row file only if the machine has
+  enough time and memory headroom.
