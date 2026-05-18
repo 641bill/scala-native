@@ -1,6 +1,6 @@
 # LogHub Retained Session Matrix
 
-Last updated: 2026-05-18 16:01 CEST
+Last updated: 2026-05-18 16:22 CEST
 
 Status: real streaming-input retained session/join triage plus the first named
 Wikimedia clickstream retained-session workload. This matrix was added after
@@ -356,6 +356,8 @@ Raw summaries:
 - `/private/tmp/wikimedia-named-clickstream-10m-l2-3run-20260518/summary.tsv`
 - `/private/tmp/wikimedia-named-clickstream-10m-heapcaps-20260518/summary.tsv`
 - `/private/tmp/wikimedia-named-clickstream-10m-regioncap-64m-20260518/summary.tsv`
+- `/private/tmp/wikimedia-named-clickstream-full-l1-20260518/summary.tsv`
+- `/private/tmp/wikimedia-named-clickstream-full-l2-20260518/summary.tsv`
 
 20k smoke:
 
@@ -462,6 +464,22 @@ Heap-cap probes:
 | `checked-rift` | `64M` | pass | `19.39` | `136151040` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
 | `checked-region-scoped` | `64M` | pass | `21.08` | `136364032` | cap applied through inherited `GC_MAXIMUM_HEAP_SIZE`; runner labels row `uncapped` |
 
+Full local file feasibility, one-run L1 final-clean (`35862259` rows):
+
+| Mode | External real s | User s | Sys s | RSS bytes | Checksum | Output | Retained proxy | Max live proxy |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `74.23` | `72.73` | `1.24` | `2298707968` | `3903090754337931261` | `33529413` | `69391672` | `780731` |
+| `checked-rift` | `69.87` | `68.48` | `1.17` | `136265728` | `3903090754337931261` | `33529413` | `69391672` | `780734` |
+| `checked-region-scoped` | `76.83` | `75.65` | `0.88` | `136593408` | `3903090754337931261` | `33529413` | `69391672` | `780734` |
+
+Full local file feasibility, one-run L2 standard stats:
+
+| Mode | Median ms | GC median ms | GC max ms | Runs with GC | Region op ms | Region objects | RSS bytes | Records/sec |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `72750.014` | `7122.811` | `7122.811` | `1/1` | `0.000` | `0` | `2571665408` | `492951.922` |
+| `checked-rift` | `71149.579` | `318.165` | `318.165` | `1/1` | `79.786` | `69391942` | `136282112` | `504040.352` |
+| `checked-region-scoped` | `76156.741` | `5582.325` | `5582.325` | `1/1` | `0.000` | `0` | `136691712` | `470900.650` |
+
 Decision: promote this named workload above the earlier generic line-session
 triage row and keep the 5M/10M scale-ups as stronger RSS/fixed-memory
 evidence.
@@ -491,3 +509,10 @@ evidence.
   under a `64M` GC heap cap. Promote 10M from feasibility to report-grade
   scale-up evidence; attempt the full 35.8M-row file only if the machine has
   enough time and memory headroom.
+- The one-run full-file feasibility row over all `35862259` rows also
+  completes: checked Rift is L1 `69.87 s`, RSS `136 MB`, versus heap
+  `74.23 s`, RSS `2.30 GB`; L2 checked Rift is `71149.579 ms` with
+  `318.165 ms` GC and `79.786 ms` region-op, versus heap `72750.014 ms` with
+  `7122.811 ms` timed GC. This is stronger full-input feasibility evidence,
+  but keep the 10M x3 row as the report-grade median until the full-file row is
+  repeated.
