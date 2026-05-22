@@ -1,6 +1,6 @@
 import scala.language.experimental.captureChecking
 
-import scala.scalanative.memory.RiftRegion
+import scala.scalanative.memory.{RiftRegion, RiftSandboxInternals}
 import scala.scalanative.runtime.{fromRawUSize, GC, RawSize, RiftAllocator}
 
 object LogHubRetainedSessionConfig {
@@ -93,6 +93,12 @@ object LogHubRetainedSessionMatrixHelpers {
       val hash: Long,
       var next: HeapJoinRecord
   )
+
+  private final class ParsedLineFields {
+    var key: Int = 0
+    var value: Int = 0
+    var hash: Long = 0L
+  }
 
   final case class Outcome(
       checksum: Long,
@@ -300,58 +306,17 @@ object LogHubRetainedSessionMatrixHelpers {
     )
   }
 
-  private def tsvFieldHash(
-      bytes: Array[Byte],
-      length: Int,
-      fieldIndex: Int
-  ): Int = {
-    var field = 0
-    var start = 0
-    var i = 0
-    while (i <= length) {
-      if (i == length || bytes(i) == '\t'.toByte) {
-        if (field == fieldIndex)
-          return BenchmarkInputSupport.stableHash(bytes, start, i - start)
-        field += 1
-        start = i + 1
-      }
-      i += 1
-    }
-    0
-  }
-
-  private def tsvFieldInt(
-      bytes: Array[Byte],
-      length: Int,
-      fieldIndex: Int
-  ): Int = {
-    var field = 0
-    var value = 0
-    var inTarget = fieldIndex == 0
-    var i = 0
-    while (i < length) {
-      val b = bytes(i)
-      if (b == '\t'.toByte) {
-        if (inTarget) return value
-        field += 1
-        inTarget = field == fieldIndex
-      } else if (inTarget && b >= '0'.toByte && b <= '9'.toByte) {
-        val digit = b - '0'.toByte
-        if (value <= (Int.MaxValue - digit) / 10)
-          value = value * 10 + digit
-      }
-      i += 1
-    }
-    value
-  }
+  private inline def stableHashStep(hash: Int, byteValue: Int): Int =
+    (hash ^ byteValue) * 0x01000193
 
   private def valueFor(bytes: Array[Byte], length: Int, severity: Int): Int =
     ((BenchmarkInputSupport.stableHash(bytes, 0, length) ^ (severity * 65537)) &
       0xffff) + 1
 
-  private def readLogLineFields(
-      source: BenchmarkInputSupport.StreamingByteLineSource
-  ): (Int, Int, Long) = {
+  private def readLogLineFieldsInto(
+      source: BenchmarkInputSupport.StreamingByteLineSource,
+      out: ParsedLineFields
+  ): Unit = {
     val bytes = source.bytes
     val length = source.length
     val severity = severityFor(bytes, length)
@@ -361,18 +326,47 @@ object LogHubRetainedSessionMatrixHelpers {
       BenchmarkInputSupport.stableHash(bytes, 0, length).toLong ^
         (severity.toLong * 1099511628211L) ^
         (key.toLong << 17)
-    (key, value, hash)
+    out.key = key
+    out.value = value
+    out.hash = hash
   }
 
-  private def readClickstreamFields(
-      source: BenchmarkInputSupport.StreamingByteLineSource
-  ): (Int, Int, Long) = {
+  private def readClickstreamFieldsInto(
+      source: BenchmarkInputSupport.StreamingByteLineSource,
+      out: ParsedLineFields
+  ): Unit = {
     val bytes = source.bytes
     val length = source.length
-    val sourceHash = tsvFieldHash(bytes, length, 0)
-    val targetHash = tsvFieldHash(bytes, length, 1)
-    val linkKindHash = tsvFieldHash(bytes, length, 2)
-    val count = math.max(1, tsvFieldInt(bytes, length, 3))
+    var lineHash = 0x811c9dc5
+    var sourceHash = 0x811c9dc5
+    var targetHash = 0x811c9dc5
+    var linkKindHash = 0x811c9dc5
+    var countValue = 0
+    var field = 0
+    var i = 0
+    while (i < length) {
+      val b = bytes(i)
+      val unsigned = b & 0xff
+      lineHash = stableHashStep(lineHash, unsigned)
+      if (b == '\t'.toByte) {
+        field += 1
+      } else if (field == 0) {
+        sourceHash = stableHashStep(sourceHash, unsigned)
+      } else if (field == 1) {
+        targetHash = stableHashStep(targetHash, unsigned)
+      } else if (field == 2) {
+        linkKindHash = stableHashStep(linkKindHash, unsigned)
+      } else if (field == 3 && b >= '0'.toByte && b <= '9'.toByte) {
+        val digit = b - '0'.toByte
+        if (countValue <= (Int.MaxValue - digit) / 10)
+          countValue = countValue * 10 + digit
+      }
+      i += 1
+    }
+    sourceHash &= 0x7fffffff
+    targetHash = if (field >= 1) targetHash & 0x7fffffff else 0
+    linkKindHash = if (field >= 2) linkKindHash & 0x7fffffff else 0
+    val count = math.max(1, if (field >= 3) countValue else 0)
     val key = BenchmarkInputSupport.positiveModulo(
       (sourceHash.toLong << 32) ^
         targetHash.toLong ^
@@ -381,21 +375,23 @@ object LogHubRetainedSessionMatrixHelpers {
     )
     val value = count
     val hash =
-      BenchmarkInputSupport.stableHash(bytes, 0, length).toLong ^
+      (lineHash & 0x7fffffff).toLong ^
         (sourceHash.toLong << 7) ^
         (targetHash.toLong << 19) ^
         (linkKindHash.toLong << 31) ^
         count.toLong
-    (key, value, hash)
+    out.key = key
+    out.value = value
+    out.hash = hash
   }
 
-  private def readLineFields(
+  private def readLineFieldsInto(
       source: BenchmarkInputSupport.StreamingByteLineSource,
-      workload: String
-  ): (Int, Int, Long) = {
-    if (workload == "wikimedia-clickstream-session")
-      readClickstreamFields(source)
-    else readLogLineFields(source)
+      clickstreamInput: Boolean,
+      out: ParsedLineFields
+  ): Unit = {
+    if (clickstreamInput) readClickstreamFieldsInto(source, out)
+    else readLogLineFieldsInto(source, out)
   }
 
   private def openSource(): BenchmarkInputSupport.StreamingByteLineSource = {
@@ -417,6 +413,8 @@ object LogHubRetainedSessionMatrixHelpers {
     val tableSize = tableSizeFor()
     val tableMask = tableSize - 1
     val source = openSource()
+    val clickstreamInput = workload == "wikimedia-clickstream-session"
+    val parsed = new ParsedLineFields
     var checksum = 0L
     var outputCount = 0L
     var retainedObjects = 0L
@@ -444,7 +442,10 @@ object LogHubRetainedSessionMatrixHelpers {
             val slot = local % slots
             val epoch = group * cfg.activeEpochs + slot
             val recordId = processed + local
-            val (key, value, hash) = readLineFields(source, workload)
+            readLineFieldsInto(source, clickstreamInput, parsed)
+            val key = parsed.key
+            val value = parsed.value
+            val hash = parsed.hash
             val event = new HeapSessionEvent(recordId, epoch, key, value, hash, null)
             if (heads(slot) == null) {
               heads(slot) = event
@@ -533,6 +534,8 @@ object LogHubRetainedSessionMatrixHelpers {
     val tableSize = tableSizeFor()
     val tableMask = tableSize - 1
     val source = openSource()
+    val clickstreamInput = workload == "wikimedia-clickstream-session"
+    val parsed = new ParsedLineFields
     var checksum = 0L
     var outputCount = 0L
     var retainedObjects = 0L
@@ -558,7 +561,10 @@ object LogHubRetainedSessionMatrixHelpers {
             val slot = local % slots
             val epoch = group * cfg.activeEpochs + slot
             val recordId = processed + local
-            val (rawKey, value, rawHash) = readLineFields(source, workload)
+            readLineFieldsInto(source, clickstreamInput, parsed)
+            val rawKey = parsed.key
+            val value = parsed.value
+            val rawHash = parsed.hash
             val key = rawKey
             val side = recordId & 1
             val hash = rawHash ^ (side.toLong * 1315423911L)
@@ -645,11 +651,16 @@ object LogHubRetainedSessionMatrixHelpers {
     )
   }
 
-  private def runCheckedSession(workload: String): Outcome = {
+  private inline def runCheckedSessionImpl(
+      workload: String,
+      inline inferredAllocations: Boolean
+  ): Outcome = {
     val cfg = LogHubRetainedSessionConfig
     val tableSize = tableSizeFor()
     val tableMask = tableSize - 1
     val source = openSource()
+    val clickstreamInput = workload == "wikimedia-clickstream-session"
+    val parsed = new ParsedLineFields
     var checksum = 0L
     var outputCount = 0L
     var retainedObjects = 0L
@@ -662,10 +673,13 @@ object LogHubRetainedSessionMatrixHelpers {
     try {
       RiftRegion.streamingOpenHandle {
         while (processed < cfg.records && !done) {
-          val remaining = cfg.records - processed
-          val slots = groupSlots(remaining, cfg)
-          val groupRecords = math.min(remaining, slots * cfg.recordsPerEpoch)
-          val groupOutcome = RiftRegion.resetOpenHandle { region ?=>
+        val remaining = cfg.records - processed
+        val slots = groupSlots(remaining, cfg)
+        val groupRecords = math.min(remaining, slots * cfg.recordsPerEpoch)
+        val baseChecksum = checksum
+        val baseProcessed = processed
+        val baseGroup = group
+        val groupOutcome = RiftRegion.resetOpenHandle { region ?=>
             final class CheckedSessionEvent(
                 val recordId: Int,
                 val epoch: Int,
@@ -688,37 +702,35 @@ object LogHubRetainedSessionMatrixHelpers {
             }
 
             val entries: Array[CheckedSessionEntry^{region}]^{region} =
-              RiftAllocator.allocateOpenHandle(
-                region,
-                new Array[CheckedSessionEntry^{region}](slots * tableSize)
-              )
+              new Array[CheckedSessionEntry^{region}](slots * tableSize)
             val heads: Array[CheckedSessionEvent^{region}]^{region} =
-              RiftAllocator.allocateOpenHandle(
-                region,
-                new Array[CheckedSessionEvent^{region}](slots)
-              )
+              new Array[CheckedSessionEvent^{region}](slots)
             val tails: Array[CheckedSessionEvent^{region}]^{region} =
-              RiftAllocator.allocateOpenHandle(
-                region,
-                new Array[CheckedSessionEvent^{region}](slots)
-              )
-            val counts = new Array[Int](slots)
-            var localChecksum = checksum
+              new Array[CheckedSessionEvent^{region}](slots)
+            val counts: Array[Int]^{region} =
+              new Array[Int](slots)
+            var localChecksum = baseChecksum
             var localOutput = 0L
             var localRetained = 0L
             var local = 0
             var liveObjects = 3L
+            var localDone = false
 
-            while (local < groupRecords && !done) {
+            while (local < groupRecords && !localDone) {
               val length = source.readLine()
-              if (length < 0) done = true
+              if (length < 0) localDone = true
               else if (length > 0) {
                 val slot = local % slots
-                val epoch = group * cfg.activeEpochs + slot
-                val recordId = processed + local
-                val (key, value, hash) = readLineFields(source, workload)
+                val epoch = baseGroup * cfg.activeEpochs + slot
+                val recordId = baseProcessed + local
+                readLineFieldsInto(source, clickstreamInput, parsed)
+                val key = parsed.key
+                val value = parsed.value
+                val hash = parsed.hash
                 val event: CheckedSessionEvent^{region} =
-                  RiftAllocator.allocateOpenHandle(
+                  inline if (inferredAllocations) then
+                    new CheckedSessionEvent(recordId, epoch, key, value, hash)
+                  else RiftAllocator.allocateOpenHandle(
                     region,
                     new CheckedSessionEvent(recordId, epoch, key, value, hash)
                   )
@@ -742,7 +754,9 @@ object LogHubRetainedSessionMatrixHelpers {
                 }
                 if (found == null) {
                   found =
-                    RiftAllocator.allocateOpenHandle(
+                    inline if (inferredAllocations) then
+                      new CheckedSessionEntry(key, 0, 0L, hash, hash)
+                    else RiftAllocator.allocateOpenHandle(
                       region,
                       new CheckedSessionEntry(key, 0, 0L, hash, hash)
                     )
@@ -767,7 +781,7 @@ object LogHubRetainedSessionMatrixHelpers {
 
             var slot = 0
             while (slot < slots) {
-              val epoch = group * cfg.activeEpochs + slot
+              val epoch = baseGroup * cfg.activeEpochs + slot
               val head: CheckedSessionEvent^{region} = heads(slot)
               val tail: CheckedSessionEvent^{region} = tails(slot)
               if (head != null && tail != null)
@@ -804,6 +818,7 @@ object LogHubRetainedSessionMatrixHelpers {
           if (groupOutcome.maxLiveObjectProxy > maxLiveObjects)
             maxLiveObjects = groupOutcome.maxLiveObjectProxy
           processed += groupOutcome.recordsRead
+          if (groupOutcome.recordsRead < groupRecords) done = true
           group += 1
         }
       }
@@ -826,11 +841,201 @@ object LogHubRetainedSessionMatrixHelpers {
     )
   }
 
-  private def runCheckedJoin(workload: String): Outcome = {
+  private def runCheckedSession(workload: String): Outcome =
+    runCheckedSessionImpl(workload, inferredAllocations = false)
+
+  private def runCheckedInferredSession(workload: String): Outcome = {
     val cfg = LogHubRetainedSessionConfig
     val tableSize = tableSizeFor()
     val tableMask = tableSize - 1
     val source = openSource()
+    val clickstreamInput = workload == "wikimedia-clickstream-session"
+    val parsed = new ParsedLineFields
+
+    val outcome =
+      try {
+      RiftRegion.streamingOpenHandle {
+        var checksum = 0L
+        var outputCount = 0L
+        var retainedObjects = 0L
+        var regionFreedObjects = 0L
+        var maxLiveObjects = 0L
+        var processed = 0
+        var group = 0
+        var done = false
+
+        while (processed < cfg.records && !done) {
+          val remaining = cfg.records - processed
+          val slots = groupSlots(remaining, cfg)
+          val groupRecords = math.min(remaining, slots * cfg.recordsPerEpoch)
+          val baseChecksum = checksum
+          val baseProcessed = processed
+          val baseGroup = group
+          val groupOutcome = RiftSandboxInternals.resetOpenHandleInline {
+            region ?=>
+            final class CheckedSessionEvent(
+                val recordId: Int,
+                val epoch: Int,
+                val key: Int,
+                val value: Int,
+                val hash: Long
+            ) {
+              var next: CheckedSessionEvent^{region} = null
+            }
+
+            final class CheckedSessionEntry(
+                val key: Int,
+                var count: Int,
+                var sum: Long,
+                var firstHash: Long,
+                var lastHash: Long
+            ) {
+              var events: CheckedSessionEvent^{region} = null
+              var next: CheckedSessionEntry^{region} = null
+            }
+
+            val entries: Array[CheckedSessionEntry^{region}]^{region} =
+              new Array[CheckedSessionEntry^{region}](slots * tableSize)
+            val heads: Array[CheckedSessionEvent^{region}]^{region} =
+              new Array[CheckedSessionEvent^{region}](slots)
+            val tails: Array[CheckedSessionEvent^{region}]^{region} =
+              new Array[CheckedSessionEvent^{region}](slots)
+            val counts: Array[Int]^{region} =
+              new Array[Int](slots)
+            var localChecksum = baseChecksum
+            var localOutput = 0L
+            var localRetained = 0L
+            var local = 0
+            var liveObjects = 3L
+            var localDone = false
+
+            while (local < groupRecords && !localDone) {
+              val length = source.readLine()
+              if (length < 0) localDone = true
+              else if (length > 0) {
+                val slot = local % slots
+                val epoch = baseGroup * cfg.activeEpochs + slot
+                val recordId = baseProcessed + local
+                readLineFieldsInto(source, clickstreamInput, parsed)
+                val key = parsed.key
+                val value = parsed.value
+                val hash = parsed.hash
+                val event: CheckedSessionEvent^{region} =
+                  new CheckedSessionEvent(recordId, epoch, key, value, hash)
+                if (heads(slot) == null) {
+                  heads(slot) = event
+                  tails(slot) = event
+                } else {
+                  event.next = heads(slot)
+                  heads(slot) = event
+                }
+                counts(slot) += 1
+                localRetained += 1L
+                liveObjects += 1L
+
+                val bucket = slot * tableSize + (mix(key) & tableMask)
+                var entry: CheckedSessionEntry^{region} = entries(bucket)
+                var found: CheckedSessionEntry^{region} = null
+                while (entry != null && found == null) {
+                  if (entry.key == key) found = entry
+                  entry = entry.next
+                }
+                if (found == null) {
+                  found =
+                    new CheckedSessionEntry(key, 0, 0L, hash, hash)
+                  found.next = entries(bucket)
+                  entries(bucket) = found
+                  localRetained += 1L
+                  liveObjects += 1L
+                }
+                event.next = found.events
+                found.events = event
+                found.count += 1
+                found.sum += value.toLong
+                found.lastHash = hash
+
+                if (recordId % cfg.sampleEvery == 0)
+                  localChecksum = fold(localChecksum, 101, epoch, key, 1, hash)
+                local += 1
+              } else {
+                local += 1
+              }
+            }
+
+            var slot = 0
+            while (slot < slots) {
+              val epoch = baseGroup * cfg.activeEpochs + slot
+              val head: CheckedSessionEvent^{region} = heads(slot)
+              val tail: CheckedSessionEvent^{region} = tails(slot)
+              if (head != null && tail != null)
+                localChecksum =
+                  fold(localChecksum, 107, epoch, head.key ^ tail.key, counts(slot), head.hash ^ tail.hash)
+              var bucket = 0
+              while (bucket < tableSize) {
+                var entry: CheckedSessionEntry^{region} =
+                  entries(slot * tableSize + bucket)
+                while (entry != null) {
+                  localChecksum =
+                    fold(localChecksum, 109, epoch, entry.key, entry.count, entry.sum ^ entry.firstHash ^ entry.lastHash)
+                  localOutput += 1L
+                  entry = entry.next
+                }
+                bucket += 1
+              }
+              slot += 1
+            }
+
+            GroupOutcome(
+              localChecksum,
+              localOutput,
+              localRetained,
+              localRetained + 3L,
+              liveObjects,
+              local
+            )
+          }
+          checksum = groupOutcome.checksum
+          outputCount += groupOutcome.outputCount
+          retainedObjects += groupOutcome.retainedObjectProxy
+          regionFreedObjects += groupOutcome.regionFreedObjectProxy
+          if (groupOutcome.maxLiveObjectProxy > maxLiveObjects)
+            maxLiveObjects = groupOutcome.maxLiveObjectProxy
+          processed += groupOutcome.recordsRead
+          if (groupOutcome.recordsRead < groupRecords) done = true
+          group += 1
+        }
+
+        Outcome(
+          checksum,
+          outputCount,
+          retainedObjects,
+          regionFreedObjects,
+          maxLiveObjects,
+          processed,
+          source.bytesRead,
+          source.inputFiles
+        )
+      }
+    } finally {
+      source.close()
+    }
+
+    checksumSink = outcome.checksum
+    outputSink = outcome.outputCount
+    retainedSink = outcome.retainedObjectProxy
+    outcome
+  }
+
+  private inline def runCheckedJoinImpl(
+      workload: String,
+      inline inferredAllocations: Boolean
+  ): Outcome = {
+    val cfg = LogHubRetainedSessionConfig
+    val tableSize = tableSizeFor()
+    val tableMask = tableSize - 1
+    val source = openSource()
+    val clickstreamInput = workload == "wikimedia-clickstream-session"
+    val parsed = new ParsedLineFields
     var checksum = 0L
     var outputCount = 0L
     var retainedObjects = 0L
@@ -880,7 +1085,10 @@ object LogHubRetainedSessionMatrixHelpers {
                 val slot = local % slots
                 val epoch = group * cfg.activeEpochs + slot
                 val recordId = processed + local
-                val (rawKey, value, rawHash) = readLineFields(source, workload)
+                readLineFieldsInto(source, clickstreamInput, parsed)
+                val rawKey = parsed.key
+                val value = parsed.value
+                val rawHash = parsed.hash
                 val key = rawKey
                 val side = recordId & 1
                 val hash = rawHash ^ (side.toLong * 1315423911L)
@@ -896,7 +1104,9 @@ object LogHubRetainedSessionMatrixHelpers {
                     cursor = cursor.next
                   }
                   val record: CheckedJoinRecord^{region} =
-                    RiftAllocator.allocateOpenHandle(
+                    inline if (inferredAllocations) then
+                      new CheckedJoinRecord(recordId, epoch, key, value, hash)
+                    else RiftAllocator.allocateOpenHandle(
                       region,
                       new CheckedJoinRecord(recordId, epoch, key, value, hash)
                     )
@@ -913,7 +1123,9 @@ object LogHubRetainedSessionMatrixHelpers {
                     cursor = cursor.next
                   }
                   val record: CheckedJoinRecord^{region} =
-                    RiftAllocator.allocateOpenHandle(
+                    inline if (inferredAllocations) then
+                      new CheckedJoinRecord(recordId, epoch, key, value, hash)
+                    else RiftAllocator.allocateOpenHandle(
                       region,
                       new CheckedJoinRecord(recordId, epoch, key, value, hash)
                     )
@@ -994,11 +1206,190 @@ object LogHubRetainedSessionMatrixHelpers {
     )
   }
 
+  private def runCheckedJoin(workload: String): Outcome =
+    runCheckedJoinImpl(workload, inferredAllocations = false)
+
+  private def runCheckedInferredJoin(workload: String): Outcome =
+    runCheckedInferredJoinImpl(workload)
+
+  private def runCheckedInferredJoinImpl(workload: String): Outcome = {
+    val cfg = LogHubRetainedSessionConfig
+    val tableSize = tableSizeFor()
+    val tableMask = tableSize - 1
+    val source = openSource()
+    val clickstreamInput = workload == "wikimedia-clickstream-session"
+    val parsed = new ParsedLineFields
+
+    val outcome =
+      try {
+        RiftRegion.streamingOpenHandle {
+          var checksum = 0L
+          var outputCount = 0L
+          var retainedObjects = 0L
+          var regionFreedObjects = 0L
+          var maxLiveObjects = 0L
+          var processed = 0
+          var group = 0
+          var done = false
+
+          while (processed < cfg.records && !done) {
+            val remaining = cfg.records - processed
+            val slots = groupSlots(remaining, cfg)
+            val groupRecords = math.min(remaining, slots * cfg.recordsPerEpoch)
+            val baseChecksum = checksum
+            val baseProcessed = processed
+            val baseGroup = group
+            val groupOutcome = RiftSandboxInternals.resetOpenHandleInline {
+              region ?=>
+              final class CheckedJoinRecord(
+                  val recordId: Int,
+                  val epoch: Int,
+                  val key: Int,
+                  val value: Int,
+                  val hash: Long
+              ) {
+                var next: CheckedJoinRecord^{region} = null
+              }
+
+              val left: Array[CheckedJoinRecord^{region}]^{region} =
+                new Array[CheckedJoinRecord^{region}](slots * tableSize)
+              val right: Array[CheckedJoinRecord^{region}]^{region} =
+                new Array[CheckedJoinRecord^{region}](slots * tableSize)
+              var localChecksum = baseChecksum
+              var localOutput = 0L
+              var localRetained = 0L
+              var liveObjects = 2L
+              var local = 0
+              var localDone = false
+
+              while (local < groupRecords && !localDone) {
+                val length = source.readLine()
+                if (length < 0) localDone = true
+                else if (length > 0) {
+                  val slot = local % slots
+                  val epoch = baseGroup * cfg.activeEpochs + slot
+                  val recordId = baseProcessed + local
+                  readLineFieldsInto(source, clickstreamInput, parsed)
+                  val rawKey = parsed.key
+                  val value = parsed.value
+                  val rawHash = parsed.hash
+                  val key = rawKey
+                  val side = recordId & 1
+                  val hash = rawHash ^ (side.toLong * 1315423911L)
+                  val bucket = slot * tableSize + (mix(key) & tableMask)
+                  if (side == 0) {
+                    var cursor: CheckedJoinRecord^{region} = right(bucket)
+                    while (cursor != null) {
+                      if (cursor.key == key) {
+                        localChecksum =
+                          fold(localChecksum, 131, epoch, key, 1, hash ^ cursor.hash)
+                        localOutput += 1L
+                      }
+                      cursor = cursor.next
+                    }
+                    val record: CheckedJoinRecord^{region} =
+                      new CheckedJoinRecord(recordId, epoch, key, value, hash)
+                    record.next = left(bucket)
+                    left(bucket) = record
+                  } else {
+                    var cursor: CheckedJoinRecord^{region} = left(bucket)
+                    while (cursor != null) {
+                      if (cursor.key == key) {
+                        localChecksum =
+                          fold(localChecksum, 137, epoch, key, 1, hash ^ cursor.hash)
+                        localOutput += 1L
+                      }
+                      cursor = cursor.next
+                    }
+                    val record: CheckedJoinRecord^{region} =
+                      new CheckedJoinRecord(recordId, epoch, key, value, hash)
+                    record.next = right(bucket)
+                    right(bucket) = record
+                  }
+                  localRetained += 1L
+                  liveObjects += 1L
+                  if (recordId % cfg.sampleEvery == 0)
+                    localChecksum = fold(localChecksum, 139, epoch, key, side, hash)
+                  local += 1
+                } else {
+                  local += 1
+                }
+              }
+
+              var slot = 0
+              while (slot < slots) {
+                val epoch = baseGroup * cfg.activeEpochs + slot
+                var leftCount = 0
+                var rightCount = 0
+                var bucket = 0
+                while (bucket < tableSize) {
+                  var l: CheckedJoinRecord^{region} =
+                    left(slot * tableSize + bucket)
+                  while (l != null) {
+                    leftCount += 1
+                    l = l.next
+                  }
+                  var r: CheckedJoinRecord^{region} =
+                    right(slot * tableSize + bucket)
+                  while (r != null) {
+                    rightCount += 1
+                    r = r.next
+                  }
+                  bucket += 1
+                }
+                localChecksum =
+                  fold(localChecksum, 149, epoch, leftCount, rightCount, leftCount.toLong + rightCount)
+                slot += 1
+              }
+
+              GroupOutcome(
+                localChecksum,
+                localOutput,
+                localRetained,
+                localRetained + 2L,
+                liveObjects,
+                local
+              )
+            }
+            checksum = groupOutcome.checksum
+            outputCount += groupOutcome.outputCount
+            retainedObjects += groupOutcome.retainedObjectProxy
+            regionFreedObjects += groupOutcome.regionFreedObjectProxy
+            if (groupOutcome.maxLiveObjectProxy > maxLiveObjects)
+              maxLiveObjects = groupOutcome.maxLiveObjectProxy
+            processed += groupOutcome.recordsRead
+            if (groupOutcome.recordsRead < groupRecords) done = true
+            group += 1
+          }
+
+          Outcome(
+            checksum,
+            outputCount,
+            retainedObjects,
+            regionFreedObjects,
+            maxLiveObjects,
+            processed,
+            source.bytesRead,
+            source.inputFiles
+          )
+        }
+      } finally {
+        source.close()
+      }
+
+    checksumSink = outcome.checksum
+    outputSink = outcome.outputCount
+    retainedSink = outcome.retainedObjectProxy
+    outcome
+  }
+
   private def runCheckedScopedSession(workload: String): Outcome = {
     val cfg = LogHubRetainedSessionConfig
     val tableSize = tableSizeFor()
     val tableMask = tableSize - 1
     val source = openSource()
+    val clickstreamInput = workload == "wikimedia-clickstream-session"
+    val parsed = new ParsedLineFields
     var checksum = 0L
     var outputCount = 0L
     var retainedObjects = 0L
@@ -1011,10 +1402,13 @@ object LogHubRetainedSessionMatrixHelpers {
     try {
       RiftRegion.streamingSafeZone { stream ?=>
         while (processed < cfg.records && !done) {
-          val remaining = cfg.records - processed
-          val slots = groupSlots(remaining, cfg)
-          val groupRecords = math.min(remaining, slots * cfg.recordsPerEpoch)
-          val groupOutcome = RiftRegion.epoch { region ?=>
+        val remaining = cfg.records - processed
+        val slots = groupSlots(remaining, cfg)
+        val groupRecords = math.min(remaining, slots * cfg.recordsPerEpoch)
+        val baseChecksum = checksum
+        val baseProcessed = processed
+        val baseGroup = group
+        val groupOutcome = RiftRegion.epoch { region ?=>
             final class CheckedSessionEvent(
                 val recordId: Int,
                 val epoch: Int,
@@ -1044,21 +1438,26 @@ object LogHubRetainedSessionMatrixHelpers {
               RiftRegion.allocOpen(new Array[CheckedSessionEvent^{region}](slots))
             val tails: Array[CheckedSessionEvent^{region}]^{region} =
               RiftRegion.allocOpen(new Array[CheckedSessionEvent^{region}](slots))
-            val counts = new Array[Int](slots)
-            var localChecksum = checksum
+            val counts: Array[Int]^{region} =
+              RiftRegion.allocOpen(new Array[Int](slots))
+            var localChecksum = baseChecksum
             var localOutput = 0L
             var localRetained = 0L
             var local = 0
             var liveObjects = 3L
+            var localDone = false
 
-            while (local < groupRecords && !done) {
+            while (local < groupRecords && !localDone) {
               val length = source.readLine()
-              if (length < 0) done = true
+              if (length < 0) localDone = true
               else if (length > 0) {
                 val slot = local % slots
-                val epoch = group * cfg.activeEpochs + slot
-                val recordId = processed + local
-                val (key, value, hash) = readLineFields(source, workload)
+                val epoch = baseGroup * cfg.activeEpochs + slot
+                val recordId = baseProcessed + local
+                readLineFieldsInto(source, clickstreamInput, parsed)
+                val key = parsed.key
+                val value = parsed.value
+                val hash = parsed.hash
                 val event: CheckedSessionEvent^{region} =
                   RiftRegion.allocOpen(
                     new CheckedSessionEvent(recordId, epoch, key, value, hash)
@@ -1107,7 +1506,7 @@ object LogHubRetainedSessionMatrixHelpers {
 
             var slot = 0
             while (slot < slots) {
-              val epoch = group * cfg.activeEpochs + slot
+              val epoch = baseGroup * cfg.activeEpochs + slot
               val head: CheckedSessionEvent^{region} = heads(slot)
               val tail: CheckedSessionEvent^{region} = tails(slot)
               if (head != null && tail != null)
@@ -1144,6 +1543,7 @@ object LogHubRetainedSessionMatrixHelpers {
           if (groupOutcome.maxLiveObjectProxy > maxLiveObjects)
             maxLiveObjects = groupOutcome.maxLiveObjectProxy
           processed += groupOutcome.recordsRead
+          if (groupOutcome.recordsRead < groupRecords) done = true
           group += 1
         }
       }
@@ -1171,6 +1571,8 @@ object LogHubRetainedSessionMatrixHelpers {
     val tableSize = tableSizeFor()
     val tableMask = tableSize - 1
     val source = openSource()
+    val clickstreamInput = workload == "wikimedia-clickstream-session"
+    val parsed = new ParsedLineFields
     var checksum = 0L
     var outputCount = 0L
     var retainedObjects = 0L
@@ -1218,7 +1620,10 @@ object LogHubRetainedSessionMatrixHelpers {
                 val slot = local % slots
                 val epoch = group * cfg.activeEpochs + slot
                 val recordId = processed + local
-                val (rawKey, value, rawHash) = readLineFields(source, workload)
+                readLineFieldsInto(source, clickstreamInput, parsed)
+                val rawKey = parsed.key
+                val value = parsed.value
+                val rawHash = parsed.hash
                 val key = rawKey
                 val side = recordId & 1
                 val hash = rawHash ^ (side.toLong * 1315423911L)
@@ -1335,6 +1740,9 @@ object LogHubRetainedSessionMatrixHelpers {
       case "heap-gc" | "gc-heap" | "heap-immix" | "heap" => "heap-gc"
       case "checked-rift" | "checked-epoch-stream" | "checked-region-stream" =>
         "checked-rift"
+      case "checked-rift-inferred" | "checked-epoch-stream-inferred" |
+          "checked-region-stream-inferred" =>
+        "checked-rift-inferred"
       case "checked-region-scoped" | "checked-epoch-scoped" |
           "best-safe-region" | "checked-rift-scoped" =>
         "checked-region-scoped"
@@ -1377,6 +1785,10 @@ object LogHubRetainedSessionMatrixHelpers {
       case ("checked-rift", query) if sessionLike(query) =>
         runCheckedSession(query)
       case ("checked-rift", "join") => runCheckedJoin("join")
+      case ("checked-rift-inferred", query) if sessionLike(query) =>
+        runCheckedInferredSession(query)
+      case ("checked-rift-inferred", "join") =>
+        runCheckedInferredJoin("join")
       case ("checked-region-scoped", query) if sessionLike(query) =>
         runCheckedScopedSession(query)
       case ("checked-region-scoped", "join") => runCheckedScopedJoin("join")

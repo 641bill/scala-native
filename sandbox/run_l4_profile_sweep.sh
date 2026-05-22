@@ -19,6 +19,8 @@ default_theodolite_power_input="zip:${parent_dir}/cache/benchmark-data/theodolit
 default_dspbench_archive="${parent_dir}/cache/benchmark-data/dspbench/DSPBench-00c20da828faf2b960fdb697c61d34cb25461875.zip"
 default_dspbench_archive_prefix="DSPBench-00c20da828faf2b960fdb697c61d34cb25461875"
 default_dspbench_fraud_input="zip:${default_dspbench_archive}!${default_dspbench_archive_prefix}/dspbench-threads/data/credit-card.dat"
+default_dspbench_log_input="zip:${default_dspbench_archive}!${default_dspbench_archive_prefix}/dspbench-spark/data/logprocessing/http-server.log"
+default_wikimedia_clickstream_input="${parent_dir}/cache/benchmark-data/wikimedia/clickstream-enwiki-2026-03.tsv.gz"
 
 export ENABLE_EXPERIMENTAL_COMPILER=1
 export JAVA_HOME="$(cs java-home --jvm temurin:17)"
@@ -30,12 +32,15 @@ cd "${repo_dir}"
 default_cases=(
   streamflex-design-checked
   streamflex-design-checked-stream
+  streamflex-design-checked-stream-inferred
   streamflex-design-heap
   commoncrawl-q2-checked-rift
   commoncrawl-q2-checked-scoped
   commoncrawl-q2-heap
   dspbench-fraud-q2-checked-scoped
   dspbench-fraud-q2-heap
+  dspbench-log-q2-checked-scoped
+  dspbench-log-q2-heap
   loghub-hdfs-stream-topk-checked
   loghub-hdfs-stream-topk-heap
   yak-topwordreal-checked-scoped
@@ -60,6 +65,8 @@ default_cases=(
   yak-graphreal-heap
   yak-graphstep-checked-scoped
   yak-graphstep-heap
+  dataflow-aggregate-checked-stream
+  dataflow-aggregate-checked-stream-inferred
   dataflow-aggregate-checked-scoped
   dataflow-aggregate-epoch-fold
   dataflow-aggregate-heap
@@ -77,6 +84,35 @@ default_cases=(
   reml-ray-heap
   reml-tsp-checked-scoped
   reml-tsp-heap
+  broom-aggregate-checked-rift
+  broom-aggregate-checked-scoped
+  broom-aggregate-heap
+  broom-join-checked-rift
+  broom-join-checked-scoped
+  broom-join-heap
+  broom-q17-checked-rift
+  broom-q17-checked-rift-inferred
+  broom-q17-checked-scoped
+  broom-q17-heap
+  broom-shopper-checked-rift
+  broom-shopper-checked-rift-inferred
+  broom-shopper-checked-scoped
+  broom-shopper-heap
+  theodolite-power-uc4-checked-rift
+  theodolite-power-uc4-checked-scoped
+  theodolite-power-uc4-heap
+  loghub-retained-session-checked-rift
+  loghub-retained-session-checked-rift-inferred
+  loghub-retained-session-checked-scoped
+  loghub-retained-session-heap
+  loghub-retained-join-checked-rift
+  loghub-retained-join-checked-rift-inferred
+  loghub-retained-join-checked-scoped
+  loghub-retained-join-heap
+  wikimedia-clickstream-checked-rift
+  wikimedia-clickstream-checked-rift-inferred
+  wikimedia-clickstream-checked-scoped
+  wikimedia-clickstream-heap
 )
 
 cases=(${(z)${RIFT_PROFILE_CASES:-"streamflex-design-checked streamflex-design-heap"}})
@@ -132,6 +168,11 @@ case_config() {
       args="checked-epoch-stream throughput"
       env_spec="RIFT_FINAL_CLEAN=1 STREAMFLEX_DESIGN_EVENTS=${RIFT_PROFILE_STREAMFLEX_EVENTS:-20000000} STREAMFLEX_DESIGN_BENCHMARK_RUNS=1 STREAMFLEX_DESIGN_WARMUPS=0"
       ;;
+    streamflex-design-checked-stream-inferred)
+      main_class="StreamFlexDesignMatrix"
+      args="checked-epoch-stream-inferred throughput"
+      env_spec="RIFT_FINAL_CLEAN=1 STREAMFLEX_DESIGN_EVENTS=${RIFT_PROFILE_STREAMFLEX_EVENTS:-20000000} STREAMFLEX_DESIGN_BENCHMARK_RUNS=1 STREAMFLEX_DESIGN_WARMUPS=0"
+      ;;
     streamflex-design-heap)
       main_class="StreamFlexDesignMatrix"
       args="gc-heap throughput"
@@ -161,6 +202,16 @@ case_config() {
       main_class="DSPBenchRegionMatrix"
       args="heap fraud-q2-alert-window"
       env_spec="RIFT_FINAL_CLEAN=1 DSPBENCH_INPUT_MODE=${RIFT_PROFILE_DSPBENCH_INPUT_MODE:-file-backed} DSPBENCH_INPUT=${RIFT_PROFILE_DSPBENCH_INPUT:-${default_dspbench_fraud_input}} DSPBENCH_EVENTS=${RIFT_PROFILE_DSPBENCH_EVENTS:-5000000} DSPBENCH_BENCHMARK_RUNS=1 DSPBENCH_WARMUPS=0"
+      ;;
+    dspbench-log-q2-checked-scoped)
+      main_class="DSPBenchRegionMatrix"
+      args="rift-checked-safezone-page-token log-q2-window"
+      env_spec="RIFT_FINAL_CLEAN=1 DSPBENCH_INPUT_MODE=${RIFT_PROFILE_DSPBENCH_INPUT_MODE:-file-backed} DSPBENCH_INPUT=${RIFT_PROFILE_DSPBENCH_INPUT:-${default_dspbench_log_input}} DSPBENCH_EVENTS=${RIFT_PROFILE_DSPBENCH_EVENTS:-5000000} DSPBENCH_BENCHMARK_RUNS=1 DSPBENCH_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    dspbench-log-q2-heap)
+      main_class="DSPBenchRegionMatrix"
+      args="heap log-q2-window"
+      env_spec="RIFT_FINAL_CLEAN=1 DSPBENCH_INPUT_MODE=${RIFT_PROFILE_DSPBENCH_INPUT_MODE:-file-backed} DSPBENCH_INPUT=${RIFT_PROFILE_DSPBENCH_INPUT:-${default_dspbench_log_input}} DSPBENCH_EVENTS=${RIFT_PROFILE_DSPBENCH_EVENTS:-5000000} DSPBENCH_BENCHMARK_RUNS=1 DSPBENCH_WARMUPS=0"
       ;;
     loghub-hdfs-stream-topk-checked)
       main_class="LogHubTopTemplatesMatrix"
@@ -211,6 +262,26 @@ case_config() {
       main_class="LogHubTopTemplatesMatrix"
       args="heap-retained-drop-anchor"
       env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_TOP_INPUT_MODE=streaming-file LOGHUB_TOP_INPUT=${RIFT_PROFILE_LOGHUB_WINDOWS_INPUT:-${default_loghub_windows_input}} LOGHUB_TOP_LINES=${RIFT_PROFILE_LOGHUB_WINDOWS_LINES:-5000000} LOGHUB_TOP_LINES_PER_EPOCH=${RIFT_PROFILE_LOGHUB_LINES_PER_EPOCH:-100000} LOGHUB_TOP_BENCHMARK_RUNS=1 LOGHUB_TOP_WARMUPS=0"
+      ;;
+    wikimedia-clickstream-checked-rift)
+      main_class="LogHubRetainedSessionMatrix"
+      args="checked-rift wikimedia-clickstream-session"
+      env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_SESSION_INPUT=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_INPUT:-${default_wikimedia_clickstream_input}} LOGHUB_SESSION_RECORDS=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_RECORDS:-10000000} LOGHUB_SESSION_RECORDS_PER_EPOCH=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_RECORDS_PER_EPOCH:-25000} LOGHUB_SESSION_ACTIVE_EPOCHS=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_ACTIVE_EPOCHS:-16} LOGHUB_SESSION_KEY_SPACE=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_KEY_SPACE:-262144} LOGHUB_SESSION_BENCHMARK_RUNS=1 LOGHUB_SESSION_WARMUPS=0"
+      ;;
+    wikimedia-clickstream-checked-rift-inferred)
+      main_class="LogHubRetainedSessionMatrix"
+      args="checked-rift-inferred wikimedia-clickstream-session"
+      env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_SESSION_INPUT=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_INPUT:-${default_wikimedia_clickstream_input}} LOGHUB_SESSION_RECORDS=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_RECORDS:-10000000} LOGHUB_SESSION_RECORDS_PER_EPOCH=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_RECORDS_PER_EPOCH:-25000} LOGHUB_SESSION_ACTIVE_EPOCHS=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_ACTIVE_EPOCHS:-16} LOGHUB_SESSION_KEY_SPACE=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_KEY_SPACE:-262144} LOGHUB_SESSION_BENCHMARK_RUNS=1 LOGHUB_SESSION_WARMUPS=0"
+      ;;
+    wikimedia-clickstream-checked-scoped)
+      main_class="LogHubRetainedSessionMatrix"
+      args="checked-region-scoped wikimedia-clickstream-session"
+      env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_SESSION_INPUT=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_INPUT:-${default_wikimedia_clickstream_input}} LOGHUB_SESSION_RECORDS=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_RECORDS:-10000000} LOGHUB_SESSION_RECORDS_PER_EPOCH=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_RECORDS_PER_EPOCH:-25000} LOGHUB_SESSION_ACTIVE_EPOCHS=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_ACTIVE_EPOCHS:-16} LOGHUB_SESSION_KEY_SPACE=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_KEY_SPACE:-262144} LOGHUB_SESSION_BENCHMARK_RUNS=1 LOGHUB_SESSION_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    wikimedia-clickstream-heap)
+      main_class="LogHubRetainedSessionMatrix"
+      args="heap-gc wikimedia-clickstream-session"
+      env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_SESSION_INPUT=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_INPUT:-${default_wikimedia_clickstream_input}} LOGHUB_SESSION_RECORDS=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_RECORDS:-10000000} LOGHUB_SESSION_RECORDS_PER_EPOCH=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_RECORDS_PER_EPOCH:-25000} LOGHUB_SESSION_ACTIVE_EPOCHS=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_ACTIVE_EPOCHS:-16} LOGHUB_SESSION_KEY_SPACE=${RIFT_PROFILE_WIKIMEDIA_CLICKSTREAM_KEY_SPACE:-262144} LOGHUB_SESSION_BENCHMARK_RUNS=1 LOGHUB_SESSION_WARMUPS=0"
       ;;
     theodolite-power-q2-checked-scoped)
       main_class="TheodolitePowerRegionMatrix"
@@ -286,6 +357,16 @@ case_config() {
       main_class="DataflowRegionMatrix"
       args="rift-checked-safezone-direct-epoch aggregate"
       env_spec="RIFT_FINAL_CLEAN=1 DATAFLOW_EPOCHS=${RIFT_PROFILE_DATAFLOW_EPOCHS:-20} DATAFLOW_DOCS_PER_EPOCH=${RIFT_PROFILE_DATAFLOW_DOCS_PER_EPOCH:-500000} DATAFLOW_BENCHMARK_RUNS=1 DATAFLOW_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    dataflow-aggregate-checked-stream)
+      main_class="DataflowRegionMatrix"
+      args="checked-epoch-stream aggregate"
+      env_spec="RIFT_FINAL_CLEAN=1 DATAFLOW_EPOCHS=${RIFT_PROFILE_DATAFLOW_EPOCHS:-20} DATAFLOW_DOCS_PER_EPOCH=${RIFT_PROFILE_DATAFLOW_DOCS_PER_EPOCH:-500000} DATAFLOW_BENCHMARK_RUNS=1 DATAFLOW_WARMUPS=0"
+      ;;
+    dataflow-aggregate-checked-stream-inferred)
+      main_class="DataflowRegionMatrix"
+      args="checked-epoch-stream-inferred aggregate"
+      env_spec="RIFT_FINAL_CLEAN=1 DATAFLOW_EPOCHS=${RIFT_PROFILE_DATAFLOW_EPOCHS:-20} DATAFLOW_DOCS_PER_EPOCH=${RIFT_PROFILE_DATAFLOW_DOCS_PER_EPOCH:-500000} DATAFLOW_BENCHMARK_RUNS=1 DATAFLOW_WARMUPS=0"
       ;;
     dataflow-aggregate-epoch-fold)
       main_class="DataflowRegionMatrix"
@@ -367,6 +448,131 @@ case_config() {
       args="tsp gc-heap"
       env_spec="RIFT_FINAL_CLEAN=1 REML_TSP_POINTS=${RIFT_PROFILE_REML_TSP_POINTS:-1024} REML_TSP_STARTS=${RIFT_PROFILE_REML_TSP_STARTS:-1024} REML_BENCHMARK_RUNS=1 REML_WARMUPS=0"
       ;;
+    broom-aggregate-checked-rift)
+      main_class="BroomRetainedDataflowMatrix"
+      args="checked-rift aggregate"
+      env_spec="RIFT_FINAL_CLEAN=1 BROOM_RECORDS=${RIFT_PROFILE_BROOM_RECORDS:-20000000} BROOM_RECORDS_PER_TIMESTAMP=${RIFT_PROFILE_BROOM_RECORDS_PER_TIMESTAMP:-25000} BROOM_ACTIVE_TIMESTAMPS=${RIFT_PROFILE_BROOM_ACTIVE_TIMESTAMPS:-16} BROOM_BENCHMARK_RUNS=1 BROOM_WARMUPS=0"
+      ;;
+    broom-aggregate-checked-scoped)
+      main_class="BroomRetainedDataflowMatrix"
+      args="checked-region-scoped aggregate"
+      env_spec="RIFT_FINAL_CLEAN=1 BROOM_RECORDS=${RIFT_PROFILE_BROOM_RECORDS:-20000000} BROOM_RECORDS_PER_TIMESTAMP=${RIFT_PROFILE_BROOM_RECORDS_PER_TIMESTAMP:-25000} BROOM_ACTIVE_TIMESTAMPS=${RIFT_PROFILE_BROOM_ACTIVE_TIMESTAMPS:-16} BROOM_BENCHMARK_RUNS=1 BROOM_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    broom-aggregate-heap)
+      main_class="BroomRetainedDataflowMatrix"
+      args="heap-gc aggregate"
+      env_spec="RIFT_FINAL_CLEAN=1 BROOM_RECORDS=${RIFT_PROFILE_BROOM_RECORDS:-20000000} BROOM_RECORDS_PER_TIMESTAMP=${RIFT_PROFILE_BROOM_RECORDS_PER_TIMESTAMP:-25000} BROOM_ACTIVE_TIMESTAMPS=${RIFT_PROFILE_BROOM_ACTIVE_TIMESTAMPS:-16} BROOM_BENCHMARK_RUNS=1 BROOM_WARMUPS=0"
+      ;;
+    broom-join-checked-rift)
+      main_class="BroomRetainedDataflowMatrix"
+      args="checked-rift join"
+      env_spec="RIFT_FINAL_CLEAN=1 BROOM_RECORDS=${RIFT_PROFILE_BROOM_RECORDS:-20000000} BROOM_RECORDS_PER_TIMESTAMP=${RIFT_PROFILE_BROOM_RECORDS_PER_TIMESTAMP:-25000} BROOM_ACTIVE_TIMESTAMPS=${RIFT_PROFILE_BROOM_ACTIVE_TIMESTAMPS:-16} BROOM_BENCHMARK_RUNS=1 BROOM_WARMUPS=0"
+      ;;
+    broom-join-checked-scoped)
+      main_class="BroomRetainedDataflowMatrix"
+      args="checked-region-scoped join"
+      env_spec="RIFT_FINAL_CLEAN=1 BROOM_RECORDS=${RIFT_PROFILE_BROOM_RECORDS:-20000000} BROOM_RECORDS_PER_TIMESTAMP=${RIFT_PROFILE_BROOM_RECORDS_PER_TIMESTAMP:-25000} BROOM_ACTIVE_TIMESTAMPS=${RIFT_PROFILE_BROOM_ACTIVE_TIMESTAMPS:-16} BROOM_BENCHMARK_RUNS=1 BROOM_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    broom-join-heap)
+      main_class="BroomRetainedDataflowMatrix"
+      args="heap-gc join"
+      env_spec="RIFT_FINAL_CLEAN=1 BROOM_RECORDS=${RIFT_PROFILE_BROOM_RECORDS:-20000000} BROOM_RECORDS_PER_TIMESTAMP=${RIFT_PROFILE_BROOM_RECORDS_PER_TIMESTAMP:-25000} BROOM_ACTIVE_TIMESTAMPS=${RIFT_PROFILE_BROOM_ACTIVE_TIMESTAMPS:-16} BROOM_BENCHMARK_RUNS=1 BROOM_WARMUPS=0"
+      ;;
+    broom-q17-checked-rift)
+      main_class="BroomRetainedDataflowMatrix"
+      args="checked-rift q17"
+      env_spec="RIFT_FINAL_CLEAN=1 BROOM_RECORDS=${RIFT_PROFILE_BROOM_RECORDS:-20000000} BROOM_RECORDS_PER_TIMESTAMP=${RIFT_PROFILE_BROOM_RECORDS_PER_TIMESTAMP:-25000} BROOM_ACTIVE_TIMESTAMPS=${RIFT_PROFILE_BROOM_ACTIVE_TIMESTAMPS:-16} BROOM_BENCHMARK_RUNS=1 BROOM_WARMUPS=0"
+      ;;
+    broom-q17-checked-rift-inferred)
+      main_class="BroomRetainedDataflowMatrix"
+      args="checked-rift-inferred q17"
+      env_spec="RIFT_FINAL_CLEAN=1 BROOM_RECORDS=${RIFT_PROFILE_BROOM_RECORDS:-20000000} BROOM_RECORDS_PER_TIMESTAMP=${RIFT_PROFILE_BROOM_RECORDS_PER_TIMESTAMP:-25000} BROOM_ACTIVE_TIMESTAMPS=${RIFT_PROFILE_BROOM_ACTIVE_TIMESTAMPS:-16} BROOM_BENCHMARK_RUNS=1 BROOM_WARMUPS=0"
+      ;;
+    broom-q17-checked-scoped)
+      main_class="BroomRetainedDataflowMatrix"
+      args="checked-region-scoped q17"
+      env_spec="RIFT_FINAL_CLEAN=1 BROOM_RECORDS=${RIFT_PROFILE_BROOM_RECORDS:-20000000} BROOM_RECORDS_PER_TIMESTAMP=${RIFT_PROFILE_BROOM_RECORDS_PER_TIMESTAMP:-25000} BROOM_ACTIVE_TIMESTAMPS=${RIFT_PROFILE_BROOM_ACTIVE_TIMESTAMPS:-16} BROOM_BENCHMARK_RUNS=1 BROOM_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    broom-q17-heap)
+      main_class="BroomRetainedDataflowMatrix"
+      args="heap-gc q17"
+      env_spec="RIFT_FINAL_CLEAN=1 BROOM_RECORDS=${RIFT_PROFILE_BROOM_RECORDS:-20000000} BROOM_RECORDS_PER_TIMESTAMP=${RIFT_PROFILE_BROOM_RECORDS_PER_TIMESTAMP:-25000} BROOM_ACTIVE_TIMESTAMPS=${RIFT_PROFILE_BROOM_ACTIVE_TIMESTAMPS:-16} BROOM_BENCHMARK_RUNS=1 BROOM_WARMUPS=0"
+      ;;
+    broom-shopper-checked-rift)
+      main_class="BroomRetainedDataflowMatrix"
+      args="checked-rift shopper"
+      env_spec="RIFT_FINAL_CLEAN=1 BROOM_RECORDS=${RIFT_PROFILE_BROOM_RECORDS:-20000000} BROOM_RECORDS_PER_TIMESTAMP=${RIFT_PROFILE_BROOM_RECORDS_PER_TIMESTAMP:-25000} BROOM_ACTIVE_TIMESTAMPS=${RIFT_PROFILE_BROOM_ACTIVE_TIMESTAMPS:-16} BROOM_BENCHMARK_RUNS=1 BROOM_WARMUPS=0"
+      ;;
+    broom-shopper-checked-rift-inferred)
+      main_class="BroomRetainedDataflowMatrix"
+      args="checked-rift-inferred shopper"
+      env_spec="RIFT_FINAL_CLEAN=1 BROOM_RECORDS=${RIFT_PROFILE_BROOM_RECORDS:-20000000} BROOM_RECORDS_PER_TIMESTAMP=${RIFT_PROFILE_BROOM_RECORDS_PER_TIMESTAMP:-25000} BROOM_ACTIVE_TIMESTAMPS=${RIFT_PROFILE_BROOM_ACTIVE_TIMESTAMPS:-16} BROOM_BENCHMARK_RUNS=1 BROOM_WARMUPS=0"
+      ;;
+    broom-shopper-checked-scoped)
+      main_class="BroomRetainedDataflowMatrix"
+      args="checked-region-scoped shopper"
+      env_spec="RIFT_FINAL_CLEAN=1 BROOM_RECORDS=${RIFT_PROFILE_BROOM_RECORDS:-20000000} BROOM_RECORDS_PER_TIMESTAMP=${RIFT_PROFILE_BROOM_RECORDS_PER_TIMESTAMP:-25000} BROOM_ACTIVE_TIMESTAMPS=${RIFT_PROFILE_BROOM_ACTIVE_TIMESTAMPS:-16} BROOM_BENCHMARK_RUNS=1 BROOM_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    broom-shopper-heap)
+      main_class="BroomRetainedDataflowMatrix"
+      args="heap-gc shopper"
+      env_spec="RIFT_FINAL_CLEAN=1 BROOM_RECORDS=${RIFT_PROFILE_BROOM_RECORDS:-20000000} BROOM_RECORDS_PER_TIMESTAMP=${RIFT_PROFILE_BROOM_RECORDS_PER_TIMESTAMP:-25000} BROOM_ACTIVE_TIMESTAMPS=${RIFT_PROFILE_BROOM_ACTIVE_TIMESTAMPS:-16} BROOM_BENCHMARK_RUNS=1 BROOM_WARMUPS=0"
+      ;;
+    theodolite-power-uc4-checked-rift)
+      main_class="TheodolitePowerRegionMatrix"
+      args="checked-epoch-stream q3-retained-uc4"
+      env_spec="RIFT_FINAL_CLEAN=1 THEODOLITE_POWER_INPUT_MODE=streaming-file THEODOLITE_POWER_INPUT=${RIFT_PROFILE_THEODOLITE_POWER_INPUT:-${default_theodolite_power_input}} THEODOLITE_POWER_RECORDS=${RIFT_PROFILE_THEODOLITE_POWER_RECORDS:-2500000} THEODOLITE_POWER_RECORDS_PER_EPOCH=${RIFT_PROFILE_THEODOLITE_POWER_RECORDS_PER_EPOCH:-25000} THEODOLITE_POWER_BENCHMARK_RUNS=1 THEODOLITE_POWER_WARMUPS=0"
+      ;;
+    theodolite-power-uc4-checked-scoped)
+      main_class="TheodolitePowerRegionMatrix"
+      args="checked-epoch-scoped q3-retained-uc4"
+      env_spec="RIFT_FINAL_CLEAN=1 THEODOLITE_POWER_INPUT_MODE=streaming-file THEODOLITE_POWER_INPUT=${RIFT_PROFILE_THEODOLITE_POWER_INPUT:-${default_theodolite_power_input}} THEODOLITE_POWER_RECORDS=${RIFT_PROFILE_THEODOLITE_POWER_RECORDS:-2500000} THEODOLITE_POWER_RECORDS_PER_EPOCH=${RIFT_PROFILE_THEODOLITE_POWER_RECORDS_PER_EPOCH:-25000} THEODOLITE_POWER_BENCHMARK_RUNS=1 THEODOLITE_POWER_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    theodolite-power-uc4-heap)
+      main_class="TheodolitePowerRegionMatrix"
+      args="heap q3-retained-uc4"
+      env_spec="RIFT_FINAL_CLEAN=1 THEODOLITE_POWER_INPUT_MODE=streaming-file THEODOLITE_POWER_INPUT=${RIFT_PROFILE_THEODOLITE_POWER_INPUT:-${default_theodolite_power_input}} THEODOLITE_POWER_RECORDS=${RIFT_PROFILE_THEODOLITE_POWER_RECORDS:-2500000} THEODOLITE_POWER_RECORDS_PER_EPOCH=${RIFT_PROFILE_THEODOLITE_POWER_RECORDS_PER_EPOCH:-25000} THEODOLITE_POWER_BENCHMARK_RUNS=1 THEODOLITE_POWER_WARMUPS=0"
+      ;;
+    loghub-retained-session-checked-rift)
+      main_class="LogHubRetainedSessionMatrix"
+      args="checked-rift session"
+      env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_SESSION_INPUT=${RIFT_PROFILE_LOGHUB_HDFS_INPUT:-${default_loghub_hdfs_input}} LOGHUB_SESSION_RECORDS=${RIFT_PROFILE_LOGHUB_SESSION_RECORDS:-1000000} LOGHUB_SESSION_RECORDS_PER_EPOCH=${RIFT_PROFILE_LOGHUB_SESSION_RECORDS_PER_EPOCH:-25000} LOGHUB_SESSION_ACTIVE_EPOCHS=${RIFT_PROFILE_LOGHUB_SESSION_ACTIVE_EPOCHS:-16} LOGHUB_SESSION_BENCHMARK_RUNS=1 LOGHUB_SESSION_WARMUPS=0"
+      ;;
+    loghub-retained-session-checked-rift-inferred)
+      main_class="LogHubRetainedSessionMatrix"
+      args="checked-rift-inferred session"
+      env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_SESSION_INPUT=${RIFT_PROFILE_LOGHUB_HDFS_INPUT:-${default_loghub_hdfs_input}} LOGHUB_SESSION_RECORDS=${RIFT_PROFILE_LOGHUB_SESSION_RECORDS:-1000000} LOGHUB_SESSION_RECORDS_PER_EPOCH=${RIFT_PROFILE_LOGHUB_SESSION_RECORDS_PER_EPOCH:-25000} LOGHUB_SESSION_ACTIVE_EPOCHS=${RIFT_PROFILE_LOGHUB_SESSION_ACTIVE_EPOCHS:-16} LOGHUB_SESSION_BENCHMARK_RUNS=1 LOGHUB_SESSION_WARMUPS=0"
+      ;;
+    loghub-retained-session-checked-scoped)
+      main_class="LogHubRetainedSessionMatrix"
+      args="checked-region-scoped session"
+      env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_SESSION_INPUT=${RIFT_PROFILE_LOGHUB_HDFS_INPUT:-${default_loghub_hdfs_input}} LOGHUB_SESSION_RECORDS=${RIFT_PROFILE_LOGHUB_SESSION_RECORDS:-1000000} LOGHUB_SESSION_RECORDS_PER_EPOCH=${RIFT_PROFILE_LOGHUB_SESSION_RECORDS_PER_EPOCH:-25000} LOGHUB_SESSION_ACTIVE_EPOCHS=${RIFT_PROFILE_LOGHUB_SESSION_ACTIVE_EPOCHS:-16} LOGHUB_SESSION_BENCHMARK_RUNS=1 LOGHUB_SESSION_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    loghub-retained-session-heap)
+      main_class="LogHubRetainedSessionMatrix"
+      args="heap-gc session"
+      env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_SESSION_INPUT=${RIFT_PROFILE_LOGHUB_HDFS_INPUT:-${default_loghub_hdfs_input}} LOGHUB_SESSION_RECORDS=${RIFT_PROFILE_LOGHUB_SESSION_RECORDS:-1000000} LOGHUB_SESSION_RECORDS_PER_EPOCH=${RIFT_PROFILE_LOGHUB_SESSION_RECORDS_PER_EPOCH:-25000} LOGHUB_SESSION_ACTIVE_EPOCHS=${RIFT_PROFILE_LOGHUB_SESSION_ACTIVE_EPOCHS:-16} LOGHUB_SESSION_BENCHMARK_RUNS=1 LOGHUB_SESSION_WARMUPS=0"
+      ;;
+    loghub-retained-join-checked-rift)
+      main_class="LogHubRetainedSessionMatrix"
+      args="checked-rift join"
+      env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_SESSION_INPUT=${RIFT_PROFILE_LOGHUB_HDFS_INPUT:-${default_loghub_hdfs_input}} LOGHUB_SESSION_RECORDS=${RIFT_PROFILE_LOGHUB_SESSION_RECORDS:-1000000} LOGHUB_SESSION_RECORDS_PER_EPOCH=${RIFT_PROFILE_LOGHUB_SESSION_RECORDS_PER_EPOCH:-25000} LOGHUB_SESSION_ACTIVE_EPOCHS=${RIFT_PROFILE_LOGHUB_SESSION_ACTIVE_EPOCHS:-16} LOGHUB_SESSION_BENCHMARK_RUNS=1 LOGHUB_SESSION_WARMUPS=0"
+      ;;
+    loghub-retained-join-checked-rift-inferred)
+      main_class="LogHubRetainedSessionMatrix"
+      args="checked-rift-inferred join"
+      env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_SESSION_INPUT=${RIFT_PROFILE_LOGHUB_HDFS_INPUT:-${default_loghub_hdfs_input}} LOGHUB_SESSION_RECORDS=${RIFT_PROFILE_LOGHUB_SESSION_RECORDS:-1000000} LOGHUB_SESSION_RECORDS_PER_EPOCH=${RIFT_PROFILE_LOGHUB_SESSION_RECORDS_PER_EPOCH:-25000} LOGHUB_SESSION_ACTIVE_EPOCHS=${RIFT_PROFILE_LOGHUB_SESSION_ACTIVE_EPOCHS:-16} LOGHUB_SESSION_BENCHMARK_RUNS=1 LOGHUB_SESSION_WARMUPS=0"
+      ;;
+    loghub-retained-join-checked-scoped)
+      main_class="LogHubRetainedSessionMatrix"
+      args="checked-region-scoped join"
+      env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_SESSION_INPUT=${RIFT_PROFILE_LOGHUB_HDFS_INPUT:-${default_loghub_hdfs_input}} LOGHUB_SESSION_RECORDS=${RIFT_PROFILE_LOGHUB_SESSION_RECORDS:-1000000} LOGHUB_SESSION_RECORDS_PER_EPOCH=${RIFT_PROFILE_LOGHUB_SESSION_RECORDS_PER_EPOCH:-25000} LOGHUB_SESSION_ACTIVE_EPOCHS=${RIFT_PROFILE_LOGHUB_SESSION_ACTIVE_EPOCHS:-16} LOGHUB_SESSION_BENCHMARK_RUNS=1 LOGHUB_SESSION_WARMUPS=0 SAFEZONE_ROOTS_MODE=1 SAFEZONE_PAGE_SIZE=32768"
+      ;;
+    loghub-retained-join-heap)
+      main_class="LogHubRetainedSessionMatrix"
+      args="heap-gc join"
+      env_spec="RIFT_FINAL_CLEAN=1 LOGHUB_SESSION_INPUT=${RIFT_PROFILE_LOGHUB_HDFS_INPUT:-${default_loghub_hdfs_input}} LOGHUB_SESSION_RECORDS=${RIFT_PROFILE_LOGHUB_SESSION_RECORDS:-1000000} LOGHUB_SESSION_RECORDS_PER_EPOCH=${RIFT_PROFILE_LOGHUB_SESSION_RECORDS_PER_EPOCH:-25000} LOGHUB_SESSION_ACTIVE_EPOCHS=${RIFT_PROFILE_LOGHUB_SESSION_ACTIVE_EPOCHS:-16} LOGHUB_SESSION_BENCHMARK_RUNS=1 LOGHUB_SESSION_WARMUPS=0"
+      ;;
     *)
       echo "unknown RIFT_PROFILE_CASES entry: ${case_name}" >&2
       exit 1
@@ -377,10 +583,14 @@ case_config() {
 profile_case() {
   local case_name="$1"
   local main_class args env_spec binary profile run_log err_log out_log pid command_status sample_status tool
+  local extra_env_spec="${RIFT_PROFILE_EXTRA_ENV:-}"
   main_class=""
   args=""
   env_spec=""
   case_config "${case_name}"
+  if [[ -n "${extra_env_spec}" ]]; then
+    env_spec="${env_spec} ${extra_env_spec}"
+  fi
   build_main "${main_class}"
   binary=$(find_binary "${main_class}")
   if [[ -z "${binary}" || ! -x "${binary}" ]]; then

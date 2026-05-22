@@ -454,6 +454,8 @@ trait NirGenStat(using Context) {
     scoped(curExprBuffer := buf) {
       genEntry()
       genVars()
+      buf.prepareDirectReturnedClosureAllocation(bodyp)
+      buf.prepareDirectReturnedRiftAllocation(bodyp)
       genBody()
       nir.ControlFlow.removeDeadBlocks(buf.toSeq)
     }

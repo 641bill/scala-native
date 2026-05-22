@@ -1,7 +1,7 @@
 # Theodolite Power Region Matrix
 
 Date: 2026-05-11
-Last updated: 2026-05-17 17:45 CEST
+Last updated: 2026-05-21 12:07 CEST
 
 Status: implemented a local single-process Theodolite UC2/UC4-style real-input
 kernel over the UCI Household Electric Power Consumption trace. This is not an
@@ -268,6 +268,131 @@ also gives a fixed-memory signal: the natural heap row fails at `64M`, while
 checked Rift completes under the same cap. This is still a local
 Theodolite-style kernel paired with a real UCI power trace, not an exact
 Theodolite artifact reproduction.
+
+### 2026-05-20 Checked Loop-Shape Follow-Up
+
+The mutator-parity audit found that the checked streaming callback for
+`q3-retained-uc4` captured mutable outer loop state. The sampled checked Rift
+top frame contained `scala.runtime.IntRef`/`LongRef`, so the row still paid
+heap allocation/runtime-helper cost in the checked path. The fix mirrors the
+Wikimedia clickstream cleanup: the checked epoch body now uses local primitive
+accumulators and returns a small primitive-only `StreamingEpochOutcome` after
+close. Query semantics and allocation placement of retained measurement and
+contribution objects are unchanged.
+
+Validation:
+
+- Compile: `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile`
+  passed.
+- Smoke:
+  `/Users/siyaoliu/rift/cache/theodolite-loopshape-smoke-20260520`.
+  20k `q3-retained-uc4` matched checksum `-2895454912458695581` and
+  output count `12352` across `heap-immix`, `checked-epoch-stream`, and
+  `checked-epoch-scoped`.
+- 1M follow-up:
+  `/Users/siyaoliu/rift/cache/theodolite-loopshape-1m-20260520`.
+  All rows matched checksum `5496025699187626461` and output count `61760`.
+- L4 follow-up:
+  `/Users/siyaoliu/rift/cache/profile-sweep-20260520-theodolite-loopshape`.
+  `rg "LongRef|IntRef|ObjectRef|BooleanRef"` finds no matches in the patched
+  checked Rift profile.
+
+1M L2 follow-up. Records: `1000000`. Epoch size: `25000`. Runs: `3`,
+warmups: `1`.
+
+| Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes | Rift op ms | Region objects | Checksum/output |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `heap-immix` | `2464.646` | `282.408` | `369.951` | `3/3` | `257802240` | `0.000` | `0` | match |
+| `checked-epoch-stream` | `2049.682` | `41.666` | `44.700` | `3/3` | `196739072` | `1.305` | `13000000` | match |
+| `checked-epoch-scoped` | `2061.617` | `40.000` | `40.060` | `3/3` | `196788224` | `0.000` | `0` | match |
+
+Compared with the earlier 1M retained-UC4 L2 row, checked Rift improves from
+`2143.809 ms` to `2049.682 ms` while preserving output. The L4 bucket summary
+for the patched checked Rift row is now parser/input/hash dominated
+(`168.60 samples/sec`) with small region allocation/init (`8.60 samples/sec`).
+Residual heap allocation/init (`23.20 samples/sec`) is mostly stream
+source/archive/runtime allocation, not retained hierarchy objects. This is a
+validated mutator-parity cleanup, not a new region-inference capability.
+
+## Retained UC4 Byte-Cursor Parser Follow-Up
+
+Date/time: 2026-05-20 19:44 CEST.
+
+The retained-UC4 parser follow-up replaces the reusable `DelimitedByteFields`
+cursor in `parseCurrentLine` with a direct semicolon byte cursor for the fields
+needed by the query: active power (`2`), voltage (`4`), and the three submeter
+fields (`6`, `7`, `8`). The accepted version still calls the existing
+`BenchmarkInputSupport.parseMilliDecimal` and `parseIntDecimal` helpers after
+locating each field. This is a shared parser/input cleanup for heap and checked
+rows, not a checked-region allocation optimization. A fully fused numeric parser
+variant was tried first and rejected because it made the 1M gate slower.
+
+Validation:
+
+- Compile: `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile`
+  passed.
+- 20k smoke:
+  `/Users/siyaoliu/rift/cache/theodolite-bytecursor-parser-smoke-20260520`.
+  `heap-immix`, `checked-epoch-stream`, and `checked-epoch-scoped` matched
+  checksum `-2895454912458695581` and output count `6176`.
+- 1M L2:
+  `/Users/siyaoliu/rift/cache/theodolite-bytecursor-parser-1m-l2-20260520`.
+  All rows matched checksum `5496025699187626461` and output count `61760`.
+- L4:
+  `/Users/siyaoliu/rift/cache/profile-sweep-20260520-theodolite-bytecursor-parser`.
+  All profiled rows matched checksum/output.
+
+1M L2 follow-up. Records: `1000000`. Epoch size: `25000`. Runs: `3`,
+warmups: `1`.
+
+| Mode | Median ms | Median GC ms | Max GC ms | Runs with GC | RSS bytes | Rift op ms | Region objects | Checksum/output |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `heap-immix` | `2325.524` | `197.187` | `236.490` | `3/3` | `257818624` | `0.000` | `0` | match |
+| `checked-epoch-stream` | `1965.787` | `35.653` | `36.434` | `3/3` | `196755456` | `1.069` | `13000000` | match |
+| `checked-epoch-scoped` | `1999.749` | `40.604` | `41.713` | `3/3` | `196820992` | `0.000` | `0` | match |
+
+L4 active-work buckets, samples/sec:
+
+| Mode | Parser/input/hash | Query mutator | Safepoint poll | GC mark/sweep metadata | Heap alloc/init | Region alloc/init | Zeroing/memset | Other |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-immix` | `133.80` | `49.80` | `51.40` | `43.40` | `25.60` | `0.00` | `12.60` | `55.60` |
+| `checked-epoch-stream` | `147.00` | `23.40` | `48.40` | `20.40` | `19.00` | `6.20` | `9.20` | `31.20` |
+| `checked-epoch-scoped` | `148.20` | `24.40` | `50.60` | `24.00` | `19.00` | `8.80` | `13.40` | `34.20` |
+
+Interpretation: the byte-cursor parser reduces the checked parser/input bucket
+from the post-loop-shape `168.60 samples/sec` to `147.00 samples/sec`, and the
+1M L2 gate improves all three modes versus the loop-shape checkpoint. The
+remaining retained-UC4 CPU is still mostly shared source/archive/parser/runtime
+floor. Region allocation/init is visible but small, so this row should not drive
+region lifecycle tuning.
+
+## Retained UC4 Active-Handle Source-Placement Follow-Up
+
+Date/time: 2026-05-21 12:07 CEST.
+
+The retained-UC4 checked Rift handle paths now use ordinary `new` under
+`RiftRegion.resetOpenHandle` for `CheckedMeasurement` and
+`CheckedContribution` records. This replaces
+`RiftAllocator.allocateOpenHandle(region, new ...)` in both the streaming-file
+and preloaded handle paths. The scoped/open-region paths and legacy explicit
+allocation controls remain unchanged, so this is source-use evidence for the
+existing active-handle inference path rather than a query rewrite.
+
+Focused real-input smoke:
+`/tmp/theodolite-inferred-openhandle-smoke-20260521`. Input was the compressed
+UCI archive member, query `q3-retained-uc4`, records `20000`, warmups `0`,
+runs `1`.
+
+| Mode | Median ms | Median GC ms | Rift op ms | Region objects | RSS bytes | Checksum/output |
+|---|---:|---:|---:|---:|---:|---|
+| `heap-immix` | `678.118` | `219.360` | `0.000` | `0` | `94044160` | match |
+| `checked-epoch-stream` | `489.551` | `46.542` | `0.556` | `260000` | `59899904` | match |
+| `checked-epoch-scoped` | `492.509` | `46.431` | `0.000` | `0` | `59916288` | match |
+
+All rows matched checksum `-2895454912458695581` and output count `1544`.
+This proves the real retained-UC4 handle source now exercises ordinary
+active-handle `new` placement. It does not add an L1/L2 elapsed claim or a new
+L4 bucket claim.
 
 ## Handle-Backed Checked Epoch Promotion
 

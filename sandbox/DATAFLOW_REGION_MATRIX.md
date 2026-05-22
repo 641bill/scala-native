@@ -1,6 +1,6 @@
 # Dataflow Region Matrix
 
-Last updated: 2026-05-15 01:27 CEST
+Last updated: 2026-05-21 11:27 CEST
 
 Status: Broom-style methodology reproduction harness with trusted
 heap/SafeZone/Rift medians, checked RegionBuffer modes, and reusable checked
@@ -45,8 +45,10 @@ Heap and Rift variants use the same logical programs:
   backend.
 - `checked-page-token-scoped`: operator-owned checked page-token path. This is
   valid for SELECT/filter/project-style rows only, not AGGREGATE or JOIN.
-- `checked-epoch-fold`: older generic fold API for AGGREGATE. It remains a
-  negative/speed-gated control.
+- `checked-epoch-fold`: older generic fold API for AGGREGATE. As of the
+  2026-05-21 epoch-fold inference source-use proof, its per-record fold events
+  use ordinary `new` under `epochFoldRegionFor` and widen to the parent stream
+  owner before `putEpochFold`. It remains a negative/speed-gated control.
 
 The benchmark intentionally uses ordinary Scala object graphs in regions. It is
 not a primitive-key-only layout experiment.
@@ -68,6 +70,31 @@ The defaults are sized for local iteration, not for the original Broom paper's
 | `DATAFLOW_BENCHMARK_RUNS` | `3` |
 
 Use `DATAFLOW_OPERATOR=select`, `aggregate`, `join`, or `all`.
+
+## 2026-05-21 Epoch-Fold Source-Placement Smoke
+
+After `epochFoldRegionFor` joined the selected child-region inference helper
+set, `runCheckedAggregateEpochFold` was updated to remove its explicit
+`RiftRegion.alloc(new ...)(using region)` event allocation. The event is now
+constructed as `CheckedAggregateEvent^{region}` with ordinary `new` and then
+widened to `CheckedAggregateEvent^{stream}` for `putEpochFold`.
+
+Focused validation:
+
+```bash
+DATAFLOW_EPOCHS=2 \
+DATAFLOW_DOCS_PER_EPOCH=10000 \
+DATAFLOW_WARMUPS=0 \
+DATAFLOW_BENCHMARK_RUNS=1 \
+DATAFLOW_MODES="gc-heap checked-epoch-fold" \
+DATAFLOW_OPERATOR=aggregate \
+zsh sandbox/run_dataflow_region_matrix.sh
+```
+
+Result: heap and checked epoch-fold both produced checksum `3276431580`; the
+checked row reported `20004` region objects. This is source-placement
+validation only. It does not replace the larger Dataflow direct-epoch evidence
+or change the conclusion that generic epoch-fold is speed-gated.
 
 ## Commands
 

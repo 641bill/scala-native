@@ -70,6 +70,9 @@ for selected_mode in "${modes[@]}"; do
     checked-epoch-stream|checked-region-stream-epoch)
       run_mode "Checked direct epoch stream" "checked-epoch-stream"
       ;;
+    checked-epoch-stream-inferred|checked-region-stream-epoch-inferred)
+      run_mode "Checked direct epoch stream inferred" "checked-epoch-stream-inferred"
+      ;;
     checked-epoch-stream-legacy|checked-region-stream-epoch-legacy)
       run_mode "Checked direct epoch stream legacy" "checked-epoch-stream-legacy"
       ;;

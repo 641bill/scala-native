@@ -1,6 +1,6 @@
 # Checked Append Window Matrix
 
-Last updated: 2026-05-15 00:32 CEST
+Last updated: 2026-05-21 11:41 CEST
 
 Status: focused cheap checked-operator benchmark. This is framework evidence,
 not DEBS application evidence.
@@ -168,7 +168,10 @@ The difference is allocation placement:
 - `rift-checked-safezone-epoch-buffer`: the same epoch path over the
   SafeZone-backed checked backend;
 - `rift-checked-chunk-token`: checked `StreamChunkAppendWindow`, an
-  operator-owned fixed object-array chunk path;
+  operator-owned fixed object-array chunk path. As of the 2026-05-21
+  chunk child-region source-use proof, records are written with ordinary
+  `new` under the direct `chunkAppendRegionFor` child owner and widened to the
+  parent stream owner before `appendChunkToken`;
 - `rift-checked-safezone-chunk-token`: the same chunk path over the
   SafeZone-backed checked backend;
 - `rift-trusted-hp`: trusted `RiftRegion.open(HPZone)` once per bucket;
@@ -206,6 +209,33 @@ Modes:
 - `rift-checked-safezone-chunk-token`
 - `rift-trusted-hp`
 - `rift-trusted-streaming`
+
+## 2026-05-21 Chunk-Token Source-Placement Smoke
+
+`runRiftCheckedChunkTokenBody` now opens each chunk bucket with a direct
+`chunkAppendRegionFor` owner local, constructs records as
+`Record^{region}` using ordinary `new`, and widens them to `Record^{stream}`
+before `appendChunkToken`. The mutable `currentRegion` owner-slot source shape
+is avoided because mutable owner-flow inference remains intentionally out of
+scope.
+
+Focused validation:
+
+```bash
+CHECKED_APPEND_EVENTS=20000 \
+CHECKED_APPEND_EVENTS_PER_BUCKET=5000 \
+CHECKED_APPEND_WARMUPS=0 \
+CHECKED_APPEND_BENCHMARK_RUNS=1 \
+CHECKED_APPEND_MODES="heap-immix-chunk rift-checked-chunk-token" \
+CHECKED_APPEND_OUTPUT_DIR=/tmp/checked-append-chunk-source-20260521 \
+zsh sandbox/run_checked_append_window_matrix.sh
+```
+
+Result: heap chunk and checked chunk-token both produced checksum
+`-8639499034914970780`; the checked row reported `20632` region objects. This
+is source-placement validation only. It does not change the larger conclusion
+that fixed-chunk append remains a control path behind linked page-token for
+append/drain workloads.
 
 ## Commands
 

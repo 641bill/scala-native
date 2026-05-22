@@ -1,6 +1,6 @@
 # Broom Retained Dataflow Matrix
 
-Last updated: 2026-05-17 16:43 CEST
+Last updated: 2026-05-21 08:05 CEST
 
 Status: new prior-work-style retained-object dataflow benchmark. This matrix
 compares the natural heap/GC program against the checked Rift region program,
@@ -693,11 +693,170 @@ comfortably where heap fails under a `64M` cap. Checked scoped also gives a
 low-RSS, zero-timed-GC safe backend comparison row and is about `17.8%` faster
 than heap in L1.
 
+## 2026-05-20 Checked Callback Source-Shape Follow-Up
+
+The profiling audit found that q17 and shopper checked Rift rows were not
+residual-heap-placement failures: their retained records were already
+region-owned. The remaining source-shape issue was the checked reset callback
+reading mutable outer `checksum`, `processed`, and `group`, which appeared as
+large `LongRef`/`IntRef` callback-ref-shaped profile buckets. The checked reset
+bodies now capture immutable per-group base values instead.
+
+Raw summaries:
+
+- `/Users/siyaoliu/rift/cache/broom-callback-local-20m-l1-rss-20260520/summary.tsv`
+- `/Users/siyaoliu/rift/cache/broom-callback-local-20m-l2-20260520/summary.tsv`
+- L4 profile: `/Users/siyaoliu/rift/cache/profile-sweep-20260520-broom-callback-local/summary.tsv`
+
+Validation:
+
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile` passed.
+- 20k smokes matched checksum/output for `q17`, `shopper`, `aggregate`, and
+  `join` across `heap-gc` and `checked-rift`.
+- Focused L4 q17/shopper checked Rift drops `callback_ref_shape` from the
+  prior `255.80/366.80` samples/sec to `0.00/0.00`.
+
+20M active-16 L1 final-clean rows after the cleanup:
+
+| Workload | Mode | L1 real s | RSS bytes | Checksum | Output count | Retained proxy | Region-freed proxy |
+|---|---|---:|---:|---:|---:|---:|---:|
+| q17 | `heap-gc` | `13.17` | `233275392` | `-4910137671593411349` | `44550` | `29559380` | `0` |
+| q17 | `checked-rift` | `9.45` | `56000512` | `-4910137671593411349` | `44550` | `29559380` | `29559430` |
+| shopper | `heap-gc` | `17.55` | `815759360` | `7666200701375459617` | `2858111` | `22858110` | `0` |
+| shopper | `checked-rift` | `14.74` | `99024896` | `7666200701375459617` | `2858111` | `22858110` | `22858310` |
+
+20M active-16 L2 standard-stat rows after the cleanup:
+
+| Workload | Mode | Median ms | GC median ms | GC max ms | Runs with GC | RSS bytes | Region op ms | Region objects | Region resets |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| q17 | `heap-gc` | `4782.648` | `1187.563` | `1218.727` | `3/3` | `233422848` | `0.000` | `0` | `0` |
+| q17 | `checked-rift` | `3229.305` | `0.000` | `0.000` | `0/3` | `56131584` | `15.979` | `29559430` | `50` |
+| shopper | `heap-gc` | `6285.094` | `1579.343` | `2315.267` | `3/3` | `1048641536` | `0.000` | `0` | `0` |
+| shopper | `checked-rift` | `5115.933` | `0.000` | `0.000` | `0/3` | `99155968` | `39.395` | `22858310` | `50` |
+
+Interpretation: the callback-local cleanup is accepted as a profile-clarity and
+mutator-parity fix, not as an isolated speed claim. The post-cleanup rows still
+show the retained-object memory-management story: q17 checked Rift is `28.2%`
+faster in L1 and `32.5%` faster in L2 with about `76%` lower RSS; shopper
+checked Rift is `16.0%` faster in L1 and `18.6%` faster in L2 with about
+`88-91%` lower RSS. The remaining checked work is generated query body plus
+region allocation/init, not residual heap allocation.
+
+## 2026-05-20 Checked Inferred Q17/Shopper Follow-Up
+
+The active checked Rift `checked-rift-inferred` source form now covers the
+remaining generated retained Broom workloads. Q17 uses ordinary `new` for the
+region-local `CheckedQ17Part`, `CheckedQ17PartEntry`, and `CheckedQ17LineItem`
+records under the same active open-handle owner. Shopper uses ordinary `new`
+for `CheckedShopperView`, `CheckedShopperCart`, `CheckedShopperPurchase`, and
+`CheckedShopperCandidate`. The initial slice left region-owned hash-table
+arrays explicit. The 2026-05-21 follow-up below now covers generated
+per-group object arrays with ordinary `new Array` in aggregate, join, q17, and
+shopper inferred rows; explicit checked rows remain explicit allocation
+controls. TPC-H file-input q17 stays on the explicit checked path until the
+file-backed source shape is separately audited.
+
+Raw summaries:
+
+- L2 timing: `/Users/siyaoliu/rift/cache/broom-inferred-q17-shopper-20m-l2-20260520/summary.tsv`
+- L4 profile: `/Users/siyaoliu/rift/cache/profile-sweep-20260520-broom-inferred-q17-shopper/summary.tsv`
+
+Validation:
+
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile` passed.
+- 20k smokes matched checksum/output for q17 and shopper across `heap-gc`,
+  `checked-rift`, and `checked-rift-inferred`.
+- L4 sampled runs matched checksum/output for q17 and shopper explicit/inferred
+  checked rows.
+
+20M active-16 L2 standard-stat rows:
+
+| Workload | Mode | Median ms | GC median ms | RSS bytes | Region op ms | Region objects | Checksum | Output |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| q17 | `heap-gc` | `3692.841` | `345.640` | `258736128` | `0.000` | `0` | `-4967241567613708774` | `45598` |
+| q17 | `checked-rift` | `2837.754` | `0.000` | `47333376` | `11.100` | `29150680` | `-4967241567613708774` | `45598` |
+| q17 | `checked-rift-inferred` | `2905.336` | `0.000` | `47448064` | `13.286` | `29150680` | `-4967241567613708774` | `45598` |
+| shopper | `heap-gc` | `4308.726` | `725.361` | `366444544` | `0.000` | `0` | `3163869112359651310` | `2856855` |
+| shopper | `checked-rift` | `3998.612` | `0.000` | `65667072` | `28.606` | `22857035` | `3163869112359651310` | `2856855` |
+| shopper | `checked-rift-inferred` | `3992.605` | `0.000` | `65667072` | `28.785` | `22857035` | `3163869112359651310` | `2856855` |
+
+L4 bucket comparison, active samples/sec:
+
+| Workload | Mode | Query | Region alloc/init | Safepoint | Zeroing | Other |
+|---|---|---:|---:|---:|---:|---:|
+| q17 | `checked-rift` | `254.80` | `20.60` | `68.80` | `0.00` | `16.00` |
+| q17 | `checked-rift-inferred` | `252.40` | `23.20` | `74.00` | `1.00` | `15.20` |
+| shopper | `checked-rift` | `391.60` | `19.60` | `38.60` | `5.00` | `73.20` |
+| shopper | `checked-rift-inferred` | `384.60` | `19.80` | `37.20` | `4.00` | `75.80` |
+
+Interpretation: this is a source-placement/inference expansion, not an
+accepted speed optimization. The inferred rows preserve checksum/output,
+region object counts, zero timed GC, and low RSS. The q17 inferred row is
+slightly slower than explicit checked in this L2 pass; shopper is effectively
+tied. The L4 shape is also essentially unchanged, which is the expected result:
+ordinary `new` is being lowered to the same checked region allocation path, and
+the remaining work is generated query body plus region allocation/init rather
+than residual heap allocation or callback-ref source shape.
+
+## 2026-05-21 Checked Inferred Generated Array Follow-Up
+
+The generated `checked-rift-inferred` Broom paths now use ordinary `new Array`
+for the per-group object arrays that were still explicit active-handle
+allocations after the q17/shopper retained-record slice:
+
+- aggregate: `heads`, `tails`, and `tables`;
+- join: `left` and `right`;
+- q17: generated table array;
+- shopper: `views`, `carts`, `purchases`, and `candidates`.
+
+The explicit `checked-rift` rows keep the old explicit
+`RiftAllocator.allocateOpenHandle(region, new Array(...))` source form as the
+control, and file-backed q17 remains on the explicit checked path.
+
+Raw summary:
+
+- L2 timing: `/Users/siyaoliu/rift/cache/broom-inferred-arrays-1m-l2-20260521/summary.tsv`
+
+Validation:
+
+- `ENABLE_EXPERIMENTAL_COMPILER=1 sbt "project sandbox3_next" compile` passed.
+- `BroomRetainedDataflowMatrix` native link passed.
+- 20k smokes matched checksum/output for aggregate, join, q17, and shopper
+  across `heap-gc`, `checked-rift`, and `checked-rift-inferred`.
+- The 1M x3 L2 gate matched checksum/output for every workload and preserved
+  identical explicit/inferred region-object counts.
+
+1M active-16 L2 standard-stat rows:
+
+| Workload | Mode | Median ms | GC median ms | RSS bytes | Region op ms | Region objects | Checksum | Output |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| aggregate | `heap-gc` | `150.510` | `5.529` | `95985664` | `0.000` | `0` | `8854638383809110735` | `839789` |
+| aggregate | `checked-rift` | `168.010` | `0.000` | `16433152` | `0.784` | `1839798` | `8854638383809110735` | `839789` |
+| aggregate | `checked-rift-inferred` | `156.174` | `0.000` | `16424960` | `0.739` | `1839798` | `8854638383809110735` | `839789` |
+| join | `heap-gc` | `186.877` | `45.041` | `190558208` | `0.000` | `0` | `3791171928160505090` | `591580` |
+| join | `checked-rift` | `145.209` | `0.000` | `26611712` | `0.915` | `1000006` | `3791171928160505090` | `591580` |
+| join | `checked-rift-inferred` | `141.424` | `0.000` | `26640384` | `0.905` | `1000006` | `3791171928160505090` | `591580` |
+| q17 | `heap-gc` | `168.177` | `13.387` | `112652288` | `0.000` | `0` | `2687651214129999488` | `2093` |
+| q17 | `checked-rift` | `155.803` | `0.000` | `16371712` | `0.688` | `1478215` | `2687651214129999488` | `2093` |
+| q17 | `checked-rift-inferred` | `154.966` | `0.000` | `16416768` | `0.690` | `1478215` | `2687651214129999488` | `2093` |
+| shopper | `heap-gc` | `278.103` | `48.462` | `199348224` | `0.000` | `0` | `-4704623849702867584` | `142731` |
+| shopper | `checked-rift` | `249.488` | `0.000` | `32026624` | `1.640` | `1142743` | `-4704623849702867584` | `142731` |
+| shopper | `checked-rift-inferred` | `248.765` | `0.000` | `32059392` | `1.617` | `1142743` | `-4704623849702867584` | `142731` |
+
+Interpretation: this completes generated Broom array source-placement coverage
+for inferred checked rows. It is not a new region-object-count reduction:
+ordinary `new Array` lowers to the same checked region allocation path and
+therefore preserves the explicit row's region object counts. The small L2
+movements are accepted only as checksum/output-gated source-shape evidence; no
+new L4 profile-bucket reduction is claimed from this slice.
+
 ## Next Work
 
-- Use aggregate/join and q17 as the current retained-object GC-heavy dataflow
-  case studies; shopper JOIN-SELECT-JOIN is now also complete as a separate
-  generated methodology row.
+- Use aggregate/join/q17/shopper as the current retained-object generated
+  dataflow case studies. `checked-rift-inferred` now covers retained records
+  plus generated per-group object arrays across all four generated workloads,
+  but only as a source-placement result unless later profiles show a real speed
+  or region-op reduction.
 - Continue the real-input search for sessions, joins, timestamp dictionaries,
   transaction-local objects, graph epochs, and text/top-k candidates, with
   Theodolite UC4 retained hierarchy windows and high-cardinality LogHub

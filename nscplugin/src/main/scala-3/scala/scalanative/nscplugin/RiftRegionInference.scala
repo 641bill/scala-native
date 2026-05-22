@@ -1,0 +1,3205 @@
+package scala.scalanative.nscplugin
+
+import dotty.tools.dotc._
+import dotty.tools.dotc.ast.tpd._
+import dotty.tools.dotc.cc.{CaptureSet, CapturingType}
+import dotty.tools.dotc.plugins.PluginPhase
+import dotty.tools.backend.jvm.DottyBackendInterface.symExtensions
+
+import scala.scalanative.nscplugin.CompilerCompat.SymUtilsCompat.*
+import scala.collection.mutable
+
+object RiftRegionInference {
+  val name = "scalanative-riftRegionInference"
+
+  final case class Settings(reportDecisions: Boolean = false)
+
+  sealed trait AllocationOwner
+  object AllocationOwner {
+    case object Heap extends AllocationOwner
+    final case class Region(owner: Symbol) extends AllocationOwner
+    case object Unknown extends AllocationOwner
+    case object Rejected extends AllocationOwner
+  }
+
+  final case class AllocationDecision(
+      owner: AllocationOwner,
+      reason: String,
+      pos: dotty.tools.dotc.util.SrcPos
+  )
+
+  private[nscplugin] val inferredAllocationOwners
+      : mutable.Map[Symbol, Symbol] =
+    mutable.Map.empty
+  private[nscplugin] val inferredMethodReturnOwners
+      : mutable.Map[Symbol, Symbol] =
+    mutable.Map.empty
+  private[nscplugin] val inferredMethodReturnLocalOwners
+      : mutable.Map[Symbol, Symbol] =
+    mutable.Map.empty
+  private[nscplugin] val inferredClosureBodyOwners
+      : mutable.Map[Symbol, Symbol] =
+    mutable.Map.empty
+  private[nscplugin] val inferredClosureValueOwners
+      : mutable.Map[Symbol, Symbol] =
+    mutable.Map.empty
+  private[nscplugin] val inferredArrayElementOwners
+      : mutable.Map[Symbol, Symbol] =
+    mutable.Map.empty
+  private[nscplugin] val allocationDecisions
+      : mutable.Map[Symbol, AllocationDecision] =
+    mutable.Map.empty
+  private[nscplugin] val inferredAllocationOwnersBySourceSpan
+      : mutable.Map[(String, Int, Int), Symbol] =
+    mutable.Map.empty
+  private[nscplugin] val inferredClosureOwnersBySourceSpan
+      : mutable.Map[(String, Int, Int), Symbol] =
+    mutable.Map.empty
+
+  private[nscplugin] def sourceSpanKey(
+      pos: dotty.tools.dotc.util.SrcPos
+  )(using dotty.tools.dotc.core.Contexts.Context): Option[(String, Int, Int)] = {
+    val sourcePos = pos.sourcePos
+    if sourcePos.span.exists && sourcePos.source.exists then
+      Some(
+        (
+          sourcePos.source.file.absolute.jpath.toString,
+          sourcePos.span.start,
+          sourcePos.span.end
+        )
+      )
+    else None
+  }
+}
+
+/** Capture-directed placement for the first ReML-style Rift inference slices.
+ *
+ *  This phase deliberately does not infer new region boundaries. It marks
+ *  direct `new T(...)` sites whose
+ *  expected type is captured by an explicit checked `ScopedRegion` or
+ *  `OpenStreamingRegion`, and direct immutable local allocation values that
+ *  are immediately constrained by a checked RegionList prepend owner. GenNIR
+ *  later turns the mark into a Rift allocation zone.
+ *  Parent `StreamingRegion` values are excluded in v1 because page/window
+ *  operators need child-bucket placement, not just the parent stream capture.
+ */
+class RiftRegionInference(
+    settings: RiftRegionInference.Settings =
+      RiftRegionInference.Settings()
+) extends PluginPhase {
+  import core.Contexts._
+  import core.Flags._
+  import core.Names._
+  import core.StdNames._
+  import core.Symbols._
+  import core.Types._
+
+  override val runsAfter = Set(PostInlineNativeInterop.name)
+  override val runsBefore = Set(transform.FirstTransform.name)
+  val phaseName = RiftRegionInference.name
+  override def description: String =
+    "mark capture-directed Rift region allocation sites"
+
+  override def runOn(
+      units: List[CompilationUnit]
+  )(using Context): List[CompilationUnit] = {
+    RiftRegionInference.inferredAllocationOwners.clear()
+    RiftRegionInference.inferredMethodReturnOwners.clear()
+    RiftRegionInference.inferredMethodReturnLocalOwners.clear()
+    RiftRegionInference.inferredClosureBodyOwners.clear()
+    RiftRegionInference.inferredClosureValueOwners.clear()
+    RiftRegionInference.inferredArrayElementOwners.clear()
+    RiftRegionInference.allocationDecisions.clear()
+    RiftRegionInference.inferredAllocationOwnersBySourceSpan.clear()
+    RiftRegionInference.inferredClosureOwnersBySourceSpan.clear()
+    directlyNewAllocatedSyms.clear()
+    localRegionConstructAllocatedApps.clear()
+    localAllocatedSyms.clear()
+    localClosureAllocatedSyms.clear()
+    localNestedClosureAllocatedSyms.clear()
+    directClosureAllocatedSyms.clear()
+    childRegionOwnerSyms.clear()
+    localOwnerAliases.clear()
+    localCaptureOwnerSymsByName.clear()
+    localArrayElementOwnerSyms.clear()
+    localStreamRankArrayElementOwnerSyms.clear()
+    val result = super.runOn(units)
+    if settings.reportDecisions then reportInferenceDecisions()
+    result
+  }
+
+  private val directlyNewAllocatedSyms: mutable.Set[Symbol] =
+    mutable.Set.empty
+  private val localRegionConstructAllocatedApps
+      : mutable.Map[Symbol, List[Apply]] =
+    mutable.Map.empty
+  private val localAllocatedSyms: mutable.Map[Symbol, List[Symbol]] =
+    mutable.Map.empty
+  private val localClosureAllocatedSyms
+      : mutable.Map[Symbol, List[(Symbol, Closure)]] =
+    mutable.Map.empty
+  private sealed trait NestedClosureAllocation
+  private final case class DirectNestedClosure(closure: Closure)
+      extends NestedClosureAllocation
+  private final case class LocalNestedClosureAlias(target: Symbol)
+      extends NestedClosureAllocation
+  private final case class LocalNestedClosure(target: Symbol, closure: Closure)
+      extends NestedClosureAllocation
+  private val localNestedClosureAllocatedSyms
+      : mutable.Map[Symbol, List[NestedClosureAllocation]] =
+    mutable.Map.empty
+  private val directClosureAllocatedSyms: mutable.Map[Symbol, Closure] =
+    mutable.Map.empty
+  private val childRegionOwnerSyms: mutable.Set[Symbol] =
+    mutable.Set.empty
+  private val localOwnerAliases: mutable.Map[Symbol, Symbol] =
+    mutable.Map.empty
+  private val localCaptureOwnerSymsByName
+      : mutable.Map[String, mutable.Set[Symbol]] =
+    mutable.Map.empty
+  private val localArrayElementOwnerSyms: mutable.Map[Symbol, Symbol] =
+    mutable.Map.empty
+  private val localStreamRankArrayElementOwnerSyms
+      : mutable.Map[Symbol, Symbol] =
+    mutable.Map.empty
+
+  private def updateDecision(
+      target: Symbol,
+      owner: RiftRegionInference.AllocationOwner,
+      reason: String,
+      pos: dotty.tools.dotc.util.SrcPos
+  ): Unit =
+    RiftRegionInference.allocationDecisions.update(
+      target,
+      RiftRegionInference.AllocationDecision(owner, reason, pos)
+    )
+
+  private def markRejected(
+      target: Symbol,
+      reason: String,
+      pos: dotty.tools.dotc.util.SrcPos
+  ): Unit = {
+    RiftRegionInference.inferredAllocationOwners.remove(target)
+    updateDecision(
+      target,
+      RiftRegionInference.AllocationOwner.Rejected,
+      reason,
+      pos
+    )
+  }
+
+  private def markRegionOwner(
+      target: Symbol,
+      owner: Symbol,
+      reason: String,
+      pos: dotty.tools.dotc.util.SrcPos
+  )(using Context): Unit = {
+    val canonical = canonicalOwner(owner)
+    val existing = RiftRegionInference.inferredAllocationOwners.get(target)
+    existing match {
+      case Some(previous) if canonicalOwner(previous) != canonical =>
+        markRejected(
+          target,
+          s"conflicting inferred region owners: ${previous.name} and ${owner.name}",
+          pos
+        )
+      case _ =>
+        RiftRegionInference.inferredAllocationOwners.update(target, canonical)
+        updateDecision(
+          target,
+          RiftRegionInference.AllocationOwner.Region(canonical),
+          reason,
+          pos
+        )
+    }
+  }
+
+  private def markLocalRegionConstructOwner(
+      target: Symbol,
+      owner: Symbol,
+      reason: String,
+      pos: dotty.tools.dotc.util.SrcPos
+  )(using Context): Unit = {
+    markRegionOwner(target, owner, reason, pos)
+    localRegionConstructAllocatedApps.get(target).foreach { apps =>
+      apps.foreach(app => markDirectConstructOwner(app, owner, reason))
+    }
+  }
+
+  private def markDirectConstructOwner(
+      app: Apply,
+      owner: Symbol,
+      reason: String
+  )(using Context): Unit = {
+    val canonical = canonicalOwner(owner)
+    app.putAttachment(
+      NirDefinitions.InferredRiftAllocationOwner,
+      canonical
+    )
+    RiftRegionInference.sourceSpanKey(app.srcPos).foreach { key =>
+      RiftRegionInference.inferredAllocationOwnersBySourceSpan.update(
+        key,
+        canonical
+      )
+    }
+    updateDecision(
+      calledSymbol(app),
+      RiftRegionInference.AllocationOwner.Region(canonical),
+      reason,
+      app.srcPos
+    )
+  }
+
+  private def registerLocalCaptureOwner(sym: Symbol)(using Context): Unit =
+    if sym != NoSymbol then
+      val owners =
+        localCaptureOwnerSymsByName.getOrElseUpdate(
+          sym.name.toString,
+          mutable.Set.empty
+        )
+      owners += sym
+
+  private def canonicalOwner(sym: Symbol)(using Context): Symbol =
+    if sym == NoSymbol then NoSymbol
+    else
+      localOwnerAliases.get(sym) match {
+        case Some(next) if next != sym => canonicalOwner(next)
+        case _                         => sym
+      }
+
+  private def reportInferenceDecisions()(using Context): Unit = {
+    RiftRegionInference.allocationDecisions.toList
+      .sortBy((sym, _) => sym.fullName.toString)
+      .foreach { (sym, decision) =>
+        val owner = decision.owner match {
+          case RiftRegionInference.AllocationOwner.Heap =>
+            "Heap"
+          case RiftRegionInference.AllocationOwner.Region(owner) =>
+            s"Region(${owner.name})"
+          case RiftRegionInference.AllocationOwner.Unknown =>
+            "Unknown"
+          case RiftRegionInference.AllocationOwner.Rejected =>
+            "Rejected"
+        }
+        Console.err.println(
+          s"[rift-infer] ${decision.pos}: ${sym.name} -> ${owner}: ${decision.reason}"
+        )
+      }
+  }
+
+  private def isRiftScopedRegionType(tpe: Type)(using Context): Boolean = {
+    val scopedRegionName =
+      "scala.scalanative.memory.RiftRegion.ScopedRegion"
+    val widened = tpe.widenDealias
+    !tpe.isInstanceOf[MethodType] &&
+      (widened.typeSymbol.fullName.toString == scopedRegionName ||
+        tpe.show.contains(scopedRegionName) ||
+        widened.show.contains(scopedRegionName))
+  }
+
+  private def isRiftOpenStreamingRegionType(tpe: Type)(using Context): Boolean = {
+    val openRegionName =
+      "scala.scalanative.memory.RiftRegion.OpenStreamingRegion"
+    val widened = tpe.widenDealias
+    !tpe.isInstanceOf[MethodType] &&
+      (widened.typeSymbol.fullName.toString == openRegionName ||
+        tpe.show.contains(openRegionName) ||
+        widened.show.contains(openRegionName))
+  }
+
+  private def isRiftStreamingRegionType(tpe: Type)(using Context): Boolean = {
+    val streamingRegionName =
+      "scala.scalanative.memory.RiftRegion.StreamingRegion"
+    val widened = tpe.widenDealias
+    !tpe.isInstanceOf[MethodType] &&
+      (widened.typeSymbol.fullName.toString == streamingRegionName ||
+        tpe.show.contains(streamingRegionName) ||
+        widened.show.contains(streamingRegionName))
+  }
+
+  private def isRiftOpenStreamingHandleType(tpe: Type)(using Context): Boolean = {
+    val handleName = "scala.scalanative.memory.RiftOpenStreamingHandle"
+    val widened = tpe.widenDealias
+    !tpe.isInstanceOf[MethodType] &&
+      (widened.typeSymbol.fullName.toString == handleName ||
+        tpe.show.contains(handleName) ||
+        widened.show.contains(handleName))
+  }
+
+  private def isRiftInferredAllocationOwnerType(tpe: Type)(using Context): Boolean =
+    isRiftScopedRegionType(tpe) ||
+      isRiftOpenStreamingRegionType(tpe) ||
+      isRiftOpenStreamingHandleType(tpe)
+
+  private def isRiftInferredAllocationOwnerSymbol(
+      sym: Symbol
+  )(using Context): Boolean =
+    val owner = canonicalOwner(sym)
+    owner != NoSymbol &&
+      !sym.is(Method) &&
+      !owner.is(Method) &&
+      (isRiftInferredAllocationOwnerType(sym.info) ||
+        isRiftInferredAllocationOwnerType(owner.info) ||
+        childRegionOwnerSyms.contains(sym) ||
+        childRegionOwnerSyms.contains(owner) ||
+        localOwnerAliases.contains(sym))
+
+  private def isRiftFrameworkOwnerTokenSymbol(
+      sym: Symbol
+  )(using Context): Boolean = {
+    val owner = canonicalOwner(sym)
+    owner != NoSymbol &&
+      !sym.is(Method) &&
+      !owner.is(Method) &&
+      (isRiftInferredAllocationOwnerSymbol(sym) ||
+        isRiftStreamingRegionType(sym.info) ||
+        isRiftStreamingRegionType(owner.info))
+  }
+
+  private def typeMentionsRiftCapture(tpe: Type)(using Context): Boolean =
+    List(tpe.show, tpe.widenDealias.show).exists(text =>
+      text.contains("^{") || text.contains("->{")
+    )
+
+  private def isRuntimeRiftAllocateName(name: String): Boolean =
+    name == "allocate" ||
+      name == "allocateOpen" ||
+      name == "allocateOpenHandle" ||
+      name == "allocateOpenHandleNoZero"
+
+  private def isRiftRegionImplementationSource(tree: Tree)(using Context): Boolean =
+    tree.sourcePos.span.exists &&
+      tree.sourcePos.source.exists &&
+      tree.sourcePos.source.file.absolute.jpath.toString
+        .endsWith("scala/scalanative/memory/RiftRegion.scala")
+
+  private def isRiftRegionRuntimeAllocatorForwarderArg(
+      callee: Symbol,
+      value: Tree
+  )(using Context): Boolean =
+    isRiftRegionImplementationSource(value) &&
+      isRuntimeRiftAllocateName(callee.name.toString)
+
+  private def directNewApply(tree: Tree): Option[Apply] =
+    tree match {
+      case app @ Apply(Select(New(_), nme.CONSTRUCTOR), _) => Some(app)
+      case app @ Apply(TypeApply(Select(New(_), nme.CONSTRUCTOR), _), _) =>
+        Some(app)
+      case Typed(expr, _)                                  => directNewApply(expr)
+      case Inlined(_, _, expr)                             => directNewApply(expr)
+      case Block(_, expr)                                  => directNewApply(expr)
+      case _                                               => None
+    }
+
+  private def directSomeApply(tree: Tree)(using Context): Option[Apply] =
+    tree match {
+      case app @ Apply(_, _ :: Nil) if isScalaSomeApply(calledSymbol(app)) =>
+        Some(app)
+      case Typed(expr, _)      => directSomeApply(expr)
+      case Inlined(_, _, expr) => directSomeApply(expr)
+      case Block(_, expr)      => directSomeApply(expr)
+      case _                   => None
+    }
+
+  private def directOptionApply(tree: Tree)(using Context): Option[Apply] =
+    tree match {
+      case app @ Apply(_, _ :: Nil) if isScalaOptionApply(calledSymbol(app)) =>
+        Some(app)
+      case Typed(expr, _)      => directOptionApply(expr)
+      case Inlined(_, _, expr) => directOptionApply(expr)
+      case Block(_, expr)      => directOptionApply(expr)
+      case _                   => None
+    }
+
+  private def directTupleApply(tree: Tree)(using Context): Option[Apply] =
+    tree match {
+      case app @ Apply(_, args) if isScalaTupleApply(calledSymbol(app), args.size) =>
+        Some(app)
+      case Typed(expr, _)      => directTupleApply(expr)
+      case Inlined(_, _, expr) => directTupleApply(expr)
+      case Block(_, expr)      => directTupleApply(expr)
+      case _                   => None
+    }
+
+  private def directArrayApply(tree: Tree)(using Context): Option[Apply] =
+    tree match {
+      case app @ Apply(_, _) if isScalaRuntimeArraysNewArray(calledSymbol(app)) =>
+        Some(app)
+      case TypeApply(Select(expr, nme.asInstanceOf_), _) =>
+        directArrayApply(expr)
+      case Typed(expr, _)      => directArrayApply(expr)
+      case Inlined(_, _, expr) => directArrayApply(expr)
+      case Block(_, expr)      => directArrayApply(expr)
+      case _                   => None
+    }
+
+  private def directClosure(tree: Tree): Option[Closure] =
+    tree match {
+      case closure: Closure                              => Some(closure)
+      case Typed(expr, _)                                => directClosure(expr)
+      case Inlined(_, _, expr)                           => directClosure(expr)
+      case Block(_, expr)                                => directClosure(expr)
+      case TypeApply(Select(expr, nme.asInstanceOf_), _) => directClosure(expr)
+      case _                                             => None
+    }
+
+  private def directReturnedClosures(tree: Tree)(using Context): List[Closure] =
+    directClosure(tree).toList match {
+      case found @ (_ :: _) => found
+      case Nil =>
+        tree match {
+          case Typed(expr, _) =>
+            directReturnedClosures(expr)
+          case Inlined(_, _, expr) =>
+            directReturnedClosures(expr)
+          case Block(_, expr) =>
+            directReturnedClosures(expr)
+          case TypeApply(Select(expr, nme.asInstanceOf_), _) =>
+            directReturnedClosures(expr)
+          case If(_, thenp, elsep) =>
+            directReturnedClosures(thenp) :::
+              directReturnedClosures(elsep)
+          case Match(_, cases) =>
+            cases.flatMap { case CaseDef(_, _, body) =>
+              directReturnedClosures(body)
+            }
+          case _ =>
+            Nil
+        }
+    }
+
+  private def localClosureAllocationPairs(
+      target: Symbol
+  ): List[(Symbol, Closure)] =
+    localClosureAllocatedSyms.getOrElse(
+      target,
+      directClosureAllocatedSyms.get(target).map(target -> _).toList
+    )
+
+  private def nestedClosureAllocations(
+      valueTree: Tree
+  )(using Context): List[NestedClosureAllocation] = {
+    val treeLocalClosurePairs = localClosureAllocationPairsInTree(valueTree)
+    def closurePairs(target: Symbol): List[(Symbol, Closure)] =
+      treeLocalClosurePairs.getOrElse(target, localClosureAllocationPairs(target))
+
+    def loop(tree: Tree): List[NestedClosureAllocation] =
+      directRegionConstructApply(tree) match {
+      case Some(app) =>
+        app.args.flatMap { arg =>
+          val localClosureAliases =
+            returnedLocalIdents(arg).flatMap { target =>
+              val pairs = closurePairs(target)
+              if pairs.nonEmpty && !pairs.exists(_._1 == target) then
+                LocalNestedClosureAlias(target) :: Nil
+              else Nil
+            }
+          directReturnedClosures(arg).map(DirectNestedClosure.apply) :::
+            localClosureAliases :::
+            returnedLocalIdents(arg)
+              .flatMap(closurePairs)
+              .map { case (target, closure) =>
+                LocalNestedClosure(target, closure)
+              } :::
+            loop(arg)
+        }.distinct
+      case None =>
+        tree match {
+          case Typed(expr, _) =>
+            loop(expr)
+          case Inlined(_, _, expr) =>
+            loop(expr)
+          case Block(_, expr) =>
+            loop(expr)
+          case TypeApply(Select(expr, nme.asInstanceOf_), _) =>
+            loop(expr)
+          case Return(expr, _) =>
+            loop(expr)
+          case Labeled(_, body) =>
+            loop(body)
+          case If(_, thenp, elsep) =>
+            loop(thenp) ::: loop(elsep)
+          case Match(_, cases) =>
+            cases.flatMap { case CaseDef(_, _, body) =>
+              loop(body)
+            }
+          case _ =>
+            Nil
+        }
+    }
+    loop(valueTree)
+  }
+
+  private def localClosureAllocationPairsInTree(
+      tree: Tree
+  )(using Context): Map[Symbol, List[(Symbol, Closure)]] = {
+    val found = mutable.Map.empty[Symbol, List[(Symbol, Closure)]]
+
+    def pairsFor(target: Symbol): List[(Symbol, Closure)] =
+      found.getOrElse(target, localClosureAllocationPairs(target))
+
+    def scan(current: Tree): Unit =
+      current match {
+        case vd: ValDef =>
+          scan(vd.rhs)
+          if !vd.symbol.is(Mutable) then {
+            val pairs =
+              directClosure(vd.rhs)
+                .map(closure => (vd.symbol -> closure) :: Nil)
+                .getOrElse(
+                  returnedLocalIdents(vd.rhs).flatMap(pairsFor).distinct
+                )
+            if pairs.nonEmpty then found.update(vd.symbol, pairs)
+          }
+        case Block(stats, expr) =>
+          stats.foreach(scan)
+          scan(expr)
+        case Typed(expr, _) =>
+          scan(expr)
+        case Inlined(_, _, expr) =>
+          scan(expr)
+        case TypeApply(Select(expr, nme.asInstanceOf_), _) =>
+          scan(expr)
+        case Return(expr, _) =>
+          scan(expr)
+        case Labeled(_, body) =>
+          scan(body)
+        case If(_, thenp, elsep) =>
+          scan(thenp)
+          scan(elsep)
+        case Match(_, cases) =>
+          cases.foreach { case CaseDef(_, _, body) => scan(body) }
+        case _ => ()
+      }
+
+    scan(tree)
+    found.toMap
+  }
+
+  private def localAllocationTargets(target: Symbol): List[Symbol] =
+    localAllocatedSyms.getOrElse(
+      target,
+      if directlyNewAllocatedSyms.contains(target) then target :: Nil else Nil
+    )
+
+  private def markSelectedAliasOwner(
+      target: Symbol,
+      allocationTargets: List[Symbol],
+      owner: Symbol,
+      reason: String,
+      pos: dotty.tools.dotc.util.SrcPos
+  )(using Context): Unit =
+    if allocationTargets.nonEmpty && !allocationTargets.contains(target) then
+      markRegionOwner(target, owner, reason, pos)
+
+  private def markLocalAllocationTargets(
+      target: Symbol,
+      owner: Symbol,
+      reason: String,
+      aliasReason: String,
+      pos: dotty.tools.dotc.util.SrcPos
+  )(using Context): Unit = {
+    val allocationTargets = localAllocationTargets(target).distinct
+    markSelectedAliasOwner(target, allocationTargets, owner, aliasReason, pos)
+    allocationTargets.foreach { allocationTarget =>
+      markLocalRegionConstructOwner(allocationTarget, owner, reason, pos)
+      localNestedClosureAllocatedSyms
+        .get(allocationTarget)
+        .foreach { nested =>
+          markNestedClosureOwnerConstrainedAllocations(
+            owner,
+            nested,
+            "nested direct closure value is constrained by a checked region owner",
+            "nested local closure value is constrained by a checked region owner",
+            "nested closure body return is constrained by a checked region owner",
+            "conflicting inferred nested local closure owners",
+            pos
+          )
+        }
+    }
+  }
+
+  private def markSelectedLocalAllocationTargets(
+      target: Symbol,
+      owner: Symbol,
+      reason: String,
+      aliasReason: String,
+      pos: dotty.tools.dotc.util.SrcPos
+  )(using Context): Unit = {
+    val allocationTargets =
+      localAllocatedSyms.getOrElse(target, Nil).distinct match {
+        case targets if targets.sizeIs > 1 => targets
+        case _                             => Nil
+      }
+    markSelectedAliasOwner(target, allocationTargets, owner, aliasReason, pos)
+    allocationTargets.foreach { allocationTarget =>
+      markLocalRegionConstructOwner(allocationTarget, owner, reason, pos)
+      localNestedClosureAllocatedSyms
+        .get(allocationTarget)
+        .foreach { nested =>
+          markNestedClosureOwnerConstrainedAllocations(
+            owner,
+            nested,
+            "nested selected direct closure value is constrained by a checked region owner",
+            "nested selected local closure value is constrained by a checked region owner",
+            "nested selected closure body return is constrained by a checked region owner",
+            "conflicting inferred nested selected local closure owners",
+            pos
+          )
+        }
+    }
+  }
+
+  private def directRegionConstructApply(tree: Tree)(using Context): Option[Apply] =
+    directNewApply(tree)
+      .orElse(directSomeApply(tree))
+      .orElse(directOptionApply(tree))
+      .orElse(directTupleApply(tree))
+      .orElse(directArrayApply(tree))
+
+  private def directReturnedNewApplies(tree: Tree)(using Context): List[Apply] =
+    directRegionConstructApply(tree).toList match {
+      case found @ (_ :: _) => found
+      case Nil =>
+        tree match {
+          case Typed(expr, _) =>
+            directReturnedNewApplies(expr)
+          case Inlined(_, _, expr) =>
+            directReturnedNewApplies(expr)
+          case Block(_, expr) =>
+            directReturnedNewApplies(expr)
+          case TypeApply(Select(expr, nme.asInstanceOf_), _) =>
+            directReturnedNewApplies(expr)
+          case Return(expr, _) =>
+            directReturnedNewApplies(expr)
+          case Labeled(_, body) =>
+            directReturnedNewApplies(body)
+          case If(_, thenp, elsep) =>
+            directReturnedNewApplies(thenp) :::
+              directReturnedNewApplies(elsep)
+          case Match(_, cases) =>
+            cases.flatMap { case CaseDef(_, _, body) =>
+              directReturnedNewApplies(body)
+            }
+          case _ =>
+            Nil
+        }
+    }
+
+  private def markNestedLocalOwnerConstrainedAllocations(
+      owner: Symbol,
+      valueTree: Tree,
+      reason: String,
+      aliasReason: String
+  )(using Context): Unit =
+    directRegionConstructApply(valueTree) match {
+      case Some(app) =>
+        app.args.foreach { arg =>
+          returnedLocalIdents(arg).distinct.foreach { target =>
+            markSelectedLocalAllocationTargets(
+              target,
+              owner,
+              reason,
+              aliasReason,
+              arg.srcPos
+            )
+          }
+          markNestedLocalOwnerConstrainedAllocations(
+            owner,
+            arg,
+            reason,
+            aliasReason
+          )
+        }
+      case None =>
+        valueTree match {
+          case Typed(expr, _) =>
+            markNestedLocalOwnerConstrainedAllocations(
+              owner,
+              expr,
+              reason,
+              aliasReason
+            )
+          case Inlined(_, _, expr) =>
+            markNestedLocalOwnerConstrainedAllocations(
+              owner,
+              expr,
+              reason,
+              aliasReason
+            )
+          case Block(_, expr) =>
+            markNestedLocalOwnerConstrainedAllocations(
+              owner,
+              expr,
+              reason,
+              aliasReason
+            )
+          case TypeApply(Select(expr, nme.asInstanceOf_), _) =>
+            markNestedLocalOwnerConstrainedAllocations(
+              owner,
+              expr,
+              reason,
+              aliasReason
+            )
+          case Return(expr, _) =>
+            markNestedLocalOwnerConstrainedAllocations(
+              owner,
+              expr,
+              reason,
+              aliasReason
+            )
+          case Labeled(_, body) =>
+            markNestedLocalOwnerConstrainedAllocations(
+              owner,
+              body,
+              reason,
+              aliasReason
+            )
+          case If(_, thenp, elsep) =>
+            markNestedLocalOwnerConstrainedAllocations(
+              owner,
+              thenp,
+              reason,
+              aliasReason
+            )
+            markNestedLocalOwnerConstrainedAllocations(
+              owner,
+              elsep,
+              reason,
+              aliasReason
+            )
+          case Match(_, cases) =>
+            cases.foreach { case CaseDef(_, _, body) =>
+              markNestedLocalOwnerConstrainedAllocations(
+                owner,
+                body,
+                reason,
+                aliasReason
+              )
+            }
+          case _ => ()
+        }
+    }
+
+  private def directReturnedInferredMethodCalls(tree: Tree)(using Context): List[Apply] =
+    tree match {
+      case app: Apply
+          if RiftRegionInference.inferredMethodReturnOwners.contains(
+            calledSymbol(app)
+          ) =>
+        app :: Nil
+      case Typed(expr, _) =>
+        directReturnedInferredMethodCalls(expr)
+      case Inlined(_, _, expr) =>
+        directReturnedInferredMethodCalls(expr)
+      case Block(_, expr) =>
+        directReturnedInferredMethodCalls(expr)
+      case TypeApply(Select(expr, nme.asInstanceOf_), _) =>
+        directReturnedInferredMethodCalls(expr)
+      case If(_, thenp, elsep) =>
+        directReturnedInferredMethodCalls(thenp) :::
+          directReturnedInferredMethodCalls(elsep)
+      case Match(_, cases) =>
+        cases.flatMap { case CaseDef(_, _, body) =>
+          directReturnedInferredMethodCalls(body)
+        }
+      case _ =>
+        Nil
+    }
+
+  private def isRiftRegionCompanionOwner(sym: Symbol)(using Context): Boolean =
+    sym.owner.fullName.toString.stripSuffix("$") ==
+      "scala.scalanative.memory.RiftRegion"
+
+  private def calledSymbol(tree: Tree)(using Context): Symbol =
+    tree match {
+      case Apply(fun, _)     => calledSymbol(fun)
+      case TypeApply(fun, _) => calledSymbol(fun)
+      case Select(_, _)      => tree.symbol
+      case _                 => tree.symbol
+    }
+
+  private def isScalaSomeApply(sym: Symbol)(using Context): Boolean =
+    sym.name.toString == "apply" &&
+      sym.owner.fullName.toString.stripSuffix("$") == "scala.Some"
+
+  private def isScalaOptionApply(sym: Symbol)(using Context): Boolean =
+    sym.name.toString == "apply" &&
+      sym.owner.fullName.toString.stripSuffix("$") == "scala.Option"
+
+  private def isScalaTupleApply(sym: Symbol, argCount: Int)(using Context): Boolean =
+    sym.name.toString == "apply" &&
+      argCount >= 2 &&
+      argCount <= 22 &&
+      sym.owner.fullName.toString.stripSuffix("$") == s"scala.Tuple$argCount"
+
+  private def isScalaRuntimeArraysNewArray(sym: Symbol)(using Context): Boolean =
+    sym == defn.newArrayMethod ||
+      (sym.name.toString == "newArray" &&
+        sym.owner.fullName.toString.stripSuffix("$") == "scala.runtime.Arrays")
+
+  private def isRiftRegionListPrepend(sym: Symbol)(using Context): Boolean = {
+    val name = sym.name.toString
+    name == "prependRegionList" && isRiftRegionCompanionOwner(sym)
+  }
+
+  private def isRiftCheckedBufferAppend(sym: Symbol)(using Context): Boolean = {
+    val name = sym.name.toString
+    name == "append" ||
+      name == "appendToObjectBuffer" ||
+      name == "appendToRegionBuffer"
+  }
+
+  private def isRiftCheckedBufferGet(sym: Symbol)(using Context): Boolean = {
+    val name = sym.name.toString
+    name == "get" ||
+      name == "getFromObjectBuffer" ||
+      name == "getFromRegionBuffer"
+  }
+
+  private def isRiftCheckedOwnerContainerType(tpe: Type)(using Context): Boolean = {
+    val objectBufferName =
+      "scala.scalanative.memory.RiftRegion.ObjectBuffer"
+    val regionBufferName =
+      "scala.scalanative.memory.RiftRegion.RegionBuffer"
+    val widened = tpe.widenDealias
+    tpe.show.contains(objectBufferName) ||
+      tpe.show.contains(regionBufferName) ||
+      widened.show.contains(objectBufferName) ||
+      widened.show.contains(regionBufferName)
+  }
+
+  private def uncapturedType(tpe: Type)(using Context): Type =
+    try
+      CapturingType
+        .decomposeCapturingType(tpe)
+        .map((parent, _) => parent)
+        .getOrElse(tpe)
+    catch {
+      case _: Throwable => tpe
+    }
+
+  private def typeCandidates(tpe: Type)(using Context): List[Type] =
+    List(tpe, tpe.widenDealias, uncapturedType(tpe), uncapturedType(tpe.widenDealias))
+
+  private def checkedOwnerContainerValueType(
+      tpe: Type
+  )(using Context): Option[Type] =
+    typeCandidates(tpe).collectFirst {
+      case candidate @ AppliedType(_, value :: Nil)
+          if isRiftCheckedOwnerContainerType(candidate) =>
+        value
+    }
+
+  private def checkedBufferGetOwnerAndValueType(
+      app: Apply,
+      sym: Symbol
+  )(using Context): Option[(Symbol, Type)] =
+    if !isRiftCheckedBufferGet(sym) then None
+    else {
+      val contextTrees = collectTrees(app.fun) ::: app.args
+      val ownerFromContext =
+        contextTrees
+          .find(tree => isRiftInferredAllocationOwnerType(tree.tpe))
+          .map(_.symbol)
+          .filter(_ != NoSymbol)
+      val ownerFromResult =
+        captureOwnerSymbols(app.tpe, ctx.owner)
+          .distinct
+          .filter(isRiftInferredAllocationOwnerSymbol)
+          .headOption
+      val valueType =
+        contextTrees
+          .find(tree => isRiftCheckedOwnerContainerType(tree.tpe))
+          .flatMap(tree =>
+            checkedOwnerContainerValueType(tree.tpe)
+              .orElse(
+                tree
+                  .getAttachment(NirDefinitions.NonErasedType)
+                  .flatMap(checkedOwnerContainerValueType)
+              )
+          )
+          .orElse(Some(app.tpe))
+      for
+        ownerSym <- ownerFromContext.orElse(ownerFromResult)
+        value <- valueType
+      yield ownerSym -> value
+    }
+
+  private def isRiftCheckedPriorityQueueType(tpe: Type)(using Context): Boolean = {
+    val priorityQueueName =
+      "scala.scalanative.memory.RiftRegion.RegionPriorityQueue"
+    val indexedPriorityQueueName =
+      "scala.scalanative.memory.RiftRegion.RegionIndexedPriorityQueue"
+    val longIndexedPriorityQueueName =
+      "scala.scalanative.memory.RiftRegion.RegionLongIndexedPriorityQueue"
+    val widened = tpe.widenDealias
+    List(tpe.show, widened.show).exists { text =>
+      text.contains(priorityQueueName) ||
+      text.contains(indexedPriorityQueueName) ||
+        text.contains(longIndexedPriorityQueueName)
+    }
+  }
+
+  private def isRiftCheckedPriorityQueueResult(sym: Symbol)(using
+      Context
+  ): Boolean = {
+    val name = sym.name.toString
+    name == "peek" ||
+      name == "pop" ||
+      name == "get" ||
+      name == "peekFromRegionPriorityQueue" ||
+      name == "popFromRegionPriorityQueue" ||
+      name == "peekFromRegionIndexedPriorityQueue" ||
+      name == "popFromRegionIndexedPriorityQueue" ||
+      name == "getFromRegionIndexedPriorityQueue" ||
+      name == "peekFromRegionLongIndexedPriorityQueue" ||
+      name == "popFromRegionLongIndexedPriorityQueue" ||
+      name == "getFromRegionLongIndexedPriorityQueue"
+  }
+
+  private def checkedPriorityQueueValueType(
+      tpe: Type
+  )(using Context): Option[Type] =
+    typeCandidates(tpe).collectFirst {
+      case candidate @ AppliedType(_, value :: Nil)
+          if isRiftCheckedPriorityQueueType(candidate) =>
+        value
+    }
+
+  private def checkedPriorityQueueResultOwnerAndValueType(
+      app: Apply,
+      sym: Symbol
+  )(using Context): Option[(Symbol, Type)] =
+    if !isRiftCheckedPriorityQueueResult(sym) then None
+    else {
+      val contextTrees = collectTrees(app.fun) ::: app.args
+      val hasCheckedQueue =
+        contextTrees.exists(tree => isRiftCheckedPriorityQueueType(tree.tpe))
+      if !hasCheckedQueue then None
+      else {
+        val ownerFromContext =
+          contextTrees
+            .find(tree => isRiftInferredAllocationOwnerType(tree.tpe))
+            .map(_.symbol)
+            .filter(_ != NoSymbol)
+        val ownerFromResult =
+          captureOwnerSymbols(app.tpe, ctx.owner)
+            .distinct
+            .filter(isRiftInferredAllocationOwnerSymbol)
+            .headOption
+        val valueType =
+          contextTrees
+            .find(tree => isRiftCheckedPriorityQueueType(tree.tpe))
+            .flatMap(tree =>
+              checkedPriorityQueueValueType(tree.tpe)
+                .orElse(
+                  tree
+                    .getAttachment(NirDefinitions.NonErasedType)
+                    .flatMap(checkedPriorityQueueValueType)
+                )
+            )
+            .orElse(Some(app.tpe))
+        for
+          ownerSym <- ownerFromContext.orElse(ownerFromResult)
+          value <- valueType
+        yield ownerSym -> value
+      }
+    }
+
+  private def isRiftCheckedStreamRankType(tpe: Type)(using Context): Boolean = {
+    val indexedRankName =
+      "scala.scalanative.memory.RiftRegion.StreamWindowIndexedRank"
+    val longIndexedRankName =
+      "scala.scalanative.memory.RiftRegion.StreamWindowLongIndexedRank"
+    val tableRankName =
+      "scala.scalanative.memory.RiftRegion.StreamWindowTableRank"
+    val widened = tpe.widenDealias
+    List(tpe.show, widened.show).exists { text =>
+      text.contains(indexedRankName) ||
+        text.contains(longIndexedRankName) ||
+        text.contains(tableRankName)
+    }
+  }
+
+  private def isRiftCheckedStreamRankResult(sym: Symbol)(using
+      Context
+  ): Boolean = {
+    val name = sym.name.toString
+    name == "peekWindowRank" ||
+      name.contains("peekWindowRank") ||
+      name == "peekTableRank" ||
+      name.contains("peekTableRank") ||
+      name == "getWindowRank" ||
+      name.contains("getWindowRank") ||
+      name == "getTableRank" ||
+      name.contains("getTableRank")
+  }
+
+  private def checkedStreamRankValueType(
+      tpe: Type
+  )(using Context): Option[Type] =
+    typeCandidates(tpe).collectFirst {
+      case candidate @ AppliedType(_, value :: Nil)
+          if isRiftCheckedStreamRankType(candidate) =>
+        value
+    }
+
+  private def checkedStreamRankResultOwnerAndValueType(
+      app: Apply,
+      sym: Symbol
+  )(using Context): Option[(Symbol, Type)] =
+    if !isRiftCheckedStreamRankResult(sym) then None
+    else {
+      val contextTrees = collectTrees(app.fun) ::: app.args
+      val hasCheckedRank =
+        contextTrees.exists(tree => isRiftCheckedStreamRankType(tree.tpe))
+      if !hasCheckedRank then None
+      else {
+        val ownerFromContext =
+          contextTrees
+            .find(tree =>
+              tree.symbol != NoSymbol &&
+                isRiftFrameworkOwnerTokenSymbol(tree.symbol)
+            )
+            .map(_.symbol)
+        val ownerFromResult =
+          captureOwnerSymbols(app.tpe, ctx.owner)
+            .distinct
+            .filter(isRiftFrameworkOwnerTokenSymbol)
+            .headOption
+        val valueType =
+          contextTrees
+            .find(tree => isRiftCheckedStreamRankType(tree.tpe))
+            .flatMap(tree =>
+              tree
+                .getAttachment(NirDefinitions.NonErasedType)
+                .flatMap(checkedStreamRankValueType)
+                .orElse(checkedStreamRankValueType(tree.tpe))
+            )
+            .orElse(Some(app.tpe))
+        for
+          ownerSym <- ownerFromContext.orElse(ownerFromResult)
+          value <- valueType
+        yield ownerSym -> value
+      }
+    }
+
+  private def isRiftChildRegionFactory(sym: Symbol)(using Context): Boolean = {
+    val name = sym.name.toString
+    isRiftRegionCompanionOwner(sym) && (
+      name == "childRegion" ||
+        name == "childBucketRegion" ||
+        name == "streamBucketRegion" ||
+        name == "pageTokenAppendRegionFor" ||
+        name == "pageTokenAppendOpenRegionFor" ||
+        name == "pageTokenAppendRiftOpenHandleFor" ||
+        name == "pageTokenMapFilterRegionFor" ||
+        name == "pageTokenMapFilterOpenRegionFor" ||
+        name == "pageTokenCountByKeyRegionFor" ||
+        name == "pageTokenCountByKeyOpenRegionFor" ||
+        name == "epochBufferRegionFor" ||
+        name == "epochBufferOpenRegionFor" ||
+        name == "epochFoldRegionFor" ||
+        name == "transactionRegionFor" ||
+        name == "chunkAppendRegionFor"
+    )
+  }
+
+  private def childRegionFactoryApply(tree: Tree)(using Context): Option[Apply] =
+    tree match {
+      case app: Apply if isRiftChildRegionFactory(calledSymbol(app)) =>
+        Some(app)
+      case Typed(expr, _)      => childRegionFactoryApply(expr)
+      case Inlined(_, _, expr) => childRegionFactoryApply(expr)
+      case Block(_, expr)      => childRegionFactoryApply(expr)
+      case _                   => None
+    }
+
+  private def collectTrees(tree: Tree): List[Tree] =
+    tree match {
+      case app @ Apply(fun, args) =>
+        app :: collectTrees(fun) ::: args.flatMap(collectTrees)
+      case tpe @ TypeApply(fun, args) =>
+        tpe :: collectTrees(fun) ::: args.flatMap(collectTrees)
+      case sel @ Select(qualifier, _) =>
+        sel :: collectTrees(qualifier)
+      case typed @ Typed(expr, _) =>
+        typed :: collectTrees(expr)
+      case inlined @ Inlined(_, _, expr) =>
+        inlined :: collectTrees(expr)
+      case block @ Block(Nil, expr) =>
+        block :: collectTrees(expr)
+      case other =>
+        other :: Nil
+    }
+
+  private def checkedBufferAppendOwnerAndValue(
+      app: Apply,
+      sym: Symbol
+  )(using Context): Option[(Tree, Tree)] =
+    if !isRiftCheckedBufferAppend(sym) || app.args.isEmpty then None
+    else {
+      val value = app.args.last
+      val contextTrees = collectTrees(app.fun) ::: app.args.dropRight(1)
+      val hasCheckedBuffer =
+        contextTrees.exists(tree => isRiftCheckedOwnerContainerType(tree.tpe))
+      if !hasCheckedBuffer then None
+      else
+        contextTrees
+            .find(tree => isRiftInferredAllocationOwnerType(tree.tpe))
+            .map(owner => (owner, value))
+    }
+
+  private def checkedPriorityQueueOwnerAndValues(
+      app: Apply,
+      sym: Symbol
+  )(using Context): Option[(Tree, List[Tree])] = {
+    val name = sym.name.toString
+    if name != "push" && name != "put" &&
+      !name.contains("RegionPriorityQueue")
+    then None
+    else {
+      val contextTrees = collectTrees(app.fun) ::: app.args
+      val hasCheckedQueue =
+        contextTrees.exists(tree => isRiftCheckedPriorityQueueType(tree.tpe))
+      if !hasCheckedQueue then None
+      else
+        contextTrees
+          .find(tree => isRiftInferredAllocationOwnerType(tree.tpe))
+          .map(owner => (owner, app.args))
+    }
+  }
+
+  private def checkedStreamRankOwnerAndValues(
+      app: Apply,
+      sym: Symbol
+  )(using Context): Option[(Tree, List[Tree])] = {
+    val name = sym.name.toString
+    if name != "putWindowRank" &&
+      name != "putWindowRankInBucket" &&
+      name != "putTableRankInBucket"
+    then None
+    else {
+      val contextTrees = collectTrees(app.fun) ::: app.args
+      val hasCheckedRank =
+        contextTrees.exists(tree => isRiftCheckedStreamRankType(tree.tpe))
+      if !hasCheckedRank then None
+      else
+        contextTrees
+          .find(tree =>
+            tree.symbol != NoSymbol &&
+              isRiftFrameworkOwnerTokenSymbol(tree.symbol)
+          )
+          .map(owner => (owner, app.args))
+    }
+  }
+  private def capturedArrayElementOwnersFromTypes(
+      arrayTypes: List[Type],
+      allowFrameworkOwnerToken: Boolean = false
+  )(using Context): List[Symbol] = {
+    def elementType(tpe: Type): Option[Type] =
+      uncapturedType(tpe.widenDealias) match {
+        case AppliedType(_, elem :: Nil) => Some(elem)
+        case _                           => None
+      }
+
+    arrayTypes
+      .flatMap(tpe => typeCandidates(tpe).flatMap(elementType))
+      .filter(typeMentionsRiftCapture)
+      .flatMap(elem =>
+        captureOwnerSymbols(elem, ctx.owner)
+          .distinct
+          .filter(owner =>
+            isRiftInferredAllocationOwnerSymbol(owner) ||
+              (allowFrameworkOwnerToken &&
+                isRiftFrameworkOwnerTokenSymbol(owner))
+          )
+      )
+      .distinct
+  }
+
+  private def capturedArrayElementOwnerNamesFromTypes(
+      arrayTypes: List[Type]
+  )(using Context): List[String] = {
+    def elementType(tpe: Type): Option[Type] =
+      uncapturedType(tpe.widenDealias) match {
+        case AppliedType(_, elem :: Nil) => Some(elem)
+        case _                           => None
+      }
+
+    arrayTypes
+      .flatMap(tpe => typeCandidates(tpe).flatMap(elementType))
+      .filter(typeMentionsRiftCapture)
+      .flatMap(captureOwnerNames)
+      .distinct
+  }
+
+  private def capturedArrayElementOwners(
+      array: Tree
+  )(using Context): List[Symbol] = {
+    val arrayTypes =
+      array.tpe :: array
+        .getAttachment(NirDefinitions.NonErasedType)
+        .toList :::
+        Option
+          .when(array.symbol != NoSymbol)(array.symbol.info)
+          .toList
+
+    val ownersFromType = capturedArrayElementOwnersFromTypes(arrayTypes)
+
+    val ownersFromLocal =
+      directLocalIdent(array)
+        .flatMap(localArrayElementOwnerSyms.get)
+        .toList
+
+    (ownersFromType ++ ownersFromLocal).map(canonicalOwner).distinct
+  }
+
+  private def checkedStreamRankLocalSymbols(app: Apply)(using
+      Context
+  ): List[Symbol] =
+    (collectTrees(app.fun) ::: app.args)
+      .filter(tree => isRiftCheckedStreamRankType(tree.tpe))
+      .flatMap(directLocalIdent)
+      .filter(sym => sym != NoSymbol && !sym.is(Mutable))
+      .distinct
+
+  private def directArrayElementOwners(
+      value: Tree,
+      allowFrameworkOwnerToken: Boolean,
+      fallbackOwner: Option[Symbol] = None
+  )(using Context): List[Symbol] =
+    directArrayApply(value).toList.flatMap { array =>
+      val arrayTypes =
+        array.tpe :: array
+          .getAttachment(NirDefinitions.NonErasedType)
+          .toList
+      val structuredOwners =
+        capturedArrayElementOwnersFromTypes(
+          arrayTypes,
+          allowFrameworkOwnerToken = allowFrameworkOwnerToken
+        )
+      val ownerNames = capturedArrayElementOwnerNamesFromTypes(arrayTypes)
+      structuredOwners ++ fallbackOwner
+        .map(canonicalOwner)
+        .filter(owner => ownerNames.contains(owner.name.toString))
+        .toList
+    }.map(canonicalOwner).distinct
+
+  private def rememberCheckedStreamRankArrayElementOwner(
+      app: Apply,
+      ownerTree: Tree,
+      values: List[Tree]
+  )(using Context): Unit = {
+    val rankSyms = checkedStreamRankLocalSymbols(app)
+    if rankSyms.nonEmpty then {
+      val fallbackOwner =
+        Option(ownerTree.symbol)
+          .filter(sym => sym != NoSymbol)
+          .map(canonicalOwner)
+      val rankValueTypes =
+        (collectTrees(app.fun) ::: app.args)
+          .filter(tree => isRiftCheckedStreamRankType(tree.tpe))
+          .flatMap(tree =>
+            tree
+              .getAttachment(NirDefinitions.NonErasedType)
+              .flatMap(checkedStreamRankValueType)
+              .orElse(checkedStreamRankValueType(tree.tpe))
+          )
+          .distinct
+      val rankValueElementOwners =
+        capturedArrayElementOwnersFromTypes(
+          rankValueTypes,
+          allowFrameworkOwnerToken = true
+        ).map(canonicalOwner).distinct
+      val rankTypeOwners =
+        rankValueElementOwners match {
+          case owner :: Nil if fallbackOwner.contains(owner) =>
+            owner :: Nil
+          case Nil =>
+            val rankValueElementOwnerNames =
+              capturedArrayElementOwnerNamesFromTypes(rankValueTypes)
+            fallbackOwner
+              .filter(owner =>
+                rankValueElementOwnerNames.contains(owner.name.toString)
+              )
+              .toList
+          case _ => Nil
+        }
+      val owners =
+        (values.flatMap(value =>
+          directArrayElementOwners(
+            value,
+            allowFrameworkOwnerToken = true,
+            fallbackOwner = fallbackOwner
+          )
+        ) ++ rankTypeOwners).distinct
+      owners match {
+        case owner :: Nil =>
+          rankSyms.foreach { rankSym =>
+            localStreamRankArrayElementOwnerSyms.update(rankSym, owner)
+          }
+        case _ => ()
+      }
+    }
+  }
+
+  private def checkedStreamRankResultArrayElementOwners(
+      app: Apply
+  )(using Context): List[Symbol] =
+    checkedStreamRankLocalSymbols(app)
+      .flatMap(localStreamRankArrayElementOwnerSyms.get)
+      .map(canonicalOwner)
+      .distinct
+
+  private def markArrayElementStoreConstrainedAllocation(
+      array: Tree,
+      value: Tree
+  )(using Context): Unit = {
+    val owners = capturedArrayElementOwners(array)
+    owners match {
+      case owner :: Nil =>
+        directLocalIdent(value).foreach { target =>
+          val allocationTargets = localAllocationTargets(target).distinct
+          markSelectedAliasOwner(
+            target,
+            allocationTargets,
+            owner,
+            "selected local allocation alias is constrained by checked region array element owner",
+            value.srcPos
+          )
+          allocationTargets.foreach { allocationTarget =>
+            markRegionOwner(
+              allocationTarget,
+              owner,
+              "local direct new or selected allocation is constrained by checked region array element owner",
+              value.srcPos
+            )
+          }
+        }
+        directReturnedNewApplies(value).foreach { app =>
+          markDirectConstructOwner(
+            app,
+            owner,
+            "direct new or branch/match returned array store value is constrained by checked region array element owner"
+          )
+        }
+        markNestedClosureOwnerConstrainedAllocations(
+          owner,
+          value,
+          "nested direct closure array store value is constrained by checked region array element owner",
+          "nested local closure array store value is constrained by checked region array element owner",
+          "nested closure array store body return is constrained by checked region array element owner",
+          "conflicting inferred nested array-store local closure owners"
+        )
+        markClosureValueOwnerConstrainedAllocation(
+          owner,
+          value,
+          "direct closure array store value is constrained by checked region array element owner",
+          "local closure array store value is constrained by checked region array element owner",
+          "closure array store body return is constrained by a checked region array element owner",
+          "conflicting inferred array-store local closure owners"
+        )
+      case first :: second :: _ =>
+        directLocalIdent(value).foreach { target =>
+          val allocationTargets = localAllocationTargets(target).distinct
+          val rejectedTargets =
+            if allocationTargets.nonEmpty then target :: allocationTargets
+            else target :: Nil
+          rejectedTargets.distinct.foreach { rejectedTarget =>
+            markRejected(
+              rejectedTarget,
+              s"ambiguous captured array element owners: ${first.name} and ${second.name}",
+              value.srcPos
+            )
+          }
+        }
+        directReturnedNewApplies(value).foreach { app =>
+          updateDecision(
+            calledSymbol(app),
+            RiftRegionInference.AllocationOwner.Rejected,
+            s"ambiguous captured array element owners: ${first.name} and ${second.name}",
+            app.srcPos
+          )
+        }
+        directReturnedClosures(value).foreach { closure =>
+          val closureSym = calledSymbol(closure)
+          if closureSym != NoSymbol then
+            updateDecision(
+              closureSym,
+              RiftRegionInference.AllocationOwner.Rejected,
+              s"ambiguous captured array element owners: ${first.name} and ${second.name}",
+              closure.srcPos
+            )
+        }
+        returnedLocalIdents(value)
+          .flatMap(localClosureAllocationPairs)
+          .map(_._1)
+          .distinct
+          .foreach { target =>
+            markRejected(
+              target,
+              s"ambiguous captured array element owners: ${first.name} and ${second.name}",
+              value.srcPos
+            )
+          }
+      case Nil => ()
+    }
+  }
+
+  private def currentScopeOwnerSymbols(using Context): Set[Symbol] =
+    ownerChain(ctx.owner).toSet
+
+  private def capturedCurrentScopeOwners(
+      expected: Type
+  )(using Context): List[Symbol] =
+    captureOwnerSymbols(expected, ctx.owner)
+      .map(canonicalOwner)
+      .distinct
+      .filter(isRiftInferredAllocationOwnerSymbol)
+      .filter(owner => currentScopeOwnerSymbols.contains(owner.owner))
+
+  private def appliedArguments(tree: Tree): List[Tree] =
+    tree match {
+      case Apply(fun, args)     => appliedArguments(fun) ::: args
+      case TypeApply(fun, _)    => appliedArguments(fun)
+      case Typed(expr, _)       => appliedArguments(expr)
+      case Inlined(_, _, expr)  => appliedArguments(expr)
+      case _                    => Nil
+    }
+
+  private def fullMethodArgumentPairs(
+      app: Apply,
+      sym: Symbol
+  )(using Context): List[(Symbol, Tree)] = {
+    val params = sym.paramSymss.flatten.filterNot(_.isType)
+    val args = appliedArguments(app)
+    if params.nonEmpty && args.length >= params.length then
+      params.zip(args).take(params.length)
+    else Nil
+  }
+
+  private def methodOwnerSubstitutions(
+      pairs: List[(Symbol, Tree)]
+  )(using Context): Map[Symbol, Symbol] =
+    pairs.flatMap { (param, value) =>
+      if isRiftInferredAllocationOwnerType(param.info) then
+        directLocalIdent(value)
+          .map(canonicalOwner)
+          .filter(isRiftInferredAllocationOwnerSymbol)
+          .map(owner => canonicalOwner(param) -> owner)
+      else None
+    }.toMap
+
+  private def capturedMethodArgumentOwners(
+      expected: Type,
+      callee: Symbol,
+      calleeOwnerSubstitutions: Map[Symbol, Symbol]
+  )(using Context): List[Symbol] = {
+    val localOwners = capturedCurrentScopeOwners(expected)
+    val substitutedOwners =
+      captureOwnerSymbols(expected, callee)
+        .map(canonicalOwner)
+        .flatMap(calleeOwnerSubstitutions.get)
+    (localOwners ::: substitutedOwners)
+      .map(canonicalOwner)
+      .distinct
+      .filter(isRiftInferredAllocationOwnerSymbol)
+  }
+
+  private def markMethodArgumentExpectedTypeConstrainedAllocation(
+      expected: Type,
+      value: Tree,
+      callee: Symbol,
+      calleeOwnerSubstitutions: Map[Symbol, Symbol]
+  )(using Context): Unit =
+    val expectedTypes =
+      List(expected, value.tpe).filter(typeMentionsRiftCapture)
+    if expectedTypes.nonEmpty &&
+      !isRiftRegionRuntimeAllocatorForwarderArg(callee, value)
+    then {
+      val owners =
+        expectedTypes
+          .flatMap(expected =>
+            capturedMethodArgumentOwners(
+              expected,
+              callee,
+              calleeOwnerSubstitutions
+            )
+          )
+          .map(canonicalOwner)
+          .distinct
+      owners match {
+        case owner :: Nil =>
+          val localTarget = directLocalIdent(value)
+          val localAllocTargets =
+            localTarget.toList.flatMap(localAllocationTargets).distinct
+          val directConstructs = directReturnedNewApplies(value)
+          val directClosureArgs = directReturnedClosures(value)
+          val localClosureArgs =
+            returnedLocalIdents(value)
+              .flatMap(localClosureAllocationPairs)
+              .distinct
+          localTarget.foreach { target =>
+            if localAllocTargets.nonEmpty then
+              markSelectedAliasOwner(
+                target,
+                localAllocTargets,
+                owner,
+                "selected local allocation alias flows into a method argument captured by a checked region",
+                value.srcPos
+              )
+              localAllocTargets.foreach { allocationTarget =>
+                markRegionOwner(
+                  allocationTarget,
+                  owner,
+                  "local direct new or selected allocation flows into a method argument captured by a checked region",
+                  value.srcPos
+                )
+              }
+            else if
+              localClosureArgs.isEmpty &&
+              !RiftRegionInference.inferredAllocationOwners
+                .get(target)
+                .exists(canonicalOwner(_) == owner) &&
+              !typeMentionsRiftCapture(value.tpe)
+            then
+              report.error(
+                "Rift checked region method argument cannot pass an unrooted heap object; use RiftRegion.root(value) for heap metadata.",
+                value.srcPos
+              )
+          }
+          directConstructs.foreach { app =>
+            markDirectConstructOwner(
+              app,
+              owner,
+              "direct new method argument is captured by a checked region"
+            )
+          }
+          markNestedClosureOwnerConstrainedAllocations(
+            owner,
+            value,
+            "nested direct closure method argument is captured by a checked region",
+            "nested local closure method argument is captured by a checked region",
+            "nested closure method argument body return is constrained by a captured checked region owner",
+            "conflicting inferred nested method-argument local closure owners"
+          )
+          directClosureArgs.foreach { closure =>
+            closure.putAttachment(
+              NirDefinitions.InferredRiftAllocationOwner,
+              owner
+            )
+            markClosureBodyOwner(
+              closure,
+              owner,
+              "closure method argument body return is constrained by a captured checked region owner"
+            )
+            val closureSym = calledSymbol(closure)
+            if closureSym != NoSymbol then
+              updateDecision(
+                closureSym,
+                RiftRegionInference.AllocationOwner.Region(owner),
+                "closure method argument is captured by a checked region",
+                closure.srcPos
+              )
+          }
+          localClosureArgs.foreach { (target, closure) =>
+            val canonical = canonicalOwner(owner)
+            val existingOwner =
+              RiftRegionInference.inferredAllocationOwners
+                .get(target)
+                .map(canonicalOwner)
+            existingOwner match {
+              case Some(previous) if previous != canonical =>
+                markRejected(
+                  target,
+                  s"conflicting inferred local closure argument owners: ${previous.name} and ${canonical.name}",
+                  value.srcPos
+                )
+              case _ =>
+                closure.putAttachment(
+                  NirDefinitions.InferredRiftAllocationOwner,
+                  canonical
+                )
+                markRegionOwner(
+                  target,
+                  canonical,
+                  "local closure flows into a method argument captured by a checked region",
+                  value.srcPos
+                )
+                markClosureBodyOwner(
+                  closure,
+                  canonical,
+                  "local closure method argument body return is constrained by a captured checked region owner"
+                )
+            }
+          }
+          if localTarget.isEmpty &&
+            directConstructs.isEmpty &&
+            directClosureArgs.isEmpty &&
+            localClosureArgs.isEmpty &&
+            directReturnedInferredMethodCalls(value).isEmpty &&
+            !typeMentionsRiftCapture(value.tpe)
+          then
+            report.error(
+              "Rift checked region method argument cannot pass an unrooted heap object; use RiftRegion.root(value) for heap metadata.",
+              value.srcPos
+            )
+        case first :: second :: _ =>
+          directLocalIdent(value).foreach { target =>
+            val allocationTargets = localAllocationTargets(target).distinct
+            if allocationTargets.nonEmpty then
+              (target :: allocationTargets).distinct.foreach { allocationTarget =>
+                markRejected(
+                  allocationTarget,
+                  s"ambiguous captured method argument owners: ${first.name} and ${second.name}",
+                  value.srcPos
+                )
+              }
+            else
+              markRejected(
+                target,
+                s"ambiguous captured method argument owners: ${first.name} and ${second.name}",
+                value.srcPos
+              )
+          }
+          directReturnedNewApplies(value).foreach { app =>
+            updateDecision(
+              calledSymbol(app),
+              RiftRegionInference.AllocationOwner.Rejected,
+              s"ambiguous captured method argument owners: ${first.name} and ${second.name}",
+              app.srcPos
+            )
+          }
+          directClosure(value).foreach { closure =>
+            val closureSym = calledSymbol(closure)
+            if closureSym != NoSymbol then
+              updateDecision(
+                closureSym,
+                RiftRegionInference.AllocationOwner.Rejected,
+                s"ambiguous captured method argument owners: ${first.name} and ${second.name}",
+                closure.srcPos
+              )
+          }
+        case Nil => ()
+      }
+    }
+
+  private def directLocalIdent(tree: Tree)(using Context): Option[Symbol] =
+    tree match {
+      case id: Ident                                      => Some(id.symbol)
+      case Typed(expr, _)                                => directLocalIdent(expr)
+      case Inlined(_, _, expr)                           => directLocalIdent(expr)
+      case Block(Nil, expr)                              => directLocalIdent(expr)
+      case TypeApply(Select(expr, nme.asInstanceOf_), _) => directLocalIdent(expr)
+      case _                                             => None
+    }
+
+  private def returnedLocalIdents(tree: Tree)(using Context): List[Symbol] =
+    tree match {
+      case id: Ident =>
+        id.symbol :: Nil
+      case Return(expr, _) =>
+        returnedLocalIdents(expr)
+      case Labeled(_, body) =>
+        returnedLocalIdents(body)
+      case Typed(expr, _) =>
+        returnedLocalIdents(expr)
+      case Inlined(_, _, expr) =>
+        returnedLocalIdents(expr)
+      case Block(_, expr) =>
+        returnedLocalIdents(expr)
+      case TypeApply(Select(expr, nme.asInstanceOf_), _) =>
+        returnedLocalIdents(expr)
+      case If(_, thenp, elsep) =>
+        returnedLocalIdents(thenp) ::: returnedLocalIdents(elsep)
+      case Match(_, cases) =>
+        cases.flatMap { case CaseDef(_, _, body) =>
+          returnedLocalIdents(body)
+        }
+      case _ =>
+        Nil
+    }
+
+  private def markLocalOwnerConstrainedAllocation(
+      ownerTree: Tree,
+      valueTree: Tree,
+      reason: String,
+      allowFrameworkOwnerToken: Boolean = false
+  )(using Context): Unit =
+    val ownerIsValid =
+      ownerTree.symbol != NoSymbol &&
+        (isRiftInferredAllocationOwnerSymbol(ownerTree.symbol) ||
+          (allowFrameworkOwnerToken &&
+            isRiftFrameworkOwnerTokenSymbol(ownerTree.symbol)))
+    if ownerIsValid
+    then {
+      directLocalIdent(valueTree).foreach { target =>
+        markLocalAllocationTargets(
+          target,
+          ownerTree.symbol,
+          reason,
+          "selected local allocation alias is constrained by a checked region owner token",
+          valueTree.srcPos
+        )
+      }
+      markNestedLocalOwnerConstrainedAllocations(
+        ownerTree.symbol,
+        valueTree,
+        reason,
+        "nested local allocation alias is constrained by a checked region owner token"
+      )
+      markNestedClosureOwnerConstrainedAllocations(
+        ownerTree.symbol,
+        valueTree,
+        "nested direct closure value is constrained by checked region owner token",
+        "nested local closure value is constrained by checked region owner token",
+        "nested closure body return is constrained by checked region owner token",
+        "conflicting inferred nested owner-token local closure owners"
+      )
+      directReturnedNewApplies(valueTree).foreach { app =>
+        markDirectConstructOwner(app, ownerTree.symbol, reason)
+      }
+      markClosureValueOwnerConstrainedAllocation(
+        ownerTree.symbol,
+        valueTree,
+        "direct closure value is constrained by checked region owner token",
+        "local closure value is constrained by checked region owner token",
+        "closure body return is constrained by a checked region owner token",
+        "conflicting inferred owner-token local closure owners"
+      )
+    }
+
+  private def markSelectedLocalOwnerConstrainedAllocation(
+      ownerTree: Tree,
+      valueTree: Tree,
+      reason: String,
+      allowFrameworkOwnerToken: Boolean = false
+  )(using Context): Unit = {
+    val ownerIsValid =
+      ownerTree.symbol != NoSymbol &&
+        (isRiftInferredAllocationOwnerSymbol(ownerTree.symbol) ||
+          (allowFrameworkOwnerToken &&
+            isRiftFrameworkOwnerTokenSymbol(ownerTree.symbol)))
+    if ownerIsValid then
+      directLocalIdent(valueTree).foreach { target =>
+        val allocationTargets = localAllocationTargets(target).distinct
+        if allocationTargets.nonEmpty && !allocationTargets.contains(target) then
+          markSelectedAliasOwner(
+            target,
+            allocationTargets,
+            ownerTree.symbol,
+            "selected local allocation alias is constrained by a checked region owner token",
+            valueTree.srcPos
+          )
+          allocationTargets.foreach { allocationTarget =>
+            markRegionOwner(
+              allocationTarget,
+              ownerTree.symbol,
+              reason,
+              valueTree.srcPos
+            )
+          }
+      }
+      if directLocalIdent(valueTree).isEmpty then
+        returnedLocalIdents(valueTree).distinct.foreach { target =>
+          val allocationTargets = localAllocationTargets(target).distinct
+          if allocationTargets.nonEmpty then {
+            markSelectedAliasOwner(
+              target,
+              allocationTargets,
+              ownerTree.symbol,
+              "branch/match local allocation alias is constrained by a checked region owner token",
+              valueTree.srcPos
+            )
+            allocationTargets.foreach { allocationTarget =>
+              markRegionOwner(
+                allocationTarget,
+                ownerTree.symbol,
+                reason,
+                valueTree.srcPos
+              )
+            }
+          }
+        }
+      directReturnedNewApplies(valueTree).foreach { app =>
+        markDirectConstructOwner(app, ownerTree.symbol, reason)
+      }
+      markNestedClosureOwnerConstrainedAllocations(
+        ownerTree.symbol,
+        valueTree,
+        "nested direct closure value is constrained by checked framework owner token",
+        "nested local closure value is constrained by checked framework owner token",
+        "nested closure body return is constrained by checked framework owner token",
+        "conflicting inferred nested framework-owner-token local closure owners"
+      )
+      markClosureValueOwnerConstrainedAllocation(
+        ownerTree.symbol,
+        valueTree,
+        "direct closure value is constrained by checked framework owner token",
+        "local closure value is constrained by checked framework owner token",
+        "closure body return is constrained by a checked framework owner token",
+        "conflicting inferred framework-owner-token local closure owners"
+      )
+  }
+
+  private def markLocalExpectedTypeConstrainedAllocation(
+      expected: Type,
+      valueTree: Tree,
+      owner: Symbol,
+      reason: String
+  )(using Context): Unit =
+    directLocalIdent(valueTree).foreach { target =>
+      val allocationTargets = localAllocationTargets(target).distinct
+      if allocationTargets.nonEmpty then {
+        val owners =
+          captureOwnerSymbols(expected, owner)
+            .distinct
+            .filter(isRiftInferredAllocationOwnerSymbol)
+        owners match {
+          case inferredOwner :: Nil =>
+            markSelectedAliasOwner(
+              target,
+              allocationTargets,
+              inferredOwner,
+              "selected local allocation alias flows into a captured expected type",
+              valueTree.srcPos
+            )
+            allocationTargets.foreach { allocationTarget =>
+              markRegionOwner(
+                allocationTarget,
+                inferredOwner,
+                reason,
+                valueTree.srcPos
+              )
+            }
+          case first :: second :: _ =>
+            val rejectedTargets =
+              if allocationTargets.nonEmpty then target :: allocationTargets
+              else target :: Nil
+            rejectedTargets.distinct.foreach { allocationTarget =>
+              markRejected(
+                allocationTarget,
+                s"ambiguous captured expected type owners: ${first.name} and ${second.name}",
+                valueTree.srcPos
+              )
+            }
+          case Nil => ()
+        }
+      }
+    }
+
+  private def closureCapturesOwner(
+      closure: Closure,
+      owner: Symbol
+  )(using Context): Boolean = {
+    val canonical = canonicalOwner(owner)
+    val ownerInClosureType =
+      captureOwnerSymbols(closure.tpe, ctx.owner)
+        .map(canonicalOwner)
+        .contains(canonical)
+    val ownerInClosureTypeName =
+      val ownerNames = captureOwnerNames(closure.tpe).toSet
+      ownerNames.contains(canonical.name.toString) ||
+        localOwnerAliases.exists { (alias, target) =>
+          canonicalOwner(target) == canonical &&
+            ownerNames.contains(alias.name.toString)
+        }
+    ownerInClosureType || ownerInClosureTypeName || closure.env.exists { env =>
+      val envOwner = canonicalOwner(env.symbol)
+      envOwner == canonical ||
+      localOwnerAliases
+        .get(env.symbol)
+        .map(canonicalOwner)
+        .contains(canonical) ||
+        isRiftInferredAllocationOwnerType(env.tpe) ||
+      (
+        env.symbol != NoSymbol &&
+          isRiftInferredAllocationOwnerType(env.symbol.info)
+      )
+    }
+  }
+
+  private def markClosureBodyOwner(
+      closure: Closure,
+      owner: Symbol,
+      reason: String
+  )(using Context): Unit = {
+    val Closure(_, fun, _) = closure: @unchecked
+    val funSym = fun.symbol
+    if funSym != NoSymbol && closureCapturesOwner(closure, owner) then {
+      val canonical = canonicalOwner(owner)
+        RiftRegionInference.inferredClosureBodyOwners.update(funSym, canonical)
+        updateDecision(
+          funSym,
+          RiftRegionInference.AllocationOwner.Region(canonical),
+          reason,
+          closure.srcPos
+        )
+    }
+  }
+
+  private def markDirectClosureRegionOwner(
+      closure: Closure,
+      owner: Symbol,
+      reason: String,
+      bodyReason: String
+  )(using Context): Unit = {
+    val canonical = canonicalOwner(owner)
+    val Closure(_, fun, _) = closure: @unchecked
+    val funSym = fun.symbol
+    if funSym != NoSymbol then
+      RiftRegionInference.inferredClosureValueOwners.update(funSym, canonical)
+    closure.putAttachment(
+      NirDefinitions.InferredRiftAllocationOwner,
+      canonical
+    )
+    RiftRegionInference.sourceSpanKey(closure.srcPos).foreach { key =>
+      RiftRegionInference.inferredClosureOwnersBySourceSpan.update(
+        key,
+        canonical
+      )
+    }
+    markClosureBodyOwner(closure, canonical, bodyReason)
+    val closureSym = calledSymbol(closure)
+    if closureSym != NoSymbol then
+      updateDecision(
+        closureSym,
+        RiftRegionInference.AllocationOwner.Region(canonical),
+        reason,
+        closure.srcPos
+      )
+  }
+
+  private def markLocalClosureRegionOwner(
+      target: Symbol,
+      closure: Closure,
+      owner: Symbol,
+      reason: String,
+      bodyReason: String,
+      conflictReason: String,
+      pos: dotty.tools.dotc.util.SrcPos
+  )(using Context): Unit = {
+    val canonical = canonicalOwner(owner)
+    val existingOwner =
+      RiftRegionInference.inferredAllocationOwners
+        .get(target)
+        .map(canonicalOwner)
+    existingOwner match {
+      case Some(previous) if previous != canonical =>
+        markRejected(
+          target,
+          s"$conflictReason: ${previous.name} and ${canonical.name}",
+          pos
+        )
+      case _ =>
+        val Closure(_, fun, _) = closure: @unchecked
+        val funSym = fun.symbol
+        if funSym != NoSymbol then
+          RiftRegionInference.inferredClosureValueOwners.update(
+            funSym,
+            canonical
+          )
+        closure.putAttachment(
+          NirDefinitions.InferredRiftAllocationOwner,
+          canonical
+        )
+        RiftRegionInference.sourceSpanKey(closure.srcPos).foreach { key =>
+          RiftRegionInference.inferredClosureOwnersBySourceSpan.update(
+            key,
+            canonical
+          )
+        }
+        markRegionOwner(target, canonical, reason, pos)
+        markClosureBodyOwner(closure, canonical, bodyReason)
+    }
+  }
+
+  private def markClosureValueOwnerConstrainedAllocation(
+      owner: Symbol,
+      valueTree: Tree,
+      directReason: String,
+      localReason: String,
+      bodyReason: String,
+      conflictReason: String
+  )(using Context): Unit = {
+    directReturnedClosures(valueTree).foreach { closure =>
+      markDirectClosureRegionOwner(closure, owner, directReason, bodyReason)
+    }
+    returnedLocalIdents(valueTree)
+      .flatMap(localClosureAllocationPairs)
+      .distinct
+      .foreach { (target, closure) =>
+        markLocalClosureRegionOwner(
+          target,
+          closure,
+          owner,
+          localReason,
+          bodyReason,
+          conflictReason,
+          valueTree.srcPos
+        )
+      }
+  }
+
+  private def markNestedClosureOwnerConstrainedAllocations(
+      owner: Symbol,
+      allocations: List[NestedClosureAllocation],
+      directReason: String,
+      localReason: String,
+      bodyReason: String,
+      conflictReason: String,
+      pos: dotty.tools.dotc.util.SrcPos
+  )(using Context): Unit =
+    allocations.distinct.foreach {
+      case DirectNestedClosure(closure) =>
+        markDirectClosureRegionOwner(closure, owner, directReason, bodyReason)
+      case LocalNestedClosureAlias(target) =>
+        markRegionOwner(target, owner, localReason, pos)
+      case LocalNestedClosure(target, closure) =>
+        markLocalClosureRegionOwner(
+          target,
+          closure,
+          owner,
+          localReason,
+          bodyReason,
+          conflictReason,
+          pos
+        )
+    }
+
+  private def markNestedClosureOwnerConstrainedAllocations(
+      owner: Symbol,
+      valueTree: Tree,
+      directReason: String,
+      localReason: String,
+      bodyReason: String,
+      conflictReason: String
+  )(using Context): Unit =
+    markNestedClosureOwnerConstrainedAllocations(
+      owner,
+      nestedClosureAllocations(valueTree),
+      directReason,
+      localReason,
+      bodyReason,
+      conflictReason,
+      valueTree.srcPos
+    )
+
+  private def markNestedClosureAliasesInRegionConstruct(
+      owner: Symbol,
+      valueTree: Tree,
+      aliasReason: String,
+      localReason: String,
+      bodyReason: String,
+      conflictReason: String
+  )(using Context): Unit = {
+    val treeLocalClosurePairs = localClosureAllocationPairsInTree(valueTree)
+
+    directReturnedNewApplies(valueTree).foreach { app =>
+      app.args.foreach { arg =>
+        returnedLocalIdents(arg).distinct.foreach { target =>
+          val pairs = treeLocalClosurePairs.getOrElse(
+            target,
+            localClosureAllocationPairs(target)
+          )
+          if pairs.nonEmpty then {
+            if !pairs.exists(_._1 == target) then
+              markRegionOwner(target, owner, aliasReason, arg.srcPos)
+            pairs.distinct.foreach { (closureTarget, closure) =>
+              markLocalClosureRegionOwner(
+                closureTarget,
+                closure,
+                owner,
+                localReason,
+                bodyReason,
+                conflictReason,
+                arg.srcPos
+              )
+            }
+          }
+        }
+      }
+    }
+  }
+
+  private def directLocalClosureValDefs(
+      tree: Tree
+  )(using Context): Map[Symbol, Closure] =
+    tree match {
+      case vd: ValDef if !vd.symbol.is(Mutable) =>
+        directClosure(vd.rhs).map(vd.symbol -> _).toMap
+      case Block(stats, expr) =>
+        (stats.flatMap(stat => directLocalClosureValDefs(stat)) :::
+          directLocalClosureValDefs(expr).toList).toMap
+      case Typed(expr, _) =>
+        directLocalClosureValDefs(expr)
+      case Inlined(_, _, expr) =>
+        directLocalClosureValDefs(expr)
+      case TypeApply(Select(expr, nme.asInstanceOf_), _) =>
+        directLocalClosureValDefs(expr)
+      case If(_, thenp, elsep) =>
+        directLocalClosureValDefs(thenp) ++ directLocalClosureValDefs(elsep)
+      case Match(_, cases) =>
+        cases.flatMap { case CaseDef(_, _, body) =>
+          directLocalClosureValDefs(body)
+        }.toMap
+      case _ =>
+        Map.empty
+    }
+
+  private def captureOwnerNames(tpe: Type)(using Context): List[String] = {
+    val CapturePattern = """(?:\^|->)\{([^}]*)\}""".r
+    List(tpe.show, tpe.widenDealias.show).flatMap { text =>
+      CapturePattern
+        .findAllMatchIn(text)
+        .flatMap(_.group(1).split(","))
+        .map(_.trim)
+        .filter(_.nonEmpty)
+    }.distinct
+  }
+
+  private def ownerChain(owner: Symbol)(using Context): List[Symbol] =
+    if owner == NoSymbol then Nil else owner :: ownerChain(owner.denot.owner)
+
+  private def captureOwnerSymbols(
+      tpe: Type,
+      owner: Symbol
+  )(using Context): List[Symbol] = {
+    def symbolsFrom(cs: CaptureSet): List[Symbol] =
+      cs.elems.iterator.toList.map(_.pathOwner).filter(_ != NoSymbol)
+
+    val ownerScope = ownerChain(owner).toSet
+    val localFromNames =
+      captureOwnerNames(tpe).flatMap { name =>
+        localCaptureOwnerSymsByName
+          .get(name)
+          .toList
+          .flatMap(_.toList)
+          .filter(sym => ownerScope.contains(sym.owner))
+          .map(canonicalOwner)
+      }
+    val fromNames =
+      captureOwnerNames(tpe).flatMap { name =>
+        ownerChain(owner).flatMap(_.paramSymss.flatten).filter {
+          _.name.toString == name
+        }
+      }
+    val fromSet =
+      try {
+        val direct =
+          CapturingType
+            .decomposeCapturingType(tpe)
+            .map((_, cs) => symbolsFrom(cs))
+            .getOrElse(Nil)
+        if direct.nonEmpty then direct
+        else symbolsFrom(CaptureSet.ofType(tpe, followResult = false))
+      } catch {
+        case _: Throwable => Nil
+      }
+    (fromSet ++ fromNames ++ localFromNames).map(canonicalOwner).distinct
+  }
+
+  private def expectedType(vd: ValDef)(using Context): Type =
+    if typeMentionsRiftCapture(vd.tpt.tpe) then vd.tpt.tpe else vd.tpe
+
+  private def markInferredAllocation(
+      expected: Type,
+      rhs: Tree,
+      owner: Symbol,
+      target: Symbol
+  )(using Context): Unit =
+    directReturnedNewApplies(rhs).foreach { app =>
+      val owners =
+        captureOwnerSymbols(expected, owner)
+          .distinct
+          .filter(isRiftInferredAllocationOwnerSymbol)
+      owners match {
+        case owner :: Nil =>
+          markDirectConstructOwner(
+            app,
+            owner,
+            "direct new or branch-returned new expected type is captured by a checked region"
+          )
+          markRegionOwner(
+            target,
+            owner,
+            "direct new or branch-returned new expected type is captured by a checked region",
+            app.srcPos
+          )
+          markNestedClosureOwnerConstrainedAllocations(
+            owner,
+            rhs,
+            "nested direct closure value is constrained by a captured expected type",
+            "nested local closure value is constrained by a captured expected type",
+            "nested closure body return is constrained by a captured expected type",
+            "conflicting inferred nested expected-type local closure owners"
+          )
+        case first :: second :: _ =>
+          markRejected(
+            target,
+            s"ambiguous captured expected type owners: ${first.name} and ${second.name}",
+            app.srcPos
+          )
+        case _ => ()
+      }
+    }
+
+  private def markInferredClosureAllocation(
+      expected: Type,
+      rhs: Tree,
+      owner: Symbol,
+      target: Symbol
+  )(using Context): Unit =
+    directReturnedClosures(rhs).foreach { closure =>
+      val owners =
+        (captureOwnerSymbols(expected, owner) ++
+          closure.env.flatMap(env => captureOwnerSymbols(env.tpe, owner)))
+          .distinct
+          .filter(isRiftInferredAllocationOwnerSymbol)
+      owners match {
+        case owner :: Nil =>
+          closure.putAttachment(
+            NirDefinitions.InferredRiftAllocationOwner,
+            owner
+          )
+          markRegionOwner(
+            target,
+            owner,
+            "closure expected type is captured by a checked region",
+            closure.srcPos
+          )
+          markClosureBodyOwner(
+            closure,
+            owner,
+            "closure body return is constrained by a captured checked region owner"
+          )
+        case first :: second :: _ =>
+          markRejected(
+            target,
+            s"ambiguous captured closure owners: ${first.name} and ${second.name}",
+            closure.srcPos
+          )
+        case Nil => ()
+      }
+    }
+
+  private def markInferredReturnAllocation(dd: DefDef)(using Context): Unit = {
+    val expectedTypes =
+      List(dd.tpt.tpe, dd.tpe, dd.symbol.info.finalResultType)
+        .filter(typeMentionsRiftCapture)
+    val methodRegionParams = dd.symbol.paramSymss.flatten.toSet
+    val apps = directReturnedNewApplies(dd.rhs)
+    if apps.nonEmpty then {
+      val capturedOwners = expectedTypes
+        .flatMap { expected =>
+          captureOwnerSymbols(expected, dd.symbol) ++
+            captureOwnerSymbols(expected, dd.symbol.owner) ++
+            captureOwnerSymbols(expected, ctx.owner)
+        }
+        .distinct
+        .filter(isRiftInferredAllocationOwnerSymbol)
+      val owners = capturedOwners.filter(methodRegionParams.contains)
+      apps.foreach { app =>
+        owners match {
+          case owner :: Nil =>
+            markDirectConstructOwner(
+              app,
+              owner,
+              "direct new method result type is captured by a checked region"
+            )
+            RiftRegionInference.inferredMethodReturnOwners.update(
+              dd.symbol,
+              owner
+            )
+            updateDecision(
+              dd.symbol,
+              RiftRegionInference.AllocationOwner.Region(owner),
+              "direct new method result type is captured by a checked region",
+              app.srcPos
+            )
+            markNestedClosureOwnerConstrainedAllocations(
+              owner,
+              dd.rhs,
+              "nested direct closure method result is captured by a checked region",
+              "nested local closure method result is captured by a checked region",
+              "nested closure method result body return is constrained by a captured checked region owner",
+              "conflicting inferred nested method-result local closure owners"
+            )
+          case first :: second :: _ =>
+            updateDecision(
+              dd.symbol,
+              RiftRegionInference.AllocationOwner.Rejected,
+              s"ambiguous captured method result owners: ${first.name} and ${second.name}",
+              app.srcPos
+            )
+          case _ => ()
+        }
+      }
+      val firstApp = apps.head
+      if owners.isEmpty && capturedOwners.nonEmpty then
+        updateDecision(
+          dd.symbol,
+          RiftRegionInference.AllocationOwner.Heap,
+          "captured method result owner is not a method parameter with a runtime handle",
+          firstApp.srcPos
+        )
+    }
+  }
+
+  private def capturedMethodResultOwners(
+      dd: DefDef,
+      expectedTypes: List[Type]
+  )(using Context): (List[Symbol], List[Symbol]) = {
+    val methodRegionParams = dd.symbol.paramSymss.flatten.toSet
+    val capturedOwners =
+      expectedTypes
+        .flatMap { expected =>
+          captureOwnerSymbols(expected, dd.symbol) ++
+            captureOwnerSymbols(expected, dd.symbol.owner) ++
+            captureOwnerSymbols(expected, ctx.owner)
+        }
+        .map(canonicalOwner)
+        .distinct
+        .filter(isRiftInferredAllocationOwnerSymbol)
+    capturedOwners -> capturedOwners.filter(methodRegionParams.contains)
+  }
+
+  private def markInferredReturnClosureAllocation(
+      dd: DefDef
+  )(using Context): Unit = {
+    val closures = directReturnedClosures(dd.rhs)
+    if closures.nonEmpty then {
+      val methodExpectedTypes =
+        List(dd.tpt.tpe, dd.tpe, dd.symbol.info.finalResultType)
+      closures.foreach { closure =>
+        val expectedTypes =
+          methodExpectedTypes :+ closure.tpe
+        val (capturedOwners, owners) =
+          capturedMethodResultOwners(dd, expectedTypes)
+        owners match {
+          case owner :: Nil =>
+            closure.putAttachment(
+              NirDefinitions.InferredRiftAllocationOwner,
+              owner
+            )
+            RiftRegionInference.inferredMethodReturnOwners.update(
+              dd.symbol,
+              owner
+            )
+            updateDecision(
+              dd.symbol,
+              RiftRegionInference.AllocationOwner.Region(owner),
+              "closure method result type is captured by a checked region",
+              closure.srcPos
+            )
+            markClosureBodyOwner(
+              closure,
+              owner,
+              "method-returned closure body return is constrained by a captured checked region owner"
+            )
+          case first :: second :: _ =>
+            updateDecision(
+              dd.symbol,
+              RiftRegionInference.AllocationOwner.Rejected,
+              s"ambiguous captured closure method result owners: ${first.name} and ${second.name}",
+              closure.srcPos
+            )
+          case _ =>
+            if capturedOwners.nonEmpty then
+              updateDecision(
+                dd.symbol,
+                RiftRegionInference.AllocationOwner.Heap,
+                "captured closure method result owner is not a method parameter with a runtime handle",
+                closure.srcPos
+              )
+        }
+      }
+    }
+  }
+
+  private def markMethodLocalReturnConstrainedAllocation(
+      dd: DefDef
+  )(using Context): Unit = {
+    val expectedTypes =
+      List(dd.tpt.tpe, dd.tpe, dd.symbol.info.finalResultType)
+        .filter(typeMentionsRiftCapture)
+    val methodRegionParams = dd.symbol.paramSymss.flatten.toSet
+    returnedLocalIdents(dd.rhs).foreach { target =>
+      val allocationTargets = localAllocationTargets(target).distinct
+      val capturedOwners =
+        expectedTypes
+          .flatMap { expected =>
+            captureOwnerSymbols(expected, dd.symbol) ++
+              captureOwnerSymbols(expected, dd.symbol.owner) ++
+              captureOwnerSymbols(expected, ctx.owner)
+          }
+          .distinct
+          .filter(isRiftInferredAllocationOwnerSymbol)
+      val owners = capturedOwners.filter(methodRegionParams.contains)
+      val existingOwner =
+        RiftRegionInference.inferredAllocationOwners
+          .get(target)
+          .map(canonicalOwner)
+      val existingAllocationOwners =
+        allocationTargets.flatMap { allocationTarget =>
+          RiftRegionInference.inferredAllocationOwners
+            .get(allocationTarget)
+            .map(canonicalOwner)
+        }.distinct
+      if allocationTargets.nonEmpty || existingOwner.nonEmpty then
+        owners match {
+          case owner :: Nil =>
+            val canonical = canonicalOwner(owner)
+            val conflicting =
+              (existingOwner.toList ++ existingAllocationOwners)
+                .find(_ != canonical)
+            conflicting match {
+              case Some(previous) =>
+                val rejectedTargets =
+                  if allocationTargets.nonEmpty then target :: allocationTargets
+                  else target :: Nil
+                rejectedTargets.distinct.foreach { rejectedTarget =>
+                  markRejected(
+                    rejectedTarget,
+                    s"conflicting inferred method-local owners: ${previous.name} and ${canonical.name}",
+                    dd.rhs.srcPos
+                  )
+                }
+              case None =>
+                markSelectedAliasOwner(
+                  target,
+                  allocationTargets,
+                  canonical,
+                  "selected local allocation alias is returned from a method with a captured region result",
+                  dd.rhs.srcPos
+                )
+                allocationTargets.foreach { allocationTarget =>
+                  markLocalRegionConstructOwner(
+                    allocationTarget,
+                    canonical,
+                    "local direct new or selected allocation is returned from a method with a captured region result",
+                    dd.rhs.srcPos
+                  )
+                }
+                RiftRegionInference.inferredMethodReturnOwners.update(
+                  dd.symbol,
+                  canonical
+                )
+                updateDecision(
+                  dd.symbol,
+                  RiftRegionInference.AllocationOwner.Region(canonical),
+                  "method returns local region allocation captured by a checked region",
+                  dd.rhs.srcPos
+                )
+            }
+          case first :: second :: _ =>
+            val rejectedTargets =
+              if allocationTargets.nonEmpty then target :: allocationTargets
+              else target :: Nil
+            rejectedTargets.distinct.foreach { rejectedTarget =>
+              markRejected(
+                rejectedTarget,
+                s"ambiguous captured method result owners: ${first.name} and ${second.name}",
+                dd.rhs.srcPos
+              )
+            }
+          case _ =>
+            if capturedOwners.nonEmpty then
+              updateDecision(
+                dd.symbol,
+                RiftRegionInference.AllocationOwner.Heap,
+                "captured method result owner is not a method parameter with a runtime handle",
+                dd.rhs.srcPos
+              )
+        }
+    }
+  }
+
+  private def markMethodLocalReturnConstrainedClosure(
+      dd: DefDef
+  )(using Context): Unit = {
+    val returnedClosures =
+      returnedLocalIdents(dd.rhs).flatMap { target =>
+        localClosureAllocationPairs(target)
+      }
+    if returnedClosures.nonEmpty then {
+      val methodExpectedTypes =
+        List(dd.tpt.tpe, dd.tpe, dd.symbol.info.finalResultType)
+      returnedClosures.foreach { (target, closure) =>
+        val expectedTypes = methodExpectedTypes :+ closure.tpe
+        val (capturedOwners, owners) =
+          capturedMethodResultOwners(dd, expectedTypes)
+        owners match {
+          case owner :: Nil =>
+            val canonical = canonicalOwner(owner)
+            val existingOwner =
+              RiftRegionInference.inferredAllocationOwners
+                .get(target)
+                .map(canonicalOwner)
+            existingOwner match {
+              case Some(previous) if previous != canonical =>
+                markRejected(
+                  target,
+                  s"conflicting inferred local closure owners: ${previous.name} and ${canonical.name}",
+                  dd.rhs.srcPos
+                )
+              case _ =>
+                closure.putAttachment(
+                  NirDefinitions.InferredRiftAllocationOwner,
+                  canonical
+                )
+                markRegionOwner(
+                  target,
+                  canonical,
+                  "local closure is returned from a method with a captured region result",
+                  dd.rhs.srcPos
+                )
+                RiftRegionInference.inferredMethodReturnOwners.update(
+                  dd.symbol,
+                  canonical
+                )
+                updateDecision(
+                  dd.symbol,
+                  RiftRegionInference.AllocationOwner.Region(canonical),
+                  "method returns local closure captured by a checked region",
+                  dd.rhs.srcPos
+                )
+                markClosureBodyOwner(
+                  closure,
+                  canonical,
+                  "method-returned local closure body return is constrained by a captured checked region owner"
+                )
+            }
+          case first :: second :: _ =>
+            markRejected(
+              target,
+              s"ambiguous captured local closure method result owners: ${first.name} and ${second.name}",
+              dd.rhs.srcPos
+            )
+            updateDecision(
+              dd.symbol,
+              RiftRegionInference.AllocationOwner.Rejected,
+              s"ambiguous captured local closure method result owners: ${first.name} and ${second.name}",
+              dd.rhs.srcPos
+            )
+          case _ =>
+            if capturedOwners.nonEmpty then {
+              updateDecision(
+                target,
+                RiftRegionInference.AllocationOwner.Heap,
+                "captured local closure method result owner is not a method parameter with a runtime handle",
+                dd.rhs.srcPos
+              )
+              updateDecision(
+                dd.symbol,
+                RiftRegionInference.AllocationOwner.Heap,
+                "captured local closure method result owner is not a method parameter with a runtime handle",
+                dd.rhs.srcPos
+              )
+            }
+        }
+      }
+    }
+  }
+
+  private def markClosureBodyReturnConstrainedAllocation(
+      dd: DefDef
+  )(using Context): Unit =
+    RiftRegionInference.inferredClosureBodyOwners
+      .get(dd.symbol)
+      .orElse(RiftRegionInference.inferredClosureValueOwners.get(dd.symbol))
+      .foreach {
+      owner =>
+        val canonical = canonicalOwner(owner)
+        directReturnedNewApplies(dd.rhs).foreach { app =>
+          markDirectConstructOwner(
+            app,
+            canonical,
+            "direct closure-body result is captured by a checked region owner"
+          )
+        }
+        markNestedClosureOwnerConstrainedAllocations(
+          canonical,
+          dd.rhs,
+          "nested direct closure-body closure result is captured by a checked region owner",
+          "nested local closure-body closure result is captured by a checked region owner",
+          "nested closure-body closure return is constrained by a checked region owner",
+          "conflicting inferred nested closure-body local closure owners"
+        )
+        markNestedClosureAliasesInRegionConstruct(
+          canonical,
+          dd.rhs,
+          "nested selected closure-body alias is constrained by a checked region owner",
+          "nested selected local closure-body closure result is captured by a checked region owner",
+          "nested selected closure-body closure return is constrained by a checked region owner",
+          "conflicting inferred nested selected closure-body local closure owners"
+        )
+        returnedLocalIdents(dd.rhs).foreach { target =>
+          val allocationTargets = localAllocationTargets(target).distinct
+          val existingOwner =
+            RiftRegionInference.inferredAllocationOwners
+              .get(target)
+              .map(canonicalOwner)
+          val existingAllocationOwners =
+            allocationTargets.flatMap { allocationTarget =>
+              RiftRegionInference.inferredAllocationOwners
+                .get(allocationTarget)
+                .map(canonicalOwner)
+            }.distinct
+          if allocationTargets.nonEmpty || existingOwner.nonEmpty
+          then
+            val conflicting =
+              (existingOwner.toList ++ existingAllocationOwners)
+                .find(_ != canonical)
+            conflicting match {
+              case Some(previous) =>
+                val rejectedTargets =
+                  if allocationTargets.nonEmpty then target :: allocationTargets
+                  else target :: Nil
+                rejectedTargets.distinct.foreach { rejectedTarget =>
+                  markRejected(
+                    rejectedTarget,
+                    s"conflicting inferred closure-body owners: ${previous.name} and ${canonical.name}",
+                    dd.rhs.srcPos
+                  )
+                }
+              case None =>
+                markSelectedAliasOwner(
+                  target,
+                  allocationTargets,
+                  canonical,
+                  "selected local allocation alias is returned from a closure body captured by a checked region",
+                  dd.rhs.srcPos
+                )
+                allocationTargets.foreach { allocationTarget =>
+                  markLocalRegionConstructOwner(
+                    allocationTarget,
+                    canonical,
+                    "local direct new or selected allocation is returned from a closure body captured by a checked region",
+                    dd.rhs.srcPos
+                  )
+                }
+                updateDecision(
+                  dd.symbol,
+                  RiftRegionInference.AllocationOwner.Region(canonical),
+                  "closure body returns a local region allocation captured by a checked region",
+                  dd.rhs.srcPos
+                )
+            }
+        }
+    }
+
+  private def markClosureBodyReturnConstrainedClosure(
+      dd: DefDef
+  )(using Context): Unit =
+    RiftRegionInference.inferredClosureBodyOwners
+      .get(dd.symbol)
+      .orElse(RiftRegionInference.inferredClosureValueOwners.get(dd.symbol))
+      .foreach {
+      owner =>
+        val canonical = canonicalOwner(owner)
+        directReturnedClosures(dd.rhs).foreach { closure =>
+          markDirectClosureRegionOwner(
+            closure,
+            canonical,
+            "direct closure-body closure result is captured by a checked region owner",
+            "nested closure-body return is constrained by a checked region owner"
+          )
+          updateDecision(
+            dd.symbol,
+            RiftRegionInference.AllocationOwner.Region(canonical),
+            "closure body returns a closure captured by a checked region",
+            closure.srcPos
+          )
+        }
+        returnedLocalIdents(dd.rhs)
+          .flatMap(localClosureAllocationPairs)
+          .distinct
+          .foreach { (target, closure) =>
+            markLocalClosureRegionOwner(
+              target,
+              closure,
+              canonical,
+              "local closure is returned from a closure body captured by a checked region",
+              "nested local closure-body return is constrained by a checked region owner",
+              "conflicting inferred closure-body local closure owners",
+              dd.rhs.srcPos
+            )
+            updateDecision(
+              dd.symbol,
+              RiftRegionInference.AllocationOwner.Region(canonical),
+              "closure body returns a local closure captured by a checked region",
+              dd.rhs.srcPos
+            )
+          }
+    }
+
+  private def markEarlyClosureBodyReturnConstrainedClosure(
+      dd: DefDef
+  )(using Context): Unit =
+    RiftRegionInference.inferredClosureBodyOwners
+      .get(dd.symbol)
+      .orElse(RiftRegionInference.inferredClosureValueOwners.get(dd.symbol))
+      .foreach {
+      owner =>
+        val canonical = canonicalOwner(owner)
+        directReturnedClosures(dd.rhs).foreach { closure =>
+          markDirectClosureRegionOwner(
+            closure,
+            canonical,
+            "direct closure-body closure result is captured by a checked region owner",
+            "nested closure-body return is constrained by a checked region owner"
+          )
+          updateDecision(
+            dd.symbol,
+            RiftRegionInference.AllocationOwner.Region(canonical),
+            "closure body returns a closure captured by a checked region",
+            closure.srcPos
+          )
+        }
+        val localClosures = directLocalClosureValDefs(dd.rhs)
+        returnedLocalIdents(dd.rhs).distinct.foreach { target =>
+          localClosures.get(target).foreach { closure =>
+            markLocalClosureRegionOwner(
+              target,
+              closure,
+              canonical,
+              "local closure is returned from a closure body captured by a checked region",
+              "nested local closure-body return is constrained by a checked region owner",
+              "conflicting inferred closure-body local closure owners",
+              dd.rhs.srcPos
+            )
+            updateDecision(
+              dd.symbol,
+              RiftRegionInference.AllocationOwner.Region(canonical),
+              "closure body returns a local closure captured by a checked region",
+              dd.rhs.srcPos
+            )
+          }
+        }
+    }
+
+  private def markForwardedInferredMethodReturn(dd: DefDef)(using Context): Unit = {
+    val calls = directReturnedInferredMethodCalls(dd.rhs)
+    val localForwardOwners =
+      returnedLocalIdents(dd.rhs)
+        .flatMap(RiftRegionInference.inferredMethodReturnLocalOwners.get)
+        .distinct
+    if calls.nonEmpty || localForwardOwners.nonEmpty then {
+      val expectedTypes =
+        List(dd.tpt.tpe, dd.tpe, dd.symbol.info.finalResultType)
+          .filter(typeMentionsRiftCapture)
+      val methodRegionParams = dd.symbol.paramSymss.flatten.toSet
+      val capturedOwners =
+        expectedTypes
+          .flatMap { expected =>
+            captureOwnerSymbols(expected, dd.symbol) ++
+              captureOwnerSymbols(expected, dd.symbol.owner) ++
+              captureOwnerSymbols(expected, ctx.owner)
+          }
+          .distinct
+          .filter(isRiftInferredAllocationOwnerSymbol)
+      val owners = capturedOwners.filter(methodRegionParams.contains)
+      owners match {
+        case owner :: Nil =>
+          RiftRegionInference.inferredMethodReturnOwners.update(
+            dd.symbol,
+            owner
+          )
+          updateDecision(
+            dd.symbol,
+            RiftRegionInference.AllocationOwner.Region(owner),
+            "method forwards an inferred region-returning method result",
+            calls.headOption.map(_.srcPos).getOrElse(dd.rhs.srcPos)
+          )
+        case first :: second :: _ =>
+          updateDecision(
+            dd.symbol,
+            RiftRegionInference.AllocationOwner.Rejected,
+            s"ambiguous captured forwarded method result owners: ${first.name} and ${second.name}",
+            calls.headOption.map(_.srcPos).getOrElse(dd.rhs.srcPos)
+          )
+        case _ =>
+          if capturedOwners.nonEmpty then
+            updateDecision(
+              dd.symbol,
+              RiftRegionInference.AllocationOwner.Heap,
+              "captured forwarded method result owner is not a method parameter with a runtime handle",
+              calls.headOption.map(_.srcPos).getOrElse(dd.rhs.srcPos)
+            )
+      }
+    }
+  }
+
+  private def markCapturedMethodParams(dd: DefDef)(using Context): Unit = {
+    val methodRegionParams =
+      dd.symbol.paramSymss.flatten.filterNot(_.isType).toSet
+    dd.symbol.paramSymss.flatten
+      .filterNot(_.isType)
+      .filterNot(isRiftInferredAllocationOwnerSymbol)
+      .foreach { param =>
+        if typeMentionsRiftCapture(param.info) then {
+          val owners =
+            (captureOwnerSymbols(param.info, dd.symbol) ++
+              captureOwnerSymbols(param.info, dd.symbol.owner) ++
+              captureOwnerSymbols(param.info, ctx.owner))
+              .map(canonicalOwner)
+              .distinct
+              .filter(isRiftInferredAllocationOwnerSymbol)
+              .filter(methodRegionParams.contains)
+          owners match {
+            case owner :: Nil =>
+              markRegionOwner(
+                param,
+                owner,
+                "method parameter value is captured by a checked region",
+                dd.srcPos
+              )
+            case first :: second :: _ =>
+              updateDecision(
+                param,
+                RiftRegionInference.AllocationOwner.Rejected,
+                s"ambiguous captured method parameter owners: ${first.name} and ${second.name}",
+                dd.srcPos
+              )
+            case Nil => ()
+          }
+        }
+      }
+  }
+
+  override def transformDefDef(dd: DefDef)(using Context): Tree = {
+    dd.symbol.paramSymss.flatten.foreach { param =>
+      if isRiftInferredAllocationOwnerSymbol(param) ||
+        isRiftFrameworkOwnerTokenSymbol(param)
+      then
+        registerLocalCaptureOwner(param)
+    }
+    markCapturedMethodParams(dd)
+    markInferredReturnAllocation(dd)
+    markInferredReturnClosureAllocation(dd)
+    markEarlyClosureBodyReturnConstrainedClosure(dd)
+    val transformed = super.transformDefDef(dd)
+    transformed match {
+      case result: DefDef =>
+        markClosureBodyReturnConstrainedAllocation(result)
+        markClosureBodyReturnConstrainedClosure(result)
+        markMethodLocalReturnConstrainedAllocation(result)
+        markMethodLocalReturnConstrainedClosure(result)
+        markForwardedInferredMethodReturn(result)
+      case _ => ()
+    }
+    transformed
+  }
+
+  override def transformValDef(vd: ValDef)(using Context): Tree = {
+    def rememberArrayElementOwner(owner: Symbol): Unit = {
+      val canonical = canonicalOwner(owner)
+      localArrayElementOwnerSyms.update(vd.symbol, canonical)
+      RiftRegionInference.inferredArrayElementOwners.update(vd.symbol, canonical)
+    }
+
+    def forgetArrayElementOwner(): Unit = {
+      localArrayElementOwnerSyms.remove(vd.symbol)
+      RiftRegionInference.inferredArrayElementOwners.remove(vd.symbol)
+    }
+
+    def directApply(tree: Tree): Option[Apply] =
+      tree match {
+        case app: Apply                                    => Some(app)
+        case Typed(expr, _)                                => directApply(expr)
+        case Inlined(_, _, expr)                           => directApply(expr)
+        case Block(_, expr)                                => directApply(expr)
+        case TypeApply(Select(expr, nme.asInstanceOf_), _) => directApply(expr)
+        case _                                             => None
+      }
+
+    if !vd.symbol.is(Mutable) then
+      directLocalIdent(vd.rhs).foreach { target =>
+        if isRiftInferredAllocationOwnerSymbol(target) then {
+          childRegionOwnerSyms += vd.symbol
+          localOwnerAliases.update(vd.symbol, canonicalOwner(target))
+          registerLocalCaptureOwner(vd.symbol)
+          updateDecision(
+            vd.symbol,
+            RiftRegionInference.AllocationOwner.Region(canonicalOwner(target)),
+            "local checked region owner alias",
+            vd.rhs.srcPos
+          )
+        } else if target.is(Mutable) &&
+          (isRiftInferredAllocationOwnerType(target.info) ||
+            isRiftStreamingRegionType(target.info))
+        then
+          markRejected(
+            vd.symbol,
+            "mutable checked region owner aliases are not inferred flow-sensitively yet",
+            vd.rhs.srcPos
+          )
+      }
+      directApply(vd.rhs).foreach { app =>
+        checkedBufferGetOwnerAndValueType(app, calledSymbol(app)).foreach {
+          (ownerSym, valueType) =>
+            val owner = canonicalOwner(ownerSym)
+            markRegionOwner(
+              vd.symbol,
+              owner,
+              "local checked buffer get result is owned by checked buffer owner",
+              vd.rhs.srcPos
+            )
+            capturedArrayElementOwnersFromTypes(
+              valueType :: expectedType(vd) :: Nil
+            ) match {
+              case elementOwner :: Nil =>
+                rememberArrayElementOwner(elementOwner)
+              case _ =>
+                forgetArrayElementOwner()
+            }
+        }
+        checkedPriorityQueueResultOwnerAndValueType(
+          app,
+          calledSymbol(app)
+        ).foreach { (ownerSym, valueType) =>
+          val owner = canonicalOwner(ownerSym)
+          markRegionOwner(
+            vd.symbol,
+            owner,
+            "local checked priority queue result is owned by checked queue owner",
+            vd.rhs.srcPos
+          )
+          capturedArrayElementOwnersFromTypes(
+            valueType :: expectedType(vd) :: Nil
+          ) match {
+            case elementOwner :: Nil =>
+              rememberArrayElementOwner(elementOwner)
+            case _ =>
+              forgetArrayElementOwner()
+          }
+        }
+        checkedStreamRankResultOwnerAndValueType(
+          app,
+          calledSymbol(app)
+        ).foreach { (ownerSym, valueType) =>
+          val owner = canonicalOwner(ownerSym)
+          markRegionOwner(
+            vd.symbol,
+            owner,
+            "local checked stream rank result is owned by checked stream owner",
+            vd.rhs.srcPos
+          )
+          val elementOwners =
+            (
+              capturedArrayElementOwnersFromTypes(
+                valueType :: expectedType(vd) :: Nil,
+                allowFrameworkOwnerToken = true
+              ) ++ checkedStreamRankResultArrayElementOwners(app)
+            ).map(canonicalOwner).distinct
+          elementOwners match {
+            case elementOwner :: Nil =>
+              rememberArrayElementOwner(elementOwner)
+            case _ =>
+              forgetArrayElementOwner()
+          }
+        }
+      }
+      childRegionFactoryApply(vd.rhs).foreach { app =>
+        childRegionOwnerSyms += vd.symbol
+        registerLocalCaptureOwner(vd.symbol)
+        updateDecision(
+          vd.symbol,
+          RiftRegionInference.AllocationOwner.Region(vd.symbol),
+          "local child-region handle returned by a checked page/window/bucket owner",
+          app.srcPos
+        )
+      }
+    directRegionConstructApply(vd.rhs) match {
+      case Some(app) if vd.symbol.is(Mutable) =>
+        localRegionConstructAllocatedApps.remove(vd.symbol)
+        markRejected(
+          vd.symbol,
+          "mutable local direct allocation is not inferred flow-sensitively yet",
+          vd.rhs.srcPos
+        )
+      case Some(app) =>
+        directlyNewAllocatedSyms += vd.symbol
+        localRegionConstructAllocatedApps.update(vd.symbol, app :: Nil)
+        updateDecision(
+          vd.symbol,
+          RiftRegionInference.AllocationOwner.Unknown,
+          "direct new local has no checked region owner constraint yet",
+          vd.rhs.srcPos
+        )
+      case None =>
+        localRegionConstructAllocatedApps.remove(vd.symbol)
+    }
+    if vd.symbol.is(Mutable) then localNestedClosureAllocatedSyms.remove(vd.symbol)
+    else {
+      val nestedClosurePairs = nestedClosureAllocations(vd.rhs).distinct
+      nestedClosurePairs match {
+        case _ :: _ =>
+          localNestedClosureAllocatedSyms.update(vd.symbol, nestedClosurePairs)
+        case Nil =>
+          localNestedClosureAllocatedSyms.remove(vd.symbol)
+      }
+    }
+    if vd.symbol.is(Mutable) then localAllocatedSyms.remove(vd.symbol)
+    else {
+      val selectedLocalAllocations =
+        returnedLocalIdents(vd.rhs).flatMap(localAllocationTargets).distinct
+      selectedLocalAllocations match {
+        case _ :: _ =>
+          localAllocatedSyms.update(vd.symbol, selectedLocalAllocations)
+          updateDecision(
+            vd.symbol,
+            RiftRegionInference.AllocationOwner.Unknown,
+            "immutable local alias selects existing direct allocation locals",
+            vd.rhs.srcPos
+          )
+        case Nil =>
+          localAllocatedSyms.remove(vd.symbol)
+      }
+    }
+    val forwardedOwners =
+      if vd.symbol.is(Mutable) then Nil
+      else
+        directReturnedInferredMethodCalls(vd.rhs)
+          .flatMap(app =>
+            RiftRegionInference.inferredMethodReturnOwners.get(
+              calledSymbol(app)
+            )
+          )
+          .distinct
+    forwardedOwners match {
+      case owner :: Nil =>
+        RiftRegionInference.inferredMethodReturnLocalOwners.update(
+          vd.symbol,
+          owner
+        )
+      case _ =>
+        RiftRegionInference.inferredMethodReturnLocalOwners.remove(vd.symbol)
+    }
+    markInferredAllocation(expectedType(vd), vd.rhs, ctx.owner, vd.symbol)
+    markLocalExpectedTypeConstrainedAllocation(
+      expectedType(vd),
+      vd.rhs,
+      ctx.owner,
+      "local direct new flows into a captured expected type"
+    )
+    if vd.symbol.is(Mutable) then
+      directClosure(vd.rhs).foreach { _ =>
+        directClosureAllocatedSyms.remove(vd.symbol)
+        localClosureAllocatedSyms.remove(vd.symbol)
+        markRejected(
+          vd.symbol,
+          "mutable local closure allocation is not inferred flow-sensitively yet",
+          vd.rhs.srcPos
+        )
+      }
+    else {
+      val directClosurePairs =
+        directReturnedClosures(vd.rhs).map(vd.symbol -> _)
+      val selectedLocalClosures =
+        returnedLocalIdents(vd.rhs).flatMap(localClosureAllocationPairs)
+      val closurePairs =
+        (directClosurePairs ++ selectedLocalClosures).distinct
+      directClosure(vd.rhs) match {
+        case Some(closure) =>
+          directClosureAllocatedSyms.update(vd.symbol, closure)
+        case None =>
+          directClosureAllocatedSyms.remove(vd.symbol)
+      }
+      closurePairs match {
+        case _ :: _ =>
+          localClosureAllocatedSyms.update(vd.symbol, closurePairs)
+        case Nil =>
+          localClosureAllocatedSyms.remove(vd.symbol)
+      }
+      markInferredClosureAllocation(
+        expectedType(vd),
+        vd.rhs,
+        ctx.owner,
+        vd.symbol
+      )
+    }
+    vd
+  }
+
+  override def transformAssign(assign: Assign)(using Context): Tree = {
+    directlyNewAllocatedSyms -= assign.lhs.symbol
+    localAllocatedSyms -= assign.lhs.symbol
+    localNestedClosureAllocatedSyms -= assign.lhs.symbol
+    directClosureAllocatedSyms -= assign.lhs.symbol
+    localClosureAllocatedSyms -= assign.lhs.symbol
+    markInferredAllocation(
+      assign.lhs.tpe,
+      assign.rhs,
+      ctx.owner,
+      assign.lhs.symbol
+    )
+    markLocalExpectedTypeConstrainedAllocation(
+      assign.lhs.tpe,
+      assign.rhs,
+      ctx.owner,
+      "local direct new is assigned into a captured location"
+    )
+    assign
+  }
+
+  override def transformApply(app: Apply)(using Context): Tree = {
+    val sym = calledSymbol(app)
+    if !sym.isClassConstructor then {
+      val pairs = fullMethodArgumentPairs(app, sym)
+      val ownerSubstitutions = methodOwnerSubstitutions(pairs)
+      pairs.foreach { (param, value) =>
+        markMethodArgumentExpectedTypeConstrainedAllocation(
+          param.info,
+          value,
+          sym,
+          ownerSubstitutions
+        )
+      }
+    }
+    app match {
+      case Apply(Select(array, name), _ :: value :: Nil)
+          if name.toString == "update" =>
+        markArrayElementStoreConstrainedAllocation(array, value)
+      case _ => ()
+    }
+    if isRiftRegionListPrepend(sym) && app.args.length >= 2 then
+      markLocalOwnerConstrainedAllocation(
+        app.args.head,
+        app.args.last,
+        "local direct new is constrained by checked RegionList prepend owner"
+      )
+    else
+      checkedBufferAppendOwnerAndValue(app, sym).foreach { (owner, value) =>
+        markLocalOwnerConstrainedAllocation(
+          owner,
+          value,
+          "local direct new is constrained by checked buffer append owner"
+        )
+      }
+    checkedPriorityQueueOwnerAndValues(app, sym).foreach { (owner, values) =>
+      values.foreach { value =>
+        markLocalOwnerConstrainedAllocation(
+          owner,
+          value,
+          "local direct new is constrained by checked priority queue owner"
+        )
+      }
+    }
+    checkedStreamRankOwnerAndValues(app, sym).foreach { (owner, values) =>
+      rememberCheckedStreamRankArrayElementOwner(app, owner, values)
+      values.foreach { value =>
+        markSelectedLocalOwnerConstrainedAllocation(
+          owner,
+          value,
+          "selected local allocation alias is constrained by checked stream rank owner",
+          allowFrameworkOwnerToken = true
+        )
+      }
+    }
+    app
+  }
+}

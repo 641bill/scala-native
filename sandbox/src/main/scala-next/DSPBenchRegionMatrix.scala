@@ -607,23 +607,57 @@ object DSPBenchRegionMatrixHelpers {
     }
   }
 
-  private def parseSensor(
+  private final class ParsedKeyValue {
+    var key: Int = -1
+    var value: Int = 0
+    var hash: Long = 0L
+  }
+
+  private final class ParsedCommonLog {
+    var statusBucket: Int = -1
+    var minuteBucket: Int = 0
+    var byteSize: Int = 0
+    var requestHash: Int = 0
+    var hash: Long = 0L
+  }
+
+  private def invalidate(out: ParsedKeyValue): Unit = {
+    out.key = -1
+    out.value = 0
+    out.hash = 0L
+  }
+
+  private def invalidate(out: ParsedCommonLog): Unit = {
+    out.statusBucket = -1
+    out.minuteBucket = 0
+    out.byteSize = 0
+    out.requestHash = 0
+    out.hash = 0L
+  }
+
+  private def parseSensorInto(
       bytes: Array[Byte],
-      length: Int
-  ): (Int, Int, Long) = {
+      length: Int,
+      out: ParsedKeyValue
+  ): Unit = {
     val deviceStart = fieldStart(bytes, length, 3)
     val valueStart = fieldStart(bytes, length, 4)
-    if (deviceStart < 0 || valueStart < 0) return (-1, 0, 0L)
+    if (deviceStart < 0 || valueStart < 0) {
+      invalidate(out)
+      return
+    }
     val rawDevice = parseIntAt(bytes, length, deviceStart)
     val value = parseScaledAt(bytes, length, valueStart)
-    if (rawDevice == Int.MinValue || value == Int.MinValue) (-1, 0, 0L)
+    if (rawDevice == Int.MinValue || value == Int.MinValue) invalidate(out)
     else {
       val device =
         BenchmarkInputSupport.positiveModulo(rawDevice, DSPBenchRegionConfig.deviceBuckets)
       val hash = BenchmarkInputSupport.stableHash(bytes, 0, length).toLong ^
         (device.toLong * 1099511628211L) ^
         (value.toLong * 1315423911L)
-      (device, value, hash)
+      out.key = device
+      out.value = value
+      out.hash = hash
     }
   }
 
@@ -660,12 +694,16 @@ object DSPBenchRegionMatrixHelpers {
     }
   }
 
-  private def parseFraud(
+  private def parseFraudInto(
       bytes: Array[Byte],
-      length: Int
-  ): (Int, Int, Long) = {
+      length: Int,
+      out: ParsedKeyValue
+  ): Unit = {
     val firstComma = csvComma(bytes, length, 0)
-    if (firstComma <= 0) return (-1, 0, 0L)
+    if (firstComma <= 0) {
+      invalidate(out)
+      return
+    }
     val secondComma = csvComma(bytes, length, firstComma + 1)
     val entityEnd = firstComma
     val stateStart = if (secondComma > firstComma) secondComma + 1 else firstComma + 1
@@ -687,7 +725,9 @@ object DSPBenchRegionMatrixHelpers {
     val recordHash = BenchmarkInputSupport.stableHash(bytes, 0, length).toLong ^
       (entity.toLong * 1099511628211L) ^
       (state.toLong * 1315423911L)
-    (entity, state, recordHash)
+    out.key = entity
+    out.value = state
+    out.hash = recordHash
   }
 
   private def indexOf(
@@ -704,31 +744,56 @@ object DSPBenchRegionMatrixHelpers {
     -1
   }
 
-  private def parseCommonLog(
+  private def parseCommonLogInto(
       bytes: Array[Byte],
-      length: Int
-  ): (Int, Int, Int, Int, Long) = {
+      length: Int,
+      out: ParsedCommonLog
+  ): Unit = {
     val ipEnd = indexOf(bytes, length, 0, ' '.toInt)
-    if (ipEnd <= 0) return (-1, 0, 0, 0, 0L)
+    if (ipEnd <= 0) {
+      invalidate(out)
+      return
+    }
 
     val openBracket = indexOf(bytes, length, ipEnd + 1, '['.toInt)
-    if (openBracket < 0) return (-1, 0, 0, 0, 0L)
+    if (openBracket < 0) {
+      invalidate(out)
+      return
+    }
     val hourColon = indexOf(bytes, length, openBracket + 1, ':'.toInt)
-    if (hourColon < 0 || hourColon + 5 >= length) return (-1, 0, 0, 0, 0L)
+    if (hourColon < 0 || hourColon + 5 >= length) {
+      invalidate(out)
+      return
+    }
     val hour = parseIntUntil(bytes, length, hourColon + 1, ':'.toInt)
     val minuteColon = indexOf(bytes, length, hourColon + 1, ':'.toInt)
-    if (hour == Int.MinValue || minuteColon < 0) return (-1, 0, 0, 0, 0L)
+    if (hour == Int.MinValue || minuteColon < 0) {
+      invalidate(out)
+      return
+    }
     val minute = parseIntUntil(bytes, length, minuteColon + 1, ':'.toInt)
-    if (minute == Int.MinValue) return (-1, 0, 0, 0, 0L)
+    if (minute == Int.MinValue) {
+      invalidate(out)
+      return
+    }
 
     val quoteStart = indexOf(bytes, length, minuteColon + 1, '"'.toInt)
-    if (quoteStart < 0) return (-1, 0, 0, 0, 0L)
+    if (quoteStart < 0) {
+      invalidate(out)
+      return
+    }
     val quoteEnd = indexOf(bytes, length, quoteStart + 1, '"'.toInt)
-    if (quoteEnd < 0) return (-1, 0, 0, 0, 0L)
+    if (quoteEnd < 0) {
+      invalidate(out)
+      return
+    }
 
     var statusStart = skipWhitespace(bytes, length, quoteEnd + 1)
     val status = parseIntAt(bytes, length, statusStart)
-    if (status == Int.MinValue) return (-1, 0, 0, 0, 0L)
+    if (status == Int.MinValue) {
+      invalidate(out)
+      return
+    }
     val bytesStart = skipWhitespace(bytes, length, skipToken(bytes, length, statusStart))
     val byteSize =
       if (bytesStart >= length) 0
@@ -751,11 +816,17 @@ object DSPBenchRegionMatrixHelpers {
       (minuteBucket.toLong << 19) ^
       requestHash.toLong
 
-    (statusBucket, minuteBucket, byteSize, requestHash, recordHash)
+    out.statusBucket = statusBucket
+    out.minuteBucket = minuteBucket
+    out.byteSize = byteSize
+    out.requestHash = requestHash
+    out.hash = recordHash
   }
 
   private def countFileBackedRows(query: String): Int = {
     val cfg = DSPBenchRegionConfig
+    val parsed = new ParsedKeyValue
+    val parsedLog = new ParsedCommonLog
     var count = 0
     var pathIndex = 0
     while (pathIndex < cfg.inputPaths.length) {
@@ -764,14 +835,16 @@ object DSPBenchRegionMatrixHelpers {
         var length = reader.readLine()
         while (length >= 0) {
           if (length > 0) {
-            val parsed =
-              if (fraudQuery(query)) parseFraud(reader.bytes, length)
-              else if (logQuery(query)) {
-                val parsed = parseCommonLog(reader.bytes, length)
-                (parsed._1, parsed._2, parsed._5)
-              }
-              else parseSensor(reader.bytes, length)
-            if (parsed._1 >= 0) count += 1
+            if (fraudQuery(query)) {
+              parseFraudInto(reader.bytes, length, parsed)
+              if (parsed.key >= 0) count += 1
+            } else if (logQuery(query)) {
+              parseCommonLogInto(reader.bytes, length, parsedLog)
+              if (parsedLog.statusBucket >= 0) count += 1
+            } else {
+              parseSensorInto(reader.bytes, length, parsed)
+              if (parsed.key >= 0) count += 1
+            }
           }
           length = reader.readLine()
         }
@@ -797,6 +870,7 @@ object DSPBenchRegionMatrixHelpers {
 
   private def foreachFileBackedSensor(consumer: SensorConsumer^): Int = {
     val cfg = DSPBenchRegionConfig
+    val parsed = new ParsedKeyValue
     var index = 0
     while (index < cfg.events) {
       var advanced = false
@@ -807,9 +881,9 @@ object DSPBenchRegionMatrixHelpers {
           var length = reader.readLine()
           while (length >= 0 && index < cfg.events) {
             if (length > 0) {
-              val parsed = parseSensor(reader.bytes, length)
-              if (parsed._1 >= 0) {
-                consumer(index, parsed._1, parsed._2, parsed._3 ^ index.toLong)
+              parseSensorInto(reader.bytes, length, parsed)
+              if (parsed.key >= 0) {
+                consumer(index, parsed.key, parsed.value, parsed.hash ^ index.toLong)
                 index += 1
                 advanced = true
               }
@@ -852,8 +926,11 @@ object DSPBenchRegionMatrixHelpers {
     private val positions = new Array[Int](cfg.fraudEntityBuckets)
     private val history =
       new Array[Int](cfg.fraudEntityBuckets * cfg.fraudStateWindow)
+    private var latestScore = 0
+    private var latestAlert = false
+    private var latestExpected = 0
 
-    def update(entity: Int, stateCode: Int): (Int, Boolean, Int) = {
+    def update(entity: Int, stateCode: Int): Unit = {
       val expected =
         if (seen(entity)) (last(entity) * 7 + entity * 3 + 5) % 18
         else stateCode
@@ -869,8 +946,14 @@ object DSPBenchRegionMatrixHelpers {
       positions(entity) = if (pos + 1 == cfg.fraudStateWindow) 0 else pos + 1
       last(entity) = stateCode
       seen(entity) = true
-      (score, score >= cfg.fraudAlertThresholdPermille, expected)
+      latestScore = score
+      latestAlert = score >= cfg.fraudAlertThresholdPermille
+      latestExpected = expected
     }
+
+    def score: Int = latestScore
+    def alert: Boolean = latestAlert
+    def expected: Int = latestExpected
   }
 
   private def generatedFraudEntity(index: Int): Int =
@@ -893,6 +976,7 @@ object DSPBenchRegionMatrixHelpers {
 
   private def foreachFileBackedFraud(consumer: FraudConsumer^): Int = {
     val cfg = DSPBenchRegionConfig
+    val parsed = new ParsedKeyValue
     var index = 0
     while (index < cfg.events) {
       var advanced = false
@@ -903,9 +987,9 @@ object DSPBenchRegionMatrixHelpers {
           var length = reader.readLine()
           while (length >= 0 && index < cfg.events) {
             if (length > 0) {
-              val parsed = parseFraud(reader.bytes, length)
-              if (parsed._1 >= 0) {
-                consumer(index, parsed._1, parsed._2, parsed._3 ^ index.toLong)
+              parseFraudInto(reader.bytes, length, parsed)
+              if (parsed.key >= 0) {
+                consumer(index, parsed.key, parsed.value, parsed.hash ^ index.toLong)
                 index += 1
                 advanced = true
               }
@@ -946,13 +1030,19 @@ object DSPBenchRegionMatrixHelpers {
     private val counts = new Array[Int](cfg.logStatusBuckets)
     private val bytes = new Array[Long](cfg.logStatusBuckets)
     private val lastMinute = new Array[Int](cfg.logStatusBuckets)
+    private var latestCount = 0
+    private var latestByteDigest = 0
 
-    def update(statusBucket: Int, minuteBucket: Int, byteSize: Int): (Int, Int) = {
+    def update(statusBucket: Int, minuteBucket: Int, byteSize: Int): Unit = {
       counts(statusBucket) += 1
       bytes(statusBucket) += byteSize.toLong
       lastMinute(statusBucket) = minuteBucket
-      (counts(statusBucket), (bytes(statusBucket) & 0x7fffffffL).toInt)
+      latestCount = counts(statusBucket)
+      latestByteDigest = (bytes(statusBucket) & 0x7fffffffL).toInt
     }
+
+    def count: Int = latestCount
+    def byteDigest: Int = latestByteDigest
   }
 
   private def generatedLogStatus(index: Int): Int = {
@@ -986,6 +1076,7 @@ object DSPBenchRegionMatrixHelpers {
 
   private def foreachFileBackedLog(consumer: LogConsumer^): Int = {
     val cfg = DSPBenchRegionConfig
+    val parsed = new ParsedCommonLog
     var index = 0
     while (index < cfg.events) {
       var advanced = false
@@ -996,15 +1087,15 @@ object DSPBenchRegionMatrixHelpers {
           var length = reader.readLine()
           while (length >= 0 && index < cfg.events) {
             if (length > 0) {
-              val parsed = parseCommonLog(reader.bytes, length)
-              if (parsed._1 >= 0) {
+              parseCommonLogInto(reader.bytes, length, parsed)
+              if (parsed.statusBucket >= 0) {
                 consumer(
                   index,
-                  parsed._1,
-                  parsed._2,
-                  parsed._3,
-                  parsed._4,
-                  parsed._5 ^ index.toLong
+                  parsed.statusBucket,
+                  parsed.minuteBucket,
+                  parsed.byteSize,
+                  parsed.requestHash,
+                  parsed.hash ^ index.toLong
                 )
                 index += 1
                 advanced = true
@@ -1218,7 +1309,10 @@ object DSPBenchRegionMatrixHelpers {
       appendHeap(bucket, 110, i, entity, stateCode, 0, false, hash)
       if (fraudPredictQuery(query)) {
         val predictStarted = if (diagnostics) System.nanoTime() else 0L
-        val prediction = fraudState.update(entity, stateCode)
+        fraudState.update(entity, stateCode)
+        val score = fraudState.score
+        val alert = fraudState.alert
+        val expected = fraudState.expected
         if (diagnostics)
           diag.predictNanos += System.nanoTime() - predictStarted
         appendHeap(
@@ -1227,14 +1321,14 @@ object DSPBenchRegionMatrixHelpers {
           i,
           entity,
           stateCode,
-          prediction._1,
-          prediction._2,
-          hash ^ prediction._3.toLong ^ 120L
+          score,
+          alert,
+          hash ^ expected.toLong ^ 120L
         )
-        appendHeap(bucket, 121, i, entity, prediction._3, prediction._1, false, hash ^ 121L)
-        appendHeap(bucket, 122, i, entity, stateCode, prediction._1, prediction._2, hash ^ 122L)
-        if (fraudAlertQuery(query) && prediction._2) {
-          appendHeap(bucket, 130, i, entity, stateCode, prediction._1, true, hash ^ 130L)
+        appendHeap(bucket, 121, i, entity, expected, score, false, hash ^ 121L)
+        appendHeap(bucket, 122, i, entity, stateCode, score, alert, hash ^ 122L)
+        if (fraudAlertQuery(query) && alert) {
+          appendHeap(bucket, 130, i, entity, stateCode, score, true, hash ^ 130L)
         }
       }
       if (i % cfg.sampleEvery == 0)
@@ -1255,7 +1349,9 @@ object DSPBenchRegionMatrixHelpers {
       appendHeap(bucket, 210, i, statusBucket, byteSize, minuteBucket, error, hash)
       if (logStatusQuery(query)) {
         val predictStarted = if (diagnostics) System.nanoTime() else 0L
-        val updated = logState.update(statusBucket, minuteBucket, byteSize)
+        logState.update(statusBucket, minuteBucket, byteSize)
+        val count = logState.count
+        val byteDigest = logState.byteDigest
         if (diagnostics)
           diag.predictNanos += System.nanoTime() - predictStarted
         appendHeap(
@@ -1263,8 +1359,8 @@ object DSPBenchRegionMatrixHelpers {
           220,
           i,
           statusBucket,
-          updated._1,
-          updated._2,
+          count,
+          byteDigest,
           error,
           hash ^ requestHash.toLong ^ 220L
         )
@@ -1499,7 +1595,10 @@ object DSPBenchRegionMatrixHelpers {
       appendSafe(bucket, 110, i, entity, stateCode, 0, false, hash)
       if (fraudPredictQuery(query)) {
         val predictStarted = if (diagnostics) System.nanoTime() else 0L
-        val prediction = fraudState.update(entity, stateCode)
+        fraudState.update(entity, stateCode)
+        val score = fraudState.score
+        val alert = fraudState.alert
+        val expected = fraudState.expected
         if (diagnostics)
           diag.predictNanos += System.nanoTime() - predictStarted
         appendSafe(
@@ -1508,14 +1607,14 @@ object DSPBenchRegionMatrixHelpers {
           i,
           entity,
           stateCode,
-          prediction._1,
-          prediction._2,
-          hash ^ prediction._3.toLong ^ 120L
+          score,
+          alert,
+          hash ^ expected.toLong ^ 120L
         )
-        appendSafe(bucket, 121, i, entity, prediction._3, prediction._1, false, hash ^ 121L)
-        appendSafe(bucket, 122, i, entity, stateCode, prediction._1, prediction._2, hash ^ 122L)
-        if (fraudAlertQuery(query) && prediction._2)
-          appendSafe(bucket, 130, i, entity, stateCode, prediction._1, true, hash ^ 130L)
+        appendSafe(bucket, 121, i, entity, expected, score, false, hash ^ 121L)
+        appendSafe(bucket, 122, i, entity, stateCode, score, alert, hash ^ 122L)
+        if (fraudAlertQuery(query) && alert)
+          appendSafe(bucket, 130, i, entity, stateCode, score, true, hash ^ 130L)
       }
       if (i % cfg.sampleEvery == 0)
         checksum = fold(checksum, 199, i, entity, stateCode, 0, false, hash, start)
@@ -1535,7 +1634,9 @@ object DSPBenchRegionMatrixHelpers {
       appendSafe(bucket, 210, i, statusBucket, byteSize, minuteBucket, error, hash)
       if (logStatusQuery(query)) {
         val predictStarted = if (diagnostics) System.nanoTime() else 0L
-        val updated = logState.update(statusBucket, minuteBucket, byteSize)
+        logState.update(statusBucket, minuteBucket, byteSize)
+        val count = logState.count
+        val byteDigest = logState.byteDigest
         if (diagnostics)
           diag.predictNanos += System.nanoTime() - predictStarted
         appendSafe(
@@ -1543,8 +1644,8 @@ object DSPBenchRegionMatrixHelpers {
           220,
           i,
           statusBucket,
-          updated._1,
-          updated._2,
+          count,
+          byteDigest,
           error,
           hash ^ requestHash.toLong ^ 220L
         )
@@ -1779,7 +1880,10 @@ object DSPBenchRegionMatrixHelpers {
       appendTrusted(bucket, region, 110, i, entity, stateCode, 0, false, hash)
       if (fraudPredictQuery(query)) {
         val predictStarted = if (diagnostics) System.nanoTime() else 0L
-        val prediction = fraudState.update(entity, stateCode)
+        fraudState.update(entity, stateCode)
+        val score = fraudState.score
+        val alert = fraudState.alert
+        val expected = fraudState.expected
         if (diagnostics)
           diag.predictNanos += System.nanoTime() - predictStarted
         appendTrusted(
@@ -1789,14 +1893,14 @@ object DSPBenchRegionMatrixHelpers {
           i,
           entity,
           stateCode,
-          prediction._1,
-          prediction._2,
-          hash ^ prediction._3.toLong ^ 120L
+          score,
+          alert,
+          hash ^ expected.toLong ^ 120L
         )
-        appendTrusted(bucket, region, 121, i, entity, prediction._3, prediction._1, false, hash ^ 121L)
-        appendTrusted(bucket, region, 122, i, entity, stateCode, prediction._1, prediction._2, hash ^ 122L)
-        if (fraudAlertQuery(query) && prediction._2)
-          appendTrusted(bucket, region, 130, i, entity, stateCode, prediction._1, true, hash ^ 130L)
+        appendTrusted(bucket, region, 121, i, entity, expected, score, false, hash ^ 121L)
+        appendTrusted(bucket, region, 122, i, entity, stateCode, score, alert, hash ^ 122L)
+        if (fraudAlertQuery(query) && alert)
+          appendTrusted(bucket, region, 130, i, entity, stateCode, score, true, hash ^ 130L)
       }
       if (i % cfg.sampleEvery == 0)
         checksum = fold(checksum, 199, i, entity, stateCode, 0, false, hash, start)
@@ -1817,7 +1921,9 @@ object DSPBenchRegionMatrixHelpers {
       appendTrusted(bucket, region, 210, i, statusBucket, byteSize, minuteBucket, error, hash)
       if (logStatusQuery(query)) {
         val predictStarted = if (diagnostics) System.nanoTime() else 0L
-        val updated = logState.update(statusBucket, minuteBucket, byteSize)
+        logState.update(statusBucket, minuteBucket, byteSize)
+        val count = logState.count
+        val byteDigest = logState.byteDigest
         if (diagnostics)
           diag.predictNanos += System.nanoTime() - predictStarted
         appendTrusted(
@@ -1826,8 +1932,8 @@ object DSPBenchRegionMatrixHelpers {
           220,
           i,
           statusBucket,
-          updated._1,
-          updated._2,
+          count,
+          byteDigest,
           error,
           hash ^ requestHash.toLong ^ 220L
         )
@@ -1897,7 +2003,8 @@ object DSPBenchRegionMatrixHelpers {
   private def runRiftCheckedPageTokenBody(
       query: String,
       modeLabel: String,
-      useRiftHandle: Boolean
+      useRiftHandle: Boolean,
+      inferredAllocations: Boolean = false
   )(using stream: RiftRegion.StreamingRegion^): RunOutcome = {
     val cfg = DSPBenchRegionConfig
     val state = new MovingAverageState()
@@ -2072,7 +2179,8 @@ object DSPBenchRegionMatrixHelpers {
       }
     }
 
-    def appendCheckedHandle(
+    def appendCheckedHandleExplicit(
+        region: RiftOpenStreamingHandle^{stream},
         kind: Int,
         i: Int,
         key: Int,
@@ -2082,11 +2190,33 @@ object DSPBenchRegionMatrixHelpers {
         hash: Long
     ): Unit = {
       val appendStarted = if (diagnostics) System.nanoTime() else 0L
-      val record: CheckedRecord^{stream} =
+      val local: CheckedRecord^{region} =
         RiftAllocator.allocateOpenHandle(
-          currentHandle,
+          region,
           new CheckedRecord(kind, i, key, value, score, flag, hash)
         )
+      val record: CheckedRecord^{stream} = local
+      RiftRegion.appendPageToken(stream, window, record)
+      if (diagnostics) {
+        appendNanos += System.nanoTime() - appendStarted
+        appendedRecords += 1L
+      }
+    }
+
+    def appendCheckedHandleInferred(
+        region: RiftOpenStreamingHandle^{stream},
+        kind: Int,
+        i: Int,
+        key: Int,
+        value: Int,
+        score: Int,
+        flag: Boolean,
+        hash: Long
+    ): Unit = {
+      val appendStarted = if (diagnostics) System.nanoTime() else 0L
+      val local: CheckedRecord^{region} =
+        new CheckedRecord(kind, i, key, value, score, flag, hash)
+      val record: CheckedRecord^{stream} = local
       RiftRegion.appendPageToken(stream, window, record)
       if (diagnostics) {
         appendNanos += System.nanoTime() - appendStarted
@@ -2104,7 +2234,28 @@ object DSPBenchRegionMatrixHelpers {
         hash: Long
     ): Unit =
       if (useRiftHandle)
-        appendCheckedHandle(kind, i, key, value, score, flag, hash)
+        if (inferredAllocations)
+          appendCheckedHandleInferred(
+            currentHandle,
+            kind,
+            i,
+            key,
+            value,
+            score,
+            flag,
+            hash
+          )
+        else
+          appendCheckedHandleExplicit(
+            currentHandle,
+            kind,
+            i,
+            key,
+            value,
+            score,
+            flag,
+            hash
+          )
       else
         appendCheckedLegacy(kind, i, key, value, score, flag, hash)
 
@@ -2119,7 +2270,10 @@ object DSPBenchRegionMatrixHelpers {
       appendChecked(110, i, entity, stateCode, 0, false, hash)
       if (fraudPredictQuery(query)) {
         val predictStarted = if (diagnostics) System.nanoTime() else 0L
-        val prediction = fraudState.update(entity, stateCode)
+        fraudState.update(entity, stateCode)
+        val score = fraudState.score
+        val alert = fraudState.alert
+        val expected = fraudState.expected
         if (diagnostics)
           predictNanos += System.nanoTime() - predictStarted
         appendChecked(
@@ -2127,14 +2281,14 @@ object DSPBenchRegionMatrixHelpers {
           i,
           entity,
           stateCode,
-          prediction._1,
-          prediction._2,
-          hash ^ prediction._3.toLong ^ 120L
+          score,
+          alert,
+          hash ^ expected.toLong ^ 120L
         )
-        appendChecked(121, i, entity, prediction._3, prediction._1, false, hash ^ 121L)
-        appendChecked(122, i, entity, stateCode, prediction._1, prediction._2, hash ^ 122L)
-        if (fraudAlertQuery(query) && prediction._2)
-          appendChecked(130, i, entity, stateCode, prediction._1, true, hash ^ 130L)
+        appendChecked(121, i, entity, expected, score, false, hash ^ 121L)
+        appendChecked(122, i, entity, stateCode, score, alert, hash ^ 122L)
+        if (fraudAlertQuery(query) && alert)
+          appendChecked(130, i, entity, stateCode, score, true, hash ^ 130L)
       }
       if (i % cfg.sampleEvery == 0)
         checksum = fold(checksum, 199, i, entity, stateCode, 0, false, hash, start)
@@ -2154,15 +2308,17 @@ object DSPBenchRegionMatrixHelpers {
       appendChecked(210, i, statusBucket, byteSize, minuteBucket, error, hash)
       if (logStatusQuery(query)) {
         val predictStarted = if (diagnostics) System.nanoTime() else 0L
-        val updated = logState.update(statusBucket, minuteBucket, byteSize)
+        logState.update(statusBucket, minuteBucket, byteSize)
+        val count = logState.count
+        val byteDigest = logState.byteDigest
         if (diagnostics)
           predictNanos += System.nanoTime() - predictStarted
         appendChecked(
           220,
           i,
           statusBucket,
-          updated._1,
-          updated._2,
+          count,
+          byteDigest,
           error,
           hash ^ requestHash.toLong ^ 220L
         )
@@ -2234,6 +2390,16 @@ object DSPBenchRegionMatrixHelpers {
         query,
         "rift-checked-page-token",
         useRiftHandle = true
+      )
+    }
+
+  private def runRiftCheckedPageTokenInferred(query: String): RunOutcome =
+    RiftRegion.streaming { stream ?=>
+      runRiftCheckedPageTokenBody(
+        query,
+        "rift-checked-page-token-inferred",
+        useRiftHandle = true,
+        inferredAllocations = true
       )
     }
 
@@ -2397,20 +2563,23 @@ object DSPBenchRegionMatrixHelpers {
           val hash = generatedHash(i, entity, stateCode)
           appendHeapDirect(110, i, entity, stateCode, 0, false, hash)
           if (fraudPredictQuery(query)) {
-            val prediction = fraudState.update(entity, stateCode)
+            fraudState.update(entity, stateCode)
+            val score = fraudState.score
+            val alert = fraudState.alert
+            val expected = fraudState.expected
             appendHeapDirect(
               120,
               i,
               entity,
               stateCode,
-              prediction._1,
-              prediction._2,
-              hash ^ prediction._3.toLong ^ 120L
+              score,
+              alert,
+              hash ^ expected.toLong ^ 120L
             )
-            appendHeapDirect(121, i, entity, prediction._3, prediction._1, false, hash ^ 121L)
-            appendHeapDirect(122, i, entity, stateCode, prediction._1, prediction._2, hash ^ 122L)
-            if (fraudAlertQuery(query) && prediction._2)
-              appendHeapDirect(130, i, entity, stateCode, prediction._1, true, hash ^ 130L)
+            appendHeapDirect(121, i, entity, expected, score, false, hash ^ 121L)
+            appendHeapDirect(122, i, entity, stateCode, score, alert, hash ^ 122L)
+            if (fraudAlertQuery(query) && alert)
+              appendHeapDirect(130, i, entity, stateCode, score, true, hash ^ 130L)
           }
           if (i % cfg.sampleEvery == 0)
             checksum = fold(checksum, 199, i, entity, stateCode, 0, false, hash, start)
@@ -2431,13 +2600,15 @@ object DSPBenchRegionMatrixHelpers {
           val error = statusBucket >= 400 && statusBucket < 600
           appendHeapDirect(210, i, statusBucket, byteSize, minuteBucket, error, hash)
           if (logStatusQuery(query)) {
-            val updated = logState.update(statusBucket, minuteBucket, byteSize)
+            logState.update(statusBucket, minuteBucket, byteSize)
+            val count = logState.count
+            val byteDigest = logState.byteDigest
             appendHeapDirect(
               220,
               i,
               statusBucket,
-              updated._1,
-              updated._2,
+              count,
+              byteDigest,
               error,
               hash ^ requestHash.toLong ^ 220L
             )
@@ -2660,20 +2831,23 @@ object DSPBenchRegionMatrixHelpers {
             val hash = generatedHash(i, entity, stateCode)
             appendChecked(110, i, entity, stateCode, 0, false, hash)
             if (fraudPredictQuery(query)) {
-              val prediction = fraudState.update(entity, stateCode)
+              fraudState.update(entity, stateCode)
+              val score = fraudState.score
+              val alert = fraudState.alert
+              val expected = fraudState.expected
               appendChecked(
                 120,
                 i,
                 entity,
                 stateCode,
-                prediction._1,
-                prediction._2,
-                hash ^ prediction._3.toLong ^ 120L
+                score,
+                alert,
+                hash ^ expected.toLong ^ 120L
               )
-              appendChecked(121, i, entity, prediction._3, prediction._1, false, hash ^ 121L)
-              appendChecked(122, i, entity, stateCode, prediction._1, prediction._2, hash ^ 122L)
-              if (fraudAlertQuery(query) && prediction._2)
-                appendChecked(130, i, entity, stateCode, prediction._1, true, hash ^ 130L)
+              appendChecked(121, i, entity, expected, score, false, hash ^ 121L)
+              appendChecked(122, i, entity, stateCode, score, alert, hash ^ 122L)
+              if (fraudAlertQuery(query) && alert)
+                appendChecked(130, i, entity, stateCode, score, true, hash ^ 130L)
             }
             if (i % cfg.sampleEvery == 0)
               checksum = fold(checksum, 199, i, entity, stateCode, 0, false, hash, start)
@@ -2694,13 +2868,15 @@ object DSPBenchRegionMatrixHelpers {
             val error = statusBucket >= 400 && statusBucket < 600
             appendChecked(210, i, statusBucket, byteSize, minuteBucket, error, hash)
             if (logStatusQuery(query)) {
-              val updated = logState.update(statusBucket, minuteBucket, byteSize)
+              logState.update(statusBucket, minuteBucket, byteSize)
+              val count = logState.count
+              val byteDigest = logState.byteDigest
               appendChecked(
                 220,
                 i,
                 statusBucket,
-                updated._1,
-                updated._2,
+                count,
+                byteDigest,
                 error,
                 hash ^ requestHash.toLong ^ 220L
               )
@@ -2817,6 +2993,9 @@ object DSPBenchRegionMatrixHelpers {
         "rift-checked-page-token-legacy"
       case "checked-region-stream" | "rift-checked-page-token" =>
         "rift-checked-page-token"
+      case "checked-region-stream-inferred" |
+          "rift-checked-page-token-inferred" =>
+        "rift-checked-page-token-inferred"
       case "checked-region-scoped" | "rift-checked-safezone-page-token" =>
         "rift-checked-safezone-page-token"
       case "checked-epoch-stream" | "checked-region-stream-epoch" |
@@ -2837,6 +3016,7 @@ object DSPBenchRegionMatrixHelpers {
   private def usesRiftRuntime(mode: String): Boolean =
     canonicalMode(mode) match {
       case "rift-hp" | "rift-streaming" | "rift-checked-page-token" |
+          "rift-checked-page-token-inferred" |
           "rift-checked-page-token-legacy" |
           "rift-checked-direct-epoch" |
           "checked-epoch-retained-no-traverse" =>
@@ -2849,6 +3029,7 @@ object DSPBenchRegionMatrixHelpers {
       case "heap" | "safezone" | "rift-hp" | "rift-streaming" |
           "heap-direct-epoch" |
           "rift-checked-page-token" | "rift-checked-page-token-legacy" |
+          "rift-checked-page-token-inferred" |
           "rift-checked-safezone-page-token" |
           "rift-checked-direct-epoch" |
           "rift-checked-safezone-direct-epoch" |
@@ -2885,6 +3066,8 @@ object DSPBenchRegionMatrixHelpers {
       case "rift-hp"        => runRiftTrusted(query, RiftRegion.HPZone)
       case "rift-streaming" => runRiftTrusted(query, RiftRegion.Streaming)
       case "rift-checked-page-token" => runRiftCheckedPageToken(query)
+      case "rift-checked-page-token-inferred" =>
+        runRiftCheckedPageTokenInferred(query)
       case "rift-checked-page-token-legacy" =>
         runRiftCheckedPageTokenLegacy(query)
       case "rift-checked-safezone-page-token" =>

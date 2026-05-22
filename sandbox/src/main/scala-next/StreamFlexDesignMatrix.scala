@@ -548,12 +548,13 @@ object StreamFlexDesignMatrixHelpers {
     RunResult(mix(checksum, anchor), capsule.size.toLong, capsule.dropped.toLong)
   }
 
-  private def processCheckedOpenHandlePeriod(
+  private inline def processCheckedOpenHandlePeriod(
       stable: StableState,
       capsule: AlertCapsule,
       startSeq: Int,
       count: Int,
-      objectsPerEvent: Int
+      objectsPerEvent: Int,
+      inline inferredAllocations: Boolean
   )(using region: RiftOpenStreamingHandle^): RunResult = {
     final class CheckedPacket(
         val seq: Int,
@@ -590,10 +591,14 @@ object StreamFlexDesignMatrixHelpers {
         val seed = mix(seq * 1009 + fragment * 9176)
         val key = stable.key(seed)
         stable.recordEvent(key)
-        packets = RiftAllocator.allocateOpenHandle(
-          region,
-          new CheckedPacket(seq, key, mix(seed + 31), packets)
-        )
+        packets =
+          inline if (inferredAllocations) then
+            new CheckedPacket(seq, key, mix(seed + 31), packets)
+          else
+            RiftAllocator.allocateOpenHandle(
+              region,
+              new CheckedPacket(seq, key, mix(seed + 31), packets)
+            )
         fragment += 1
       }
       i += 1
@@ -603,10 +608,14 @@ object StreamFlexDesignMatrixHelpers {
     var packet = packets
     while (packet != null) {
       val value = mix(packet.payload + stable.laneBias(packet.key))
-      features = RiftAllocator.allocateOpenHandle(
-        region,
-        new CheckedFeature(packet.seq, packet.key, value, features)
-      )
+      features =
+        inline if (inferredAllocations) then
+          new CheckedFeature(packet.seq, packet.key, value, features)
+        else
+          RiftAllocator.allocateOpenHandle(
+            region,
+            new CheckedFeature(packet.seq, packet.key, value, features)
+          )
       packet = packet.next
     }
 
@@ -614,10 +623,14 @@ object StreamFlexDesignMatrixHelpers {
     var feature = features
     while (feature != null) {
       val score = stable.classify(feature.key, feature.value, feature.seq)
-      decisions = RiftAllocator.allocateOpenHandle(
-        region,
-        new CheckedDecision(feature.seq, feature.key, score, decisions)
-      )
+      decisions =
+        inline if (inferredAllocations) then
+          new CheckedDecision(feature.seq, feature.key, score, decisions)
+        else
+          RiftAllocator.allocateOpenHandle(
+            region,
+            new CheckedDecision(feature.seq, feature.key, score, decisions)
+          )
       feature = feature.next
     }
 
@@ -625,10 +638,14 @@ object StreamFlexDesignMatrixHelpers {
     var decision = decisions
     while (decision != null) {
       if (((decision.score ^ (decision.score >>> 11)) & 7L) == 0L)
-        alerts = RiftAllocator.allocateOpenHandle(
-          region,
-          new CheckedAlert(decision.seq, decision.key, decision.score, alerts)
-        )
+        alerts =
+          inline if (inferredAllocations) then
+            new CheckedAlert(decision.seq, decision.key, decision.score, alerts)
+          else
+            RiftAllocator.allocateOpenHandle(
+              region,
+              new CheckedAlert(decision.seq, decision.key, decision.score, alerts)
+            )
       decision = decision.next
     }
 
@@ -696,27 +713,51 @@ object StreamFlexDesignMatrixHelpers {
           }
         }
       case "checked-epoch-stream" | "checked-epoch-stream-open-handle" =>
-        RiftRegion.streamingOpenHandle {
-          while (start < cfg.events) {
-            val count = math.min(cfg.periodEvents, cfg.events - start)
-            val result = RiftRegion.resetOpenHandle {
-              processCheckedOpenHandlePeriod(
-                stable,
-                capsule,
-                start,
-                count,
-                cfg.objectsPerEvent
-              )
-            }
-            consume(result)
-            start += count
-          }
-        }
+        return runThroughputCheckedOpenHandle(stable, capsule, inferredAllocations = false)
+      case "checked-epoch-stream-inferred" =>
+        return runThroughputCheckedOpenHandle(stable, capsule, inferredAllocations = true)
       case other =>
         throw new IllegalArgumentException(s"unknown StreamFlex design mode '$other'")
     }
     checksumSink = checksum
     RunResult(mix(checksum, stable.checksum), outputs, drops)
+  }
+
+  private inline def runThroughputCheckedOpenHandle(
+      stable: StableState,
+      capsule: AlertCapsule,
+      inline inferredAllocations: Boolean
+  ): RunResult = {
+    val cfg = StreamFlexDesignConfig
+    val result = RiftRegion.streamingOpenHandle {
+      var checksum = 0L
+      var outputs = 0L
+      var drops = 0L
+      var start = 0
+
+      while (start < cfg.events) {
+        val periodStart = start
+        val count = math.min(cfg.periodEvents, cfg.events - periodStart)
+        val periodResult = RiftRegion.resetOpenHandle {
+          processCheckedOpenHandlePeriod(
+            stable,
+            capsule,
+            periodStart,
+            count,
+            cfg.objectsPerEvent,
+            inferredAllocations = inferredAllocations
+          )
+        }
+        checksum = mix(checksum, periodResult.checksum)
+        outputs += periodResult.outputCount
+        drops += periodResult.dropped
+        start = periodStart + count
+      }
+
+      RunResult(mix(checksum, stable.checksum), outputs, drops)
+    }
+    checksumSink = result.checksum
+    result
   }
 
   private def runLatencyOnce(
@@ -783,7 +824,32 @@ object StreamFlexDesignMatrixHelpers {
           while (event < events) {
             timed {
               RiftRegion.resetOpenHandle {
-                processCheckedOpenHandlePeriod(stable, capsule, event, 1, objectsPerEvent)
+                processCheckedOpenHandlePeriod(
+                  stable,
+                  capsule,
+                  event,
+                  1,
+                  objectsPerEvent,
+                  inferredAllocations = false
+                )
+              }
+            }
+            event += 1
+          }
+        }
+      case "checked-epoch-stream-inferred" =>
+        RiftRegion.streamingOpenHandle {
+          while (event < events) {
+            timed {
+              RiftRegion.resetOpenHandle {
+                processCheckedOpenHandlePeriod(
+                  stable,
+                  capsule,
+                  event,
+                  1,
+                  objectsPerEvent,
+                  inferredAllocations = true
+                )
               }
             }
             event += 1
@@ -820,7 +886,8 @@ object StreamFlexDesignMatrixHelpers {
     mode == "checked-epoch-scoped" ||
       mode == "checked-epoch-stream" ||
       mode == "checked-epoch-stream-legacy" ||
-      mode == "checked-epoch-stream-open-handle"
+      mode == "checked-epoch-stream-open-handle" ||
+      mode == "checked-epoch-stream-inferred"
 
   private def validateAgainstHeap(result: RunResult, expected: RunResult): Unit =
     if (result != expected)
@@ -1024,7 +1091,8 @@ object StreamFlexDesignMatrixHelpers {
       case "gc-heap" | "heap-same-shape" | "region-scoped-rooted" |
           "checked-epoch-scoped" | "checked-epoch-stream" |
           "checked-epoch-stream-legacy" |
-          "checked-epoch-stream-open-handle" =>
+          "checked-epoch-stream-open-handle" |
+          "checked-epoch-stream-inferred" =>
         ()
       case other =>
         throw new IllegalArgumentException(

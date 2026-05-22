@@ -16,6 +16,7 @@ object NirDefinitions {
   def get(using Context): NirDefinitions = cached.get
   object NonErasedType extends StickyKey[Type]
   object NonErasedTypes extends StickyKey[List[Type]]
+  object InferredRiftAllocationOwner extends StickyKey[Symbol]
 }
 
 // scalafmt: { maxColumn = 120}
@@ -93,6 +94,10 @@ final class NirDefinitions()(using ctx: Context) {
   @tu lazy val RuntimePackage_exitMonitor = RuntimePackageClass.requiredMethod("exitMonitor")
   @tu lazy val RuntimePackage_fromRawSize = RuntimePackageClass.requiredMethod("fromRawSize")
   @tu lazy val RuntimePackage_fromRawUSize = RuntimePackageClass.requiredMethod("fromRawUSize")
+
+  // Scala standard library allocation shapes recognized by Rift inference.
+  @tu lazy val ScalaSomeClass = requiredClass("scala.Some")
+  @tu lazy val ScalaNoneModule = requiredModule("scala.None")
 
   @tu lazy val RuntimePackage_toRawSizeAlts = RuntimePackageClass
     .alternatives("toRawSize")

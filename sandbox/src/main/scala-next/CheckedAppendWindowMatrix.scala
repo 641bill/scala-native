@@ -1273,40 +1273,36 @@ object CheckedAppendWindowMatrixHelpers {
         )
       }
 
-    var currentStartSeconds = Long.MinValue
-    var currentRegion: RiftRegion.StreamingRegion^{stream} = null
     var i = 0
     while (i < cfg.events) {
-      val seed = mix(i * 1103515245 + 12345)
-      val key = seed % cfg.keySpace
-      val value = (mix(seed + 17) & 0xffff) + 1
       val startSeconds = bucketStart(i)
-      if (startSeconds != currentStartSeconds) {
-        currentStartSeconds = startSeconds
-        currentRegion =
-          RiftRegion.chunkAppendRegionFor(
-            stream,
-            window,
-            startSeconds,
-            closeCutoff(startSeconds)
-          )(consume)
+      val region =
+        RiftRegion.chunkAppendRegionFor(
+          stream,
+          window,
+          startSeconds,
+          closeCutoff(startSeconds)
+        )(consume)
+      while (i < cfg.events && bucketStart(i) == startSeconds) {
+        val seed = mix(i * 1103515245 + 12345)
+        val key = seed % cfg.keySpace
+        val value = (mix(seed + 17) & 0xffff) + 1
+        val recordInBucket: Record^{region} =
+          new Record(key, value, value.toLong)
+        val record: Record^{stream} = recordInBucket
+        record.value += seed & 3
+        record.total += record.value.toLong
+        RiftRegion.appendChunkToken(stream, window, record)
+        if (i % cfg.sampleEvery == 0)
+          running = fold(
+            running,
+            record.key,
+            record.value,
+            record.total,
+            startSeconds
+          )
+        i += 1
       }
-      val record: Record^{stream} =
-        RiftRegion.alloc(new Record(key, value, value.toLong))(
-          using currentRegion
-        )
-      record.value += seed & 3
-      record.total += record.value.toLong
-      RiftRegion.appendChunkToken(stream, window, record)
-      if (i % cfg.sampleEvery == 0)
-        running = fold(
-          running,
-          record.key,
-          record.value,
-          record.total,
-          currentStartSeconds
-        )
-      i += 1
     }
 
     RiftRegion.closeAllChunkAppendBucketsWithCursor(stream, window)(consume)

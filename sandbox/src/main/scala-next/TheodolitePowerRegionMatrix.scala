@@ -139,6 +139,14 @@ object TheodolitePowerRegionMatrixHelpers {
 
   final case class RunOutcome(checksum: Long, outputCount: Long)
 
+  private final class StreamingEpochOutcome(
+      val checksum: Long,
+      val anchor: Long,
+      val nextIndex: Int,
+      val nextLength: Int,
+      val recordsRead: Int
+  )
+
   final case class RuntimeSample(
       gcCollections: Long,
       gcNanos: Long,
@@ -215,43 +223,80 @@ object TheodolitePowerRegionMatrixHelpers {
   private var parsedSub2Watt = 0
   private var parsedSub3Watt = 0
   private var parsedVoltageDeci = 0
-  private val fieldCursor = new BenchmarkInputSupport.DelimitedByteFields(';')
 
   private def parseCurrentLine(
       bytes: Array[Byte],
       length: Int
   ): Boolean = {
-    fieldCursor.reset(bytes, length)
-    if (!fieldCursor.advanceTo(2)) return false
+    if (bytes == null || length <= 0) return false
+
+    val delimiter = ';'.toInt
+    var pos = 0
+
+    while (pos < length && (bytes(pos) & 0xff) != delimiter) pos += 1
+    if (pos >= length) return false
+    pos += 1
+
+    while (pos < length && (bytes(pos) & 0xff) != delimiter) pos += 1
+    if (pos >= length) return false
+    pos += 1
+
+    val activeStart = pos
+    while (pos < length && (bytes(pos) & 0xff) != delimiter) pos += 1
     val active = BenchmarkInputSupport.parseMilliDecimal(
       bytes,
-      fieldCursor.offset,
-      fieldCursor.length
+      activeStart,
+      pos - activeStart
     )
-    if (!fieldCursor.advanceTo(4)) return false
+    if (pos >= length) return false
+    pos += 1
+
+    while (pos < length && (bytes(pos) & 0xff) != delimiter) pos += 1
+    if (pos >= length) return false
+    pos += 1
+
+    val voltStart = pos
+    while (pos < length && (bytes(pos) & 0xff) != delimiter) pos += 1
     val volt = BenchmarkInputSupport.parseMilliDecimal(
       bytes,
-      fieldCursor.offset,
-      fieldCursor.length
+      voltStart,
+      pos - voltStart
     )
-    if (!fieldCursor.advanceTo(6)) return false
+    if (pos >= length) return false
+    pos += 1
+
+    while (pos < length && (bytes(pos) & 0xff) != delimiter) pos += 1
+    if (pos >= length) return false
+    pos += 1
+
+    val s1Start = pos
+    while (pos < length && (bytes(pos) & 0xff) != delimiter) pos += 1
     val s1 = BenchmarkInputSupport.parseIntDecimal(
       bytes,
-      fieldCursor.offset,
-      fieldCursor.length
+      s1Start,
+      pos - s1Start
     )
-    if (!fieldCursor.advanceTo(7)) return false
+    if (pos >= length) return false
+    pos += 1
+
+    val s2Start = pos
+    while (pos < length && (bytes(pos) & 0xff) != delimiter) pos += 1
     val s2 = BenchmarkInputSupport.parseIntDecimal(
       bytes,
-      fieldCursor.offset,
-      fieldCursor.length
+      s2Start,
+      pos - s2Start
     )
-    if (!fieldCursor.advanceTo(8)) return false
+    if (pos >= length) return false
+    pos += 1
+
+    val s3Start = pos
+    while (pos < length && (bytes(pos) & 0xff) != delimiter) pos += 1
     val s3 = BenchmarkInputSupport.parseIntDecimal(
       bytes,
-      fieldCursor.offset,
-      fieldCursor.length
+      s3Start,
+      pos - s3Start
     )
+
     if (active >= 0 && volt >= 0 && s1 >= 0 && s2 >= 0 && s3 >= 0) {
       parsedTotalMilliW = active
       parsedVoltageDeci = volt / 100
@@ -1115,9 +1160,10 @@ object TheodolitePowerRegionMatrixHelpers {
         reader.readLine() // header
         var length = reader.readLine()
         while (length >= 0 && index < input.records) {
-          var anchor = 0L
-          var inEpoch = 0
-          RiftRegion.resetOpenHandle { region ?=>
+          val baseChecksum = checksum
+          val baseIndex = index
+          val baseLength = length
+          val epochOutcome = RiftRegion.resetOpenHandle { region ?=>
             final class CheckedMeasurement(
                 val minute: Int,
                 val group: Int,
@@ -1136,26 +1182,28 @@ object TheodolitePowerRegionMatrixHelpers {
 
             var measurementHead: CheckedMeasurement^{region} = null
             var contributionHead: CheckedContribution^{region} = null
+            var localChecksum = baseChecksum
+            var localIndex = baseIndex
+            var localLength = baseLength
+            var localInEpoch = 0
             while (
-              length >= 0 && index < input.records && inEpoch < cfg.recordsPerEpoch
+              localLength >= 0 && localIndex < input.records && localInEpoch < cfg.recordsPerEpoch
             ) {
-              if (parseCurrentLine(reader.bytes, length)) {
-                val group = groupFor(index)
-                val measurement = RiftAllocator.allocateOpenHandle(
-                  region,
+              if (parseCurrentLine(reader.bytes, localLength)) {
+                val group = groupFor(localIndex)
+                val measurement: CheckedMeasurement^{region} =
                   new CheckedMeasurement(
-                    index,
+                    localIndex,
                     group,
                     parsedTotalMilliW,
                     parsedVoltageDeci,
                     measurementHead
                   )
-                )
                 measurementHead = measurement
                 sums(group) += measurement.totalMilliW.toLong
                 counts(group) += 1
-                checksum = fold(
-                  checksum,
+                localChecksum = fold(
+                  localChecksum,
                   measurement.minute,
                   measurement.group,
                   measurement.voltageDeci,
@@ -1163,47 +1211,41 @@ object TheodolitePowerRegionMatrixHelpers {
                 )
                 if (query == "q2-hierarchical") {
                   val base = cfg.groupCount
-                  val c1 = RiftAllocator.allocateOpenHandle(
-                    region,
+                  val c1: CheckedContribution^{region} =
                     new CheckedContribution(
-                      index,
+                      localIndex,
                       group,
                       1,
                       parsedSub1Watt,
                       contributionHead
                     )
-                  )
                   contributionHead = c1
                   sums(base + group) += c1.watt.toLong
                   counts(base + group) += 1
-                  val c2 = RiftAllocator.allocateOpenHandle(
-                    region,
+                  val c2: CheckedContribution^{region} =
                     new CheckedContribution(
-                      index,
+                      localIndex,
                       group,
                       2,
                       parsedSub2Watt,
                       contributionHead
                     )
-                  )
                   contributionHead = c2
                   sums(base * 2 + group) += c2.watt.toLong
                   counts(base * 2 + group) += 1
-                  val c3 = RiftAllocator.allocateOpenHandle(
-                    region,
+                  val c3: CheckedContribution^{region} =
                     new CheckedContribution(
-                      index,
+                      localIndex,
                       group,
                       3,
                       parsedSub3Watt,
                       contributionHead
                     )
-                  )
                   contributionHead = c3
                   sums(base * 3 + group) += c3.watt.toLong
                   counts(base * 3 + group) += 1
-                  checksum = fold(
-                    checksum,
+                  localChecksum = fold(
+                    localChecksum,
                     c1.minute,
                     c2.watt,
                     c3.watt,
@@ -1220,22 +1262,20 @@ object TheodolitePowerRegionMatrixHelpers {
                       parsedSub2Watt,
                       parsedSub3Watt
                     )
-                    val contribution = RiftAllocator.allocateOpenHandle(
-                      region,
+                    val contribution: CheckedContribution^{region} =
                       new CheckedContribution(
-                        index,
+                        localIndex,
                         node,
                         uc4Circuit(k),
                         watt,
                         contributionHead
                       )
-                    )
                     contributionHead = contribution
                     val slot = uc4Slot(k, group)
                     sums(slot) += contribution.watt.toLong
                     counts(slot) += 1
-                    checksum = fold(
-                      checksum,
+                    localChecksum = fold(
+                      localChecksum,
                       contribution.minute,
                       contribution.group,
                       contribution.circuit,
@@ -1244,19 +1284,28 @@ object TheodolitePowerRegionMatrixHelpers {
                     k += 1
                   }
                 }
-                index += 1
-                inEpoch += 1
+                localIndex += 1
+                localInEpoch += 1
               }
-              length = reader.readLine()
+              localLength = reader.readLine()
             }
             val a =
               if (measurementHead == null) 0L else measurementHead.totalMilliW.toLong
             val b =
               if (contributionHead == null) 0L else contributionHead.watt.toLong
-            anchor = a ^ (b << 5)
+            new StreamingEpochOutcome(
+              localChecksum,
+              a ^ (b << 5),
+              localIndex,
+              localLength,
+              localInEpoch
+            )
           }
-          if (inEpoch > 0) {
-            retainedAnchorSink ^= anchor
+          checksum = epochOutcome.checksum
+          index = epochOutcome.nextIndex
+          length = epochOutcome.nextLength
+          if (epochOutcome.recordsRead > 0) {
+            retainedAnchorSink ^= epochOutcome.anchor
             outputs += closeEpoch(sums, counts)
           }
         }
@@ -1287,9 +1336,10 @@ object TheodolitePowerRegionMatrixHelpers {
         reader.readLine() // header
         var length = reader.readLine()
         while (length >= 0 && index < input.records) {
-          var anchor = 0L
-          var inEpoch = 0
-          RiftRegion.epoch { region ?=>
+          val baseChecksum = checksum
+          val baseIndex = index
+          val baseLength = length
+          val epochOutcome = RiftRegion.epoch { region ?=>
             final class CheckedMeasurement(
                 val minute: Int,
                 val group: Int,
@@ -1308,14 +1358,18 @@ object TheodolitePowerRegionMatrixHelpers {
 
             var measurementHead: CheckedMeasurement^{region} = null
             var contributionHead: CheckedContribution^{region} = null
+            var localChecksum = baseChecksum
+            var localIndex = baseIndex
+            var localLength = baseLength
+            var localInEpoch = 0
             while (
-              length >= 0 && index < input.records && inEpoch < cfg.recordsPerEpoch
+              localLength >= 0 && localIndex < input.records && localInEpoch < cfg.recordsPerEpoch
             ) {
-              if (parseCurrentLine(reader.bytes, length)) {
-                val group = groupFor(index)
+              if (parseCurrentLine(reader.bytes, localLength)) {
+                val group = groupFor(localIndex)
                 val measurement = RiftRegion.allocOpen(
                   new CheckedMeasurement(
-                    index,
+                    localIndex,
                     group,
                     parsedTotalMilliW,
                     parsedVoltageDeci,
@@ -1325,8 +1379,8 @@ object TheodolitePowerRegionMatrixHelpers {
                 measurementHead = measurement
                 sums(group) += measurement.totalMilliW.toLong
                 counts(group) += 1
-                checksum = fold(
-                  checksum,
+                localChecksum = fold(
+                  localChecksum,
                   measurement.minute,
                   measurement.group,
                   measurement.voltageDeci,
@@ -1336,7 +1390,7 @@ object TheodolitePowerRegionMatrixHelpers {
                   val base = cfg.groupCount
                   val c1 = RiftRegion.allocOpen(
                     new CheckedContribution(
-                      index,
+                      localIndex,
                       group,
                       1,
                       parsedSub1Watt,
@@ -1348,7 +1402,7 @@ object TheodolitePowerRegionMatrixHelpers {
                   counts(base + group) += 1
                   val c2 = RiftRegion.allocOpen(
                     new CheckedContribution(
-                      index,
+                      localIndex,
                       group,
                       2,
                       parsedSub2Watt,
@@ -1360,7 +1414,7 @@ object TheodolitePowerRegionMatrixHelpers {
                   counts(base * 2 + group) += 1
                   val c3 = RiftRegion.allocOpen(
                     new CheckedContribution(
-                      index,
+                      localIndex,
                       group,
                       3,
                       parsedSub3Watt,
@@ -1370,8 +1424,8 @@ object TheodolitePowerRegionMatrixHelpers {
                   contributionHead = c3
                   sums(base * 3 + group) += c3.watt.toLong
                   counts(base * 3 + group) += 1
-                  checksum = fold(
-                    checksum,
+                  localChecksum = fold(
+                    localChecksum,
                     c1.minute,
                     c2.watt,
                     c3.watt,
@@ -1390,7 +1444,7 @@ object TheodolitePowerRegionMatrixHelpers {
                     )
                     val contribution = RiftRegion.allocOpen(
                       new CheckedContribution(
-                        index,
+                        localIndex,
                         node,
                         uc4Circuit(k),
                         watt,
@@ -1401,8 +1455,8 @@ object TheodolitePowerRegionMatrixHelpers {
                     val slot = uc4Slot(k, group)
                     sums(slot) += contribution.watt.toLong
                     counts(slot) += 1
-                    checksum = fold(
-                      checksum,
+                    localChecksum = fold(
+                      localChecksum,
                       contribution.minute,
                       contribution.group,
                       contribution.circuit,
@@ -1411,19 +1465,28 @@ object TheodolitePowerRegionMatrixHelpers {
                     k += 1
                   }
                 }
-                index += 1
-                inEpoch += 1
+                localIndex += 1
+                localInEpoch += 1
               }
-              length = reader.readLine()
+              localLength = reader.readLine()
             }
             val a =
               if (measurementHead == null) 0L else measurementHead.totalMilliW.toLong
             val b =
               if (contributionHead == null) 0L else contributionHead.watt.toLong
-            anchor = a ^ (b << 5)
+            new StreamingEpochOutcome(
+              localChecksum,
+              a ^ (b << 5),
+              localIndex,
+              localLength,
+              localInEpoch
+            )
           }
-          if (inEpoch > 0) {
-            retainedAnchorSink ^= anchor
+          checksum = epochOutcome.checksum
+          index = epochOutcome.nextIndex
+          length = epochOutcome.nextLength
+          if (epochOutcome.recordsRead > 0) {
+            retainedAnchorSink ^= epochOutcome.anchor
             outputs += closeEpoch(sums, counts)
           }
         }
@@ -1475,8 +1538,7 @@ object TheodolitePowerRegionMatrixHelpers {
           var i = index
           while (i < end) {
             val group = groupFor(i)
-            val measurement = RiftAllocator.allocateOpenHandle(
-              region,
+            val measurement: CheckedMeasurement^{region} =
               new CheckedMeasurement(
                 i,
                 group,
@@ -1484,7 +1546,6 @@ object TheodolitePowerRegionMatrixHelpers {
                 input.voltageDeci(i),
                 measurementHead
               )
-            )
             measurementHead = measurement
             sums(group) += measurement.totalMilliW.toLong
             counts(group) += 1
@@ -1497,8 +1558,7 @@ object TheodolitePowerRegionMatrixHelpers {
             )
             if (query == "q2-hierarchical") {
               val base = cfg.groupCount
-              val c1 = RiftAllocator.allocateOpenHandle(
-                region,
+              val c1: CheckedContribution^{region} =
                 new CheckedContribution(
                   i,
                   group,
@@ -1506,12 +1566,10 @@ object TheodolitePowerRegionMatrixHelpers {
                   input.sub1Watt(i),
                   contributionHead
                 )
-              )
               contributionHead = c1
               sums(base + group) += c1.watt.toLong
               counts(base + group) += 1
-              val c2 = RiftAllocator.allocateOpenHandle(
-                region,
+              val c2: CheckedContribution^{region} =
                 new CheckedContribution(
                   i,
                   group,
@@ -1519,12 +1577,10 @@ object TheodolitePowerRegionMatrixHelpers {
                   input.sub2Watt(i),
                   contributionHead
                 )
-              )
               contributionHead = c2
               sums(base * 2 + group) += c2.watt.toLong
               counts(base * 2 + group) += 1
-              val c3 = RiftAllocator.allocateOpenHandle(
-                region,
+              val c3: CheckedContribution^{region} =
                 new CheckedContribution(
                   i,
                   group,
@@ -1532,7 +1588,6 @@ object TheodolitePowerRegionMatrixHelpers {
                   input.sub3Watt(i),
                   contributionHead
                 )
-              )
               contributionHead = c3
               sums(base * 3 + group) += c3.watt.toLong
               counts(base * 3 + group) += 1
@@ -1548,10 +1603,8 @@ object TheodolitePowerRegionMatrixHelpers {
                   input.sub2Watt(i),
                   input.sub3Watt(i)
                 )
-                val contribution = RiftAllocator.allocateOpenHandle(
-                  region,
+                val contribution: CheckedContribution^{region} =
                   new CheckedContribution(i, node, uc4Circuit(k), watt, contributionHead)
-                )
                 contributionHead = contribution
                 val slot = uc4Slot(k, group)
                 sums(slot) += contribution.watt.toLong

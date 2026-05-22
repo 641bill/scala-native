@@ -380,6 +380,37 @@ object ReMLRegionMatrixHelpers {
     else RiftRegion.streaming { stream ?=> body() }
   }
 
+  private def runCheckedMsortInferred(reverse: Boolean): Long =
+    RiftRegion.streaming { stream ?=>
+      RiftRegion.epoch { region ?=>
+        final class Node(val value: Int, val next: Node^{region})
+        val cfg = ReMLRegionConfig
+        var head: Node^{region} = null
+        var i = 0
+        while (i < cfg.listSize) {
+          val index = if (reverse) cfg.listSize - i else i
+          head = new Node(mix(index * 1103515245 + 12345), head)
+          i += 1
+        }
+        var cursor = head
+        var count = 0
+        val values = new Array[Int](cfg.listSize)
+        while (cursor != null) {
+          values(count) = cursor.value
+          cursor = cursor.next
+          count += 1
+        }
+        scala.util.Sorting.quickSort(values)
+        var checksum = 0L
+        i = 0
+        while (i < values.length) {
+          checksum = fold(checksum, values(i).toLong)
+          i += 1
+        }
+        checksum
+      }
+    }
+
   private def runHeapLife(): Long = {
     val cfg = ReMLRegionConfig
     var current = new Array[Byte](cfg.lifeSize * cfg.lifeSize)
@@ -574,6 +605,42 @@ object ReMLRegionMatrixHelpers {
     else RiftRegion.streaming { stream ?=> body() }
   }
 
+  private def runCheckedFftInferred(): Long =
+    RiftRegion.streaming { stream ?=>
+      RiftRegion.epoch { region ?=>
+        final class Complex(val re: Double, val im: Double)
+        val cfg = ReMLRegionConfig
+        val values: Array[Complex^{region}]^{region} =
+          new Array[Complex^{region}](cfg.fftSize)
+        var i = 0
+        while (i < values.length) {
+          values(i) = new Complex(math.sin(i.toDouble), math.cos(i.toDouble))
+          i += 1
+        }
+        var span = 1
+        while (span < values.length) {
+          i = 0
+          while (i + span < values.length) {
+            val a = values(i)
+            val b = values(i + span)
+            values(i) = new Complex(a.re + b.re, a.im + b.im)
+            values(i + span) = new Complex(a.re - b.re, a.im - b.im)
+            i += span << 1
+          }
+          span <<= 1
+        }
+        var checksum = 0L
+        i = 0
+        while (i < values.length) {
+          val c = values(i)
+          checksum =
+            fold(checksum, java.lang.Double.doubleToLongBits(c.re + c.im))
+          i += math.max(1, values.length / 256)
+        }
+        checksum
+      }
+    }
+
   private def gcd(a0: Int, b0: Int): Int = {
     var a = math.abs(a0)
     var b = math.abs(b0)
@@ -679,6 +746,32 @@ object ReMLRegionMatrixHelpers {
     if (safeZoneBackend) RiftRegion.streamingSafeZone { stream ?=> body() }
     else RiftRegion.streaming { stream ?=> body() }
   }
+
+  private def runCheckedRatioInferred(): Long =
+    RiftRegion.streaming { stream ?=>
+      RiftRegion.epoch { region ?=>
+        final class Ratio(val n: Int, val d: Int)
+        val cfg = ReMLRegionConfig
+        val values: Array[Ratio^{region}]^{region} =
+          new Array[Ratio^{region}](cfg.ratioCount)
+        var i = 1
+        while (i <= cfg.ratioCount) {
+          val n = mix(i) % 100000 + 1
+          val d = mix(i + 17) % 99999 + 1
+          val g = gcd(n, d)
+          values(i - 1) = new Ratio(n / g, d / g)
+          i += 1
+        }
+        var checksum = 0L
+        i = 0
+        while (i < values.length) {
+          val r = values(i)
+          checksum = fold(checksum, r.n.toLong * 65537L + r.d.toLong)
+          i += 1
+        }
+        checksum
+      }
+    }
 
   private def evalHeapLogic(node: HeapLogicNode): Long =
     if (node.kind == 0) node.value.toLong
@@ -900,6 +993,58 @@ object ReMLRegionMatrixHelpers {
     if (safeZoneBackend) RiftRegion.streamingSafeZone { stream ?=> body() }
     else RiftRegion.streaming { stream ?=> body() }
   }
+
+  private def runCheckedLogicInferred(): Long =
+    RiftRegion.streaming { stream ?=>
+      RiftRegion.epoch { region ?=>
+        final class LogicNode(
+            val kind: Int,
+            val value: Int,
+            val left: LogicNode^{region},
+            val right: LogicNode^{region}
+        )
+        def eval(node: LogicNode^{region}): Long =
+          if (node.kind == 0) node.value.toLong
+          else {
+            val child = eval(node.left)
+            node.kind match {
+              case 1 => child ^ node.value.toLong
+              case 2 => (child & 0xffffL) + node.value.toLong
+              case 3 => (child | node.value.toLong) ^ (node.value.toLong << 1)
+              case _ => child + node.value.toLong
+            }
+          }
+        val cfg = ReMLRegionConfig
+        var checksum = 0L
+        var i = 0
+        while (i < cfg.logicIterations) {
+          val seed = i + 17
+          val seeds = new Array[Int](cfg.logicDepth + 1)
+          seeds(0) = seed
+          var d = 1
+          while (d <= cfg.logicDepth) {
+            seeds(d) = seeds(d - 1) * 1664525 + 1013904223
+            d += 1
+          }
+          var node: LogicNode^{region} =
+            new LogicNode(0, mix(seeds(cfg.logicDepth)) & 0x7fff, null, null)
+          d = cfg.logicDepth
+          while (d > 0) {
+            val currentSeed = seeds(d - 1)
+            node = new LogicNode(
+              1 + (mix(currentSeed) & 3),
+              mix(currentSeed ^ d),
+              node,
+              null
+            )
+            d -= 1
+          }
+          checksum = fold(checksum, eval(node))
+          i += 1
+        }
+        checksum
+      }
+    }
 
   private def runHeapRay(): Long = {
     val cfg = ReMLRegionConfig
@@ -1170,6 +1315,79 @@ object ReMLRegionMatrixHelpers {
     else RiftRegion.streaming { stream ?=> body() }
   }
 
+  private def runCheckedRayInferred(): Long =
+    RiftRegion.streaming { stream ?=>
+      RiftRegion.epoch { region ?=>
+        final class Sphere(
+            val x: Double,
+            val y: Double,
+            val z: Double,
+            val radius: Double
+        )
+        final class Ray(
+            val ox: Double,
+            val oy: Double,
+            val oz: Double,
+            val dx: Double,
+            val dy: Double,
+            val dz: Double
+        )
+        final class Hit(val sphere: Int, val t: Double)
+        val cfg = ReMLRegionConfig
+        val spheres: Array[Sphere^{region}]^{region} =
+          new Array[Sphere^{region}](cfg.raySpheres)
+        var i = 0
+        while (i < spheres.length) {
+          spheres(i) = new Sphere(
+            ((mix(i) % 2000).toDouble - 1000.0) / 100.0,
+            ((mix(i + 7) % 2000).toDouble - 1000.0) / 100.0,
+            4.0 + (mix(i + 13) % 900).toDouble / 100.0,
+            0.25 + (mix(i + 19) % 75).toDouble / 100.0
+          )
+          i += 1
+        }
+        var checksum = 0L
+        i = 0
+        while (i < cfg.rayRays) {
+          val ray: Ray^{region} = new Ray(
+            0.0,
+            0.0,
+            -2.0,
+            ((mix(i) % 2000).toDouble - 1000.0) / 2000.0,
+            ((mix(i + 3) % 2000).toDouble - 1000.0) / 2000.0,
+            1.0
+          )
+          var bestT = Double.PositiveInfinity
+          var bestSphere = -1
+          var j = 0
+          while (j < spheres.length) {
+            val s = spheres(j)
+            val ox = ray.ox - s.x
+            val oy = ray.oy - s.y
+            val oz = ray.oz - s.z
+            val b = ox * ray.dx + oy * ray.dy + oz * ray.dz
+            val c = ox * ox + oy * oy + oz * oz - s.radius * s.radius
+            val disc = b * b - c
+            if (disc > 0.0) {
+              val t = -b - math.sqrt(disc)
+              if (t > 0.0 && t < bestT) {
+                bestT = t
+                bestSphere = j
+              }
+            }
+            j += 1
+          }
+          if (bestSphere >= 0) {
+            val hit: Hit^{region} = new Hit(bestSphere, bestT)
+            checksum =
+              fold(checksum, hit.sphere.toLong * 65537L + hit.t.toLong)
+          } else checksum = fold(checksum, i.toLong)
+          i += 1
+        }
+        checksum
+      }
+    }
+
   private def pointDistance2Heap(a: HeapPoint, b: HeapPoint): Double = {
     val dx = a.x - b.x
     val dy = a.y - b.y
@@ -1428,6 +1646,71 @@ object ReMLRegionMatrixHelpers {
     else RiftRegion.streaming { stream ?=> body() }
   }
 
+  private def runCheckedTspInferred(): Long =
+    RiftRegion.streaming { stream ?=>
+      RiftRegion.epoch { region ?=>
+        final class Point(val x: Double, val y: Double)
+        final class TourNode(val point: Int, val next: TourNode^{region})
+        def distance2(a: Point^{region}, b: Point^{region}): Double = {
+          val dx = a.x - b.x
+          val dy = a.y - b.y
+          dx * dx + dy * dy
+        }
+        val cfg = ReMLRegionConfig
+        val points: Array[Point^{region}]^{region} =
+          new Array[Point^{region}](cfg.tspPoints)
+        var i = 0
+        while (i < points.length) {
+          points(i) = new Point(
+            (mix(i) % 10000).toDouble / 100.0,
+            (mix(i + 11) % 10000).toDouble / 100.0
+          )
+          i += 1
+        }
+        val visited = new Array[Boolean](cfg.tspPoints)
+        var checksum = 0L
+        var start = 0
+        while (start < cfg.tspStarts) {
+          java.util.Arrays.fill(visited, false)
+          var current = start % cfg.tspPoints
+          var tour: TourNode^{region} = null
+          var step = 0
+          var total = 0.0
+          while (step < cfg.tspPoints) {
+            visited(current) = true
+            tour = new TourNode(current, tour)
+            var best = -1
+            var bestD = Double.PositiveInfinity
+            var j = 0
+            while (j < cfg.tspPoints) {
+              if (!visited(j)) {
+                val d = distance2(points(current), points(j))
+                if (d < bestD) {
+                  bestD = d
+                  best = j
+                }
+              }
+              j += 1
+            }
+            if (best >= 0) {
+              total += math.sqrt(bestD)
+              current = best
+            }
+            step += 1
+          }
+          var cursor = tour
+          var tourChecksum = 0L
+          while (cursor != null) {
+            tourChecksum = fold(tourChecksum, cursor.point.toLong)
+            cursor = cursor.next
+          }
+          checksum = fold(checksum, tourChecksum ^ total.toLong)
+          start += 1
+        }
+        checksum
+      }
+    }
+
   private def canonicalMode(mode: String): String =
     mode match {
       case "heap" | "heap-immix" | "gc-heap" => "gc-heap"
@@ -1444,6 +1727,8 @@ object ReMLRegionMatrixHelpers {
         "region-stream-rootless"
       case "rift-checked" | "rift-checked-rift" | "checked-region-stream" =>
         "checked-region-stream"
+      case "rift-checked-inferred" | "checked-region-stream-inferred" =>
+        "checked-region-stream-inferred"
       case "rift-checked-safezone-32k" |
           "rift-checked-safezone-improved-32k" | "checked-region-scoped" =>
         "checked-region-scoped"
@@ -1453,7 +1738,8 @@ object ReMLRegionMatrixHelpers {
   private def usesRiftStats(mode: String): Boolean =
     mode == "region-hp-rootless" ||
       mode == "region-stream-rootless" ||
-      mode == "checked-region-stream"
+      mode == "checked-region-stream" ||
+      mode == "checked-region-stream-inferred"
 
   private def runWorkload(workload: String, mode: String): Long =
     workload match {
@@ -1470,6 +1756,8 @@ object ReMLRegionMatrixHelpers {
           case "region-stream-rootless" =>
             runTrustedMsort(RiftRegion.Streaming, false)
           case "checked-region-stream" => runCheckedMsort(false, false)
+          case "checked-region-stream-inferred" =>
+            runCheckedMsortInferred(false)
           case "checked-region-scoped" => runCheckedMsort(false, true)
         }
       case "msort-r" =>
@@ -1481,6 +1769,8 @@ object ReMLRegionMatrixHelpers {
           case "region-stream-rootless" =>
             runTrustedMsort(RiftRegion.Streaming, true)
           case "checked-region-stream" => runCheckedMsort(true, false)
+          case "checked-region-stream-inferred" =>
+            runCheckedMsortInferred(true)
           case "checked-region-scoped" => runCheckedMsort(true, true)
         }
       case "fft" =>
@@ -1491,6 +1781,7 @@ object ReMLRegionMatrixHelpers {
           case "region-hp-rootless" => runTrustedFft(RiftRegion.HPZone)
           case "region-stream-rootless" => runTrustedFft(RiftRegion.Streaming)
           case "checked-region-stream" => runCheckedFft(false)
+          case "checked-region-stream-inferred" => runCheckedFftInferred()
           case "checked-region-scoped" => runCheckedFft(true)
         }
       case "ratio" =>
@@ -1501,6 +1792,7 @@ object ReMLRegionMatrixHelpers {
           case "region-hp-rootless" => runTrustedRatio(RiftRegion.HPZone)
           case "region-stream-rootless" => runTrustedRatio(RiftRegion.Streaming)
           case "checked-region-stream" => runCheckedRatio(false)
+          case "checked-region-stream-inferred" => runCheckedRatioInferred()
           case "checked-region-scoped" => runCheckedRatio(true)
         }
       case "logic" =>
@@ -1511,6 +1803,7 @@ object ReMLRegionMatrixHelpers {
           case "region-hp-rootless" => runTrustedLogic(RiftRegion.HPZone)
           case "region-stream-rootless" => runTrustedLogic(RiftRegion.Streaming)
           case "checked-region-stream" => runCheckedLogic(false)
+          case "checked-region-stream-inferred" => runCheckedLogicInferred()
           case "checked-region-scoped" => runCheckedLogic(true)
         }
       case "ray" =>
@@ -1521,6 +1814,7 @@ object ReMLRegionMatrixHelpers {
           case "region-hp-rootless" => runTrustedRay(RiftRegion.HPZone)
           case "region-stream-rootless" => runTrustedRay(RiftRegion.Streaming)
           case "checked-region-stream" => runCheckedRay(false)
+          case "checked-region-stream-inferred" => runCheckedRayInferred()
           case "checked-region-scoped" => runCheckedRay(true)
         }
       case "tsp" =>
@@ -1531,6 +1825,7 @@ object ReMLRegionMatrixHelpers {
           case "region-hp-rootless" => runTrustedTsp(RiftRegion.HPZone)
           case "region-stream-rootless" => runTrustedTsp(RiftRegion.Streaming)
           case "checked-region-stream" => runCheckedTsp(false)
+          case "checked-region-stream-inferred" => runCheckedTspInferred()
           case "checked-region-scoped" => runCheckedTsp(true)
         }
       case other =>

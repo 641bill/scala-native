@@ -1,6 +1,6 @@
 # StreamFlex Design Matrix
 
-Last updated: 2026-05-15 14:45 CEST
+Last updated: 2026-05-20 14:43 CEST
 
 Status: first Rift-native StreamFlex system-design reproduction. This is a
 methodology benchmark for the StreamFlex axes: stable state, transient scoped
@@ -358,6 +358,87 @@ Interpretation:
   Checked scoped has the best max-latency row in this run; checked stream is
   the direct evidence that the Rift-backed allocation lowering transfers to
   the StreamFlex-style backend.
+
+### L1 Transfer Gate After Stats-Disabled Object Fast Path
+
+Date/time: 2026-05-20 00:05 CEST.
+
+This gate reruns the representative StreamFlex-design workload after the Rift
+runtime gained a final-clean no-stats managed-object allocation helper. It is
+a transfer check for the allocation-body cleanup, not an exact StreamFlex/Ovm
+artifact claim and not profiler timing.
+
+Artifacts:
+
+- `/Users/siyaoliu/rift/cache/streamflex-design-nostats-fastpath-20m-20260520`
+
+L1 final-clean throughput, 20M events x 3 runs:
+
+| Mode | External real s | External user s | RSS bytes | Checksum | Output count |
+|---|---:|---:|---:|---:|---:|
+| `gc-heap` | 32.71 | 32.67 | 12468224 | `5305809911915216923` | 19999119 |
+| `checked-epoch-stream` | 19.63 | 19.58 | 12582912 | `5305809911915216923` | 19999119 |
+| `checked-epoch-scoped` | 26.04 | 25.99 | 12632064 | `5305809911915216923` | 19999119 |
+
+Follow-up L4 profile:
+
+- `/Users/siyaoliu/rift/cache/profile-sweep-20260520-streamflex-nostats-fastpath`
+
+With the callback-ref classifier enabled, coarse buckets for
+`checked-epoch-stream` are callback-ref-shaped checked body `1055` samples,
+region allocation/init `1225`, query mutator `1220`, traversal/capsule `172`,
+and other `145`. Interpretation: the runtime fast path improves final-clean
+elapsed by removing allocator-body constant cost, but the remaining
+StreamFlex-design work is still split across allocation/init, stable-state
+query work, checked callback source shape, and capsule traversal.
+
+### Callback-Local Source-Shape Probe
+
+Date/time: 2026-05-20 14:35 CEST.
+
+The checked streaming throughput loop was refactored so checksum/output/drop
+counters live inside the `streamingOpenHandle` callback, with immutable
+per-period values passed into each reset body. This mirrors the accepted
+Wikimedia/Theodolite source-shape cleanup and is not a query rewrite.
+
+Artifacts:
+
+- `/Users/siyaoliu/rift/cache/profile-sweep-20260520-streamflex-callback-local`
+- `/Users/siyaoliu/rift/cache/streamflex-design-callback-local-20m-20260520`
+
+The 20k smoke matched the previous checksum/output for
+`checked-epoch-stream` and `checked-epoch-stream-inferred`:
+checksum `3496158305702065933`, output `20013`.
+
+L4 result for `checked-epoch-stream` at 20M events:
+
+| Profile | Callback-ref samples/sec | Traversal/capsule samples/sec | Region alloc/init samples/sec | Query mutator samples/sec |
+|---|---:|---:|---:|---:|
+| Before callback-local source shape | `211.00` | `34.40` | `245.00` | `244.00` |
+| After callback-local source shape | `0.00` | `35.40` | `273.60` | `491.60` |
+
+Interpretation: the source-shape change removes the generated
+`scala.runtime.*Ref` callback signature from sampled top frames, but it does
+not remove the underlying pipeline work. After adding
+`StreamFlexDesignMatrixHelpers.*anonfun` to the query classifier, the exposed
+work is ordinary checked query/body work plus region allocation/init. It is not
+a capsule/traversal regression; actual capsule/traversal samples remain small
+at about `35` samples/sec.
+
+L1 final-clean throughput, 20M events x 3 runs:
+
+| Mode | External real s | External user s | RSS bytes | Checksum | Output count |
+|---|---:|---:|---:|---:|---:|
+| `gc-heap` | 34.58 | 31.68 | 12337152 | `5305809911915216923` | 19999119 |
+| `checked-epoch-stream` | 19.98 | 19.43 | 12566528 | `5305809911915216923` | 19999119 |
+
+Interpretation: this is accepted as source-shape/profile-clarity cleanup, not
+as a new speed claim. The checked stream row remains much faster than heap,
+but the callback-local change by itself is timing-neutral to slightly slower
+relative to the prior `19.63 s` checkpoint, likely because the removed
+callback-ref marker was mostly body attribution rather than direct allocation
+time. The next StreamFlex-specific target remains allocation/init and
+query/object pipeline work, not more counter-localization or capsule traversal.
 
 ## Experimental Reusable-Slab Bulk-Zero Gate
 

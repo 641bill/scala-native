@@ -562,7 +562,9 @@ object BroomRetainedDataflowMatrixHelpers {
     Outcome(checksum, outputCount, retainedObjects, 0L, maxLiveObjects)
   }
 
-  private def runCheckedAggregate(): Outcome = {
+  private inline def runCheckedAggregateImpl(
+      inline inferredAllocations: Boolean
+  ): Outcome = {
     val cfg = BroomRetainedDataflowConfig
     val tableSize = nextPowerOfTwo(math.max(16, cfg.keySpace * 2))
     val tableMask = tableSize - 1
@@ -579,6 +581,9 @@ object BroomRetainedDataflowMatrixHelpers {
         val remaining = cfg.records - processed
         val slots = groupSlots(remaining, cfg)
         val groupRecords = math.min(remaining, slots * cfg.recordsPerTimestamp)
+        val baseChecksum = checksum
+        val baseProcessed = processed
+        val baseGroup = group
 
         val groupOutcome = RiftRegion.resetOpenHandle { region ?=>
           final class CheckedEvent(
@@ -600,22 +605,31 @@ object BroomRetainedDataflowMatrixHelpers {
           }
 
           val heads: Array[CheckedEvent^{region}]^{region} =
-            RiftAllocator.allocateOpenHandle(
-              region,
+            inline if (inferredAllocations) then
               new Array[CheckedEvent^{region}](slots)
-            )
+            else
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new Array[CheckedEvent^{region}](slots)
+              )
           val tails: Array[CheckedEvent^{region}]^{region} =
-            RiftAllocator.allocateOpenHandle(
-              region,
+            inline if (inferredAllocations) then
               new Array[CheckedEvent^{region}](slots)
-            )
+            else
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new Array[CheckedEvent^{region}](slots)
+              )
           val tables: Array[CheckedAggregateEntry^{region}]^{region} =
-            RiftAllocator.allocateOpenHandle(
-              region,
+            inline if (inferredAllocations) then
               new Array[CheckedAggregateEntry^{region}](slots * tableSize)
-            )
+            else
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new Array[CheckedAggregateEntry^{region}](slots * tableSize)
+              )
           val counts = new Array[Int](slots)
-          var localChecksum = checksum
+          var localChecksum = baseChecksum
           var localOutput = 0L
           var localRetained = 0L
           var liveObjects = 3L
@@ -623,13 +637,15 @@ object BroomRetainedDataflowMatrixHelpers {
 
           while (local < groupRecords) {
             val slot = local % slots
-            val timestamp = group * cfg.activeTimestamps + slot
-            val recordId = processed + local
+            val timestamp = baseGroup * cfg.activeTimestamps + slot
+            val recordId = baseProcessed + local
             val key = generatedKey(recordId, timestamp)
             val value = generatedValue(recordId, timestamp)
             val hash = mix(recordId ^ (timestamp * 65537)).toLong
             val event: CheckedEvent^{region} =
-              RiftAllocator.allocateOpenHandle(
+              inline if (inferredAllocations) then
+                new CheckedEvent(recordId, timestamp, key, value, hash)
+              else RiftAllocator.allocateOpenHandle(
                 region,
                 new CheckedEvent(recordId, timestamp, key, value, hash)
               )
@@ -649,7 +665,9 @@ object BroomRetainedDataflowMatrixHelpers {
             }
             if (found == null) {
               found =
-                RiftAllocator.allocateOpenHandle(
+                inline if (inferredAllocations) then
+                  new CheckedAggregateEntry(key, 0, 0L)
+                else RiftAllocator.allocateOpenHandle(
                   region,
                   new CheckedAggregateEntry(key, 0, 0L)
                 )
@@ -668,7 +686,7 @@ object BroomRetainedDataflowMatrixHelpers {
 
           var slot = 0
           while (slot < slots) {
-            val timestamp = group * cfg.activeTimestamps + slot
+            val timestamp = baseGroup * cfg.activeTimestamps + slot
             val head = heads(slot)
             val tail = tails(slot)
             if (head != null && tail != null)
@@ -707,6 +725,12 @@ object BroomRetainedDataflowMatrixHelpers {
     retainedSink = retainedObjects
     Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
   }
+
+  private def runCheckedAggregate(): Outcome =
+    runCheckedAggregateImpl(inferredAllocations = false)
+
+  private def runCheckedInferredAggregate(): Outcome =
+    runCheckedAggregateImpl(inferredAllocations = true)
 
   private def runHeapJoin(): Outcome = {
     val cfg = BroomRetainedDataflowConfig
@@ -1242,7 +1266,9 @@ object BroomRetainedDataflowMatrixHelpers {
     Outcome(checksum, outputCount, retainedObjects, 0L, maxLiveObjects)
   }
 
-  private def runCheckedJoin(): Outcome = {
+  private inline def runCheckedJoinImpl(
+      inline inferredAllocations: Boolean
+  ): Outcome = {
     val cfg = BroomRetainedDataflowConfig
     val tableSize = nextPowerOfTwo(math.max(16, cfg.keySpace * 2))
     val tableMask = tableSize - 1
@@ -1259,6 +1285,9 @@ object BroomRetainedDataflowMatrixHelpers {
         val remaining = cfg.records - processed
         val slots = groupSlots(remaining, cfg)
         val groupRecords = math.min(remaining, slots * cfg.recordsPerTimestamp)
+        val baseChecksum = checksum
+        val baseProcessed = processed
+        val baseGroup = group
 
         val groupOutcome = RiftRegion.resetOpenHandle { region ?=>
           final class CheckedJoinRecord(
@@ -1272,16 +1301,22 @@ object BroomRetainedDataflowMatrixHelpers {
           }
 
           val left: Array[CheckedJoinRecord^{region}]^{region} =
-            RiftAllocator.allocateOpenHandle(
-              region,
+            inline if (inferredAllocations) then
               new Array[CheckedJoinRecord^{region}](slots * tableSize)
-            )
+            else
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new Array[CheckedJoinRecord^{region}](slots * tableSize)
+              )
           val right: Array[CheckedJoinRecord^{region}]^{region} =
-            RiftAllocator.allocateOpenHandle(
-              region,
+            inline if (inferredAllocations) then
               new Array[CheckedJoinRecord^{region}](slots * tableSize)
-            )
-          var localChecksum = checksum
+            else
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new Array[CheckedJoinRecord^{region}](slots * tableSize)
+              )
+          var localChecksum = baseChecksum
           var localOutput = 0L
           var localRetained = 0L
           var liveObjects = 2L
@@ -1289,8 +1324,8 @@ object BroomRetainedDataflowMatrixHelpers {
 
           while (local < groupRecords) {
             val slot = local % slots
-            val timestamp = group * cfg.activeTimestamps + slot
-            val recordId = processed + local
+            val timestamp = baseGroup * cfg.activeTimestamps + slot
+            val recordId = baseProcessed + local
             val ordinal = local / slots
             val side = ordinal & 1
             val key = generatedKey(ordinal / 2, timestamp)
@@ -1308,12 +1343,15 @@ object BroomRetainedDataflowMatrixHelpers {
                 }
                 cursor = cursor.next
               }
-              left(bucket) =
-                RiftAllocator.allocateOpenHandle(
+              val record: CheckedJoinRecord^{region} =
+                inline if (inferredAllocations) then
+                  new CheckedJoinRecord(recordId, timestamp, key, value, hash)
+                else RiftAllocator.allocateOpenHandle(
                   region,
                   new CheckedJoinRecord(recordId, timestamp, key, value, hash)
                 )
-              left(bucket).next = oldLeft
+              left(bucket) = record
+              record.next = oldLeft
             } else {
               val oldRight: CheckedJoinRecord^{region} = right(bucket)
               var cursor: CheckedJoinRecord^{region} = left(bucket)
@@ -1325,12 +1363,15 @@ object BroomRetainedDataflowMatrixHelpers {
                 }
                 cursor = cursor.next
               }
-              right(bucket) =
-                RiftAllocator.allocateOpenHandle(
+              val record: CheckedJoinRecord^{region} =
+                inline if (inferredAllocations) then
+                  new CheckedJoinRecord(recordId, timestamp, key, value, hash)
+                else RiftAllocator.allocateOpenHandle(
                   region,
                   new CheckedJoinRecord(recordId, timestamp, key, value, hash)
                 )
-              right(bucket).next = oldRight
+              right(bucket) = record
+              record.next = oldRight
             }
             localRetained += 1L
             liveObjects += 1L
@@ -1341,7 +1382,7 @@ object BroomRetainedDataflowMatrixHelpers {
 
           var slot = 0
           while (slot < slots) {
-            val timestamp = group * cfg.activeTimestamps + slot
+            val timestamp = baseGroup * cfg.activeTimestamps + slot
             var bucket = 0
             var leftCount = 0
             var rightCount = 0
@@ -1383,7 +1424,15 @@ object BroomRetainedDataflowMatrixHelpers {
     Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
   }
 
-  private def runCheckedShopper(): Outcome = {
+  private def runCheckedJoin(): Outcome =
+    runCheckedJoinImpl(inferredAllocations = false)
+
+  private def runCheckedInferredJoin(): Outcome =
+    runCheckedJoinImpl(inferredAllocations = true)
+
+  private inline def runCheckedShopperImpl(
+      inline inferredAllocations: Boolean
+  ): Outcome = {
     val cfg = BroomRetainedDataflowConfig
     val tableSize = nextPowerOfTwo(math.max(16, cfg.keySpace * 2))
     val tableMask = tableSize - 1
@@ -1400,6 +1449,9 @@ object BroomRetainedDataflowMatrixHelpers {
         val remaining = cfg.records - processed
         val slots = groupSlots(remaining, cfg)
         val groupRecords = math.min(remaining, slots * cfg.recordsPerTimestamp)
+        val baseChecksum = checksum
+        val baseProcessed = processed
+        val baseGroup = group
 
         val groupOutcome = RiftRegion.resetOpenHandle { region ?=>
           final class CheckedShopperView(
@@ -1448,26 +1500,38 @@ object BroomRetainedDataflowMatrixHelpers {
           }
 
           val views: Array[CheckedShopperView^{region}]^{region} =
-            RiftAllocator.allocateOpenHandle(
-              region,
+            inline if (inferredAllocations) then
               new Array[CheckedShopperView^{region}](slots * tableSize)
-            )
+            else
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new Array[CheckedShopperView^{region}](slots * tableSize)
+              )
           val carts: Array[CheckedShopperCart^{region}]^{region} =
-            RiftAllocator.allocateOpenHandle(
-              region,
+            inline if (inferredAllocations) then
               new Array[CheckedShopperCart^{region}](slots * tableSize)
-            )
+            else
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new Array[CheckedShopperCart^{region}](slots * tableSize)
+              )
           val purchases: Array[CheckedShopperPurchase^{region}]^{region} =
-            RiftAllocator.allocateOpenHandle(
-              region,
+            inline if (inferredAllocations) then
               new Array[CheckedShopperPurchase^{region}](slots * tableSize)
-            )
+            else
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new Array[CheckedShopperPurchase^{region}](slots * tableSize)
+              )
           val candidates: Array[CheckedShopperCandidate^{region}]^{region} =
-            RiftAllocator.allocateOpenHandle(
-              region,
+            inline if (inferredAllocations) then
               new Array[CheckedShopperCandidate^{region}](slots * tableSize)
-            )
-          var localChecksum = checksum
+            else
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new Array[CheckedShopperCandidate^{region}](slots * tableSize)
+              )
+          var localChecksum = baseChecksum
           var localOutput = 0L
           var localRetained = 0L
           var liveObjects = 4L
@@ -1475,8 +1539,8 @@ object BroomRetainedDataflowMatrixHelpers {
 
           while (local < groupRecords) {
             val slot = local % slots
-            val timestamp = group * cfg.activeTimestamps + slot
-            val recordId = processed + local
+            val timestamp = baseGroup * cfg.activeTimestamps + slot
+            val recordId = baseProcessed + local
             val ordinal = local / slots
             val phase = ordinal % 3
             val logical = ordinal / 3
@@ -1491,8 +1555,18 @@ object BroomRetainedDataflowMatrixHelpers {
 
             if (phase == 0) {
               val oldView: CheckedShopperView^{region} = views(bucket)
-              views(bucket) =
-                RiftAllocator.allocateOpenHandle(
+              val view: CheckedShopperView^{region} =
+                inline if (inferredAllocations) then
+                  new CheckedShopperView(
+                    recordId,
+                    timestamp,
+                    user,
+                    item,
+                    campaign,
+                    value,
+                    hash
+                  )
+                else RiftAllocator.allocateOpenHandle(
                   region,
                   new CheckedShopperView(
                     recordId,
@@ -1504,17 +1578,21 @@ object BroomRetainedDataflowMatrixHelpers {
                     hash
                   )
                 )
-              views(bucket).next = oldView
+              views(bucket) = view
+              view.next = oldView
               localRetained += 1L
               liveObjects += 1L
             } else if (phase == 1) {
               val oldCart: CheckedShopperCart^{region} = carts(bucket)
-              carts(bucket) =
-                RiftAllocator.allocateOpenHandle(
+              val cart: CheckedShopperCart^{region} =
+                inline if (inferredAllocations) then
+                  new CheckedShopperCart(recordId, timestamp, user, item, value, hash)
+                else RiftAllocator.allocateOpenHandle(
                   region,
                   new CheckedShopperCart(recordId, timestamp, user, item, value, hash)
                 )
-              carts(bucket).next = oldCart
+              carts(bucket) = cart
+              cart.next = oldCart
               localRetained += 1L
               liveObjects += 1L
               var view: CheckedShopperView^{region} = views(bucket)
@@ -1527,8 +1605,17 @@ object BroomRetainedDataflowMatrixHelpers {
                   val candidateHash = hash ^ view.hash ^ (value.toLong << 17)
                   val oldCandidate: CheckedShopperCandidate^{region} =
                     candidates(bucket)
-                  candidates(bucket) =
-                    RiftAllocator.allocateOpenHandle(
+                  val candidateRecord: CheckedShopperCandidate^{region} =
+                    inline if (inferredAllocations) then
+                      new CheckedShopperCandidate(
+                        timestamp,
+                        user,
+                        item,
+                        view.campaign,
+                        value + view.value,
+                        candidateHash
+                      )
+                    else RiftAllocator.allocateOpenHandle(
                       region,
                       new CheckedShopperCandidate(
                         timestamp,
@@ -1539,7 +1626,8 @@ object BroomRetainedDataflowMatrixHelpers {
                         candidateHash
                       )
                     )
-                  candidates(bucket).next = oldCandidate
+                  candidates(bucket) = candidateRecord
+                  candidateRecord.next = oldCandidate
                   localRetained += 1L
                   liveObjects += 1L
                   localChecksum =
@@ -1556,12 +1644,15 @@ object BroomRetainedDataflowMatrixHelpers {
               }
             } else {
               val oldPurchase: CheckedShopperPurchase^{region} = purchases(bucket)
-              purchases(bucket) =
-                RiftAllocator.allocateOpenHandle(
+              val purchase: CheckedShopperPurchase^{region} =
+                inline if (inferredAllocations) then
+                  new CheckedShopperPurchase(recordId, timestamp, user, item, value, hash)
+                else RiftAllocator.allocateOpenHandle(
                   region,
                   new CheckedShopperPurchase(recordId, timestamp, user, item, value, hash)
                 )
-              purchases(bucket).next = oldPurchase
+              purchases(bucket) = purchase
+              purchase.next = oldPurchase
               localRetained += 1L
               liveObjects += 1L
               var candidate: CheckedShopperCandidate^{region} = candidates(bucket)
@@ -1590,7 +1681,7 @@ object BroomRetainedDataflowMatrixHelpers {
 
           var slot = 0
           while (slot < slots) {
-            val timestamp = group * cfg.activeTimestamps + slot
+            val timestamp = baseGroup * cfg.activeTimestamps + slot
             var bucket = 0
             var viewCount = 0
             var cartCount = 0
@@ -1652,8 +1743,17 @@ object BroomRetainedDataflowMatrixHelpers {
     Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
   }
 
-  private def runCheckedQ17(): Outcome = {
-    if (q17UsesTpchFileInput()) return runCheckedTpchQ17()
+  private def runCheckedShopper(): Outcome =
+    runCheckedShopperImpl(inferredAllocations = false)
+
+  private def runCheckedInferredShopper(): Outcome =
+    runCheckedShopperImpl(inferredAllocations = true)
+
+  private inline def runCheckedQ17Impl(
+      inline inferredAllocations: Boolean
+  ): Outcome =
+    if (q17UsesTpchFileInput()) runCheckedTpchQ17()
+    else {
 
     val cfg = BroomRetainedDataflowConfig
     val tableSize = nextPowerOfTwo(math.max(16, cfg.keySpace * 2))
@@ -1671,6 +1771,9 @@ object BroomRetainedDataflowMatrixHelpers {
         val remaining = cfg.records - processed
         val slots = groupSlots(remaining, cfg)
         val groupRecords = math.min(remaining, slots * cfg.recordsPerTimestamp)
+        val baseChecksum = checksum
+        val baseProcessed = processed
+        val baseGroup = group
 
         val groupOutcome = RiftRegion.resetOpenHandle { region ?=>
           final class CheckedQ17Part(
@@ -1701,11 +1804,14 @@ object BroomRetainedDataflowMatrixHelpers {
           }
 
           val tables: Array[CheckedQ17PartEntry^{region}]^{region} =
-            RiftAllocator.allocateOpenHandle(
-              region,
+            inline if (inferredAllocations) then
               new Array[CheckedQ17PartEntry^{region}](slots * tableSize)
-            )
-          var localChecksum = checksum
+            else
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new Array[CheckedQ17PartEntry^{region}](slots * tableSize)
+              )
+          var localChecksum = baseChecksum
           var localOutput = 0L
           var localRetained = 0L
           var liveObjects = 1L
@@ -1713,8 +1819,8 @@ object BroomRetainedDataflowMatrixHelpers {
 
           while (local < groupRecords) {
             val slot = local % slots
-            val timestamp = group * cfg.activeTimestamps + slot
-            val recordId = processed + local
+            val timestamp = baseGroup * cfg.activeTimestamps + slot
+            val recordId = baseProcessed + local
             val ordinal = local / slots
             val partKey = generatedQ17PartKey(ordinal / 4, timestamp)
             val quantity = generatedQ17Quantity(recordId, timestamp, partKey)
@@ -1730,7 +1836,14 @@ object BroomRetainedDataflowMatrixHelpers {
             }
             if (found == null) {
               val part: CheckedQ17Part^{region} =
-                RiftAllocator.allocateOpenHandle(
+                inline if (inferredAllocations) then
+                  new CheckedQ17Part(
+                    partKey,
+                    generatedQ17Brand(partKey),
+                    generatedQ17Container(partKey),
+                    selectedQ17Part(partKey)
+                  )
+                else RiftAllocator.allocateOpenHandle(
                   region,
                   new CheckedQ17Part(
                     partKey,
@@ -1740,7 +1853,9 @@ object BroomRetainedDataflowMatrixHelpers {
                   )
                 )
               found =
-                RiftAllocator.allocateOpenHandle(
+                inline if (inferredAllocations) then
+                  new CheckedQ17PartEntry(part, 0, 0L)
+                else RiftAllocator.allocateOpenHandle(
                   region,
                   new CheckedQ17PartEntry(part, 0, 0L)
                 )
@@ -1750,7 +1865,16 @@ object BroomRetainedDataflowMatrixHelpers {
               liveObjects += 2L
             }
             val line: CheckedQ17LineItem^{region} =
-              RiftAllocator.allocateOpenHandle(
+              inline if (inferredAllocations) then
+                new CheckedQ17LineItem(
+                  recordId,
+                  timestamp,
+                  partKey,
+                  quantity,
+                  revenue,
+                  hash
+                )
+              else RiftAllocator.allocateOpenHandle(
                 region,
                 new CheckedQ17LineItem(
                   recordId,
@@ -1775,7 +1899,7 @@ object BroomRetainedDataflowMatrixHelpers {
 
           var slot = 0
           while (slot < slots) {
-            val timestamp = group * cfg.activeTimestamps + slot
+            val timestamp = baseGroup * cfg.activeTimestamps + slot
             var bucket = 0
             while (bucket < tableSize) {
               var entry: CheckedQ17PartEntry^{region} =
@@ -1843,6 +1967,12 @@ object BroomRetainedDataflowMatrixHelpers {
     retainedSink = retainedObjects
     Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
   }
+
+  private def runCheckedQ17(): Outcome =
+    runCheckedQ17Impl(inferredAllocations = false)
+
+  private def runCheckedInferredQ17(): Outcome =
+    runCheckedQ17Impl(inferredAllocations = true)
 
   private def runCheckedTpchQ17(): Outcome = {
     val cfg = BroomRetainedDataflowConfig
@@ -2050,7 +2180,9 @@ object BroomRetainedDataflowMatrixHelpers {
     Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
   }
 
-  private def runCheckedScopedAggregate(): Outcome = {
+  private inline def runCheckedScopedAggregateImpl(
+      inline inferredAllocations: Boolean
+  ): Outcome = {
     val cfg = BroomRetainedDataflowConfig
     val tableSize = nextPowerOfTwo(math.max(16, cfg.keySpace * 2))
     val tableMask = tableSize - 1
@@ -2110,7 +2242,9 @@ object BroomRetainedDataflowMatrixHelpers {
             val value = generatedValue(recordId, timestamp)
             val hash = mix(recordId ^ (timestamp * 65537)).toLong
             val event: CheckedEvent^{region} =
-              RiftRegion.allocOpen(
+              inline if (inferredAllocations) then
+                new CheckedEvent(recordId, timestamp, key, value, hash)
+              else RiftRegion.allocOpen(
                 new CheckedEvent(recordId, timestamp, key, value, hash)
               )
             event.next = heads(slot)
@@ -2128,7 +2262,10 @@ object BroomRetainedDataflowMatrixHelpers {
               entry = entry.next
             }
             if (found == null) {
-              found = RiftRegion.allocOpen(new CheckedAggregateEntry(key, 0, 0L))
+              found =
+                inline if (inferredAllocations) then
+                  new CheckedAggregateEntry(key, 0, 0L)
+                else RiftRegion.allocOpen(new CheckedAggregateEntry(key, 0, 0L))
               found.next = tables(bucket)
               tables(bucket) = found
               localRetained += 1L
@@ -2184,7 +2321,15 @@ object BroomRetainedDataflowMatrixHelpers {
     Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
   }
 
-  private def runCheckedScopedJoin(): Outcome = {
+  private def runCheckedScopedAggregate(): Outcome =
+    runCheckedScopedAggregateImpl(inferredAllocations = false)
+
+  private def runCheckedScopedInferredAggregate(): Outcome =
+    runCheckedScopedAggregateImpl(inferredAllocations = true)
+
+  private inline def runCheckedScopedJoinImpl(
+      inline inferredAllocations: Boolean
+  ): Outcome = {
     val cfg = BroomRetainedDataflowConfig
     val tableSize = nextPowerOfTwo(math.max(16, cfg.keySpace * 2))
     val tableMask = tableSize - 1
@@ -2244,11 +2389,14 @@ object BroomRetainedDataflowMatrixHelpers {
                 }
                 cursor = cursor.next
               }
-              left(bucket) =
-                RiftRegion.allocOpen(
+              val record: CheckedJoinRecord^{region} =
+                inline if (inferredAllocations) then
+                  new CheckedJoinRecord(recordId, timestamp, key, value, hash)
+                else RiftRegion.allocOpen(
                   new CheckedJoinRecord(recordId, timestamp, key, value, hash)
                 )
-              left(bucket).next = oldLeft
+              left(bucket) = record
+              record.next = oldLeft
             } else {
               val oldRight: CheckedJoinRecord^{region} = right(bucket)
               var cursor: CheckedJoinRecord^{region} = left(bucket)
@@ -2260,11 +2408,14 @@ object BroomRetainedDataflowMatrixHelpers {
                 }
                 cursor = cursor.next
               }
-              right(bucket) =
-                RiftRegion.allocOpen(
+              val record: CheckedJoinRecord^{region} =
+                inline if (inferredAllocations) then
+                  new CheckedJoinRecord(recordId, timestamp, key, value, hash)
+                else RiftRegion.allocOpen(
                   new CheckedJoinRecord(recordId, timestamp, key, value, hash)
                 )
-              right(bucket).next = oldRight
+              right(bucket) = record
+              record.next = oldRight
             }
             localRetained += 1L
             liveObjects += 1L
@@ -2316,6 +2467,12 @@ object BroomRetainedDataflowMatrixHelpers {
     retainedSink = retainedObjects
     Outcome(checksum, outputCount, retainedObjects, regionFreedObjects, maxLiveObjects)
   }
+
+  private def runCheckedScopedJoin(): Outcome =
+    runCheckedScopedJoinImpl(inferredAllocations = false)
+
+  private def runCheckedScopedInferredJoin(): Outcome =
+    runCheckedScopedJoinImpl(inferredAllocations = true)
 
   private def runCheckedScopedShopper(): Outcome = {
     val cfg = BroomRetainedDataflowConfig
@@ -2960,9 +3117,15 @@ object BroomRetainedDataflowMatrixHelpers {
       case "heap-gc" | "gc-heap" | "heap-immix" | "heap" => "heap-gc"
       case "checked-rift" | "checked-epoch-stream" | "checked-region-stream" =>
         "checked-rift"
+      case "checked-rift-inferred" | "checked-epoch-stream-inferred" |
+          "checked-region-stream-inferred" =>
+        "checked-rift-inferred"
       case "checked-region-scoped" | "checked-epoch-scoped" |
           "best-safe-region" | "checked-rift-scoped" =>
         "checked-region-scoped"
+      case "checked-region-scoped-inferred" | "checked-epoch-scoped-inferred" |
+          "checked-rift-scoped-inferred" =>
+        "checked-region-scoped-inferred"
       case other =>
         throw new IllegalArgumentException(s"unknown Broom retained mode '$other'")
     }
@@ -2990,10 +3153,22 @@ object BroomRetainedDataflowMatrixHelpers {
       case ("checked-rift", "join")      => runCheckedJoin()
       case ("checked-rift", "shopper")   => runCheckedShopper()
       case ("checked-rift", "q17")       => runCheckedQ17()
+      case ("checked-rift-inferred", "aggregate") =>
+        runCheckedInferredAggregate()
+      case ("checked-rift-inferred", "join") =>
+        runCheckedInferredJoin()
+      case ("checked-rift-inferred", "shopper") =>
+        runCheckedInferredShopper()
+      case ("checked-rift-inferred", "q17") =>
+        runCheckedInferredQ17()
       case ("checked-region-scoped", "aggregate") => runCheckedScopedAggregate()
       case ("checked-region-scoped", "join")      => runCheckedScopedJoin()
       case ("checked-region-scoped", "shopper")   => runCheckedScopedShopper()
       case ("checked-region-scoped", "q17")       => runCheckedScopedQ17()
+      case ("checked-region-scoped-inferred", "aggregate") =>
+        runCheckedScopedInferredAggregate()
+      case ("checked-region-scoped-inferred", "join") =>
+        runCheckedScopedInferredJoin()
       case other =>
         throw new IllegalArgumentException(
           s"unsupported Broom retained run selection $other"

@@ -852,7 +852,7 @@ static void *scalanative_rift_region_alloc_slow(
     uintptr_t mask;
     uintptr_t p;
     uintptr_t n;
-    uint64_t start_ns = scalanative_rift_now_ns();
+    uint64_t start_ns = stats_enabled ? scalanative_rift_now_ns() : 0;
 
     if (stats_enabled) region->alloc_slow_count++;
     align = scalanative_rift_normalize_align(align);
@@ -863,11 +863,13 @@ static void *scalanative_rift_region_alloc_slow(
     }
 
     if (slab == NULL) {
-        uint64_t end_ns = scalanative_rift_now_ns();
-        scalanative_rift_stats_add_duration(
-            &scalanative_rift_stats_slow_alloc_ns_value, start_ns, end_ns);
-        scalanative_rift_stats_add_duration(
-            &scalanative_rift_stats_region_op_ns_value, start_ns, end_ns);
+        if (stats_enabled) {
+            uint64_t end_ns = scalanative_rift_now_ns();
+            scalanative_rift_stats_add_duration(
+                &scalanative_rift_stats_slow_alloc_ns_value, start_ns, end_ns);
+            scalanative_rift_stats_add_duration(
+                &scalanative_rift_stats_region_op_ns_value, start_ns, end_ns);
+        }
         return NULL;
     }
 
@@ -876,17 +878,19 @@ static void *scalanative_rift_region_alloc_slow(
     p = ((uintptr_t)region->bump + mask) & ~mask;
     n = p + size;
     if (n > (uintptr_t)region->end) {
-        uint64_t end_ns = scalanative_rift_now_ns();
-        scalanative_rift_stats_add_duration(
-            &scalanative_rift_stats_slow_alloc_ns_value, start_ns, end_ns);
-        scalanative_rift_stats_add_duration(
-            &scalanative_rift_stats_region_op_ns_value, start_ns, end_ns);
+        if (stats_enabled) {
+            uint64_t end_ns = scalanative_rift_now_ns();
+            scalanative_rift_stats_add_duration(
+                &scalanative_rift_stats_slow_alloc_ns_value, start_ns, end_ns);
+            scalanative_rift_stats_add_duration(
+                &scalanative_rift_stats_region_op_ns_value, start_ns, end_ns);
+        }
         return NULL;
     }
 
     region->bump = (uint8_t *)n;
     if (stats_enabled) scalanative_rift_stats_record_alloc_bytes(region, size);
-    {
+    if (stats_enabled) {
         uint64_t end_ns = scalanative_rift_now_ns();
         scalanative_rift_stats_add_duration(
             &scalanative_rift_stats_slow_alloc_ns_value, start_ns, end_ns);
@@ -942,7 +946,8 @@ void scalanative_rift_shutdown(void) {
 }
 
 void *scalanative_rift_region_open(uint32_t kind) {
-    uint64_t start_ns = scalanative_rift_now_ns();
+    bool stats_enabled = scalanative_rift_alloc_stats_enabled();
+    uint64_t start_ns = stats_enabled ? scalanative_rift_now_ns() : 0;
     scalanative_rift_region *region =
         (scalanative_rift_region *)calloc(1, sizeof(*region));
     scalanative_rift_slab *slab;
@@ -967,14 +972,13 @@ void *scalanative_rift_region_open(uint32_t kind) {
     region->kind = kind;
     region->family = 0;
     region->slab_count = 1;
-    region->alloc_stats_enabled =
-        scalanative_rift_alloc_stats_enabled() ? 1u : 0u;
+    region->alloc_stats_enabled = stats_enabled ? 1u : 0u;
     region->current_slab_zeroed =
         scalanative_rift_slab_is_zeroed(slab) ? 1u : 0u;
     scalanative_rift_stats_record_active_acquire(region, slab->mapped_size);
-    scalanative_rift_stats_add(&scalanative_rift_stats_region_open_total_value,
-                               1);
-    {
+    if (stats_enabled) {
+        scalanative_rift_stats_add(
+            &scalanative_rift_stats_region_open_total_value, 1);
         uint64_t end_ns = scalanative_rift_now_ns();
         scalanative_rift_stats_add_duration(
             &scalanative_rift_stats_open_ns_value, start_ns, end_ns);
@@ -1023,17 +1027,19 @@ void scalanative_rift_region_set_family(void *rawregion, uint32_t family) {
 
 void scalanative_rift_region_close(void *rawregion) {
     scalanative_rift_region *region = (scalanative_rift_region *)rawregion;
+    bool stats_enabled;
     uint64_t start_ns;
 
     if (region == NULL) return;
-    start_ns = scalanative_rift_now_ns();
+    stats_enabled = region->alloc_stats_enabled != 0u;
+    start_ns = stats_enabled ? scalanative_rift_now_ns() : 0;
     scalanative_rift_region_flush_alloc_stats(region);
     scalanative_rift_stats_release_alloc_bytes(region);
     scalanative_rift_release_slab_chain(region->head, region->family);
     free(region);
-    scalanative_rift_stats_add(&scalanative_rift_stats_region_close_total_value,
-                               1);
-    {
+    if (stats_enabled) {
+        scalanative_rift_stats_add(
+            &scalanative_rift_stats_region_close_total_value, 1);
         uint64_t end_ns = scalanative_rift_now_ns();
         scalanative_rift_stats_add_duration(
             &scalanative_rift_stats_close_ns_value, start_ns, end_ns);
@@ -1046,11 +1052,13 @@ void scalanative_rift_region_reset(void *rawregion) {
     scalanative_rift_region *region = (scalanative_rift_region *)rawregion;
     scalanative_rift_slab *first;
     scalanative_rift_slab *rest;
+    bool stats_enabled;
     uint64_t start_ns;
 
     if (region == NULL || region->head == NULL) return;
 
-    start_ns = scalanative_rift_now_ns();
+    stats_enabled = region->alloc_stats_enabled != 0u;
+    start_ns = stats_enabled ? scalanative_rift_now_ns() : 0;
     scalanative_rift_region_flush_alloc_stats(region);
     scalanative_rift_stats_release_alloc_bytes(region);
     first = region->head;
@@ -1067,9 +1075,9 @@ void scalanative_rift_region_reset(void *rawregion) {
     region->slab_count = 1;
     region->current_slab_zeroed =
         scalanative_rift_slab_is_zeroed(first) ? 1u : 0u;
-    scalanative_rift_stats_add(&scalanative_rift_stats_region_reset_total_value,
-                               1);
-    {
+    if (stats_enabled) {
+        scalanative_rift_stats_add(
+            &scalanative_rift_stats_region_reset_total_value, 1);
         uint64_t end_ns = scalanative_rift_now_ns();
         scalanative_rift_stats_add_duration(
             &scalanative_rift_stats_reset_ns_value, start_ns, end_ns);
@@ -1132,6 +1140,24 @@ static inline void *scalanative_rift_region_alloc_object_fast(
     return (void *)p;
 }
 
+static inline void *scalanative_rift_region_alloc_object_fast_nostats(
+    scalanative_rift_region *region, size_t size) {
+    const uintptr_t mask = (uintptr_t)sizeof(void *) - 1u;
+    uintptr_t p;
+    uintptr_t n;
+
+    p = ((uintptr_t)region->bump + mask) & ~mask;
+    n = p + size;
+
+    if (__builtin_expect(n > (uintptr_t)region->end, 0)) {
+        return scalanative_rift_region_alloc_slow(
+            region, size, sizeof(void *), false);
+    }
+
+    region->bump = (uint8_t *)n;
+    return (void *)p;
+}
+
 void *scalanative_rift_region_alloc(void *rawregion, void *info, size_t size) {
     scalanative_rift_region *region = (scalanative_rift_region *)rawregion;
     bool stats_enabled;
@@ -1139,6 +1165,14 @@ void *scalanative_rift_region_alloc(void *rawregion, void *info, size_t size) {
 
     if (region == NULL) return NULL;
     stats_enabled = region->alloc_stats_enabled != 0u;
+    if (__builtin_expect(!stats_enabled, 1)) {
+        current = scalanative_rift_region_alloc_object_fast_nostats(
+            region, size);
+        if (current == NULL) return NULL;
+        if (!region->current_slab_zeroed) memset(current, 0, size);
+        *((void **)current) = info;
+        return current;
+    }
 
     current = scalanative_rift_region_alloc_object_fast(
         region, size, stats_enabled);
@@ -1167,6 +1201,13 @@ void *scalanative_rift_region_alloc_nozero(void *rawregion, void *info,
 
     if (region == NULL) return NULL;
     stats_enabled = region->alloc_stats_enabled != 0u;
+    if (__builtin_expect(!stats_enabled, 1)) {
+        current = scalanative_rift_region_alloc_object_fast_nostats(
+            region, size);
+        if (current == NULL) return NULL;
+        *((void **)current) = info;
+        return current;
+    }
 
     current = scalanative_rift_region_alloc_object_fast(
         region, size, stats_enabled);

@@ -29,29 +29,39 @@ class ScalaNativePlugin extends StandardPlugin:
           |     Non-absolute paths would be ignored.
           |     Multiple paths should be separated by a single semicolon ';' character.
           |     If none of the patches matches path would be relative to -sourcepath if defined or -sourceroot otherwise.
+          |  -P:$name:riftInferReport
+          |     Emit opt-in diagnostics for Rift region placement inference decisions.
           |""".stripMargin
     )
 
   @nowarn("cat=deprecation")
   override def init(options: List[String]): List[PluginPhase] = {
-    val genNirSettings = options
-      .foldLeft(GenNIR.Settings()) {
-        case (config, "genStaticForwardersForNonTopLevelObjects") =>
-          config.copy(genStaticForwardersForNonTopLevelObjects = true)
-        case (config, "forceStrictFinalFields") =>
-          config.copy(forceStrictFinalFields = true)
-        case (config, s"positionRelativizationPaths:${paths}") =>
-          config.copy(positionRelativizationPaths =
-            (config.positionRelativizationPaths ++ paths
+    val (genNirSettings, riftInferenceSettings) = options
+      .foldLeft((GenNIR.Settings(), RiftRegionInference.Settings())) {
+        case ((genConfig, riftConfig), "genStaticForwardersForNonTopLevelObjects") =>
+          genConfig.copy(genStaticForwardersForNonTopLevelObjects = true) ->
+            riftConfig
+        case ((genConfig, riftConfig), "forceStrictFinalFields") =>
+          genConfig.copy(forceStrictFinalFields = true) -> riftConfig
+        case ((genConfig, riftConfig), "riftInferReport") =>
+          genConfig -> riftConfig.copy(reportDecisions = true)
+        case ((genConfig, riftConfig), s"positionRelativizationPaths:${paths}") =>
+          genConfig.copy(positionRelativizationPaths =
+            (genConfig.positionRelativizationPaths ++ paths
               .split(';')
               .map(Paths.get(_))
               .filter(_.isAbsolute())).distinct.sortBy(-_.getNameCount())
-          )
-        case (config, s"mapSourceURI:${mapping}") =>
+          ) -> riftConfig
+        case ((genConfig, riftConfig), s"mapSourceURI:${mapping}") =>
           given Context = ContextBase().initialCtx
           report.warning("'mapSourceURI' is deprecated, it's ignored.")
-          config
-        case (config, _) => config
+          genConfig -> riftConfig
+        case (configs, _) => configs
       }
-    List(PrepNativeInterop(), PostInlineNativeInterop(), GenNIR(genNirSettings))
+    List(
+      PrepNativeInterop(),
+      PostInlineNativeInterop(),
+      RiftRegionInference(riftInferenceSettings),
+      GenNIR(genNirSettings)
+    )
   }

@@ -1,6 +1,6 @@
 # LogHub Retained Session Matrix
 
-Last updated: 2026-05-18 16:22 CEST
+Last updated: 2026-05-21 07:56 CEST
 
 Status: real streaming-input retained session/join triage plus the first named
 Wikimedia clickstream retained-session workload. This matrix was added after
@@ -516,3 +516,305 @@ evidence.
   `7122.811 ms` timed GC. This is stronger full-input feasibility evidence,
   but keep the 10M x3 row as the report-grade median until the full-file row is
   repeated.
+- 2026-05-19 inference follow-up, source
+  `/private/tmp/wikimedia-full-l2-inference-20260519/summary.tsv`: the
+  full-file L2 row was rerun after the owner-token/generic inference work and
+  adds `checked-rift-inferred`. Heap is `71819.469 ms`, GC `5671.534 ms`,
+  RSS `2.81 GB`; explicit checked Rift is `70451.516 ms`, GC `0.672 ms`,
+  region-op `71.044 ms`, RSS `130.5 MB`; inferred checked Rift is
+  `70022.499 ms`, GC `0.696 ms`, region-op `79.254 ms`, RSS `130.5 MB`.
+  Checksums/output and region object counts match explicit checked Rift
+  (`69391942` region objects). The inferred row is `429.017 ms` faster than
+  explicit checked Rift in this one-run L2 pass, but the row remains
+  full-file one-run evidence, not a report-grade median.
+
+### 2026-05-20 Checked Loop-Shape Audit
+
+Source audit found that the checked Wikimedia session loop still captured
+outer mutable `checksum`, `processed`, `group`, and `done` state through the
+region callback. The pre-fix L4 profile exposed this as
+`scala.runtime.LongRef`, `BooleanRef`, and `IntRef` parameters in the checked
+`anonfun` top frame. The fix keeps the logical query unchanged but makes the
+group body use immutable base values, a local EOF flag, and a reusable parsed
+field scratch object; it also places the per-group `counts` array in the
+checked region for checked session modes.
+
+Raw summaries:
+
+- `/Users/siyaoliu/rift/cache/loghub-wikimedia-loopshape-smoke-20260520/summary.tsv`
+- `/Users/siyaoliu/rift/cache/loghub-wikimedia-loopshape-1m-20260520/summary.tsv`
+- `/Users/siyaoliu/rift/cache/profile-sweep-20260520-wikimedia-loopshape-priv/summary.tsv`
+
+20k smoke matched checksum/output across `heap-gc`, `checked-rift`,
+`checked-rift-inferred`, and `checked-region-scoped`:
+checksum `4440636879622788340`, output `18167`.
+
+1M L2 standard stats after the loop-shape cleanup:
+
+| Mode | Median ms | Min ms | Max ms | GC median ms | GC max ms | Runs with GC | Region op ms | Region objects | RSS bytes | Checksum | Output |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `2012.161` | `2005.311` | `3026.927` | `148.355` | `159.938` | `3/3` | `0.000` | `0` | `587350016` | `250002331971566003` | `922453` |
+| `checked-rift` | `1990.483` | `1949.478` | `2032.769` | `0.169` | `0.281` | `3/3` | `2.511` | `1922465` | `123650048` | `250002331971566003` | `922453` |
+| `checked-rift-inferred` | `1939.183` | `1930.530` | `1970.763` | `0.262` | `0.331` | `3/3` | `3.667` | `1922465` | `124141568` | `250002331971566003` | `922453` |
+| `checked-region-scoped` | `1928.016` | `1916.475` | `2008.246` | `26.233` | `27.908` | `3/3` | `0.000` | `0` | `125124608` | `250002331971566003` | `922453` |
+
+Post-fix L4 profile interpretation:
+
+- The boxed `LongRef` / `BooleanRef` / `IntRef` closure parameters disappear
+  from checked top frames, so the source-shape cleanup did remove that
+  accidental checked-loop overhead.
+- Region allocation remains small in the sampled profile: about `3.8`
+  samples/sec for checked Rift and `3.6` samples/sec for inferred checked Rift
+  in the 5 s sample.
+- The remaining checked overhead is not region close/open. It is mostly TSV
+  field hashing/int parsing, byte-line reading, stable hashing, and the
+  checked session-loop closure itself. The corrected profile classifier now
+  separates `LogHubRetainedSessionMatrixHelpers.*anonfun` session-loop frames
+  from parser/input frames, because the mangled closure signature includes
+  `StreamingByteLineSource` even when the top-frame work is query/session-loop
+  code.
+
+The loop-shape cleanup is therefore accepted as a mutator-parity/source-shape
+fix, not as a new headline speed claim. It makes the checked rows cleaner for
+future profiling, but the main remaining candidate is a compiler/API-level
+solution for inlineable checked region-body callbacks; a direct `inline`
+`resetOpenHandle` experiment was rejected by capture checking because the
+owner token became `{any}` in many benchmark bodies.
+
+### 2026-05-20 Inferred Session Inline-Reset Split
+
+The internal `resetOpenHandleInline` probes showed that simple/non-inline
+open-handle bodies can inline and preserve region allocation, but enclosing
+`inline def` wrappers lose the owner capture. `checked-rift-inferred` session
+mode was therefore split out of the generic `runCheckedSessionImpl` wrapper and
+uses a sandbox-only bridge to the internal inline reset helper. The logical
+query is unchanged: same parser, same session tables, same per-record/event
+objects, and same checksum/output. The explicit `checked-rift` mode remains on
+the non-inline helper path.
+
+Raw summaries:
+
+- `/Users/siyaoliu/rift/cache/loghub-wikimedia-inline-reset-smoke-20260520/summary.tsv`
+- `/Users/siyaoliu/rift/cache/loghub-wikimedia-inline-reset-1m-20260520/summary.tsv`
+
+20k smoke matched checksum/output across `heap-gc`, `checked-rift`, and
+`checked-rift-inferred`: checksum `-8642330901600858181`, output `19102`.
+
+1M L2 standard stats after the inferred-session split:
+
+| Mode | Median ms | Min ms | Max ms | GC median ms | GC max ms | Runs with GC | Region op ms | Region objects | RSS bytes | Checksum | Output |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `2044.334` | `2042.497` | `2051.658` | `158.237` | `168.740` | `3/3` | `0.000` | `0` | `590102528` | `250002331971566003` | `922453` |
+| `checked-rift` | `1955.329` | `1950.891` | `1956.729` | `0.135` | `0.330` | `3/3` | `2.276` | `1922465` | `123617280` | `250002331971566003` | `922453` |
+| `checked-rift-inferred` | `1867.761` | `1857.456` | `1874.685` | `0.153` | `0.268` | `3/3` | `2.554` | `1922465` | `126730240` | `250002331971566003` | `922453` |
+| `checked-region-scoped` | `1972.133` | `1961.303` | `1974.453` | `25.737` | `28.637` | `3/3` | `0.000` | `0` | `125026304` | `250002331971566003` | `922453` |
+
+Interpretation:
+
+- The split inferred path is now the fastest safe row in this 1M L2 pass:
+  `1867.761 ms`, about `4.5%` faster than explicit checked Rift and about
+  `8.6%` faster than heap, with matching checksum/output.
+- RSS remains in the same low range as other checked rows (`~124-127 MB`),
+  versus heap at `590 MB`.
+- This is accepted as a general checked-framework/source-shape optimization:
+  it removes an enclosing inline-wrapper shape that capture checking cannot
+  preserve today, while keeping the benchmark semantics and public Rift APIs
+  unchanged. It is still not a full solution for inlineable region-body
+  callbacks; the join path and broader compiler ownership/effect-summary work
+  remain open.
+
+### 2026-05-20 State-Local Inferred Session Follow-Up
+
+The inferred session path was then tightened so the mutable loop counters stay
+inside the open-handle callback instead of being captured through outer boxed
+state. This keeps the same query semantics and public API shape.
+
+Raw summaries:
+
+- `/Users/siyaoliu/rift/cache/loghub-wikimedia-inline-reset-state-smoke-20260520/summary.tsv`
+- `/Users/siyaoliu/rift/cache/loghub-wikimedia-inline-reset-state-1m-20260520/summary.tsv`
+- `/Users/siyaoliu/rift/cache/profile-sweep-20260520-wikimedia-inline-reset-state-escalated/summary.tsv`
+
+20k smoke matched checksum/output across `heap-gc`, `checked-rift`, and
+`checked-rift-inferred`: checksum `-8642330901600858181`, output `19102`.
+
+1M L2 standard stats after the state-local cleanup:
+
+| Mode | Median ms | Min ms | Max ms | GC median ms | GC max ms | Runs with GC | Region op ms | Region objects | RSS bytes | Checksum | Output |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `2082.274` | `2080.107` | `2117.115` | `175.642` | `183.149` | `3/3` | `0.000` | `0` | `590102528` | `250002331971566003` | `922453` |
+| `checked-rift` | `2015.182` | `2009.286` | `2043.809` | `0.157` | `0.344` | `3/3` | `3.011` | `1922465` | `123633664` | `250002331971566003` | `922453` |
+| `checked-rift-inferred` | `1927.010` | `1893.473` | `1942.639` | `0.161` | `0.281` | `3/3` | `3.125` | `1922465` | `126779392` | `250002331971566003` | `922453` |
+| `checked-region-scoped` | `1968.287` | `1966.403` | `2025.894` | `23.875` | `26.017` | `3/3` | `0.000` | `0` | `124993536` | `250002331971566003` | `922453` |
+
+Fresh L4 for `checked-rift-inferred` reports parser/input/hash `519.00`
+samples/sec, query/session-loop `56.00`, safepoint poll `241.20`, region
+alloc/init `3.80`, and zeroing `1.20`. No sampled
+`scala.runtime.IntRef`/`LongRef`/`BooleanRef` top-frame matches remain. The
+state-local cleanup is therefore accepted, but the remaining row is still
+dominated by TSV parsing/hashing and residual runtime safepoint/metadata work,
+not region allocation.
+
+### 2026-05-20 Wikimedia Fused Clickstream Parser
+
+The next Wikimedia follow-up addressed the shared parser/hash floor instead of
+region allocation. The old clickstream parser walked each byte line repeatedly:
+three `tsvFieldHash` calls, one `tsvFieldInt`, and a whole-line
+`stableHash`. `readClickstreamFieldsInto` now computes source/target/link-kind
+FNV hashes, field-3 count, and the whole-line FNV hash in one byte pass. This
+is backend-neutral and applies to heap and every checked row.
+
+Raw summaries:
+
+- `/Users/siyaoliu/rift/cache/loghub-wikimedia-fused-parser-1m-20260520/summary.tsv`
+- `/Users/siyaoliu/rift/cache/profile-sweep-20260520-wikimedia-fused-parser/summary.tsv`
+
+20k compressed smoke matched checksum/output across `heap-gc`,
+`checked-rift`, `checked-rift-inferred`, and `checked-region-scoped`: checksum
+`-5707858218641866390`, output `18036`.
+
+1M x3 L2 standard stats after the fused parser:
+
+| Mode | Median ms | Min ms | Max ms | GC median ms | GC max ms | Runs with GC | Region op ms | Region objects | Checksum | Output |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `1219.250` | `1218.549` | `1222.755` | `103.101` | `108.270` | `3/3` | `0.000` | `0` | `250002331971566003` | `922453` |
+| `checked-rift` | `1203.342` | `1203.006` | `1206.332` | `0.232` | `0.243` | `3/3` | `1.739` | `1922465` | `250002331971566003` | `922453` |
+| `checked-rift-inferred` | `1124.139` | `1121.720` | `1126.134` | `0.232` | `0.246` | `3/3` | `1.809` | `1922465` | `250002331971566003` | `922453` |
+| `checked-region-scoped` | `1216.653` | `1202.141` | `1220.408` | `30.300` | `32.169` | `3/3` | `0.000` | `0` | `250002331971566003` | `922453` |
+
+Focused L4 confirms the mechanical effect: the old `tsvFieldHash`,
+`tsvFieldInt`, and standalone `stableHash` top frames disappear, replaced by
+one fused `readClickstreamFieldsInto` frame. Coarse buckets remain parser-heavy
+because the workload is still real compressed TSV replay: parser/input/hash is
+heap `418.20`, explicit checked `496.60`, inferred checked `490.20`, and scoped
+`512.40` samples/sec. Region allocation remains tiny (`2.60-6.20` samples/sec).
+This result is accepted as shared parser/hash fairness cleanup, not as a
+Rift-specific memory-management win.
+
+### 2026-05-21 Chunked ByteLineReader Follow-Up
+
+The next shared input cleanup removed the per-byte helper shape in
+`BenchmarkInputSupport.ByteLineReader`. The old `readLine` path called
+`nextByte` and `append` for every byte. The new path scans each filled input
+buffer for newline bytes and copies contiguous spans into the reusable line
+buffer with `System.arraycopy`, preserving CR trimming and EOF final-line
+semantics.
+
+Raw summaries:
+
+- `/tmp/loghub-bytereader-smoke-wikimedia/summary.tsv`
+- `/tmp/loghub-bytereader-smoke-join/summary.tsv`
+- `/tmp/theodolite-bytereader-smoke/summary.tsv`
+- `/Users/siyaoliu/rift/cache/loghub-bytereader-wikimedia-1m-l2-20260521/summary.tsv`
+- `/Users/siyaoliu/rift/cache/loghub-bytereader-join-1m-l2-20260521/summary.tsv`
+- `/Users/siyaoliu/rift/cache/profile-sweep-20260521-bytereader-loghub/summary.tsv`
+
+Validation:
+
+- `sandbox3_next` compile passed.
+- 20k compressed Wikimedia clickstream-session smoke matched checksum/output
+  across heap, explicit checked, inferred checked, and scoped: checksum
+  `-7932171983828413881`, output `17518`.
+- 20k HDFS archive-member join smoke matched the same four modes: checksum
+  `-1607483374812565358`, output `0`. The tar reader still reports a nonzero
+  external exit status when closed after the record limit, but every row wrote
+  a valid `RESULT`.
+- 20k zip-backed Theodolite retained-UC4 smoke matched heap, checked stream,
+  and checked scoped: checksum `-2895454912458695581`, output `6176`.
+
+1M x3 L2 standard stats after the chunked reader:
+
+| Workload | Mode | Median ms | Min ms | Max ms | GC median ms | Region op ms | Region objects | Checksum | Output |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Wikimedia clickstream-session | `heap-gc` | `1061.907` | `1059.806` | `1066.727` | `105.736` | `0.000` | `0` | `250002331971566003` | `922453` |
+| Wikimedia clickstream-session | `checked-rift` | `1041.414` | `1039.591` | `1045.862` | `0.234` | `1.761` | `1922465` | `250002331971566003` | `922453` |
+| Wikimedia clickstream-session | `checked-rift-inferred` | `960.242` | `958.452` | `960.464` | `0.131` | `1.735` | `1922465` | `250002331971566003` | `922453` |
+| Wikimedia clickstream-session | `checked-region-scoped` | `1047.725` | `1034.973` | `1048.164` | `24.033` | `0.000` | `0` | `250002331971566003` | `922453` |
+| HDFS join | `heap-gc` | `7134.073` | `7086.826` | `7159.943` | `27.343` | `0.000` | `0` | `4282190220497908364` | `0` |
+| HDFS join | `checked-rift` | `7138.545` | `7100.550` | `7160.117` | `0.295` | `1.253` | `1000006` | `4282190220497908364` | `0` |
+| HDFS join | `checked-rift-inferred` | `7097.635` | `7060.752` | `7138.951` | `0.294` | `0.990` | `1000006` | `4282190220497908364` | `0` |
+| HDFS join | `checked-region-scoped` | `7140.815` | `7130.046` | `7150.360` | `6.153` | `0.000` | `0` | `4282190220497908364` | `0` |
+
+Inferred session-array source audit: after the array-placement evidence was
+recorded, a source audit found the inferred Wikimedia session path still used
+explicit `RiftAllocator.allocateOpenHandle(region, new Array(...))` for
+`entries`, `heads`, `tails`, and `counts`. Those remaining per-group arrays
+now use ordinary `new Array` under the validated reset-open-handle owner. A
+fresh sandbox compile and native link passed, and a fresh 20k compressed
+Wikimedia smoke under `/tmp/loghub-inferred-session-array-smoke` matched
+checksum `4260216346575211415` and output `18980` across heap, explicit
+checked, inferred checked, and scoped.
+
+Fresh 1M x3 L2 standard stats after completing the inferred session array
+source shape:
+
+| Mode | Median ms | Min ms | Max ms | GC median ms | Region op ms | Region objects | Checksum | Output |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `1069.051` | `1066.926` | `1075.975` | `106.308` | `0.000` | `0` | `250002331971566003` | `922453` |
+| `checked-rift` | `1052.706` | `1047.754` | `1062.249` | `0.241` | `1.784` | `1922465` | `250002331971566003` | `922453` |
+| `checked-rift-inferred` | `965.723` | `961.293` | `981.874` | `0.229` | `1.870` | `1922465` | `250002331971566003` | `922453` |
+| `checked-region-scoped` | `1053.033` | `1041.968` | `1069.362` | `27.650` | `0.000` | `0` | `250002331971566003` | `922453` |
+
+This confirms the intended source-plumbing cleanup with identical explicit and
+inferred region-object counts; it is not a new region-object-count reduction.
+
+Focused L4 confirms the mechanical source effect: the old
+`ByteLineReaderD8nextByte` and `ByteLineReaderD6append` top frames are absent.
+Samples now land in the chunked `ByteLineReader.readLine` body plus the
+benchmark parser/hash work. Coarse parser/input/hash samples/sec are mixed
+rather than uniformly lower in the five-second Wikimedia sample
+(`385.80/478.80/510.40/484.60` for heap/explicit/inferred/scoped), so the
+accepted claim is shared throughput improvement and removal of per-byte helper
+frames, not a uniform L4 bucket reduction.
+
+### 2026-05-20 Inferred Join Inline-Reset Split
+
+After branch/match-final local inference closed the mixed inferred/explicit
+allocation gap, `checked-rift-inferred` join was split out of the enclosing
+inline wrapper and moved to the same sandbox-only internal inline reset bridge
+used by the session path. The explicit `checked-rift` join remains on the
+older non-inline helper path for comparison.
+
+Input uses the compressed archive member, not the removed decompressed HDFS
+file:
+
+`tar.gz:/Users/siyaoliu/rift/cache/benchmark-data/loghub/HDFS_1.tar.gz!HDFS.log`
+
+Raw summaries:
+
+- `/Users/siyaoliu/rift/cache/loghub-join-inline-inferred-smoke-20260520-archive-priv/summary.tsv`
+- `/Users/siyaoliu/rift/cache/loghub-join-inline-inferred-1m-20260520/summary.tsv`
+- `/Users/siyaoliu/rift/cache/profile-sweep-20260520-loghub-join-inline-inferred/summary.tsv`
+
+20k smoke matched checksum/output across `heap-gc`, `checked-rift`,
+`checked-rift-inferred`, and `checked-region-scoped`: checksum
+`-3039645399054221914`, output `0`.
+
+1M L2 standard stats:
+
+| Mode | Median ms | Min ms | Max ms | GC median ms | GC max ms | Runs with GC | Region op ms | Region objects | RSS bytes | Checksum | Output |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `heap-gc` | `8268.847` | `8199.232` | `8272.734` | `42.256` | `63.717` | `3/3` | `0.000` | `0` | `273530880` | `4282190220497908364` | `0` |
+| `checked-rift` | `10102.728` | `8505.642` | `12569.110` | `0.353` | `0.625` | `3/3` | `2.534` | `1000006` | `67977216` | `4282190220497908364` | `0` |
+| `checked-rift-inferred` | `8350.524` | `8251.936` | `10683.908` | `0.342` | `1.296` | `3/3` | `2.681` | `1000006` | `66600960` | `4282190220497908364` | `0` |
+| `checked-region-scoped` | `8389.309` | `8384.063` | `8395.176` | `6.589` | `7.172` | `3/3` | `0.000` | `0` | `67026944` | `4282190220497908364` | `0` |
+
+Interpretation:
+
+- The inferred join split removes the rejected enclosing inline-wrapper shape
+  from the inferred join path and brings it close to heap and checked scoped in
+  this archive-backed control.
+- The row is not a GC-heavy real-input win: heap GC is only `42.256 ms`, about
+  `0.5%` of the L2 median. Use it as source-shape and RSS/control evidence,
+  not as a headline memory-management result.
+- L4 follow-up confirms the row is not allocator-bound. Parser/input/hash
+  samples/sec are heap `598.80`, explicit checked Rift `629.40`, inferred
+  checked Rift `622.60`, and checked scoped `612.20`; residual
+  safepoint-poll samples are also near `190` samples/sec across modes, while
+  actual GC mark/sweep metadata is `0.00` in the checked rows.
+  Checked callback-ref-shape samples are explicit checked `17.00`, inferred
+  checked `12.60`, and scoped `31.20`, versus heap `0.00`. This marks
+  generated closure bodies whose signatures carry `scala.runtime.*Ref`; it is
+  a source-shape marker, not direct allocation time. The next general compiler
+  target is callback ownership/effect-summary preservation rather than another
+  region allocation fast path for this row.

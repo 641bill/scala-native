@@ -261,6 +261,9 @@ run_case() {
     checked-region-stream|rift-checked-page-token)
       binary_mode="rift-checked-page-token"
       ;;
+    checked-region-stream-inferred|rift-checked-page-token-inferred)
+      binary_mode="rift-checked-page-token-inferred"
+      ;;
     rift-checked-page-token-open-region|rift-checked-page-token-legacy)
       binary_mode="rift-checked-page-token-legacy"
       ;;

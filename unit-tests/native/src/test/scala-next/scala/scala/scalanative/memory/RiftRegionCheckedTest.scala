@@ -3,7 +3,7 @@ package scala.scalanative.memory
 import org.junit.Assert._
 import org.junit.Test
 
-import scala.scalanative.runtime.{RiftAllocator, toRawPtr}
+import scala.scalanative.runtime.{fromRawUSize, RiftAllocator, toRawPtr}
 import scala.scalanative.runtime.Intrinsics.castRawPtrToLong
 import scala.scalanative.unsafe.Ptr
 
@@ -21,10 +21,21 @@ private object RiftCheckedStaticMetadata:
   val metadata: RiftCheckedMetadata = new RiftCheckedMetadata(2)
 private final class RiftCheckedStaticEntry(
     val metadata: RiftCheckedMetadata^)
+private final class RiftCheckedListNode(val value: Int)
+    extends RiftRegion.RegionListNode
 
 class RiftRegionCheckedTest {
   private def address(ptr: Ptr[Byte]): Long =
     castRawPtrToLong(toRawPtr(ptr))
+
+  private def rawSizeToLong(value: scala.scalanative.runtime.RawSize): Long =
+    fromRawUSize(value).toLong
+
+  private def invokeRegionFunction(
+      fn: Function1[Int, Int]^,
+      value: Int
+  ): Int =
+    fn(value)
 
   @Test def scopedRegionAllocatesOrdinaryObjectGraph(): Unit = {
     RiftRegion.init(1)
@@ -46,6 +57,3477 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def scopedRegionInfersAnnotatedNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        val list = RiftRegion.regionList[RiftCheckedListNode]()
+        val first: RiftCheckedListNode^{region} =
+          new RiftCheckedListNode(40)
+        val second: RiftCheckedListNode^{region} =
+          new RiftCheckedListNode(2)
+        RiftRegion.prependRegionList(region, list, first)
+        RiftRegion.prependRegionList(region, list, second)
+        val head = RiftRegion.regionListHead(region, list)
+        head.value + RiftRegion.regionListNext(region, head).value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRegionListLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        val list = RiftRegion.regionList[RiftCheckedListNode]()
+        val first = new RiftCheckedListNode(40)
+        val second = new RiftCheckedListNode(2)
+        RiftRegion.prependRegionList(region, list, first)
+        RiftRegion.prependRegionList(region, list, second)
+        val head = RiftRegion.regionListHead(region, list)
+        head.value + RiftRegion.regionListNext(region, head).value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRegionListLocalBlockNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        val list = RiftRegion.regionList[RiftCheckedListNode]()
+        val first =
+          val value = 40
+          new RiftCheckedListNode(value)
+        val second =
+          val value = 2
+          new RiftCheckedListNode(value)
+        RiftRegion.prependRegionList(region, list, first)
+        RiftRegion.prependRegionList(region, list, second)
+        val head = RiftRegion.regionListHead(region, list)
+        head.value + RiftRegion.regionListNext(region, head).value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRegionListInlineNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        val list = RiftRegion.regionList[RiftCheckedListNode]()
+        RiftRegion.prependRegionList(
+          region,
+          list,
+          new RiftCheckedListNode(40)
+        )
+        RiftRegion.prependRegionList(
+          region,
+          list,
+          new RiftCheckedListNode(2)
+        )
+        val head = RiftRegion.regionListHead(region, list)
+        head.value + RiftRegion.regionListNext(region, head).value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRegionListInlineBlockNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        val list = RiftRegion.regionList[RiftCheckedListNode]()
+        RiftRegion.prependRegionList(
+          region,
+          list,
+          {
+            val value = 40
+            new RiftCheckedListNode(value)
+          }
+        )
+        RiftRegion.prependRegionList(
+          region,
+          list,
+          {
+            val value = 2
+            new RiftCheckedListNode(value)
+          }
+        )
+        val head = RiftRegion.regionListHead(region, list)
+        head.value + RiftRegion.regionListNext(region, head).value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersCapturedValDefLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        val node = new RiftCheckedListNode(40)
+        val captured: RiftCheckedListNode^{region} = node
+        val list = RiftRegion.regionList[RiftCheckedListNode]()
+        RiftRegion.prependRegionList(region, list, captured)
+        RiftRegion.regionListHead(region, list).value + 2
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 1L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRegionListSelectedLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        val list = RiftRegion.regionList[RiftCheckedListNode]()
+        val first = new RiftCheckedListNode(40)
+        val second = new RiftCheckedListNode(42)
+        val keep =
+          System.identityHashCode(first) + System.identityHashCode(second)
+        val selected = if ((keep & 1) == 0) first else second
+        val expected = if ((keep & 1) == 0) 40 else 42
+        RiftRegion.prependRegionList(region, list, selected)
+        RiftRegion.regionListHead(region, list).value - expected + 42
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, sum)
+      assertTrue(
+        s"expected selected RegionList candidate allocations to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRegionListBranchMatchSyntheticFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        final class SomeNode(
+            val option: Option[RiftCheckedLeaf^{region}]^{region}
+        ) extends RiftRegion.RegionListNode
+        final class OptionNode(
+            val option: Option[RiftCheckedLeaf^{region}]^{region}
+        ) extends RiftRegion.RegionListNode
+        final class PairNode(
+            val pair: Tuple2[
+              RiftCheckedLeaf^{region},
+              RiftCheckedLeaf^{region}
+            ]^{region}
+        ) extends RiftRegion.RegionListNode
+        val someList = RiftRegion.regionList[SomeNode]()
+        val optionList = RiftRegion.regionList[OptionNode]()
+        val pairList = RiftRegion.regionList[PairNode]()
+
+        val chooseSome = (System.identityHashCode(region) & 1) == 0
+        RiftRegion.prependRegionList(
+          region,
+          someList,
+          if chooseSome then new SomeNode(Some(new RiftCheckedLeaf(40)))
+          else new SomeNode(Some(new RiftCheckedLeaf(41)))
+        )
+
+        val optionSelector = System.identityHashCode(someList) & 1
+        RiftRegion.prependRegionList(
+          region,
+          optionList,
+          optionSelector match
+            case 0 => new OptionNode(Option(new RiftCheckedLeaf(10)))
+            case _ => new OptionNode(Option(new RiftCheckedLeaf(11)))
+        )
+
+        val choosePair = (System.identityHashCode(optionList) & 1) == 0
+        RiftRegion.prependRegionList(
+          region,
+          pairList,
+          if choosePair then new PairNode(
+            Tuple2(new RiftCheckedLeaf(1), new RiftCheckedLeaf(2))
+          )
+          else new PairNode(
+            Tuple2(new RiftCheckedLeaf(3), new RiftCheckedLeaf(4))
+          )
+        )
+
+        val expectedSome = if chooseSome then 40 else 41
+        val expectedOption = if optionSelector == 0 then 10 else 11
+        val expectedPair = if choosePair then 3 else 7
+        RiftRegion.regionListHead(region, someList).option.get.value +
+          RiftRegion.regionListHead(region, optionList).option.get.value +
+          RiftRegion.regionListHead(region, pairList).pair._1.value +
+          RiftRegion.regionListHead(region, pairList).pair._2.value -
+          expectedSome - expectedOption - expectedPair + 42
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected branch/match RegionList synthetic factories, payloads, and nodes to be region allocated, observed $delta region objects",
+        delta >= 10L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRegionListSelectedNestedSyntheticFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        final class SomeNode(
+            val option: Option[RiftCheckedLeaf^{region}]^{region}
+        ) extends RiftRegion.RegionListNode
+        final class OptionNode(
+            val option: Option[RiftCheckedLeaf^{region}]^{region}
+        ) extends RiftRegion.RegionListNode
+        final class PairNode(
+            val pair: Tuple2[
+              RiftCheckedLeaf^{region},
+              RiftCheckedLeaf^{region}
+            ]^{region}
+        ) extends RiftRegion.RegionListNode
+        val someList = RiftRegion.regionList[SomeNode]()
+        val optionList = RiftRegion.regionList[OptionNode]()
+        val pairList = RiftRegion.regionList[PairNode]()
+
+        val chooseSome = (System.identityHashCode(region) & 1) == 0
+        val someFirst = Some(new RiftCheckedLeaf(40))
+        val someSecond = Some(new RiftCheckedLeaf(41))
+        val someSelected = if chooseSome then someFirst else someSecond
+        RiftRegion.prependRegionList(
+          region,
+          someList,
+          new SomeNode(someSelected)
+        )
+
+        val chooseOption = (System.identityHashCode(someList) & 1) == 0
+        val optionFirst = Option(new RiftCheckedLeaf(10))
+        val optionSecond = Option(new RiftCheckedLeaf(11))
+        val optionSelected = if chooseOption then optionFirst else optionSecond
+        RiftRegion.prependRegionList(
+          region,
+          optionList,
+          new OptionNode(optionSelected)
+        )
+
+        val choosePair = (System.identityHashCode(optionList) & 1) == 0
+        val pairFirst = Tuple2(new RiftCheckedLeaf(1), new RiftCheckedLeaf(2))
+        val pairSecond = Tuple2(new RiftCheckedLeaf(3), new RiftCheckedLeaf(4))
+        val pairSelected = if choosePair then pairFirst else pairSecond
+        RiftRegion.prependRegionList(
+          region,
+          pairList,
+          new PairNode(pairSelected)
+        )
+
+        val expectedSome = if chooseSome then 40 else 41
+        val expectedOption = if chooseOption then 10 else 11
+        val expectedPair = if choosePair then 3 else 7
+        RiftRegion.regionListHead(region, someList).option.get.value +
+          RiftRegion.regionListHead(region, optionList).option.get.value +
+          RiftRegion.regionListHead(region, pairList).pair._1.value +
+          RiftRegion.regionListHead(region, pairList).pair._2.value -
+          expectedSome - expectedOption - expectedPair + 42
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected selected nested RegionList synthetic factories, payloads, and nodes to be region allocated, observed $delta region objects",
+        delta >= 17L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOptionSomeLocalPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val leaf: RiftCheckedListNode^{region} =
+          new RiftCheckedListNode(40)
+        val option: Some[RiftCheckedListNode^{region}]^{region} = Some(leaf)
+        val identity = System.identityHashCode(option)
+
+        option.value.value + 2 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected leaf and Some to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOptionSomeInlineNewArgumentPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val option: Some[RiftCheckedListNode^{region}]^{region} =
+          Some(new RiftCheckedListNode(40))
+        val identity = System.identityHashCode(option)
+
+        option.value.value + 2 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inline leaf and Some to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOptionSupertypeSomePlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val option: Option[RiftCheckedListNode^{region}]^{region} =
+          Some(new RiftCheckedListNode(40))
+        val identity = System.identityHashCode(option)
+
+        option.get.value + 2 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected Option-supertype Some and value to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionAcceptsOptionNoneWithoutRegionAllocation(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val option: Option[RiftCheckedListNode^{region}]^{region} = None
+
+        if (option.isEmpty) 42 else 0
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertEquals(
+        "None is a static empty option and should not allocate region objects",
+        0L,
+        after - before
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOptionSomeOrNonePlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def maybe(include: Boolean)(
+            using r: RiftRegion.ScopedRegion^
+        ): Option[RiftCheckedListNode^{r}]^{r} =
+          if (include)
+            Some(new RiftCheckedListNode(40))
+          else
+            None
+
+        val present = maybe(true)(using region)
+        val absent = maybe(false)(using region)
+        val identity = System.identityHashCode(present)
+
+        present.get.value + (if (absent.isEmpty) 2 else 0) + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected Some and payload to be region allocated while None allocates no region object, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOptionApplyInlineNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val option: Option[RiftCheckedListNode^{region}]^{region} =
+          Option(new RiftCheckedListNode(40))
+        val identity = System.identityHashCode(option)
+
+        option.get.value + 2 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected Option.apply Some branch and payload to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionOptionApplyNullAllocatesNoRegionObject(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val option: Option[RiftCheckedListNode^{region}]^{region} =
+          Option(null)
+
+        if (option.isEmpty) 42 else 0
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertEquals(
+        "Option(null) lowers to None and should not allocate a region object",
+        0L,
+        after - before
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodReturnedOptionApplyPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def make(using r: RiftRegion.ScopedRegion^)
+            : Option[RiftCheckedListNode^{r}]^{r} =
+          Option(new RiftCheckedListNode(40))
+
+        val option = make(using region)
+        val identity = System.identityHashCode(option)
+
+        option.get.value + 2 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned Option.apply Some branch and payload to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersTuple2LocalPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val left: RiftCheckedListNode^{region} =
+          new RiftCheckedListNode(40)
+        val right: RiftCheckedListNode^{region} =
+          new RiftCheckedListNode(2)
+        val pair: Tuple2[
+          RiftCheckedListNode^{region},
+          RiftCheckedListNode^{region}
+        ]^{region} =
+          Tuple2(left, right)
+        val identity = System.identityHashCode(pair)
+
+        pair._1.value + pair._2.value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected Tuple2 and both leaves to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersTuple2InlineNewArgumentPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val pair: Tuple2[
+          RiftCheckedListNode^{region},
+          RiftCheckedListNode^{region}
+        ]^{region} =
+          Tuple2(
+            new RiftCheckedListNode(40),
+            new RiftCheckedListNode(2)
+          )
+        val identity = System.identityHashCode(pair)
+
+        pair._1.value + pair._2.value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inline Tuple2 and both leaves to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersTupleLiteralInlineNewArgumentPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val pair: Tuple2[
+          RiftCheckedListNode^{region},
+          RiftCheckedListNode^{region}
+        ]^{region} =
+          (
+            new RiftCheckedListNode(40),
+            new RiftCheckedListNode(2)
+          )
+        val identity = System.identityHashCode(pair)
+
+        pair._1.value + pair._2.value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected tuple literal and both leaves to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersTuple3InlineNewArgumentPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val triple: Tuple3[
+          RiftCheckedListNode^{region},
+          RiftCheckedListNode^{region},
+          RiftCheckedListNode^{region}
+        ]^{region} =
+          Tuple3(
+            new RiftCheckedListNode(20),
+            new RiftCheckedListNode(20),
+            new RiftCheckedListNode(2)
+          )
+        val identity = System.identityHashCode(triple)
+
+        triple._1.value + triple._2.value + triple._3.value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected Tuple3 and three leaves to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersPolymorphicCellPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        final class Cell[A](val value: A)
+
+        val leaf: RiftCheckedListNode^{region} =
+          new RiftCheckedListNode(40)
+        val cell: Cell[RiftCheckedListNode^{region}]^{region} =
+          new Cell[RiftCheckedListNode^{region}](leaf)
+        val identity = System.identityHashCode(cell)
+
+        cell.value.value + 2 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected polymorphic Cell and leaf to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersDirectConstructorInlineNewArgumentPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        final class Wrapper(val node: RiftCheckedListNode^{region})
+        val wrapper: Wrapper^{region} =
+          new Wrapper(new RiftCheckedListNode(40))
+        val identity = System.identityHashCode(wrapper)
+
+        wrapper.node.value + 2 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected wrapper and inline leaf to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def openHandleInfersAnnotatedLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.epochOpenHandle {
+        region ?=>
+          final class Node(val value: Int, val next: Node^{region})
+          val first: Node^{region} = new Node(40, null)
+          val second: Node^{region} = new Node(2, first)
+          val identity = System.identityHashCode(second)
+
+          second.value + second.next.value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected open-handle inferred locals to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def openHandleNoZeroSkipsDefinitelyInitializedInferredRecord()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val beforeSkipped =
+        rawSizeToLong(RiftAllocator.Impl.statsAllocZeroSkippedTotal())
+      val beforeZeroed =
+        rawSizeToLong(RiftAllocator.Impl.statsAllocZeroObjectTotal())
+      val total = RiftRegion.epochOpenHandle {
+        region ?=>
+          final class Metadata(val salt: Int)
+          final class Record(
+              val value: Int,
+              val metadata: Metadata^{region},
+              var mutable: Int
+          )
+
+          val metadata: Metadata^{region} = new Metadata(2)
+          val record: Record^{region} =
+            new Record(39, metadata, 0)
+          record.mutable += 1
+          val identity =
+            System.identityHashCode(metadata) ^
+              System.identityHashCode(record)
+          record.value + record.metadata.salt + record.mutable +
+            (identity & 0)
+      }
+      val afterSkipped =
+        rawSizeToLong(RiftAllocator.Impl.statsAllocZeroSkippedTotal())
+      val afterZeroed =
+        rawSizeToLong(RiftAllocator.Impl.statsAllocZeroObjectTotal())
+      val skipped = afterSkipped - beforeSkipped
+      val zeroed = afterZeroed - beforeZeroed
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected definite-init open-handle records to skip zeroing, observed $skipped zero-skipped objects",
+        skipped >= 2L
+      )
+      assertEquals(
+        "definite-init open-handle record path should not zero these objects",
+        0L,
+        zeroed
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def resetOpenHandleInfersAnnotatedLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.streamingOpenHandle {
+        RiftRegion.resetOpenHandle {
+          region ?=>
+            final class Node(val value: Int, val next: Node^{region})
+            val first: Node^{region} = new Node(40, null)
+            val second: Node^{region} = new Node(2, first)
+            val identity = System.identityHashCode(second)
+
+            second.value + second.next.value + (identity & 0)
+        }
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected reset-open-handle inferred locals to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def resetOpenHandleInlineInfersAnnotatedLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.streamingOpenHandle {
+        RiftRegion.resetOpenHandleInline {
+          region ?=>
+            final class Node(val value: Int, val next: Node^{region})
+            val first: Node^{region} = new Node(40, null)
+            val second: Node^{region} = new Node(2, first)
+            val identity = System.identityHashCode(second)
+
+            second.value + second.next.value + (identity & 0)
+        }
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inline reset-open-handle inferred locals to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def resetOpenHandleInlineInfersRegionArrayPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.streamingOpenHandle {
+        RiftRegion.resetOpenHandleInline {
+          region ?=>
+            final class Entry(val key: Int) {
+              var next: Entry^{region} = null
+            }
+            val entries: Array[Entry^{region}]^{region} =
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new Array[Entry^{region}](8)
+              )
+            val first: Entry^{region} = new Entry(40)
+            val second: Entry^{region} = new Entry(2)
+            second.next = first
+            entries(0) = second
+            val identity = System.identityHashCode(entries)
+
+            entries(0).key + entries(0).next.key + (identity & 0)
+        }
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inline reset-open-handle array body to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def resetOpenHandleInlineInfersDirectRegionArrayPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.streamingOpenHandle {
+        RiftRegion.resetOpenHandleInline {
+          region ?=>
+            final class Entry(val key: Int) {
+              var next: Entry^{region} = null
+            }
+            val entries: Array[Entry^{region}]^{region} =
+              new Array[Entry^{region}](8)
+            val counts: Array[Int]^{region} =
+              new Array[Int](8)
+            val first: Entry^{region} = new Entry(1)
+            val second: Entry^{region} = new Entry(2)
+            second.next = first
+            entries(0) = second
+            counts(0) = 39
+            val identity =
+              System.identityHashCode(entries) ^
+                System.identityHashCode(counts) ^
+                System.identityHashCode(second)
+
+            entries(0).key + entries(0).next.key + counts(0) +
+              (identity & 0)
+        }
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inline reset-open-handle direct arrays and entries to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def inferredScopedBranchNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        final class Entry(val key: Int)
+        val entry: Entry^{region} =
+          if (before >= 0L) new Entry(40)
+          else new Entry(2)
+        val identity = System.identityHashCode(entry)
+
+        entry.key + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(40, total)
+      assertTrue(
+        s"expected branch-returned inferred local to be region allocated, observed $delta region objects",
+        delta >= 1L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def inferredScopedMatchNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        final class Entry(val key: Int)
+        val selector = (before & 1L).toInt
+        val entry: Entry^{region} =
+          selector match {
+            case 0 => new Entry(41)
+            case _ => new Entry(1)
+          }
+        val identity = System.identityHashCode(entry)
+
+        entry.key + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(41, total)
+      assertTrue(
+        s"expected match-returned inferred local to be region allocated, observed $delta region objects",
+        delta >= 1L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def resetOpenHandleInlineInfersMixedRuntimeBranchPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.streamingOpenHandle {
+        RiftRegion.resetOpenHandleInline {
+          region ?=>
+            final class Entry(val key: Int)
+            val entries: Array[Entry^{region}]^{region} =
+              RiftAllocator.allocateOpenHandle(
+                region,
+                new Array[Entry^{region}](8)
+              )
+            val first: Entry^{region} =
+              if (before >= 0L) new Entry(42)
+              else RiftAllocator.allocateOpenHandle(region, new Entry(1))
+            entries(0) = first
+            val identity = System.identityHashCode(entries)
+
+            entries(0).key + (identity & 0)
+        }
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected mixed-branch inline reset body to region allocate array and selected entry, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersCapturedValDefLocalBlockNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        val node =
+          val value = 40
+          new RiftCheckedListNode(value)
+        val captured: RiftCheckedListNode^{region} = node
+        val list = RiftRegion.regionList[RiftCheckedListNode]()
+        RiftRegion.prependRegionList(region, list, captured)
+        RiftRegion.regionListHead(region, list).value + 2
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 1L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersAnnotatedLocalBlockNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        val node: RiftCheckedListNode^{region} =
+          val value = 40
+          new RiftCheckedListNode(value)
+        val list = RiftRegion.regionList[RiftCheckedListNode]()
+        RiftRegion.prependRegionList(region, list, node)
+        RiftRegion.regionListHead(region, list).value + 2
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 1L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersCapturedAssignmentLocalBlockNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        var captured: RiftCheckedListNode^{region} = null
+        captured =
+          val value = 40
+          new RiftCheckedListNode(value)
+        val list = RiftRegion.regionList[RiftCheckedListNode]()
+        RiftRegion.prependRegionList(region, list, captured)
+        RiftRegion.regionListHead(region, list).value + 2
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 1L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersLocalMethodReturnNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        def make(
+            value: Int
+        )(using r: RiftRegion.ScopedRegion^): RiftCheckedListNode^{r} =
+          new RiftCheckedListNode(value)
+        val node = make(40)(using region)
+        val list = RiftRegion.regionList[RiftCheckedListNode]()
+        RiftRegion.prependRegionList(region, list, node)
+        RiftRegion.regionListHead(region, list).value + 2
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 1L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersInlineMethodArgumentNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def consume(node: RiftCheckedListNode^{region}): Int =
+          node.value + (System.identityHashCode(node) & 0)
+        consume(new RiftCheckedListNode(40)) + 2
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inline method argument value to be region allocated, observed $delta region objects",
+        delta >= 1L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersInlineRegionParamMethodArgumentNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def consume(
+            using r: RiftRegion.ScopedRegion^
+        )(
+            node: RiftCheckedListNode^{r}
+        ): Int =
+          node.value + (System.identityHashCode(node) & 0)
+        consume(using region)(new RiftCheckedListNode(40)) + 2
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inline region-param method argument value to be region allocated, observed $delta region objects",
+        delta >= 1L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersInlineRegionParamMethodArgumentArrayPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def consume(
+            using r: RiftRegion.ScopedRegion^
+        )(
+            leaves: Array[RiftCheckedLeaf^{r}]^{r}
+        ): Int =
+          leaves(0) = new RiftCheckedLeaf(20)
+          leaves(1) = new RiftCheckedLeaf(22)
+          val identity =
+            System.identityHashCode(leaves) ^
+              System.identityHashCode(leaves(0)) ^
+              System.identityHashCode(leaves(1))
+          leaves(0).value + leaves(1).value + (identity & 0)
+
+        consume(using region)(new Array[RiftCheckedLeaf^{region}](2))
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inline region-param array argument and stored values to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersInlineRegionParamMethodArgumentClosurePlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def consume(
+            using r: RiftRegion.ScopedRegion^
+        )(
+            add: Function1[Int, Int]^{r}
+        ): Int =
+          invokeRegionFunction(add, 2)
+
+        consume(using region)((n: Int) => n + 40)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inline region-param closure argument to be region allocated, observed $delta region objects",
+        delta >= 1L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersInlineRegionParamMethodArgumentSomePlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def consume(
+            using r: RiftRegion.ScopedRegion^
+        )(
+            option: Option[RiftCheckedListNode^{r}]^{r}
+        ): Int =
+          option.get.value + (System.identityHashCode(option) & 0)
+
+        consume(using region)(Some(new RiftCheckedListNode(40))) + 2
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inline region-param Some argument and payload to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersInlineRegionParamMethodArgumentOptionApplyPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def consume(
+            using r: RiftRegion.ScopedRegion^
+        )(
+            option: Option[RiftCheckedListNode^{r}]^{r}
+        ): Int =
+          option.get.value + (System.identityHashCode(option) & 0)
+
+        consume(using region)(Option(new RiftCheckedListNode(40))) + 2
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inline region-param Option.apply argument and payload to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersInlineRegionParamMethodArgumentTuple2Placement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def consume(
+            using r: RiftRegion.ScopedRegion^
+        )(
+            pair: Tuple2[RiftCheckedListNode^{r}, RiftCheckedListNode^{r}]^{r}
+        ): Int =
+          pair._1.value + pair._2.value +
+            (System.identityHashCode(pair) & 0)
+
+        consume(using region)(
+          Tuple2(new RiftCheckedListNode(40), new RiftCheckedListNode(2))
+        )
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inline region-param Tuple2 argument and payloads to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersInlineRegionParamMethodArgumentGenericCellPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        final class Cell[A](val value: A)
+        def consume(
+            using r: RiftRegion.ScopedRegion^
+        )(
+            cell: Cell[RiftCheckedListNode^{r}]^{r}
+        ): Int =
+          cell.value.value + (System.identityHashCode(cell) & 0)
+
+        consume(using region)(new Cell(new RiftCheckedListNode(40))) + 2
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inline region-param generic Cell argument and payload to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersInlinePolymorphicMethodArgumentGenericCellPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        final class Cell[A](val value: A)
+        def consume[A](
+            using r: RiftRegion.ScopedRegion^
+        )(
+            cell: Cell[A^{r}]^{r}
+        ): Cell[A^{r}]^{r} =
+          cell
+
+        val cell =
+          consume[RiftCheckedListNode](using region)(
+            new Cell(new RiftCheckedListNode(40))
+          )
+        cell.value.value + 2 +
+          (System.identityHashCode(cell) & 0) +
+          (System.identityHashCode(cell.value) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected polymorphic inline region-param Cell argument and payload to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersSelectedPolymorphicMethodArgumentGenericCellPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        final class Cell[A](val value: A)
+        def consume[A](
+            using r: RiftRegion.ScopedRegion^
+        )(
+            cell: Cell[A^{r}]^{r}
+        ): Cell[A^{r}]^{r} =
+          cell
+
+        val chooseFirst = (System.identityHashCode(region) & 1) == 0
+        val first: Cell[RiftCheckedListNode^{region}]^{region} =
+          new Cell[RiftCheckedListNode^{region}](
+            new RiftCheckedListNode(40)
+          )
+        val second: Cell[RiftCheckedListNode^{region}]^{region} =
+          new Cell[RiftCheckedListNode^{region}](
+            new RiftCheckedListNode(41)
+          )
+        val selected = if chooseFirst then first else second
+        val cell = consume[RiftCheckedListNode](using region)(selected)
+        val expected = if chooseFirst then 40 else 41
+        cell.value.value - expected + 42 +
+          (System.identityHashCode(cell) & 0) +
+          (System.identityHashCode(cell.value) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected selected polymorphic method argument Cell candidates and payloads to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersPolymorphicMethodReturnedGenericCellPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        final class Cell[A](val value: A)
+        def make[A](
+            using r: RiftRegion.ScopedRegion^
+        )(
+            value: A^{r}
+        ): Cell[A^{r}]^{r} =
+          new Cell[A^{r}](value)
+
+        val cell =
+          make[RiftCheckedListNode](using region)(
+            new RiftCheckedListNode(40)
+          )
+        cell.value.value + 2 +
+          (System.identityHashCode(cell) & 0) +
+          (System.identityHashCode(cell.value) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected polymorphic method-returned Cell and payload to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedPolymorphicMethodReturnedGenericCellPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        final class Cell[A](val value: A)
+        def make[A](
+            using r: RiftRegion.ScopedRegion^
+        )(
+            value: A^{r}
+        ): Cell[A^{r}]^{r} =
+          new Cell[A^{r}](value)
+
+        def wrap[A](
+            using r: RiftRegion.ScopedRegion^
+        )(
+            value: A^{r}
+        ): Cell[A^{r}]^{r} =
+          make[A](using r)(value)
+
+        val cell =
+          wrap[RiftCheckedListNode](using region)(
+            new RiftCheckedListNode(40)
+          )
+        cell.value.value + 2 +
+          (System.identityHashCode(cell) & 0) +
+          (System.identityHashCode(cell.value) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected forwarded polymorphic method-returned Cell and payload to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersPolymorphicMethodReturnedOptionFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def make[A](
+            using r: RiftRegion.ScopedRegion^
+        )(
+            value: A^{r}
+        ): Option[A^{r}]^{r} =
+          Some(value)
+
+        val option =
+          make[RiftCheckedListNode](using region)(
+            new RiftCheckedListNode(40)
+          )
+        option.get.value + 2 +
+          (System.identityHashCode(option) & 0) +
+          (System.identityHashCode(option.get) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected polymorphic method-returned Option/Some and payload to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersPolymorphicMethodReturnedTuple2FactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def make[A, B](
+            using r: RiftRegion.ScopedRegion^
+        )(
+            left: A^{r},
+            right: B^{r}
+        ): Tuple2[A^{r}, B^{r}]^{r} =
+          Tuple2(left, right)
+
+        val pair =
+          make[RiftCheckedListNode, RiftCheckedListNode](using region)(
+            new RiftCheckedListNode(40),
+            new RiftCheckedListNode(2)
+          )
+        pair._1.value + pair._2.value +
+          (System.identityHashCode(pair) & 0) +
+          (System.identityHashCode(pair._1) & 0) +
+          (System.identityHashCode(pair._2) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected polymorphic method-returned Tuple2 and payloads to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersPolymorphicMethodReturnedOptionApplyFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def make[A](
+            using r: RiftRegion.ScopedRegion^
+        )(
+            value: A^{r}
+        ): Option[A^{r}]^{r} =
+          Option(value)
+
+        val option =
+          make[RiftCheckedListNode](using region)(
+            new RiftCheckedListNode(40)
+          )
+        option.get.value + 2 +
+          (System.identityHashCode(option) & 0) +
+          (System.identityHashCode(option.get) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected polymorphic method-returned Option.apply Some branch and payload to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersBranchForwardedPolymorphicOptionApplyFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def make[A](
+            using r: RiftRegion.ScopedRegion^
+        )(
+            value: A^{r}
+        ): Option[A^{r}]^{r} =
+          Option(value)
+
+        def branch[A](flag: Boolean)(
+            using r: RiftRegion.ScopedRegion^
+        )(
+            value: A^{r}
+        ): Option[A^{r}]^{r} =
+          if flag then make[A](using r)(value)
+          else make[A](using r)(value)
+
+        def matched[A](selector: Int)(
+            using r: RiftRegion.ScopedRegion^
+        )(
+            value: A^{r}
+        ): Option[A^{r}]^{r} =
+          selector match
+            case 0 => make[A](using r)(value)
+            case _ => make[A](using r)(value)
+
+        val left =
+          branch[RiftCheckedListNode](true)(using region)(
+            new RiftCheckedListNode(20)
+          )
+        val right =
+          matched[RiftCheckedListNode](0)(using region)(
+            new RiftCheckedListNode(22)
+          )
+        left.get.value + right.get.value +
+          (System.identityHashCode(left) & 0) +
+          (System.identityHashCode(right) & 0) +
+          (System.identityHashCode(left.get) & 0) +
+          (System.identityHashCode(right.get) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected branch/match forwarded polymorphic Option.apply results and payloads to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersBranchForwardedPolymorphicTuple2FactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def make[A, B](
+            using r: RiftRegion.ScopedRegion^
+        )(
+            left: A^{r},
+            right: B^{r}
+        ): Tuple2[A^{r}, B^{r}]^{r} =
+          Tuple2(left, right)
+
+        def branch[A, B](flag: Boolean)(
+            using r: RiftRegion.ScopedRegion^
+        )(
+            left: A^{r},
+            right: B^{r}
+        ): Tuple2[A^{r}, B^{r}]^{r} =
+          if flag then make[A, B](using r)(left, right)
+          else make[A, B](using r)(left, right)
+
+        def matched[A, B](selector: Int)(
+            using r: RiftRegion.ScopedRegion^
+        )(
+            left: A^{r},
+            right: B^{r}
+        ): Tuple2[A^{r}, B^{r}]^{r} =
+          selector match
+            case 0 => make[A, B](using r)(left, right)
+            case _ => make[A, B](using r)(left, right)
+
+        val first =
+          branch[RiftCheckedListNode, RiftCheckedListNode](true)(
+            using region
+          )(new RiftCheckedListNode(20), new RiftCheckedListNode(1))
+        val second =
+          matched[RiftCheckedListNode, RiftCheckedListNode](0)(using region)(
+            new RiftCheckedListNode(20),
+            new RiftCheckedListNode(1)
+          )
+        first._1.value + first._2.value +
+          second._1.value + second._2.value +
+          (System.identityHashCode(first) & 0) +
+          (System.identityHashCode(second) & 0) +
+          (System.identityHashCode(first._1) & 0) +
+          (System.identityHashCode(first._2) & 0) +
+          (System.identityHashCode(second._1) & 0) +
+          (System.identityHashCode(second._2) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected branch/match forwarded polymorphic Tuple2 results and payloads to be region allocated, observed $delta region objects",
+        delta >= 6L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersLocalMethodSomeFactoryPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def make(
+            value: Int
+        )(using r: RiftRegion.ScopedRegion^)
+            : Some[RiftCheckedListNode^{r}]^{r} =
+          Some(new RiftCheckedListNode(value))
+        val option = make(40)(using region)
+        val identity = System.identityHashCode(option)
+        option.value.value + 2 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned Some and value to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersLocalMethodOptionSupertypeSomeFactoryPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def make(
+            value: Int
+        )(using r: RiftRegion.ScopedRegion^)
+            : Option[RiftCheckedListNode^{r}]^{r} =
+          Some(new RiftCheckedListNode(value))
+        val option = make(40)(using region)
+        val identity = System.identityHashCode(option)
+        option.get.value + 2 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned Option-supertype Some and value to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersLocalMethodReturnedLocalOptionSomeFactoryPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def make(
+            value: Int
+        )(using r: RiftRegion.ScopedRegion^)
+            : Option[RiftCheckedListNode^{r}]^{r} =
+          val option: Option[RiftCheckedListNode^{r}]^{r} =
+            Some(new RiftCheckedListNode(value))
+          option
+        val option = make(40)(using region)
+        val identity = System.identityHashCode(option)
+        option.get.value + 2 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected returned-local Option-supertype Some and value to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedOptionSomeFactoryPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def make(
+            value: Int
+        )(using r: RiftRegion.ScopedRegion^)
+            : Option[RiftCheckedListNode^{r}]^{r} =
+          Some(new RiftCheckedListNode(value))
+
+        def branch(
+            flag: Boolean
+        )(using r: RiftRegion.ScopedRegion^)
+            : Option[RiftCheckedListNode^{r}]^{r} =
+          if flag then make(20)(using r) else make(0)(using r)
+
+        def matched(
+            selector: Int
+        )(using r: RiftRegion.ScopedRegion^)
+            : Option[RiftCheckedListNode^{r}]^{r} =
+          selector match
+            case 0 => make(22)(using r)
+            case _ => make(0)(using r)
+
+        val left = branch(true)(using region)
+        val right = matched(0)(using region)
+        val identity =
+          System.identityHashCode(left) ^
+            System.identityHashCode(right) ^
+            System.identityHashCode(left.get) ^
+            System.identityHashCode(right.get)
+        left.get.value + right.get.value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected branch/match forwarded Option-supertype Some values to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersLocalMethodTuple2FactoryPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def make(using r: RiftRegion.ScopedRegion^)
+            : Tuple2[
+              RiftCheckedListNode^{r},
+              RiftCheckedListNode^{r}
+            ]^{r} =
+          Tuple2(
+            new RiftCheckedListNode(40),
+            new RiftCheckedListNode(2)
+          )
+        val pair = make(using region)
+        val identity = System.identityHashCode(pair)
+        pair._1.value + pair._2.value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned Tuple2 and values to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersLocalMethodReturnedLocalTuple2FactoryPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def make(using r: RiftRegion.ScopedRegion^)
+            : Tuple2[
+              RiftCheckedListNode^{r},
+              RiftCheckedListNode^{r}
+            ]^{r} =
+          val pair: Tuple2[
+            RiftCheckedListNode^{r},
+            RiftCheckedListNode^{r}
+          ]^{r} =
+            Tuple2(
+              new RiftCheckedListNode(40),
+              new RiftCheckedListNode(2)
+            )
+          pair
+        val pair = make(using region)
+        val identity = System.identityHashCode(pair)
+        pair._1.value + pair._2.value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected returned-local Tuple2 and values to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedTuple2FactoryPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def make(
+            left: Int,
+            right: Int
+        )(using r: RiftRegion.ScopedRegion^)
+            : Tuple2[
+              RiftCheckedListNode^{r},
+              RiftCheckedListNode^{r}
+            ]^{r} =
+          Tuple2(
+            new RiftCheckedListNode(left),
+            new RiftCheckedListNode(right)
+          )
+
+        def branch(
+            flag: Boolean
+        )(using r: RiftRegion.ScopedRegion^)
+            : Tuple2[
+              RiftCheckedListNode^{r},
+              RiftCheckedListNode^{r}
+            ]^{r} =
+          if flag then make(10, 11)(using r) else make(0, 0)(using r)
+
+        def matched(
+            selector: Int
+        )(using r: RiftRegion.ScopedRegion^)
+            : Tuple2[
+              RiftCheckedListNode^{r},
+              RiftCheckedListNode^{r}
+            ]^{r} =
+          selector match
+            case 0 => make(9, 12)(using r)
+            case _ => make(0, 0)(using r)
+
+        val left = branch(true)(using region)
+        val right = matched(0)(using region)
+        val identity =
+          System.identityHashCode(left) ^
+            System.identityHashCode(right) ^
+            System.identityHashCode(left._1) ^
+            System.identityHashCode(left._2) ^
+            System.identityHashCode(right._1) ^
+            System.identityHashCode(right._2)
+        left._1.value + left._2.value + right._1.value + right._2.value +
+          (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected branch/match forwarded Tuple2 values to be region allocated, observed $delta region objects",
+        delta >= 6L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersLocalMethodTupleLiteralPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def make(using r: RiftRegion.ScopedRegion^)
+            : Tuple2[
+              RiftCheckedListNode^{r},
+              RiftCheckedListNode^{r}
+            ]^{r} =
+          (
+            new RiftCheckedListNode(40),
+            new RiftCheckedListNode(2)
+          )
+        val pair = make(using region)
+        val identity = System.identityHashCode(pair)
+        pair._1.value + pair._2.value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned tuple literal and values to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersLocalMethodPolymorphicCellFactoryPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        final class Cell[A](val value: A)
+
+        def make(
+            value: Int
+        )(using r: RiftRegion.ScopedRegion^)
+            : Cell[RiftCheckedListNode^{r}]^{r} =
+          val leaf: RiftCheckedListNode^{r} =
+            new RiftCheckedListNode(value)
+          new Cell[RiftCheckedListNode^{r}](leaf)
+
+        val cell = make(40)(using region)
+        val identity = System.identityHashCode(cell)
+        cell.value.value + 2 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned polymorphic Cell and value to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersLocalMethodReturnedLocalPolymorphicCellFactoryPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        final class Cell[A](val value: A)
+
+        def make(
+            value: Int
+        )(using r: RiftRegion.ScopedRegion^)
+            : Cell[RiftCheckedListNode^{r}]^{r} =
+          val leaf: RiftCheckedListNode^{r} =
+            new RiftCheckedListNode(value)
+          val cell: Cell[RiftCheckedListNode^{r}]^{r} =
+            new Cell[RiftCheckedListNode^{r}](leaf)
+          cell
+
+        val cell = make(40)(using region)
+        val identity = System.identityHashCode(cell)
+        cell.value.value + 2 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected returned-local polymorphic Cell and value to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedPolymorphicCellFactoryPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        final class Cell[A](val value: A)
+
+        def make(
+            value: Int
+        )(using r: RiftRegion.ScopedRegion^)
+            : Cell[RiftCheckedListNode^{r}]^{r} =
+          val leaf: RiftCheckedListNode^{r} =
+            new RiftCheckedListNode(value)
+          new Cell[RiftCheckedListNode^{r}](leaf)
+
+        def branch(
+            flag: Boolean
+        )(using r: RiftRegion.ScopedRegion^)
+            : Cell[RiftCheckedListNode^{r}]^{r} =
+          if flag then make(20)(using r) else make(0)(using r)
+
+        def matched(
+            selector: Int
+        )(using r: RiftRegion.ScopedRegion^)
+            : Cell[RiftCheckedListNode^{r}]^{r} =
+          selector match
+            case 0 => make(22)(using r)
+            case _ => make(0)(using r)
+
+        val left = branch(true)(using region)
+        val right = matched(0)(using region)
+        val identity =
+          System.identityHashCode(left) ^
+            System.identityHashCode(right) ^
+            System.identityHashCode(left.value) ^
+            System.identityHashCode(right.value)
+        left.value.value + right.value.value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected branch/match forwarded polymorphic Cell values to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersObjectBufferLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        val buffer = RiftRegion.objectBuffer[RiftCheckedLeaf](2)
+        val left = new RiftCheckedLeaf(20)
+        val right = new RiftCheckedLeaf(22)
+        RiftRegion.append(region, buffer, left)
+        region.append(buffer, right)
+        RiftRegion.get(region, buffer, 0).value +
+          region.get(buffer, 1).value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersObjectBufferSelectedLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        val buffer = RiftRegion.objectBuffer[RiftCheckedLeaf](1)
+        val first = new RiftCheckedLeaf(40)
+        val second = new RiftCheckedLeaf(42)
+        val keep =
+          System.identityHashCode(first) + System.identityHashCode(second)
+        val selected = if ((keep & 1) == 0) first else second
+        val expected = if ((keep & 1) == 0) 40 else 42
+        RiftRegion.append(region, buffer, selected)
+        RiftRegion.get(region, buffer, 0).value - expected + 42
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, sum)
+      assertTrue(
+        s"expected selected ObjectBuffer candidate allocations to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersObjectBufferInlineClosurePlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val buffer =
+          RiftRegion.objectBuffer[Function1[Int, Int]^{region}](1)
+        RiftRegion.append(region, buffer, (n: Int) => n + 40)
+
+        val fn = RiftRegion.get(region, buffer, 0)
+        val identity = System.identityHashCode(fn)
+        invokeRegionFunction(fn, 2) + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected ObjectBuffer backing array plus inline closure value to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersObjectBufferInlineClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val owner = region
+        val buffer =
+          RiftRegion.objectBuffer[Function1[Int, RiftCheckedLeaf^{region}]^{region}](1)
+        RiftRegion.append(
+          region,
+          buffer,
+          (n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + 40 + keepOwner)
+            leaf
+          }
+        )
+
+        val fn = RiftRegion.get(region, buffer, 0)
+        val leaf = fn(2)
+        leaf.value +
+          (System.identityHashCode(fn) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected ObjectBuffer backing array plus closure value and closure-body allocation to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersObjectBufferInlineArrayPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val buffer =
+          RiftRegion.objectBuffer[Array[RiftCheckedLeaf^{region}]^{region}](1)
+        RiftRegion.append(
+          region,
+          buffer,
+          new Array[RiftCheckedLeaf^{region}](2)
+        )
+        val leaves = RiftRegion.get(region, buffer, 0)
+        leaves(0) = new RiftCheckedLeaf(20)
+        leaves(1) = new RiftCheckedLeaf(22)
+
+        val identity =
+          System.identityHashCode(buffer) ^
+            System.identityHashCode(leaves) ^
+            System.identityHashCode(leaves(0)) ^
+            System.identityHashCode(leaves(1))
+        leaves(0).value + leaves(1).value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected ObjectBuffer backing array plus inline array value and stored values to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRegionBufferInlineArrayPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val buffer =
+          RiftRegion.regionBuffer[Array[RiftCheckedLeaf^{region}]^{region}](1)
+        region.append(buffer, new Array[RiftCheckedLeaf^{region}](2))
+        val leaves = region.get(buffer, 0)
+        leaves(0) = new RiftCheckedLeaf(20)
+        leaves(1) = new RiftCheckedLeaf(22)
+
+        val identity =
+          System.identityHashCode(buffer) ^
+            System.identityHashCode(leaves) ^
+            System.identityHashCode(leaves(0)) ^
+            System.identityHashCode(leaves(1))
+        leaves(0).value + leaves(1).value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected RegionBuffer backing array plus inline array value and stored values to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRegionBufferSelectedClosurePlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val buffer =
+          RiftRegion.regionBuffer[Function1[Int, Int]^{region}](1)
+        val first = (n: Int) => n + 40
+        val second = (n: Int) => n + 41
+        val keep =
+          System.identityHashCode(first) + System.identityHashCode(second)
+        val selected = if ((keep & 1) == 0) first else second
+        val expected = if ((keep & 1) == 0) 42 else 43
+        region.append(buffer, selected)
+
+        val fn = region.get(buffer, 0)
+        val identity =
+          System.identityHashCode(first) ^
+            System.identityHashCode(second) ^
+            System.identityHashCode(fn)
+        invokeRegionFunction(fn, 2) - expected + 42 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected RegionBuffer backing array plus selected closure values to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRegionBufferSelectedClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val owner = region
+        val buffer =
+          RiftRegion.regionBuffer[Function1[Int, RiftCheckedLeaf^{region}]^{region}](1)
+        val first = (n: Int) => {
+          val keepOwner = System.identityHashCode(owner) & 0
+          val leaf: RiftCheckedLeaf^{owner} =
+            new RiftCheckedLeaf(n + 40 + keepOwner)
+          leaf
+        }
+        val second = (n: Int) => {
+          val keepOwner = System.identityHashCode(owner) & 0
+          val leaf: RiftCheckedLeaf^{owner} =
+            new RiftCheckedLeaf(n + 41 + keepOwner)
+          leaf
+        }
+        val keep =
+          System.identityHashCode(first) + System.identityHashCode(second)
+        val selected = if ((keep & 1) == 0) first else second
+        val expected = if ((keep & 1) == 0) 42 else 43
+        region.append(buffer, selected)
+
+        val fn = region.get(buffer, 0)
+        val leaf = fn(2)
+        val identity =
+          System.identityHashCode(first) ^
+            System.identityHashCode(second) ^
+            System.identityHashCode(fn) ^
+            System.identityHashCode(leaf)
+        leaf.value - expected + 42 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected RegionBuffer backing array plus selected closure values and closure-body allocation to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersBufferSelectedLocalSyntheticFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val objectSomeBuffer =
+          RiftRegion.objectBuffer[Option[RiftCheckedLeaf^{region}]^{region}](1)
+        val objectSomeFirst = Some(new RiftCheckedLeaf(40))
+        val objectSomeSecond = Some(new RiftCheckedLeaf(41))
+        val objectSomeKeep =
+          System.identityHashCode(objectSomeFirst) +
+            System.identityHashCode(objectSomeSecond)
+        val objectSomeSelected =
+          if ((objectSomeKeep & 1) == 0) objectSomeFirst else objectSomeSecond
+        RiftRegion.append(region, objectSomeBuffer, objectSomeSelected)
+
+        val objectOptionBuffer =
+          RiftRegion.objectBuffer[Option[RiftCheckedLeaf^{region}]^{region}](1)
+        val objectOptionFirst = Option(new RiftCheckedLeaf(1))
+        val objectOptionSecond = Option(new RiftCheckedLeaf(2))
+        val objectOptionKeep =
+          System.identityHashCode(objectOptionFirst) +
+            System.identityHashCode(objectOptionSecond)
+        val objectOptionSelected =
+          if ((objectOptionKeep & 1) == 0) objectOptionFirst
+          else objectOptionSecond
+        RiftRegion.append(region, objectOptionBuffer, objectOptionSelected)
+
+        val objectPairBuffer = RiftRegion.objectBuffer[
+          Tuple2[RiftCheckedLeaf^{region}, RiftCheckedLeaf^{region}]^{region}
+        ](1)
+        val objectPairFirst =
+          Tuple2(new RiftCheckedLeaf(1), new RiftCheckedLeaf(1))
+        val objectPairSecond =
+          Tuple2(new RiftCheckedLeaf(2), new RiftCheckedLeaf(2))
+        val objectPairKeep =
+          System.identityHashCode(objectPairFirst) +
+            System.identityHashCode(objectPairSecond)
+        val objectPairSelected =
+          if ((objectPairKeep & 1) == 0) objectPairFirst else objectPairSecond
+        RiftRegion.append(region, objectPairBuffer, objectPairSelected)
+
+        val regionSomeBuffer =
+          RiftRegion.regionBuffer[Option[RiftCheckedLeaf^{region}]^{region}](1)
+        val regionSomeFirst = Some(new RiftCheckedLeaf(10))
+        val regionSomeSecond = Some(new RiftCheckedLeaf(11))
+        val regionSomeKeep =
+          System.identityHashCode(regionSomeFirst) +
+            System.identityHashCode(regionSomeSecond)
+        val regionSomeSelected =
+          if ((regionSomeKeep & 1) == 0) regionSomeFirst else regionSomeSecond
+        region.append(regionSomeBuffer, regionSomeSelected)
+
+        val regionOptionBuffer =
+          RiftRegion.regionBuffer[Option[RiftCheckedLeaf^{region}]^{region}](1)
+        val regionOptionFirst = Option(new RiftCheckedLeaf(3))
+        val regionOptionSecond = Option(new RiftCheckedLeaf(4))
+        val regionOptionKeep =
+          System.identityHashCode(regionOptionFirst) +
+            System.identityHashCode(regionOptionSecond)
+        val regionOptionSelected =
+          if ((regionOptionKeep & 1) == 0) regionOptionFirst
+          else regionOptionSecond
+        region.append(regionOptionBuffer, regionOptionSelected)
+
+        val regionPairBuffer = RiftRegion.regionBuffer[
+          Tuple2[RiftCheckedLeaf^{region}, RiftCheckedLeaf^{region}]^{region}
+        ](1)
+        val regionPairFirst =
+          Tuple2(new RiftCheckedLeaf(3), new RiftCheckedLeaf(3))
+        val regionPairSecond =
+          Tuple2(new RiftCheckedLeaf(4), new RiftCheckedLeaf(4))
+        val regionPairKeep =
+          System.identityHashCode(regionPairFirst) +
+            System.identityHashCode(regionPairSecond)
+        val regionPairSelected =
+          if ((regionPairKeep & 1) == 0) regionPairFirst else regionPairSecond
+        region.append(regionPairBuffer, regionPairSelected)
+
+        val expectedObjectSome =
+          if ((objectSomeKeep & 1) == 0) 40 else 41
+        val expectedObjectOption =
+          if ((objectOptionKeep & 1) == 0) 1 else 2
+        val expectedObjectPair =
+          if ((objectPairKeep & 1) == 0) 2 else 4
+        val expectedRegionSome =
+          if ((regionSomeKeep & 1) == 0) 10 else 11
+        val expectedRegionOption =
+          if ((regionOptionKeep & 1) == 0) 3 else 4
+        val expectedRegionPair =
+          if ((regionPairKeep & 1) == 0) 6 else 8
+
+        RiftRegion.get(region, objectSomeBuffer, 0).get.value +
+          RiftRegion.get(region, objectOptionBuffer, 0).get.value +
+          RiftRegion.get(region, objectPairBuffer, 0)._1.value +
+          RiftRegion.get(region, objectPairBuffer, 0)._2.value +
+          region.get(regionSomeBuffer, 0).get.value +
+          region.get(regionOptionBuffer, 0).get.value +
+          region.get(regionPairBuffer, 0)._1.value +
+          region.get(regionPairBuffer, 0)._2.value -
+          expectedObjectSome - expectedObjectOption - expectedObjectPair -
+          expectedRegionSome - expectedRegionOption - expectedRegionPair + 42
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected selected buffer Some/Option/Tuple2 factories and payloads to be region allocated, observed $delta region objects",
+        delta >= 28L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersBufferSelectedNestedSyntheticFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        final class SomeNode(
+            val option: Option[RiftCheckedLeaf^{region}]^{region}
+        )
+        final class OptionNode(
+            val option: Option[RiftCheckedLeaf^{region}]^{region}
+        )
+        final class PairNode(
+            val pair: Tuple2[
+              RiftCheckedLeaf^{region},
+              RiftCheckedLeaf^{region}
+            ]^{region}
+        )
+
+        val objectSomeBuffer = RiftRegion.objectBuffer[SomeNode](1)
+        val someFirst = Some(new RiftCheckedLeaf(40))
+        val someSecond = Some(new RiftCheckedLeaf(41))
+        val someKeep =
+          System.identityHashCode(someFirst) +
+            System.identityHashCode(someSecond)
+        val someSelected =
+          if ((someKeep & 1) == 0) someFirst else someSecond
+        RiftRegion.append(region, objectSomeBuffer, new SomeNode(someSelected))
+
+        val regionOptionBuffer = RiftRegion.regionBuffer[OptionNode](1)
+        val optionFirst = Option(new RiftCheckedLeaf(10))
+        val optionSecond = Option(new RiftCheckedLeaf(11))
+        val optionKeep =
+          System.identityHashCode(optionFirst) +
+            System.identityHashCode(optionSecond)
+        val optionSelected =
+          if ((optionKeep & 1) == 0) optionFirst else optionSecond
+        region.append(regionOptionBuffer, new OptionNode(optionSelected))
+
+        val objectPairBuffer = RiftRegion.objectBuffer[PairNode](1)
+        val pairFirst = Tuple2(new RiftCheckedLeaf(1), new RiftCheckedLeaf(2))
+        val pairSecond = Tuple2(new RiftCheckedLeaf(3), new RiftCheckedLeaf(4))
+        val pairKeep =
+          System.identityHashCode(pairFirst) + System.identityHashCode(pairSecond)
+        val pairSelected =
+          if ((pairKeep & 1) == 0) pairFirst else pairSecond
+        RiftRegion.append(region, objectPairBuffer, new PairNode(pairSelected))
+
+        val expectedSome = if ((someKeep & 1) == 0) 40 else 41
+        val expectedOption = if ((optionKeep & 1) == 0) 10 else 11
+        val expectedPair = if ((pairKeep & 1) == 0) 3 else 7
+        RiftRegion.get(region, objectSomeBuffer, 0).option.get.value +
+          region.get(regionOptionBuffer, 0).option.get.value +
+          RiftRegion.get(region, objectPairBuffer, 0).pair._1.value +
+          RiftRegion.get(region, objectPairBuffer, 0).pair._2.value -
+          expectedSome - expectedOption - expectedPair + 42
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected selected nested buffer synthetic factories, payloads, and value objects to be region allocated, observed $delta region objects",
+        delta >= 17L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersBufferBranchMatchSyntheticFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val objectSomeBuffer =
+          RiftRegion.objectBuffer[Option[RiftCheckedLeaf^{region}]^{region}](1)
+        val chooseSome = (System.identityHashCode(region) & 1) == 0
+        RiftRegion.append(
+          region,
+          objectSomeBuffer,
+          if chooseSome then Some(new RiftCheckedLeaf(40))
+          else Some(new RiftCheckedLeaf(41))
+        )
+
+        val regionOptionBuffer =
+          RiftRegion.regionBuffer[Option[RiftCheckedLeaf^{region}]^{region}](1)
+        val optionSelector = System.identityHashCode(objectSomeBuffer) & 1
+        region.append(
+          regionOptionBuffer,
+          (optionSelector match
+            case 0 => Option(new RiftCheckedLeaf(10))
+            case _ => Option(new RiftCheckedLeaf(11))
+          )
+        )
+
+        val objectPairBuffer = RiftRegion.objectBuffer[
+          Tuple2[RiftCheckedLeaf^{region}, RiftCheckedLeaf^{region}]^{region}
+        ](1)
+        val choosePair = (System.identityHashCode(regionOptionBuffer) & 1) == 0
+        RiftRegion.append(
+          region,
+          objectPairBuffer,
+          if choosePair then
+            Tuple2(new RiftCheckedLeaf(1), new RiftCheckedLeaf(2))
+          else Tuple2(new RiftCheckedLeaf(3), new RiftCheckedLeaf(4))
+        )
+
+        val expectedSome = if chooseSome then 40 else 41
+        val expectedOption = if optionSelector == 0 then 10 else 11
+        val expectedPair = if choosePair then 3 else 7
+        RiftRegion.get(region, objectSomeBuffer, 0).get.value +
+          region.get(regionOptionBuffer, 0).get.value +
+          RiftRegion.get(region, objectPairBuffer, 0)._1.value +
+          RiftRegion.get(region, objectPairBuffer, 0)._2.value -
+          expectedSome - expectedOption - expectedPair + 42
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected branch/match buffer Some/Option/Tuple2 factories and payloads to be region allocated, observed $delta region objects",
+        delta >= 7L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersObjectBufferLocalBlockNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        val buffer = RiftRegion.objectBuffer[RiftCheckedLeaf](2)
+        val left =
+          val value = 20
+          new RiftCheckedLeaf(value)
+        val right =
+          val value = 22
+          new RiftCheckedLeaf(value)
+        RiftRegion.append(region, buffer, left)
+        region.append(buffer, right)
+        RiftRegion.get(region, buffer, 0).value +
+          region.get(buffer, 1).value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersObjectBufferInlineNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        val buffer = RiftRegion.objectBuffer[RiftCheckedLeaf](2)
+        RiftRegion.append(region, buffer, new RiftCheckedLeaf(20))
+        region.append(buffer, new RiftCheckedLeaf(22))
+        RiftRegion.get(region, buffer, 0).value +
+          region.get(buffer, 1).value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersObjectBufferInlineBlockNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        val buffer = RiftRegion.objectBuffer[RiftCheckedLeaf](2)
+        RiftRegion.append(
+          region,
+          buffer,
+          {
+            val value = 20
+            new RiftCheckedLeaf(value)
+          }
+        )
+        region.append(
+          buffer,
+          {
+            val value = 22
+            new RiftCheckedLeaf(value)
+          }
+        )
+        RiftRegion.get(region, buffer, 0).value +
+          region.get(buffer, 1).value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersLocalMethodReturnedLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        def make(
+            value: Int
+        )(using r: RiftRegion.ScopedRegion^): RiftCheckedListNode^{r} =
+          val node = new RiftCheckedListNode(value)
+          node
+        val node = make(40)(using region)
+        val list = RiftRegion.regionList[RiftCheckedListNode]()
+        RiftRegion.prependRegionList(region, list, node)
+        RiftRegion.regionListHead(region, list).value + 2
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 1L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersLocalMethodReturnedLocalBlockNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        def make(
+            value: Int
+        )(using r: RiftRegion.ScopedRegion^): RiftCheckedListNode^{r} =
+          val node =
+            val adjusted = value + 1
+            new RiftCheckedListNode(adjusted)
+          node
+        val left = make(19)(using region)
+        val right = make(21)(using region)
+        left.value + right.value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersLocalMethodBlockReturnedNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        def make(
+            value: Int
+        )(using r: RiftRegion.ScopedRegion^): RiftCheckedListNode^{r} =
+          val adjusted = value + 1
+          new RiftCheckedListNode(adjusted)
+        val left = make(19)(using region)
+        val right = make(21)(using region)
+        left.value + right.value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedLocalMethodReturnPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        def make(
+            value: Int
+        )(using r: RiftRegion.ScopedRegion^): RiftCheckedListNode^{r} =
+          new RiftCheckedListNode(value)
+        def wrap(
+            value: Int
+        )(using r: RiftRegion.ScopedRegion^): RiftCheckedListNode^{r} =
+          make(value)(using r)
+        val left = wrap(20)(using region)
+        val right = wrap(22)(using region)
+        left.value + right.value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedLocalAliasMethodReturnPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        def make(
+            value: Int
+        )(using r: RiftRegion.ScopedRegion^): RiftCheckedListNode^{r} =
+          new RiftCheckedListNode(value)
+        def wrap(
+            value: Int
+        )(using r: RiftRegion.ScopedRegion^): RiftCheckedListNode^{r} =
+          val node = make(value)(using r)
+          node
+        val left = wrap(20)(using region)
+        val right = wrap(22)(using region)
+        left.value + right.value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedBranchAndMatchMethodReturnPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        def make(
+            value: Int
+        )(using r: RiftRegion.ScopedRegion^): RiftCheckedListNode^{r} =
+          new RiftCheckedListNode(value)
+        def branchWrap(
+            value: Int,
+            flag: Boolean
+        )(using r: RiftRegion.ScopedRegion^): RiftCheckedListNode^{r} =
+          if (flag) make(value)(using r)
+          else make(value + 1000)(using r)
+        def matchWrap(
+            value: Int,
+            selector: Int
+        )(using r: RiftRegion.ScopedRegion^): RiftCheckedListNode^{r} =
+          selector match {
+            case 0 => make(value)(using r)
+            case _ => make(value + 1000)(using r)
+          }
+        val left = branchWrap(20, true)(using region)
+        val right = matchWrap(22, 0)(using region)
+        left.value + right.value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodReturnedSelectedLocalNewPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): RiftCheckedLeaf^{r} = {
+        val first = new RiftCheckedLeaf(40)
+        val second = new RiftCheckedLeaf(41)
+        val keep =
+          System.identityHashCode(first) + System.identityHashCode(second)
+        val selected = if (flag || keep != 0) first else second
+        selected
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val leaf = make(true)(using region)
+        leaf.value + 2 + (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned selected local allocations to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodReturnedSelectedLocalSyntheticFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def makeOption(flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Option[RiftCheckedLeaf^{r}]^{r} = {
+        val first = Some(new RiftCheckedLeaf(40))
+        val second = Some(new RiftCheckedLeaf(41))
+        val keep =
+          System.identityHashCode(first) + System.identityHashCode(second)
+        val selected = if (flag || keep != 0) first else second
+        selected
+      }
+
+      def makeOptionApply(flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Option[RiftCheckedLeaf^{r}]^{r} = {
+        val first = Option(new RiftCheckedLeaf(10))
+        val second = Option(new RiftCheckedLeaf(11))
+        val keep =
+          System.identityHashCode(first) + System.identityHashCode(second)
+        val selected = if (flag || keep != 0) first else second
+        selected
+      }
+
+      def makePair(flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[RiftCheckedLeaf^{r}, RiftCheckedLeaf^{r}]^{r} = {
+        val first = Tuple2(new RiftCheckedLeaf(1), new RiftCheckedLeaf(1))
+        val second = Tuple2(new RiftCheckedLeaf(2), new RiftCheckedLeaf(2))
+        val keep =
+          System.identityHashCode(first) + System.identityHashCode(second)
+        val selected = if (flag || keep != 0) first else second
+        selected
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val option = makeOption(true)(using region)
+        val optionApply = makeOptionApply(true)(using region)
+        val pair = makePair(true)(using region)
+        val optionIdentity = System.identityHashCode(option)
+        val optionApplyIdentity = System.identityHashCode(optionApply)
+        val pairIdentity = System.identityHashCode(pair)
+        option.get.value + optionApply.get.value + pair._1.value +
+          pair._2.value - 10 +
+          (optionIdentity & 0) + (optionApplyIdentity & 0) +
+          (pairIdentity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected selected local Some/Option/Tuple2 factories and payloads to be region allocated, observed $delta region objects",
+        delta >= 14L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodArgumentSelectedLocalSyntheticFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def consumeOption(using r: RiftRegion.ScopedRegion^)(
+          option: Option[RiftCheckedLeaf^{r}]^{r}
+      ): Int = {
+        val identity = System.identityHashCode(option)
+        option.get.value + (identity & 0)
+      }
+
+      def consumeOptionApply(using r: RiftRegion.ScopedRegion^)(
+          option: Option[RiftCheckedLeaf^{r}]^{r}
+      ): Int = {
+        val identity = System.identityHashCode(option)
+        option.get.value + (identity & 0)
+      }
+
+      def consumePair(using r: RiftRegion.ScopedRegion^)(
+          pair: Tuple2[RiftCheckedLeaf^{r}, RiftCheckedLeaf^{r}]^{r}
+      ): Int = {
+        val identity = System.identityHashCode(pair)
+        pair._1.value + pair._2.value + (identity & 0)
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val optionFirst = Some(new RiftCheckedLeaf(40))
+        val optionSecond = Some(new RiftCheckedLeaf(41))
+        val optionKeep =
+          System.identityHashCode(optionFirst) +
+            System.identityHashCode(optionSecond)
+        val optionSelected =
+          if ((optionKeep & 1) == 0) optionFirst else optionSecond
+
+        val optionApplyFirst = Option(new RiftCheckedLeaf(10))
+        val optionApplySecond = Option(new RiftCheckedLeaf(11))
+        val optionApplyKeep =
+          System.identityHashCode(optionApplyFirst) +
+            System.identityHashCode(optionApplySecond)
+        val optionApplySelected =
+          if ((optionApplyKeep & 1) == 0) optionApplyFirst
+          else optionApplySecond
+
+        val pairFirst = Tuple2(new RiftCheckedLeaf(1), new RiftCheckedLeaf(1))
+        val pairSecond = Tuple2(new RiftCheckedLeaf(2), new RiftCheckedLeaf(2))
+        val pairKeep =
+          System.identityHashCode(pairFirst) + System.identityHashCode(pairSecond)
+        val pairSelected = if ((pairKeep & 1) == 0) pairFirst else pairSecond
+
+        val expectedOption = if ((optionKeep & 1) == 0) 40 else 41
+        val expectedOptionApply =
+          if ((optionApplyKeep & 1) == 0) 10 else 11
+        val expectedPair = if ((pairKeep & 1) == 0) 2 else 4
+        consumeOption(using region)(optionSelected) +
+          consumeOptionApply(using region)(optionApplySelected) +
+          consumePair(using region)(pairSelected) -
+          expectedOption - expectedOptionApply - expectedPair + 42
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected selected owner-token Some/Option/Tuple2 factories and payloads to be region allocated, observed $delta region objects",
+        delta >= 14L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodArgumentBranchMatchSyntheticFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def consumeOption(using r: RiftRegion.ScopedRegion^)(
+          option: Option[RiftCheckedLeaf^{r}]^{r}
+      ): Int = {
+        val identity = System.identityHashCode(option)
+        option.get.value + (identity & 0)
+      }
+
+      def consumePair(using r: RiftRegion.ScopedRegion^)(
+          pair: Tuple2[RiftCheckedLeaf^{r}, RiftCheckedLeaf^{r}]^{r}
+      ): Int = {
+        val identity = System.identityHashCode(pair)
+        pair._1.value + pair._2.value + (identity & 0)
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val flag = (System.identityHashCode(region) & 1) == 0
+        val selector = System.identityHashCode(region) & 1
+        val expectedSome = if flag then 40 else 41
+        val expectedOption = if selector == 0 then 10 else 11
+        val expectedPair = if flag then 3 else 7
+
+        consumeOption(using region)(
+          if flag then Some(new RiftCheckedLeaf(40))
+          else Some(new RiftCheckedLeaf(41))
+        ) +
+          consumeOption(using region)(
+            (selector match
+              case 0 => Option(new RiftCheckedLeaf(10))
+              case _ => Option(new RiftCheckedLeaf(11))
+            )
+          ) +
+          consumePair(using region)(
+            if flag then Tuple2(new RiftCheckedLeaf(1), new RiftCheckedLeaf(2))
+            else Tuple2(new RiftCheckedLeaf(3), new RiftCheckedLeaf(4))
+          ) -
+          expectedSome - expectedOption - expectedPair + 42
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected branch/match owner-token Some/Option/Tuple2 factories and payloads to be region allocated, observed $delta region objects",
+        delta >= 7L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def streamingEpochInfersLocalMethodReturnedLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.streaming { stream ?=>
+        RiftRegion.epoch { epoch ?=>
+          def make(
+              value: Int
+          )(using r: RiftRegion.OpenStreamingRegion^): RiftCheckedListNode^{r} =
+            val node = new RiftCheckedListNode(value)
+            node
+          val node = make(40)(using epoch)
+          node.value + 2
+        }
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 1L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersBranchedLocalMethodNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        def make(
+            value: Int,
+            flag: Boolean
+        )(using r: RiftRegion.ScopedRegion^): RiftCheckedListNode^{r} =
+          if (flag) new RiftCheckedListNode(value)
+          else new RiftCheckedListNode(value + 1000)
+        val left = make(20, true)(using region)
+        val right = make(22, true)(using region)
+        left.value + right.value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersBranchReturnedLocalMethodNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        def make(
+            value: Int,
+            flag: Boolean
+        )(using r: RiftRegion.ScopedRegion^): RiftCheckedListNode^{r} =
+          if (flag) {
+            val left = new RiftCheckedListNode(value)
+            left
+          } else {
+            val right = new RiftCheckedListNode(value + 1000)
+            right
+          }
+        val left = make(20, true)(using region)
+        val right = make(22, true)(using region)
+        left.value + right.value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMatchedLocalMethodNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        def make(
+            value: Int,
+            selector: Int
+        )(using r: RiftRegion.ScopedRegion^): RiftCheckedListNode^{r} =
+          selector match {
+            case 0 => new RiftCheckedListNode(value)
+            case _ => new RiftCheckedListNode(value + 1000)
+          }
+        val left = make(20, 0)(using region)
+        val right = make(22, 0)(using region)
+        left.value + right.value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMatchReturnedLocalMethodNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        def make(
+            value: Int,
+            selector: Int
+        )(using r: RiftRegion.ScopedRegion^): RiftCheckedListNode^{r} =
+          selector match {
+            case 0 =>
+              val left = new RiftCheckedListNode(value)
+              left
+            case _ =>
+              val right = new RiftCheckedListNode(value + 1000)
+              right
+          }
+        val left = make(20, 0)(using region)
+        val right = make(22, 0)(using region)
+        left.value + right.value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersBranchAndMatchReturnedLocalBlockMethodNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        def branchMake(
+            value: Int,
+            flag: Boolean
+        )(using r: RiftRegion.ScopedRegion^): RiftCheckedListNode^{r} =
+          if (flag) {
+            val left = {
+              val adjusted = value
+              new RiftCheckedListNode(adjusted)
+            }
+            left
+          } else {
+            val right = {
+              val adjusted = value + 1000
+              new RiftCheckedListNode(adjusted)
+            }
+            right
+          }
+        def matchMake(
+            value: Int,
+            selector: Int
+        )(using r: RiftRegion.ScopedRegion^): RiftCheckedListNode^{r} =
+          selector match {
+            case 0 =>
+              val left = {
+                val adjusted = value
+                new RiftCheckedListNode(adjusted)
+              }
+              left
+            case _ =>
+              val right = {
+                val adjusted = value + 1000
+                new RiftCheckedListNode(adjusted)
+              }
+              right
+          }
+        val left = branchMake(20, true)(using region)
+        val right = matchMake(22, 0)(using region)
+        left.value + right.value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRegionBufferLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        val buffer = RiftRegion.regionBuffer[RiftCheckedLeaf](1)
+        val left = new RiftCheckedLeaf(20)
+        val right = new RiftCheckedLeaf(22)
+        region.append(buffer, left)
+        RiftRegion.append(region, buffer, right)
+        region.get(buffer, 0).value +
+          RiftRegion.get(region, buffer, 1).value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRegionBufferLocalBlockNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        val buffer = RiftRegion.regionBuffer[RiftCheckedLeaf](1)
+        val left =
+          val value = 20
+          new RiftCheckedLeaf(value)
+        val right =
+          val value = 22
+          new RiftCheckedLeaf(value)
+        region.append(buffer, left)
+        RiftRegion.append(region, buffer, right)
+        region.get(buffer, 0).value +
+          RiftRegion.get(region, buffer, 1).value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRegionBufferInlineNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        val buffer = RiftRegion.regionBuffer[RiftCheckedLeaf](1)
+        region.append(buffer, new RiftCheckedLeaf(20))
+        RiftRegion.append(region, buffer, new RiftCheckedLeaf(22))
+        region.get(buffer, 0).value +
+          RiftRegion.get(region, buffer, 1).value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRegionBufferInlineBlockNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val sum = RiftRegion.scoped { region ?=>
+        val buffer = RiftRegion.regionBuffer[RiftCheckedLeaf](1)
+        region.append(
+          buffer,
+          {
+            val value = 20
+            new RiftCheckedLeaf(value)
+          }
+        )
+        RiftRegion.append(
+          region,
+          buffer,
+          {
+            val value = 22
+            new RiftCheckedLeaf(value)
+          }
+        )
+        region.get(buffer, 0).value +
+          RiftRegion.get(region, buffer, 1).value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, sum)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def scopedRegionAllowsNonEscapingClosureCapture(): Unit = {
     RiftRegion.init(1)
     try {
@@ -57,6 +3539,2256 @@ class RiftRegionCheckedTest {
       }
 
       assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersLocalClosurePlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val leaf: RiftCheckedLeaf^{region} =
+          new RiftCheckedLeaf(40)
+        val addCaptured: Function1[Int, Int]^{region} =
+          (n: Int) => leaf.value + n
+
+        invokeRegionFunction(addCaptured, 2)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected region-local leaf and closure object to be region allocated, observed ${after - before} region objects",
+        after - before >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersCaptureFreeLocalClosurePlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val add: Function1[Int, Int]^{region} =
+          (n: Int) => n + 40
+
+        invokeRegionFunction(add, 2)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected capture-free closure object to be region allocated, observed ${after - before} region objects",
+        after - before >= 1L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodReturnedCaptureFreeClosurePlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Int]^{r} = {
+        val add: Function1[Int, Int]^{r} =
+          (n: Int) => n + 40
+        add
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        invokeRegionFunction(make(using region), 2)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned capture-free closure object to be region allocated, observed ${after - before} region objects",
+        after - before >= 1L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodReturnedClosureCapturingRegionValuePlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Int]^{r} = {
+        val leaf: RiftCheckedLeaf^{r} =
+          new RiftCheckedLeaf(40)
+        val add: Function1[Int, Int]^{r} =
+          (n: Int) => leaf.value + n
+        add
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        invokeRegionFunction(make(using region), 2)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned closure and captured region value to be region allocated, observed ${after - before} region objects",
+        after - before >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOwnerAliasMethodReturnedClosureCapturingRegionValuePlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Int]^{r} = {
+        val owner = r
+        val leaf: RiftCheckedLeaf^{owner} =
+          new RiftCheckedLeaf(40)
+        val add: Function1[Int, Int]^{owner} =
+          (n: Int) => leaf.value + n
+        add
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        invokeRegionFunction(make(using region), 2)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected owner-alias method-returned closure and captured region value to be region allocated, observed ${after - before} region objects",
+        after - before >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedMethodReturnedClosureCapturingRegionValuePlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Int]^{r} = {
+        val leaf: RiftCheckedLeaf^{r} =
+          new RiftCheckedLeaf(40)
+        val add: Function1[Int, Int]^{r} =
+          (n: Int) => leaf.value + n
+        add
+      }
+
+      def wrap(using r: RiftRegion.ScopedRegion^): Function1[Int, Int]^{r} =
+        make(using r)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        invokeRegionFunction(wrap(using region), 2)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected forwarded method-returned closure and captured region value to be region allocated, observed ${after - before} region objects",
+        after - before >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedLocalAliasMethodReturnedClosureCapturingRegionValuePlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Int]^{r} = {
+        val leaf: RiftCheckedLeaf^{r} =
+          new RiftCheckedLeaf(40)
+        val add: Function1[Int, Int]^{r} =
+          (n: Int) => leaf.value + n
+        add
+      }
+
+      def wrap(using r: RiftRegion.ScopedRegion^): Function1[Int, Int]^{r} = {
+        val forwarded = make(using r)
+        forwarded
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        invokeRegionFunction(wrap(using region), 2)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected forwarded local-alias method-returned closure and captured region value to be region allocated, observed ${after - before} region objects",
+        after - before >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedBranchMethodReturnedClosureCapturingRegionValuePlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Int]^{r} = {
+        val leaf: RiftCheckedLeaf^{r} =
+          new RiftCheckedLeaf(40)
+        val add: Function1[Int, Int]^{r} =
+          (n: Int) => leaf.value + n
+        add
+      }
+
+      def wrap(flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, Int]^{r} =
+        if (flag) make(using r) else make(using r)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        invokeRegionFunction(wrap(true)(using region), 2)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected branch-forwarded method-returned closure and captured region value to be region allocated, observed ${after - before} region objects",
+        after - before >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedMatchMethodReturnedClosureCapturingRegionValuePlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Int]^{r} = {
+        val leaf: RiftCheckedLeaf^{r} =
+          new RiftCheckedLeaf(40)
+        val add: Function1[Int, Int]^{r} =
+          (n: Int) => leaf.value + n
+        add
+      }
+
+      def wrap(selector: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, Int]^{r} =
+        selector match {
+          case 0 => make(using r)
+          case _ => make(using r)
+        }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        invokeRegionFunction(wrap(0)(using region), 2)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected match-forwarded method-returned closure and captured region value to be region allocated, observed ${after - before} region objects",
+        after - before >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodyAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val make: Function1[Int, RiftCheckedLeaf^{region}]^{region} =
+          (value: Int) => {
+            val owner = region
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(value)
+            leaf
+          }
+
+        val leaf = make(40)
+        leaf.value + 2 +
+          (System.identityHashCode(make) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected captured-owner closure object and body allocation to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodyDirectOptionFactoryAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val make: Function1[
+          Int,
+          Option[RiftCheckedLeaf^{region}]^{region}
+        ]^{region} =
+          (value: Int) => {
+            val owner = region
+            val keepOwner = System.identityHashCode(owner) & 0
+            Some(new RiftCheckedLeaf(value + keepOwner))
+          }
+
+        val maybe = make(40)
+        val leaf = maybe.get
+        leaf.value + 2 +
+          (System.identityHashCode(make) & 0) +
+          (System.identityHashCode(maybe) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected captured-owner closure object plus direct Option/Some body factory allocation to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodyOptionApplyFactoryAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val make: Function1[
+          Int,
+          Option[RiftCheckedLeaf^{region}]^{region}
+        ]^{region} =
+          (value: Int) => {
+            val owner = region
+            val keepOwner = System.identityHashCode(owner) & 0
+            Option(new RiftCheckedLeaf(value + keepOwner))
+          }
+
+        val maybe = make(40)
+        val leaf = maybe.get
+        leaf.value + 2 +
+          (System.identityHashCode(make) & 0) +
+          (System.identityHashCode(maybe) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected captured-owner closure object plus Option.apply body factory allocation to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodySomeOrNoneAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val make: Function1[
+          Boolean,
+          Option[RiftCheckedLeaf^{region}]^{region}
+        ]^{region} =
+          (include: Boolean) => {
+            val owner = region
+            val keepOwner = System.identityHashCode(owner) & 0
+            if (include) Some(new RiftCheckedLeaf(40 + keepOwner))
+            else None
+          }
+
+        val some = make(true)
+        val none = make(false)
+        val leaf = some.get
+        leaf.value + 2 + none.fold(0)(_.value) +
+          (System.identityHashCode(make) & 0) +
+          (System.identityHashCode(some) & 0) +
+          (System.identityHashCode(none) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected captured-owner closure object plus Some branch payload to be region allocated while None allocates no region object, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodySelectedOptionFactoryAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val make: Function1[
+          Int,
+          Option[RiftCheckedLeaf^{region}]^{region}
+        ]^{region} =
+          (value: Int) => {
+            val owner = region
+            val keepOwner = System.identityHashCode(owner) & 0
+            val first = Some(new RiftCheckedLeaf(value + keepOwner))
+            val second = Some(new RiftCheckedLeaf(value + 1 + keepOwner))
+            val keepFactories =
+              System.identityHashCode(first) + System.identityHashCode(second)
+            val selected =
+              if (value + (keepFactories & 0) >= 0) first else second
+            selected
+          }
+
+        val maybe = make(40)
+        val leaf = maybe.get
+        leaf.value + 2 +
+          (System.identityHashCode(make) & 0) +
+          (System.identityHashCode(maybe) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected captured-owner closure object plus selected Option/Some body factory allocations to be region allocated, observed $delta region objects",
+        delta >= 5L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodyDirectTupleFactoryAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val make: Function1[
+          Int,
+          Tuple2[RiftCheckedLeaf^{region}, RiftCheckedLeaf^{region}]^{region}
+        ]^{region} =
+          (value: Int) => {
+            val owner = region
+            val keepOwner = System.identityHashCode(owner) & 0
+            Tuple2(
+              new RiftCheckedLeaf(value + keepOwner),
+              new RiftCheckedLeaf(1 + keepOwner)
+            )
+          }
+
+        val pair = make(39)
+        val first = pair._1
+        val second = pair._2
+        first.value + second.value + 2 +
+          (System.identityHashCode(make) & 0) +
+          (System.identityHashCode(pair) & 0) +
+          (System.identityHashCode(first) & 0) +
+          (System.identityHashCode(second) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected captured-owner closure object plus direct Tuple2 body factory allocation to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodySelectedTupleFactoryAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val make: Function1[
+          Int,
+          Tuple2[RiftCheckedLeaf^{region}, RiftCheckedLeaf^{region}]^{region}
+        ]^{region} =
+          (value: Int) => {
+            val owner = region
+            val keepOwner = System.identityHashCode(owner) & 0
+            val first = Tuple2(
+              new RiftCheckedLeaf(value + keepOwner),
+              new RiftCheckedLeaf(1 + keepOwner)
+            )
+            val second = Tuple2(
+              new RiftCheckedLeaf(value + 1 + keepOwner),
+              new RiftCheckedLeaf(0 + keepOwner)
+            )
+            val keepFactories =
+              System.identityHashCode(first) +
+                System.identityHashCode(second) +
+                System.identityHashCode(first._1) +
+                System.identityHashCode(first._2) +
+                System.identityHashCode(second._1) +
+                System.identityHashCode(second._2)
+            val selected =
+              if (value + (keepFactories & 0) >= 0) first else second
+            selected
+          }
+
+        val pair = make(39)
+        val first = pair._1
+        val second = pair._2
+        first.value + second.value + 2 +
+          (System.identityHashCode(make) & 0) +
+          (System.identityHashCode(pair) & 0) +
+          (System.identityHashCode(first) & 0) +
+          (System.identityHashCode(second) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected captured-owner closure object plus selected Tuple2 body factory allocations to be region allocated, observed $delta region objects",
+        delta >= 7L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodyOptionApplyInlineClosureAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val make: Function1[
+          Int,
+          Option[Function1[Int, RiftCheckedLeaf^{region}]^{region}]^{region}
+        ]^{region} =
+          (base: Int) => {
+            val owner = region
+            Option((value: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(base + value + keepOwner)
+              leaf
+            })
+          }
+
+        val maybe = make(40)
+        val fn = maybe.get
+        val leaf = fn(2)
+        leaf.value +
+          (System.identityHashCode(make) & 0) +
+          (System.identityHashCode(maybe) & 0) +
+          (System.identityHashCode(fn) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected captured-owner closure body Option.apply wrapper plus inline closure/body allocation to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodySomeInlineClosureAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val make: Function1[
+          Int,
+          Option[Function1[Int, RiftCheckedLeaf^{region}]^{region}]^{region}
+        ]^{region} =
+          (base: Int) => {
+            val owner = region
+            Some((value: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(base + value + keepOwner)
+              leaf
+            })
+          }
+
+        val maybe = make(40)
+        val fn = maybe.get
+        val leaf = fn(2)
+        leaf.value +
+          (System.identityHashCode(make) & 0) +
+          (System.identityHashCode(maybe) & 0) +
+          (System.identityHashCode(fn) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected captured-owner closure body Some wrapper plus inline closure/body allocation to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodyOptionApplySelectedClosureAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val make: Function1[
+          Boolean,
+          Option[Function1[Int, RiftCheckedLeaf^{region}]^{region}]^{region}
+        ]^{region} =
+          (chooseFirst: Boolean) => {
+            val owner = region
+            val first = (value: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(value + 40 + keepOwner)
+              leaf
+            }
+            val second = (value: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(value + 41 + keepOwner)
+              leaf
+            }
+            val selected = if chooseFirst then first else second
+            Option(selected)
+          }
+
+        val flag = System.identityHashCode(region) != 0
+        val maybe = make(flag)
+        val fn = maybe.get
+        val leaf = fn(2)
+        val expected = if flag then 42 else 43
+        leaf.value - expected + 42 +
+          (System.identityHashCode(make) & 0) +
+          (System.identityHashCode(maybe) & 0) +
+          (System.identityHashCode(fn) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected captured-owner closure body Option.apply wrapper plus selected closure values/body allocation to be region allocated, observed $delta region objects",
+        delta >= 5L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodySomeSelectedClosureAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val make: Function1[
+          Boolean,
+          Option[Function1[Int, RiftCheckedLeaf^{region}]^{region}]^{region}
+        ]^{region} =
+          (chooseFirst: Boolean) => {
+            val owner = region
+            val first = (value: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(value + 40 + keepOwner)
+              leaf
+            }
+            val second = (value: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(value + 41 + keepOwner)
+              leaf
+            }
+            val selected = if chooseFirst then first else second
+            Some(selected)
+          }
+
+        val flag = System.identityHashCode(region) != 0
+        val maybe = make(flag)
+        val fn = maybe.get
+        val leaf = fn(2)
+        val expected = if flag then 42 else 43
+        leaf.value - expected + 42 +
+          (System.identityHashCode(make) & 0) +
+          (System.identityHashCode(maybe) & 0) +
+          (System.identityHashCode(fn) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected captured-owner closure body Some wrapper plus selected closure values/body allocation to be region allocated, observed $delta region objects",
+        delta >= 5L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodReturnedClosureBodyAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, RiftCheckedLeaf^{r}]^{r} =
+        (value: Int) => {
+          val owner = r
+          val leaf: RiftCheckedLeaf^{owner} =
+            new RiftCheckedLeaf(value)
+          leaf
+        }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makeLeaf = make(using region)
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned captured-owner closure object and body allocation to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodyMethodSummaryAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def build(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): RiftCheckedLeaf^{r} =
+        new RiftCheckedLeaf(value)
+
+      def make(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, RiftCheckedLeaf^{r}]^{r} =
+        (value: Int) => {
+          val owner = r
+          val keepOwner = System.identityHashCode(owner) & 0
+          build(value + keepOwner)(using owner)
+        }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makeLeaf = make(using region)
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned closure plus callee-summary body allocation to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodyForwardedMethodSummaryAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def build(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): RiftCheckedLeaf^{r} =
+        new RiftCheckedLeaf(value)
+
+      def forward(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): RiftCheckedLeaf^{r} =
+        build(value)(using r)
+
+      def make(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, RiftCheckedLeaf^{r}]^{r} =
+        (value: Int) => {
+          val owner = r
+          val keepOwner = System.identityHashCode(owner) & 0
+          forward(value + keepOwner)(using owner)
+        }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makeLeaf = make(using region)
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned closure plus forwarded callee-summary body allocation to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodyBranchForwardedMethodSummaryAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def build(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): RiftCheckedLeaf^{r} =
+        new RiftCheckedLeaf(value)
+
+      def forward(flag: Boolean, value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): RiftCheckedLeaf^{r} =
+        if flag then build(value)(using r)
+        else build(value + 1)(using r)
+
+      def make(flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, RiftCheckedLeaf^{r}]^{r} =
+        (value: Int) => {
+          val owner = r
+          val keepOwner = System.identityHashCode(owner) & 0
+          forward(flag, value + keepOwner)(using owner)
+        }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makeLeaf = make(true)(using region)
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned closure plus branch-forwarded callee-summary body allocation to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodyMatchForwardedMethodSummaryAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def build(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): RiftCheckedLeaf^{r} =
+        new RiftCheckedLeaf(value)
+
+      def forward(selector: Int, value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): RiftCheckedLeaf^{r} =
+        selector match
+          case 0 => build(value)(using r)
+          case _ => build(value + 1)(using r)
+
+      def make(selector: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, RiftCheckedLeaf^{r}]^{r} =
+        (value: Int) => {
+          val owner = r
+          val keepOwner = System.identityHashCode(owner) & 0
+          forward(selector, value + keepOwner)(using owner)
+        }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makeLeaf = make(0)(using region)
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned closure plus match-forwarded callee-summary body allocation to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodyOptionMethodSummaryAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def build(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Option[RiftCheckedLeaf^{r}]^{r} =
+        Some(new RiftCheckedLeaf(value))
+
+      def make(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, Option[RiftCheckedLeaf^{r}]^{r}]^{r} =
+        (value: Int) => {
+          val owner = r
+          val keepOwner = System.identityHashCode(owner) & 0
+          build(value + keepOwner)(using owner)
+        }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makeLeaf = make(using region)
+        val maybe = makeLeaf(40)
+        val leaf = maybe.get
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(maybe) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned closure plus Option/Some callee-summary body allocation to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodyOptionApplyMethodSummaryAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def build(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Option[RiftCheckedLeaf^{r}]^{r} =
+        Option(new RiftCheckedLeaf(value))
+
+      def make(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, Option[RiftCheckedLeaf^{r}]^{r}]^{r} =
+        (value: Int) => {
+          val owner = r
+          val keepOwner = System.identityHashCode(owner) & 0
+          build(value + keepOwner)(using owner)
+        }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makeLeaf = make(using region)
+        val maybe = makeLeaf(40)
+        val leaf = maybe.get
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(maybe) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned closure plus Option.apply callee-summary body allocation to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodyTupleMethodSummaryAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def build(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[RiftCheckedLeaf^{r}, RiftCheckedLeaf^{r}]^{r} =
+        Tuple2(new RiftCheckedLeaf(value), new RiftCheckedLeaf(1))
+
+      def make(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[
+        Int,
+        Tuple2[RiftCheckedLeaf^{r}, RiftCheckedLeaf^{r}]^{r}
+      ]^{r} =
+        (value: Int) => {
+          val owner = r
+          val keepOwner = System.identityHashCode(owner) & 0
+          build(value + keepOwner)(using owner)
+        }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makePair = make(using region)
+        val pair = makePair(39)
+        val first = pair._1
+        val second = pair._2
+        first.value + second.value + 2 +
+          (System.identityHashCode(makePair) & 0) +
+          (System.identityHashCode(pair) & 0) +
+          (System.identityHashCode(first) & 0) +
+          (System.identityHashCode(second) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned closure plus Tuple2 callee-summary body allocation to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodySelectedOptionApplyMethodSummaryAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def build(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Option[RiftCheckedLeaf^{r}]^{r} = {
+        val first = Option(new RiftCheckedLeaf(value))
+        val second = Option(new RiftCheckedLeaf(value + 1))
+        val keepFactories =
+          System.identityHashCode(first) + System.identityHashCode(second)
+        if (value + (keepFactories & 0) >= 0) first else second
+      }
+
+      def make(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, Option[RiftCheckedLeaf^{r}]^{r}]^{r} =
+        (value: Int) => {
+          val owner = r
+          val keepOwner = System.identityHashCode(owner) & 0
+          build(value + keepOwner)(using owner)
+        }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makeLeaf = make(using region)
+        val maybe = makeLeaf(40)
+        val leaf = maybe.get
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(maybe) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned closure plus selected Option.apply callee-summary body allocations to be region allocated, observed $delta region objects",
+        delta >= 5L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodySelectedTupleMethodSummaryAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def build(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[RiftCheckedLeaf^{r}, RiftCheckedLeaf^{r}]^{r} = {
+        val first = Tuple2(
+          new RiftCheckedLeaf(value),
+          new RiftCheckedLeaf(1)
+        )
+        val second = Tuple2(
+          new RiftCheckedLeaf(value + 1),
+          new RiftCheckedLeaf(0)
+        )
+        val keepFactories =
+          System.identityHashCode(first) +
+            System.identityHashCode(second) +
+            System.identityHashCode(first._1) +
+            System.identityHashCode(first._2) +
+            System.identityHashCode(second._1) +
+            System.identityHashCode(second._2)
+        if (value + (keepFactories & 0) >= 0) first else second
+      }
+
+      def make(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[
+        Int,
+        Tuple2[RiftCheckedLeaf^{r}, RiftCheckedLeaf^{r}]^{r}
+      ]^{r} =
+        (value: Int) => {
+          val owner = r
+          val keepOwner = System.identityHashCode(owner) & 0
+          build(value + keepOwner)(using owner)
+        }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makePair = make(using region)
+        val pair = makePair(39)
+        val first = pair._1
+        val second = pair._2
+        first.value + second.value + 2 +
+          (System.identityHashCode(makePair) & 0) +
+          (System.identityHashCode(pair) & 0) +
+          (System.identityHashCode(first) & 0) +
+          (System.identityHashCode(second) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned closure plus selected Tuple2 callee-summary body allocations to be region allocated, observed $delta region objects",
+        delta >= 7L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedMethodReturnedClosureBodyAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, RiftCheckedLeaf^{r}]^{r} =
+        (value: Int) => {
+          val owner = r
+          val leaf: RiftCheckedLeaf^{owner} =
+            new RiftCheckedLeaf(value)
+          leaf
+        }
+
+      def wrap(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, RiftCheckedLeaf^{r}]^{r} =
+        make(using r)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makeLeaf = wrap(using region)
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected forwarded method-returned captured-owner closure object and body allocation to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedBranchMethodReturnedClosureBodyAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, RiftCheckedLeaf^{r}]^{r} =
+        (value: Int) => {
+          val owner = r
+          val leaf: RiftCheckedLeaf^{owner} =
+            new RiftCheckedLeaf(value)
+          leaf
+        }
+
+      def wrap(flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, RiftCheckedLeaf^{r}]^{r} =
+        if (flag) make(using r) else make(using r)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makeLeaf = wrap(true)(using region)
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected branch-forwarded method-returned captured-owner closure object and body allocation to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedMatchMethodReturnedClosureBodyAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, RiftCheckedLeaf^{r}]^{r} =
+        (value: Int) => {
+          val owner = r
+          val leaf: RiftCheckedLeaf^{owner} =
+            new RiftCheckedLeaf(value)
+          leaf
+        }
+
+      def wrap(selector: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, RiftCheckedLeaf^{r}]^{r} =
+        selector match {
+          case 0 => make(using r)
+          case _ => make(using r)
+        }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makeLeaf = wrap(0)(using region)
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected match-forwarded method-returned captured-owner closure object and body allocation to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodReturnedLocalClosureBodyAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, RiftCheckedLeaf^{r}]^{r} = {
+        val makeLeaf =
+          (value: Int) => {
+            val owner = r
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(value)
+            leaf
+          }
+        makeLeaf
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makeLeaf = make(using region)
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned local captured-owner closure object and body allocation to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodyReturnedClosureAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, Function1[Int, RiftCheckedLeaf^{r}]^{r}]^{r} =
+        (base: Int) => {
+          val owner = r
+          ((value: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(base + value + keepOwner)
+            leaf
+          }): Function1[Int, RiftCheckedLeaf^{owner}]^{owner}
+        }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val outer = make(using region)
+        val inner = outer(40)
+        val leaf = inner(2)
+        leaf.value +
+          (System.identityHashCode(outer) & 0) +
+          (System.identityHashCode(inner) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected closure-body returned closure object and nested body allocation to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodyReturnedUntypedLocalClosureAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, Function1[Int, RiftCheckedLeaf^{r}]^{r}]^{r} =
+        (base: Int) => {
+          val owner = r
+          val inner =
+            (value: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(base + value + keepOwner)
+              leaf
+            }
+          inner
+        }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val outer = make(using region)
+        val inner = outer(40)
+        val leaf = inner(2)
+        leaf.value +
+          (System.identityHashCode(outer) & 0) +
+          (System.identityHashCode(inner) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected closure-body returned untyped local closure object and nested body allocation to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersClosureBodyReturnedTypedLocalClosureAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, Function1[Int, RiftCheckedLeaf^{r}]^{r}]^{r} =
+        (base: Int) => {
+          val owner = r
+          val inner: Function1[Int, RiftCheckedLeaf^{owner}]^{owner} =
+            (value: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(base + value + keepOwner)
+              leaf
+            }
+          inner
+        }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val outer = make(using region)
+        val inner = outer(40)
+        val leaf = inner(2)
+        leaf.value +
+          (System.identityHashCode(outer) & 0) +
+          (System.identityHashCode(inner) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected closure-body returned local closure object and nested body allocation to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodReturnedSelectedLocalClosureBodyAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, RiftCheckedLeaf^{r}]^{r} = {
+        val first =
+          (value: Int) => {
+            val owner = r
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(value)
+            leaf
+          }
+        val second =
+          (value: Int) => {
+            val owner = r
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(value + 1)
+            leaf
+          }
+        val keep =
+          System.identityHashCode(first) + System.identityHashCode(second)
+        val selected = if (flag || keep != 0) first else second
+        selected
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makeLeaf = make(true)(using region)
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned selected local captured-owner closures and body allocation to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodReturnedForwardedSelectedLocalClosureBodyAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, RiftCheckedLeaf^{r}]^{r} = {
+        val first =
+          (value: Int) => {
+            val owner = r
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(value)
+            leaf
+          }
+        val second =
+          (value: Int) => {
+            val owner = r
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(value + 1)
+            leaf
+          }
+        val keep =
+          System.identityHashCode(first) + System.identityHashCode(second)
+        val selected = if (flag || keep != 0) first else second
+        val forwarded = selected
+        forwarded
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makeLeaf = make(true)(using region)
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned forwarded selected local captured-owner closures and body allocation to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodArgumentLocalClosureBodyAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def consume(using r: RiftRegion.ScopedRegion^)(
+          makeLeaf: Function1[Int, RiftCheckedLeaf^{r}]^{r}
+      ): Int = {
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makeLeaf =
+          (value: Int) => {
+            val owner = region
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(value)
+            leaf
+          }
+        consume(using region)(makeLeaf)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-argument local captured-owner closure object and body allocation to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodArgumentBranchInlineClosureBodyAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def consume(using r: RiftRegion.ScopedRegion^)(
+          makeLeaf: Function1[Int, RiftCheckedLeaf^{r}]^{r}
+      ): Int = {
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        consume(using region)(
+          if (System.identityHashCode(region) != 0)
+            (value: Int) => {
+              val owner = region
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(value)
+              leaf
+            }
+          else
+            (value: Int) => {
+              val owner = region
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(value + 1)
+              leaf
+            }
+        )
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected branch-selected inline captured-owner closure body allocation to be region allocated, observed $delta region objects",
+        delta >= 1L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodArgumentMatchInlineClosureBodyAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def consume(using r: RiftRegion.ScopedRegion^)(
+          makeLeaf: Function1[Int, RiftCheckedLeaf^{r}]^{r}
+      ): Int = {
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val selector = System.identityHashCode(region) & 0
+        consume(using region)(
+          selector match {
+            case 0 =>
+              (value: Int) => {
+                val owner = region
+                val leaf: RiftCheckedLeaf^{owner} =
+                  new RiftCheckedLeaf(value)
+                leaf
+              }
+            case _ =>
+              (value: Int) => {
+                val owner = region
+                val leaf: RiftCheckedLeaf^{owner} =
+                  new RiftCheckedLeaf(value + 1)
+                leaf
+              }
+          }
+        )
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected match-selected inline captured-owner closure body allocation to be region allocated, observed $delta region objects",
+        delta >= 1L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodArgumentBranchLocalClosureBodyAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def consume(using r: RiftRegion.ScopedRegion^)(
+          makeLeaf: Function1[Int, RiftCheckedLeaf^{r}]^{r}
+      ): Int = {
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val first =
+          (value: Int) => {
+            val owner = region
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(value)
+            leaf
+          }
+        val second =
+          (value: Int) => {
+            val owner = region
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(value + 1)
+            leaf
+          }
+        consume(using region)(
+          if (System.identityHashCode(first) != 0) first else second
+        ) +
+          (System.identityHashCode(first) & 0) +
+          (System.identityHashCode(second) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected branch-selected local captured-owner closures and body allocation to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodArgumentMatchLocalClosureBodyAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def consume(using r: RiftRegion.ScopedRegion^)(
+          makeLeaf: Function1[Int, RiftCheckedLeaf^{r}]^{r}
+      ): Int = {
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val first =
+          (value: Int) => {
+            val owner = region
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(value)
+            leaf
+          }
+        val second =
+          (value: Int) => {
+            val owner = region
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(value + 1)
+            leaf
+          }
+        val selector = System.identityHashCode(first) & 0
+        consume(using region)(
+          selector match {
+            case 0 => first
+            case _ => second
+          }
+        ) +
+          (System.identityHashCode(first) & 0) +
+          (System.identityHashCode(second) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected match-selected local captured-owner closures and body allocation to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodArgumentSelectedLocalClosureBodyAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def consume(using r: RiftRegion.ScopedRegion^)(
+          makeLeaf: Function1[Int, RiftCheckedLeaf^{r}]^{r}
+      ): Int = {
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val first =
+          (value: Int) => {
+            val owner = region
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(value)
+            leaf
+          }
+        val second =
+          (value: Int) => {
+            val owner = region
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(value + 1)
+            leaf
+          }
+        val selected =
+          if (System.identityHashCode(first) != 0) first else second
+        consume(using region)(selected) +
+          (System.identityHashCode(first) & 0) +
+          (System.identityHashCode(second) & 0) +
+          (System.identityHashCode(selected) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected selected local captured-owner closure wrappers and body allocation to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersLocalSelectedInlineClosureBodyAllocationWithCapturedOwnerTerm()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makeLeaf: Function1[Int, RiftCheckedLeaf^{region}]^{region} =
+          if (System.identityHashCode(region) != 0)
+            (value: Int) => {
+              val owner = region
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(value)
+              leaf
+            }
+          else
+            (value: Int) => {
+              val owner = region
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(value + 1)
+              leaf
+            }
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected local selected inline captured-owner closure body allocation to be region allocated, observed $delta region objects",
+        delta >= 1L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersWrapperInlineClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        final class Wrapper(
+            val make: Function1[Int, RiftCheckedLeaf^{region}]^{region}
+        )
+        val owner = region
+        val wrapper: Wrapper^{region} =
+          new Wrapper((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + 40 + keepOwner)
+            leaf
+          })
+        val leaf = wrapper.make(2)
+        leaf.value +
+          (System.identityHashCode(wrapper) & 0) +
+          (System.identityHashCode(wrapper.make) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected region wrapper plus inline closure value and closure-body allocation to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersWrapperSelectedClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        final class Wrapper(
+            val make: Function1[Int, RiftCheckedLeaf^{region}]^{region}
+        )
+        val owner = region
+        val first = (n: Int) => {
+          val keepOwner = System.identityHashCode(owner) & 0
+          val leaf: RiftCheckedLeaf^{owner} =
+            new RiftCheckedLeaf(n + 40 + keepOwner)
+          leaf
+        }
+        val second = (n: Int) => {
+          val keepOwner = System.identityHashCode(owner) & 0
+          val leaf: RiftCheckedLeaf^{owner} =
+            new RiftCheckedLeaf(n + 41 + keepOwner)
+          leaf
+        }
+        val keep =
+          System.identityHashCode(first) + System.identityHashCode(second)
+        val selected = if ((keep & 1) == 0) first else second
+        val expected = if ((keep & 1) == 0) 42 else 43
+        val wrapper: Wrapper^{region} = new Wrapper(selected)
+        val leaf = wrapper.make(2)
+        val identity =
+          System.identityHashCode(first) ^
+            System.identityHashCode(second) ^
+            System.identityHashCode(selected) ^
+            System.identityHashCode(wrapper) ^
+            System.identityHashCode(leaf)
+        leaf.value - expected + 42 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected region wrapper plus selected closure values and closure-body allocation to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodReturnedSomeInlineClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using
+          r: RiftRegion.ScopedRegion^
+      ): Option[Function1[Int, RiftCheckedLeaf^{r}]^{r}]^{r} = {
+        val owner = r
+        Some((n: Int) => {
+          val keepOwner = System.identityHashCode(owner) & 0
+          val leaf: RiftCheckedLeaf^{owner} =
+            new RiftCheckedLeaf(n + 40 + keepOwner)
+          leaf
+        })
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val maybe = make(using region)
+        val fn = maybe.get
+        val leaf = fn(2)
+        leaf.value +
+          (System.identityHashCode(maybe) & 0) +
+          (System.identityHashCode(fn) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned Some plus inline closure value and closure-body allocation to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodReturnedSomeSelectedClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Option[Function1[Int, RiftCheckedLeaf^{r}]^{r}]^{r} = {
+        val owner = r
+        val first = (n: Int) => {
+          val keepOwner = System.identityHashCode(owner) & 0
+          val leaf: RiftCheckedLeaf^{owner} =
+            new RiftCheckedLeaf(n + 40 + keepOwner)
+          leaf
+        }
+        val second = (n: Int) => {
+          val keepOwner = System.identityHashCode(owner) & 0
+          val leaf: RiftCheckedLeaf^{owner} =
+            new RiftCheckedLeaf(n + 41 + keepOwner)
+          leaf
+        }
+        val selected = if flag then first else second
+        Some(selected)
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val flag = System.identityHashCode(region) != 0
+        val maybe = make(flag)(using region)
+        val fn = maybe.get
+        val leaf = fn(2)
+        val expected = if flag then 42 else 43
+        leaf.value - expected + 42 +
+          (System.identityHashCode(maybe) & 0) +
+          (System.identityHashCode(fn) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned Some plus selected closure values and closure-body allocation to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodArgumentWrapperInlineClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      def consume(using r: RiftRegion.ScopedRegion^)(
+          wrapper: Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ): Int = {
+        val fn = wrapper.make
+        val leaf = fn(2)
+        leaf.value +
+          (System.identityHashCode(wrapper) & 0) +
+          (System.identityHashCode(fn) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val owner = region
+        consume(using region)(
+          new Wrapper[RiftCheckedLeaf^{region}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + 40 + keepOwner)
+            leaf
+          })
+        )
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-argument wrapper plus inline closure value and closure-body allocation to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodArgumentWrapperSelectedClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      def consume(using r: RiftRegion.ScopedRegion^)(
+          wrapper: Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ): Int = {
+        val fn = wrapper.make
+        val leaf = fn(2)
+        leaf.value +
+          (System.identityHashCode(wrapper) & 0) +
+          (System.identityHashCode(fn) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val owner = region
+        val first = (n: Int) => {
+          val keepOwner = System.identityHashCode(owner) & 0
+          val leaf: RiftCheckedLeaf^{owner} =
+            new RiftCheckedLeaf(n + 40 + keepOwner)
+          leaf
+        }
+        val second = (n: Int) => {
+          val keepOwner = System.identityHashCode(owner) & 0
+          val leaf: RiftCheckedLeaf^{owner} =
+            new RiftCheckedLeaf(n + 41 + keepOwner)
+          leaf
+        }
+        val keep =
+          System.identityHashCode(first) + System.identityHashCode(second)
+        val selected = if ((keep & 1) == 0) first else second
+        val expected = if ((keep & 1) == 0) 42 else 43
+        consume(using region)(new Wrapper[RiftCheckedLeaf^{region}](selected)) -
+          expected + 42 +
+          (System.identityHashCode(first) & 0) +
+          (System.identityHashCode(second) & 0) +
+          (System.identityHashCode(selected) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-argument wrapper plus selected closure values and closure-body allocation to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOwnerAliasLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val owner = region
+        val leaf: RiftCheckedLeaf^{owner} =
+          new RiftCheckedLeaf(42)
+        val identity = System.identityHashCode(leaf)
+        leaf.value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected owner-alias local allocation to be region allocated, observed ${after - before} region objects",
+        after - before >= 1L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOwnerAliasMethodReturnedLocalNewPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using r: RiftRegion.ScopedRegion^): RiftCheckedLeaf^{r} = {
+        val owner = r
+        val leaf: RiftCheckedLeaf^{owner} =
+          new RiftCheckedLeaf(42)
+        val identity = System.identityHashCode(leaf)
+        val result: RiftCheckedLeaf^{r} = leaf
+        if ((identity & 0) == 0) result else result
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        make(using region).value
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected owner-alias method-returned allocation to be region allocated, observed ${after - before} region objects",
+        after - before >= 1L
+      )
     } finally {
       RiftRegion.shutdown()
     }
@@ -116,6 +5848,562 @@ class RiftRegionCheckedTest {
       }
 
       assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRegionOwnedArrayPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val leaves: Array[RiftCheckedLeaf^{region}]^{region} =
+          new Array[RiftCheckedLeaf^{region}](2)
+        val first: RiftCheckedLeaf^{region} = new RiftCheckedLeaf(20)
+        val second: RiftCheckedLeaf^{region} = new RiftCheckedLeaf(21)
+        leaves(0) = first
+        leaves(1) = second
+
+        val roots:
+          Array[RiftRegion.HeapRoot[RiftCheckedMetadata]^{region}]^{region} =
+          new Array[RiftRegion.HeapRoot[RiftCheckedMetadata]^{region}](1)
+        roots(0) = RiftRegion.root(new RiftCheckedMetadata(1))
+
+        val identity =
+          System.identityHashCode(leaves) ^
+            System.identityHashCode(roots) ^
+            System.identityHashCode(first) ^
+            System.identityHashCode(second)
+        leaves(0).value + leaves(1).value + roots(0).value.value +
+          (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inferred arrays and region values to be region allocated, observed ${after - before} region objects",
+        after - before >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersInlineArrayStoreRegionObjectPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val leaves: Array[RiftCheckedLeaf^{region}]^{region} =
+          new Array[RiftCheckedLeaf^{region}](2)
+        leaves(0) = new RiftCheckedLeaf(20)
+        leaves(1) = new RiftCheckedLeaf(22)
+
+        val identity =
+          System.identityHashCode(leaves) ^
+            System.identityHashCode(leaves(0)) ^
+            System.identityHashCode(leaves(1))
+        leaves(0).value + leaves(1).value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inferred array plus inline store values to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersInlineArrayStoreSomeFactoryPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val options: Array[Option[RiftCheckedLeaf^{region}]^{region}]^{region} =
+          new Array[Option[RiftCheckedLeaf^{region}]^{region}](1)
+        options(0) = Some(new RiftCheckedLeaf(42))
+
+        val option = options(0)
+        val identity =
+          System.identityHashCode(options) ^
+            System.identityHashCode(option) ^
+            System.identityHashCode(option.get)
+        option.get.value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inferred array plus inline Some store value to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersInlineArrayStoreOptionApplyFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val options: Array[Option[RiftCheckedLeaf^{region}]^{region}]^{region} =
+          new Array[Option[RiftCheckedLeaf^{region}]^{region}](1)
+        options(0) = Option(new RiftCheckedLeaf(42))
+
+        val option = options(0)
+        val identity =
+          System.identityHashCode(options) ^
+            System.identityHashCode(option) ^
+            System.identityHashCode(option.get)
+        option.get.value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inferred array plus inline Option.apply store value to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersInlineArrayStoreTuple2FactoryPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val pairs: Array[
+          Tuple2[RiftCheckedLeaf^{region}, RiftCheckedLeaf^{region}]^{region}
+        ]^{region} =
+          new Array[
+            Tuple2[RiftCheckedLeaf^{region}, RiftCheckedLeaf^{region}]^{region}
+          ](1)
+        pairs(0) = Tuple2(new RiftCheckedLeaf(40), new RiftCheckedLeaf(2))
+
+        val pair = pairs(0)
+        val identity =
+          System.identityHashCode(pairs) ^
+            System.identityHashCode(pair) ^
+            System.identityHashCode(pair._1) ^
+            System.identityHashCode(pair._2)
+        pair._1.value + pair._2.value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inferred array plus inline Tuple2 store value to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersBranchMatchArrayStoreFactoryPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val flag = (System.identityHashCode(region) & 1) == 0
+        val selector = System.identityHashCode(region) & 1
+
+        val leaves: Array[RiftCheckedLeaf^{region}]^{region} =
+          new Array[RiftCheckedLeaf^{region}](1)
+        leaves(0) =
+          if flag then new RiftCheckedLeaf(40) else new RiftCheckedLeaf(41)
+
+        val options: Array[
+          Option[RiftCheckedLeaf^{region}]^{region}
+        ]^{region} =
+          new Array[Option[RiftCheckedLeaf^{region}]^{region}](1)
+        options(0) =
+          selector match
+            case 0 => Option(new RiftCheckedLeaf(1))
+            case _ => Option(new RiftCheckedLeaf(2))
+
+        val pairs: Array[
+          Tuple2[RiftCheckedLeaf^{region}, RiftCheckedLeaf^{region}]^{region}
+        ]^{region} =
+          new Array[
+            Tuple2[RiftCheckedLeaf^{region}, RiftCheckedLeaf^{region}]^{region}
+          ](1)
+        pairs(0) =
+          if flag then Tuple2(new RiftCheckedLeaf(1), new RiftCheckedLeaf(1))
+          else Tuple2(new RiftCheckedLeaf(2), new RiftCheckedLeaf(2))
+
+        val expectedLeaf = if flag then 40 else 41
+        val expectedOption = if selector == 0 then 1 else 2
+        val expectedPair = if flag then 2 else 4
+        val identity =
+          System.identityHashCode(leaves) ^
+            System.identityHashCode(leaves(0)) ^
+            System.identityHashCode(options) ^
+            System.identityHashCode(options(0)) ^
+            System.identityHashCode(pairs) ^
+            System.identityHashCode(pairs(0))
+        leaves(0).value + options(0).get.value +
+          pairs(0)._1.value + pairs(0)._2.value -
+          expectedLeaf - expectedOption - expectedPair + 42 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected branch/match array-store factories and payloads to be region allocated, observed $delta region objects",
+        delta >= 9L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersInlineArrayStoreClosurePlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val functions: Array[Function1[Int, Int]^{region}]^{region} =
+          new Array[Function1[Int, Int]^{region}](1)
+        functions(0) = (n: Int) => n + 40
+
+        val fn = functions(0)
+        val identity =
+          System.identityHashCode(functions) ^ System.identityHashCode(fn)
+        invokeRegionFunction(fn, 2) + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inferred array plus inline closure store value to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersInlineArrayStoreClosureBodyAllocation(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val owner = region
+        val functions: Array[Function1[Int, RiftCheckedLeaf^{region}]^{region}]^{region} =
+          new Array[Function1[Int, RiftCheckedLeaf^{region}]^{region}](1)
+        functions(0) = (n: Int) => {
+          val keepOwner = System.identityHashCode(owner) & 0
+          val leaf: RiftCheckedLeaf^{owner} =
+            new RiftCheckedLeaf(n + 40 + keepOwner)
+          leaf
+        }
+
+        val fn = functions(0)
+        val leaf = fn(2)
+        leaf.value +
+          (System.identityHashCode(functions) & 0) +
+          (System.identityHashCode(fn) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inferred array plus inline closure store value and closure-body allocation to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersSelectedArrayStoreClosurePlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val functions: Array[Function1[Int, Int]^{region}]^{region} =
+          new Array[Function1[Int, Int]^{region}](1)
+        val first = (n: Int) => n + 40
+        val second = (n: Int) => n + 41
+        val keep =
+          System.identityHashCode(first) + System.identityHashCode(second)
+        val selected =
+          if ((keep & 1) == 0) first else second
+        functions(0) = selected
+
+        val expected = if ((keep & 1) == 0) 42 else 43
+        val fn = functions(0)
+        val identity =
+          System.identityHashCode(functions) ^
+            System.identityHashCode(first) ^
+            System.identityHashCode(second) ^
+            System.identityHashCode(fn)
+        invokeRegionFunction(fn, 2) - expected + 42 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected inferred array plus selected closure store values to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersSelectedArrayStoreSyntheticFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val someItems: Array[Option[RiftCheckedLeaf^{region}]^{region}]^{region} =
+          new Array[Option[RiftCheckedLeaf^{region}]^{region}](1)
+        val someFirst = Some(new RiftCheckedLeaf(40))
+        val someSecond = Some(new RiftCheckedLeaf(41))
+        val someKeep =
+          System.identityHashCode(someFirst) +
+            System.identityHashCode(someSecond)
+        val someSelected =
+          if ((someKeep & 1) == 0) someFirst else someSecond
+        someItems(0) = someSelected
+
+        val optionItems
+            : Array[Option[RiftCheckedLeaf^{region}]^{region}]^{region} =
+          new Array[Option[RiftCheckedLeaf^{region}]^{region}](1)
+        val optionFirst = Option(new RiftCheckedLeaf(1))
+        val optionSecond = Option(new RiftCheckedLeaf(2))
+        val optionKeep =
+          System.identityHashCode(optionFirst) +
+            System.identityHashCode(optionSecond)
+        val optionSelected =
+          if ((optionKeep & 1) == 0) optionFirst else optionSecond
+        optionItems(0) = optionSelected
+
+        val pairItems: Array[
+          Tuple2[RiftCheckedLeaf^{region}, RiftCheckedLeaf^{region}]^{region}
+        ]^{region} =
+          new Array[
+            Tuple2[RiftCheckedLeaf^{region}, RiftCheckedLeaf^{region}]^{region}
+          ](1)
+        val pairFirst = Tuple2(new RiftCheckedLeaf(1), new RiftCheckedLeaf(1))
+        val pairSecond = Tuple2(new RiftCheckedLeaf(2), new RiftCheckedLeaf(2))
+        val pairKeep =
+          System.identityHashCode(pairFirst) + System.identityHashCode(pairSecond)
+        val pairSelected =
+          if ((pairKeep & 1) == 0) pairFirst else pairSecond
+        pairItems(0) = pairSelected
+
+        val expectedSome = if ((someKeep & 1) == 0) 40 else 41
+        val expectedOption = if ((optionKeep & 1) == 0) 1 else 2
+        val expectedPair = if ((pairKeep & 1) == 0) 2 else 4
+        someItems(0).get.value +
+          optionItems(0).get.value +
+          pairItems(0)._1.value +
+          pairItems(0)._2.value -
+          expectedSome - expectedOption - expectedPair + 42
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected selected array-store Some/Option/Tuple2 factories and payloads to be region allocated, observed $delta region objects",
+        delta >= 14L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMethodReturnedRegionOwnedArrayPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def make(using
+            r: RiftRegion.ScopedRegion^
+        ): Array[RiftCheckedLeaf^{r}]^{r} =
+          val leaves: Array[RiftCheckedLeaf^{r}]^{r} =
+            new Array[RiftCheckedLeaf^{r}](2)
+          val first: RiftCheckedLeaf^{r} = new RiftCheckedLeaf(20)
+          val second: RiftCheckedLeaf^{r} = new RiftCheckedLeaf(21)
+          leaves(0) = first
+          leaves(1) = second
+          leaves
+
+        val leaves = make(using region)
+        val identity =
+          System.identityHashCode(leaves) ^
+            System.identityHashCode(leaves(0)) ^
+            System.identityHashCode(leaves(1))
+        leaves(0).value + leaves(1).value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(41, total)
+      assertTrue(
+        s"expected method-returned array and region values to be region allocated, observed ${after - before} region objects",
+        after - before >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedMethodReturnedRegionOwnedArrayPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def make(using
+            r: RiftRegion.ScopedRegion^
+        ): Array[RiftCheckedLeaf^{r}]^{r} =
+          val leaves: Array[RiftCheckedLeaf^{r}]^{r} =
+            new Array[RiftCheckedLeaf^{r}](2)
+          val first: RiftCheckedLeaf^{r} = new RiftCheckedLeaf(20)
+          val second: RiftCheckedLeaf^{r} = new RiftCheckedLeaf(21)
+          leaves(0) = first
+          leaves(1) = second
+          leaves
+
+        def wrap(using r: RiftRegion.ScopedRegion^): Array[RiftCheckedLeaf^{r}]^{r} =
+          val leaves = make(using r)
+          leaves
+
+        val leaves = wrap(using region)
+        val identity =
+          System.identityHashCode(leaves) ^
+            System.identityHashCode(leaves(0)) ^
+            System.identityHashCode(leaves(1))
+        leaves(0).value + leaves(1).value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(41, total)
+      assertTrue(
+        s"expected forwarded method-returned array and region values to be region allocated, observed ${after - before} region objects",
+        after - before >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersBranchForwardedMethodReturnedRegionOwnedArrayPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def make(using
+            r: RiftRegion.ScopedRegion^
+        ): Array[RiftCheckedLeaf^{r}]^{r} =
+          val leaves: Array[RiftCheckedLeaf^{r}]^{r} =
+            new Array[RiftCheckedLeaf^{r}](2)
+          val first: RiftCheckedLeaf^{r} = new RiftCheckedLeaf(20)
+          val second: RiftCheckedLeaf^{r} = new RiftCheckedLeaf(21)
+          leaves(0) = first
+          leaves(1) = second
+          leaves
+
+        def wrap(
+            flag: Boolean
+        )(using r: RiftRegion.ScopedRegion^): Array[RiftCheckedLeaf^{r}]^{r} =
+          if flag then make(using r) else make(using r)
+
+        val leaves = wrap(true)(using region)
+        val identity =
+          System.identityHashCode(leaves) ^
+            System.identityHashCode(leaves(0)) ^
+            System.identityHashCode(leaves(1))
+        leaves(0).value + leaves(1).value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(41, total)
+      assertTrue(
+        s"expected branch-forwarded method-returned array and region values to be region allocated, observed ${after - before} region objects",
+        after - before >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersMatchForwardedMethodReturnedRegionOwnedArrayPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        def make(using
+            r: RiftRegion.ScopedRegion^
+        ): Array[RiftCheckedLeaf^{r}]^{r} =
+          val leaves: Array[RiftCheckedLeaf^{r}]^{r} =
+            new Array[RiftCheckedLeaf^{r}](2)
+          val first: RiftCheckedLeaf^{r} = new RiftCheckedLeaf(20)
+          val second: RiftCheckedLeaf^{r} = new RiftCheckedLeaf(21)
+          leaves(0) = first
+          leaves(1) = second
+          leaves
+
+        def wrap(
+            selector: Int
+        )(using r: RiftRegion.ScopedRegion^): Array[RiftCheckedLeaf^{r}]^{r} =
+          selector match {
+            case 0 => make(using r)
+            case _ => make(using r)
+          }
+
+        val leaves = wrap(0)(using region)
+        val identity =
+          System.identityHashCode(leaves) ^
+            System.identityHashCode(leaves(0)) ^
+            System.identityHashCode(leaves(1))
+        leaves(0).value + leaves(1).value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(41, total)
+      assertTrue(
+        s"expected match-forwarded method-returned array and region values to be region allocated, observed ${after - before} region objects",
+        after - before >= 3L
+      )
     } finally {
       RiftRegion.shutdown()
     }
@@ -484,6 +6772,1164 @@ class RiftRegionCheckedTest {
       }
 
       assertEquals(2, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersPriorityQueueLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val plain = RiftRegion.regionPriorityQueue[RiftCheckedLeaf](1)
+        val plainLow = new RiftCheckedLeaf(10)
+        val plainHigh = new RiftCheckedLeaf(20)
+        region.push(plain, plainLow, 1L)
+        RiftRegion.push(region, plain, plainHigh, 2L)
+
+        val indexed = RiftRegion.regionIndexedPriorityQueue[RiftCheckedLeaf](4, 1)
+        val indexedLow = new RiftCheckedLeaf(3)
+        val indexedHigh = new RiftCheckedLeaf(4)
+        region.put(indexed, 1, indexedLow, 1L)
+        RiftRegion.put(region, indexed, 2, indexedHigh, 2L)
+
+        val longIndexed =
+          RiftRegion.regionLongIndexedPriorityQueue[RiftCheckedLeaf](1, 4)
+        val longLow = new RiftCheckedLeaf(0)
+        val longHigh = new RiftCheckedLeaf(1)
+        region.put(longIndexed, 10L, longLow, 1L)
+        RiftRegion.put(region, longIndexed, 20L, longHigh, 2L)
+
+        region.pop(plain).value +
+          RiftRegion.pop(region, plain).value +
+          region.peek(indexed).value +
+          RiftRegion.get(region, indexed, 1).value +
+          region.peek(longIndexed).value +
+          RiftRegion.get(region, longIndexed, 10L).value +
+          region.length(plain) +
+          region.length(indexed) +
+          region.length(longIndexed)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(after - before >= 6L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersPriorityQueueSelectedLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val queue = RiftRegion.regionPriorityQueue[RiftCheckedLeaf](1)
+        val low = new RiftCheckedLeaf(40)
+        val high = new RiftCheckedLeaf(42)
+        val keep = System.identityHashCode(low) + System.identityHashCode(high)
+        val selected = if ((keep & 1) == 0) low else high
+        val expected = if ((keep & 1) == 0) 40 else 42
+        region.push(queue, selected, 1L)
+        region.peek(queue).value - expected + 42
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected selected priority-queue candidate allocations to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersPriorityQueueInlineClosurePlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val queue =
+          RiftRegion.regionPriorityQueue[Function1[Int, Int]^{region}](1)
+        region.push(queue, (n: Int) => n + 40, 1L)
+
+        val fn = region.peek(queue)
+        val identity = System.identityHashCode(fn)
+        invokeRegionFunction(fn, 2) + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected priority-queue backing arrays plus inline closure value to be region allocated, observed $delta region objects",
+        delta >= 3L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersPriorityQueueInlineClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val owner = region
+        val queue =
+          RiftRegion.regionPriorityQueue[
+            Function1[Int, RiftCheckedLeaf^{region}]^{region}
+          ](1)
+        region.push(
+          queue,
+          (n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + 40 + keepOwner)
+            leaf
+          },
+          1L
+        )
+
+        val fn = region.peek(queue)
+        val leaf = fn(2)
+        leaf.value +
+          (System.identityHashCode(fn) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected priority-queue backing arrays plus inline closure value and closure-body allocation to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersPriorityQueueSelectedClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val owner = region
+        val queue =
+          RiftRegion.regionPriorityQueue[
+            Function1[Int, RiftCheckedLeaf^{region}]^{region}
+          ](1)
+        val first = (n: Int) => {
+          val keepOwner = System.identityHashCode(owner) & 0
+          val leaf: RiftCheckedLeaf^{owner} =
+            new RiftCheckedLeaf(n + 40 + keepOwner)
+          leaf
+        }
+        val second = (n: Int) => {
+          val keepOwner = System.identityHashCode(owner) & 0
+          val leaf: RiftCheckedLeaf^{owner} =
+            new RiftCheckedLeaf(n + 41 + keepOwner)
+          leaf
+        }
+        val keep =
+          System.identityHashCode(first) + System.identityHashCode(second)
+        val selected = if ((keep & 1) == 0) first else second
+        val expected = if ((keep & 1) == 0) 42 else 43
+        region.push(queue, selected, 1L)
+
+        val fn = region.peek(queue)
+        val leaf = fn(2)
+        val identity =
+          System.identityHashCode(first) ^
+            System.identityHashCode(second) ^
+            System.identityHashCode(fn) ^
+            System.identityHashCode(leaf)
+        leaf.value - expected + 42 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected priority-queue backing arrays plus selected closure values and closure-body allocation to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersPriorityQueueInlineArrayPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val queue =
+          RiftRegion.regionPriorityQueue[
+            Array[RiftCheckedLeaf^{region}]^{region}
+          ](1)
+        region.push(queue, new Array[RiftCheckedLeaf^{region}](2), 1L)
+        val leaves = region.peek(queue)
+        leaves(0) = new RiftCheckedLeaf(20)
+        leaves(1) = new RiftCheckedLeaf(22)
+
+        val identity =
+          System.identityHashCode(queue) ^
+            System.identityHashCode(leaves) ^
+            System.identityHashCode(leaves(0)) ^
+            System.identityHashCode(leaves(1))
+        leaves(0).value + leaves(1).value + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected priority-queue backing arrays plus inline array value and stored values to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersIndexedPriorityQueueInlineArrayPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val indexed =
+          RiftRegion.regionIndexedPriorityQueue[
+            Array[RiftCheckedLeaf^{region}]^{region}
+          ](4, 1)
+        region.put(indexed, 1, new Array[RiftCheckedLeaf^{region}](1), 1L)
+        val indexedLeaves = region.get(indexed, 1)
+        indexedLeaves(0) = new RiftCheckedLeaf(10)
+
+        val longIndexed =
+          RiftRegion.regionLongIndexedPriorityQueue[
+            Array[RiftCheckedLeaf^{region}]^{region}
+          ](1, 4)
+        RiftRegion.put(
+          region,
+          longIndexed,
+          10L,
+          new Array[RiftCheckedLeaf^{region}](1),
+          2L
+        )
+        val longLeaves = RiftRegion.peek(region, longIndexed)
+        longLeaves(0) = new RiftCheckedLeaf(30)
+
+        val identity =
+          System.identityHashCode(indexed) ^
+            System.identityHashCode(indexedLeaves) ^
+            System.identityHashCode(indexedLeaves(0)) ^
+            System.identityHashCode(longIndexed) ^
+            System.identityHashCode(longLeaves) ^
+            System.identityHashCode(longLeaves(0))
+        indexedLeaves(0).value + longLeaves(0).value + 2 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected indexed priority-queue backing arrays plus inline array values and stored values to be region allocated, observed $delta region objects",
+        delta >= 6L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersLexicographicPriorityQueueInlineArrayPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val indexed =
+          RiftRegion.regionIndexedPriorityQueueLexicographic[
+            Array[RiftCheckedLeaf^{region}]^{region}
+          ](4, 1)
+        region.put(
+          indexed,
+          1,
+          new Array[RiftCheckedLeaf^{region}](1),
+          1L,
+          2L,
+          3L,
+          4L
+        )
+        val indexedLeaves = region.get(indexed, 1)
+        indexedLeaves(0) = new RiftCheckedLeaf(10)
+
+        val longIndexed =
+          RiftRegion.regionLongIndexedPriorityQueueLexicographic[
+            Array[RiftCheckedLeaf^{region}]^{region}
+          ](1, 4)
+        RiftRegion.put(
+          region,
+          longIndexed,
+          10L,
+          new Array[RiftCheckedLeaf^{region}](1),
+          2L,
+          3L,
+          4L,
+          5L
+        )
+        val longLeaves = RiftRegion.peek(region, longIndexed)
+        longLeaves(0) = new RiftCheckedLeaf(30)
+
+        val identity =
+          System.identityHashCode(indexed) ^
+            System.identityHashCode(indexedLeaves) ^
+            System.identityHashCode(indexedLeaves(0)) ^
+            System.identityHashCode(longIndexed) ^
+            System.identityHashCode(longLeaves) ^
+            System.identityHashCode(longLeaves(0))
+        indexedLeaves(0).value + longLeaves(0).value + 2 + (identity & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected lexicographic priority-queue backing arrays plus inline array values and stored values to be region allocated, observed $delta region objects",
+        delta >= 6L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersPriorityQueueSelectedLocalSyntheticFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val plain =
+          RiftRegion.regionPriorityQueue[
+            Option[RiftCheckedLeaf^{region}]^{region}
+          ](1)
+        val someFirst = Some(new RiftCheckedLeaf(40))
+        val someSecond = Some(new RiftCheckedLeaf(41))
+        val someKeep =
+          System.identityHashCode(someFirst) +
+            System.identityHashCode(someSecond)
+        val someSelected =
+          if ((someKeep & 1) == 0) someFirst else someSecond
+        region.push(plain, someSelected, 1L)
+
+        val indexed =
+          RiftRegion.regionIndexedPriorityQueue[
+            Option[RiftCheckedLeaf^{region}]^{region}
+          ](4, 1)
+        val optionFirst = Option(new RiftCheckedLeaf(10))
+        val optionSecond = Option(new RiftCheckedLeaf(11))
+        val optionKeep =
+          System.identityHashCode(optionFirst) +
+            System.identityHashCode(optionSecond)
+        val optionSelected =
+          if ((optionKeep & 1) == 0) optionFirst else optionSecond
+        region.put(indexed, 1, optionSelected, 2L)
+
+        val longIndexed =
+          RiftRegion.regionLongIndexedPriorityQueue[
+            Tuple2[RiftCheckedLeaf^{region}, RiftCheckedLeaf^{region}]^{region}
+          ](1, 4)
+        val pairFirst = Tuple2(new RiftCheckedLeaf(1), new RiftCheckedLeaf(1))
+        val pairSecond = Tuple2(new RiftCheckedLeaf(2), new RiftCheckedLeaf(2))
+        val pairKeep =
+          System.identityHashCode(pairFirst) + System.identityHashCode(pairSecond)
+        val pairSelected =
+          if ((pairKeep & 1) == 0) pairFirst else pairSecond
+        region.put(longIndexed, 10L, pairSelected, 3L)
+
+        val expectedSome = if ((someKeep & 1) == 0) 40 else 41
+        val expectedOption = if ((optionKeep & 1) == 0) 10 else 11
+        val expectedPair = if ((pairKeep & 1) == 0) 2 else 4
+        region.peek(plain).get.value +
+          region.peek(indexed).get.value +
+          region.peek(longIndexed)._1.value +
+          region.peek(longIndexed)._2.value -
+          expectedSome - expectedOption - expectedPair + 42
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected selected priority-queue Some/Option/Tuple2 factories and payloads to be region allocated, observed $delta region objects",
+        delta >= 14L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersPriorityQueueSelectedNestedSyntheticFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        final class SomeNode(
+            val option: Option[RiftCheckedLeaf^{region}]^{region}
+        )
+        final class OptionNode(
+            val option: Option[RiftCheckedLeaf^{region}]^{region}
+        )
+        final class PairNode(
+            val pair: Tuple2[
+              RiftCheckedLeaf^{region},
+              RiftCheckedLeaf^{region}
+            ]^{region}
+        )
+
+        val plain = RiftRegion.regionPriorityQueue[SomeNode](1)
+        val someFirst = Some(new RiftCheckedLeaf(40))
+        val someSecond = Some(new RiftCheckedLeaf(41))
+        val someKeep =
+          System.identityHashCode(someFirst) +
+            System.identityHashCode(someSecond)
+        val someSelected =
+          if ((someKeep & 1) == 0) someFirst else someSecond
+        region.push(plain, new SomeNode(someSelected), 1L)
+
+        val indexed = RiftRegion.regionIndexedPriorityQueue[OptionNode](4, 1)
+        val optionFirst = Option(new RiftCheckedLeaf(10))
+        val optionSecond = Option(new RiftCheckedLeaf(11))
+        val optionKeep =
+          System.identityHashCode(optionFirst) +
+            System.identityHashCode(optionSecond)
+        val optionSelected =
+          if ((optionKeep & 1) == 0) optionFirst else optionSecond
+        region.put(indexed, 1, new OptionNode(optionSelected), 2L)
+
+        val longIndexed =
+          RiftRegion.regionLongIndexedPriorityQueue[PairNode](1, 4)
+        val pairFirst = Tuple2(new RiftCheckedLeaf(1), new RiftCheckedLeaf(2))
+        val pairSecond = Tuple2(new RiftCheckedLeaf(3), new RiftCheckedLeaf(4))
+        val pairKeep =
+          System.identityHashCode(pairFirst) + System.identityHashCode(pairSecond)
+        val pairSelected =
+          if ((pairKeep & 1) == 0) pairFirst else pairSecond
+        region.put(longIndexed, 10L, new PairNode(pairSelected), 3L)
+
+        val expectedSome = if ((someKeep & 1) == 0) 40 else 41
+        val expectedOption = if ((optionKeep & 1) == 0) 10 else 11
+        val expectedPair = if ((pairKeep & 1) == 0) 3 else 7
+        region.peek(plain).option.get.value +
+          region.peek(indexed).option.get.value +
+          region.peek(longIndexed).pair._1.value +
+          region.peek(longIndexed).pair._2.value -
+          expectedSome - expectedOption - expectedPair + 42
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected selected nested priority-queue synthetic factories, payloads, and value objects to be region allocated, observed $delta region objects",
+        delta >= 17L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersPriorityQueueBranchMatchSyntheticFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val plain =
+          RiftRegion.regionPriorityQueue[
+            Option[RiftCheckedLeaf^{region}]^{region}
+          ](1)
+        val chooseSome = (System.identityHashCode(region) & 1) == 0
+        region.push(
+          plain,
+          if chooseSome then Some(new RiftCheckedLeaf(40))
+          else Some(new RiftCheckedLeaf(41)),
+          1L
+        )
+
+        val indexed =
+          RiftRegion.regionIndexedPriorityQueue[
+            Option[RiftCheckedLeaf^{region}]^{region}
+          ](4, 1)
+        val optionSelector = System.identityHashCode(plain) & 1
+        region.put(
+          indexed,
+          1,
+          (optionSelector match
+            case 0 => Option(new RiftCheckedLeaf(10))
+            case _ => Option(new RiftCheckedLeaf(11))
+          ),
+          2L
+        )
+
+        val longIndexed =
+          RiftRegion.regionLongIndexedPriorityQueue[
+            Tuple2[RiftCheckedLeaf^{region}, RiftCheckedLeaf^{region}]^{region}
+          ](1, 4)
+        val choosePair = (System.identityHashCode(indexed) & 1) == 0
+        region.put(
+          longIndexed,
+          10L,
+          if choosePair then
+            Tuple2(new RiftCheckedLeaf(1), new RiftCheckedLeaf(2))
+          else Tuple2(new RiftCheckedLeaf(3), new RiftCheckedLeaf(4)),
+          3L
+        )
+
+        val expectedSome = if chooseSome then 40 else 41
+        val expectedOption = if optionSelector == 0 then 10 else 11
+        val expectedPair = if choosePair then 3 else 7
+        region.peek(plain).get.value +
+          region.peek(indexed).get.value +
+          region.peek(longIndexed)._1.value +
+          region.peek(longIndexed)._2.value -
+          expectedSome - expectedOption - expectedPair + 42
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected branch/match priority-queue Some/Option/Tuple2 factories and payloads to be region allocated, observed $delta region objects",
+        delta >= 7L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersLexicographicPriorityQueueSelectedLocalSyntheticFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val indexed =
+          RiftRegion.regionIndexedPriorityQueueLexicographic[
+            Option[RiftCheckedLeaf^{region}]^{region}
+          ](4, 1)
+        val someFirst = Some(new RiftCheckedLeaf(40))
+        val someSecond = Some(new RiftCheckedLeaf(41))
+        val someKeep =
+          System.identityHashCode(someFirst) +
+            System.identityHashCode(someSecond)
+        val someSelected =
+          if ((someKeep & 1) == 0) someFirst else someSecond
+        region.put(indexed, 1, someSelected, 1L, 2L, 3L, 4L)
+
+        val optionFirst = Option(new RiftCheckedLeaf(10))
+        val optionSecond = Option(new RiftCheckedLeaf(11))
+        val optionKeep =
+          System.identityHashCode(optionFirst) +
+            System.identityHashCode(optionSecond)
+        val optionSelected =
+          if ((optionKeep & 1) == 0) optionFirst else optionSecond
+        RiftRegion.put(region, indexed, 2, optionSelected, 2L, 3L, 4L, 5L)
+
+        val longIndexed =
+          RiftRegion.regionLongIndexedPriorityQueueLexicographic[
+            Tuple2[RiftCheckedLeaf^{region}, RiftCheckedLeaf^{region}]^{region}
+          ](1, 4)
+        val pairFirst = Tuple2(new RiftCheckedLeaf(1), new RiftCheckedLeaf(1))
+        val pairSecond = Tuple2(new RiftCheckedLeaf(2), new RiftCheckedLeaf(2))
+        val pairKeep =
+          System.identityHashCode(pairFirst) + System.identityHashCode(pairSecond)
+        val pairSelected =
+          if ((pairKeep & 1) == 0) pairFirst else pairSecond
+        region.put(longIndexed, 10L, pairSelected, 3L, 4L, 5L, 6L)
+
+        val expectedSome = if ((someKeep & 1) == 0) 40 else 41
+        val expectedOption = if ((optionKeep & 1) == 0) 10 else 11
+        val expectedPair = if ((pairKeep & 1) == 0) 2 else 4
+        region.get(indexed, 1).get.value +
+          region.get(indexed, 2).get.value +
+          region.get(longIndexed, 10L)._1.value +
+          region.get(longIndexed, 10L)._2.value -
+          expectedSome - expectedOption - expectedPair + 42
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected selected lexicographic priority-queue Some/Option/Tuple2 factories and payloads to be region allocated, observed $delta region objects",
+        delta >= 14L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersPriorityQueueInlineNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val plain = RiftRegion.regionPriorityQueue[RiftCheckedLeaf](1)
+        region.push(plain, new RiftCheckedLeaf(10), 1L)
+        RiftRegion.push(region, plain, new RiftCheckedLeaf(20), 2L)
+
+        val indexed = RiftRegion.regionIndexedPriorityQueue[RiftCheckedLeaf](4, 1)
+        region.put(indexed, 1, new RiftCheckedLeaf(3), 1L)
+        RiftRegion.put(region, indexed, 2, new RiftCheckedLeaf(4), 2L)
+
+        val longIndexed =
+          RiftRegion.regionLongIndexedPriorityQueue[RiftCheckedLeaf](1, 4)
+        region.put(longIndexed, 10L, new RiftCheckedLeaf(0), 1L)
+        RiftRegion.put(region, longIndexed, 20L, new RiftCheckedLeaf(1), 2L)
+
+        region.pop(plain).value +
+          RiftRegion.pop(region, plain).value +
+          region.peek(indexed).value +
+          RiftRegion.get(region, indexed, 1).value +
+          region.peek(longIndexed).value +
+          RiftRegion.get(region, longIndexed, 10L).value +
+          region.length(plain) +
+          region.length(indexed) +
+          region.length(longIndexed)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(after - before >= 6L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersPriorityQueueInlineBlockNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val plain = RiftRegion.regionPriorityQueue[RiftCheckedLeaf](1)
+        region.push(plain, { val value = 10; new RiftCheckedLeaf(value) }, 1L)
+        RiftRegion.push(
+          region,
+          plain,
+          { val value = 20; new RiftCheckedLeaf(value) },
+          2L
+        )
+
+        val indexed = RiftRegion.regionIndexedPriorityQueue[RiftCheckedLeaf](4, 1)
+        region.put(indexed, 1, { val value = 3; new RiftCheckedLeaf(value) }, 1L)
+        RiftRegion.put(
+          region,
+          indexed,
+          2,
+          { val value = 4; new RiftCheckedLeaf(value) },
+          2L
+        )
+
+        val longIndexed =
+          RiftRegion.regionLongIndexedPriorityQueue[RiftCheckedLeaf](1, 4)
+        region.put(
+          longIndexed,
+          10L,
+          { val value = 0; new RiftCheckedLeaf(value) },
+          1L
+        )
+        RiftRegion.put(
+          region,
+          longIndexed,
+          20L,
+          { val value = 1; new RiftCheckedLeaf(value) },
+          2L
+        )
+
+        region.pop(plain).value +
+          RiftRegion.pop(region, plain).value +
+          region.peek(indexed).value +
+          RiftRegion.get(region, indexed, 1).value +
+          region.peek(longIndexed).value +
+          RiftRegion.get(region, longIndexed, 10L).value +
+          region.length(plain) +
+          region.length(indexed) +
+          region.length(longIndexed)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(after - before >= 6L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def streamingRegionInfersWindowRankBranchMatchLocalNewPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def run(insertSelected: Boolean): Long = {
+        RiftAllocator.Impl.statsReset()
+        val total = RiftRegion.streaming { stream ?=>
+          val indexed =
+            RiftRegion.streamWindowIndexedRank[RiftCheckedLeaf](10, 8, 1)
+
+          val longIndexed =
+            RiftRegion.streamWindowLongIndexedRank[RiftCheckedLeaf](10, 1, 4)
+          val longBucket =
+            RiftRegion.streamWindowBucketFor(stream, longIndexed, 7L)
+
+          val table =
+            RiftRegion.streamWindowTableRank[RiftCheckedLeaf](10, 1, 4)
+          val tableBucket =
+            RiftRegion.streamWindowBucketFor(stream, table, 7L)
+
+          if (insertSelected) {
+            val low = new RiftCheckedLeaf(10)
+            val high = new RiftCheckedLeaf(40)
+            val keep =
+              System.identityHashCode(low) + System.identityHashCode(high)
+            val chooseLow = (keep & 1) == 0
+            RiftRegion.putWindowRank(
+              stream,
+              indexed,
+              1,
+              if chooseLow then low else high,
+              1L
+            )
+
+            val first = new RiftCheckedLeaf(1)
+            val second = new RiftCheckedLeaf(2)
+            val longKeep =
+              System.identityHashCode(first) + System.identityHashCode(second)
+            val longSelector = longKeep & 1
+            RiftRegion.putWindowRankInBucket(
+              stream,
+              longIndexed,
+              longBucket,
+              10L,
+              (longSelector match
+                case 0 => first
+                case _ => second
+              ),
+              2L
+            )
+
+            val left = new RiftCheckedLeaf(3)
+            val right = new RiftCheckedLeaf(4)
+            val tableKeep =
+              System.identityHashCode(left) + System.identityHashCode(right)
+            val tableSelector = tableKeep & 1
+            RiftRegion.putTableRankInBucket(
+              stream,
+              table,
+              tableBucket,
+              20L,
+              (tableSelector match
+                case 0 => left
+                case _ => right
+              ),
+              3L
+            )
+
+            val expectedIndexed = if chooseLow then 10 else 40
+            val expectedLong = if longSelector == 0 then 1 else 2
+            val expectedTable = if tableSelector == 0 then 3 else 4
+            RiftRegion.peekWindowRank(stream, indexed).value +
+              RiftRegion.peekWindowRank(stream, longIndexed).value +
+              RiftRegion.peekTableRank(stream, table).value -
+              expectedIndexed - expectedLong - expectedTable + 42
+          } else 42
+        }
+        assertEquals(42, total)
+        fromRawUSize(RiftAllocator.Impl.statsAllocObjectTotal()).toLong
+      }
+      val setupOnly = run(insertSelected = false)
+      val withSelected = run(insertSelected = true)
+      val delta = withSelected - setupOnly
+
+      assertTrue(
+        s"expected stream-window rank branch/match local Row candidates to be region allocated, observed $delta region objects",
+        delta >= 6L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def streamingRegionInfersWindowRankSelectedLocalSyntheticFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def run(insertSelected: Boolean): Long = {
+        RiftAllocator.Impl.statsReset()
+        val total = RiftRegion.streaming { stream ?=>
+          val indexed =
+            RiftRegion.streamWindowIndexedRank[
+              Option[RiftCheckedLeaf^{stream}]^{stream}
+            ](10, 8, 1)
+
+          val longIndexed =
+            RiftRegion.streamWindowLongIndexedRankLexicographic[
+              Option[RiftCheckedLeaf^{stream}]^{stream}
+            ](10, 1, 4)
+          val longBucket =
+            RiftRegion.streamWindowBucketFor(stream, longIndexed, 7L)
+
+          val table =
+            RiftRegion.streamWindowTableRankLexicographic[
+              Tuple2[RiftCheckedLeaf^{stream}, RiftCheckedLeaf^{stream}]^{stream}
+            ](10, 1, 4)
+          val tableBucket =
+            RiftRegion.streamWindowBucketFor(stream, table, 7L)
+
+          if (insertSelected) {
+            val someFirst = Some(new RiftCheckedLeaf(40))
+            val someSecond = Some(new RiftCheckedLeaf(41))
+            val someKeep =
+              System.identityHashCode(someFirst) +
+                System.identityHashCode(someSecond)
+            val someSelected =
+              if ((someKeep & 1) == 0) someFirst else someSecond
+            RiftRegion.putWindowRank(stream, indexed, 1, someSelected, 1L)
+
+            val optionFirst = Option(new RiftCheckedLeaf(10))
+            val optionSecond = Option(new RiftCheckedLeaf(11))
+            val optionKeep =
+              System.identityHashCode(optionFirst) +
+                System.identityHashCode(optionSecond)
+            val optionSelected =
+              if ((optionKeep & 1) == 0) optionFirst else optionSecond
+            RiftRegion.putWindowRankInBucket(
+              stream,
+              longIndexed,
+              longBucket,
+              10L,
+              optionSelected,
+              2L,
+              3L,
+              4L,
+              5L
+            )
+
+            val pairFirst =
+              Tuple2(new RiftCheckedLeaf(1), new RiftCheckedLeaf(1))
+            val pairSecond =
+              Tuple2(new RiftCheckedLeaf(2), new RiftCheckedLeaf(2))
+            val pairKeep =
+              System.identityHashCode(pairFirst) +
+                System.identityHashCode(pairSecond)
+            val pairSelected =
+              if ((pairKeep & 1) == 0) pairFirst else pairSecond
+            RiftRegion.putTableRankInBucket(
+              stream,
+              table,
+              tableBucket,
+              20L,
+              pairSelected,
+              3L,
+              4L,
+              5L,
+              6L
+            )
+
+            val expectedSome = if ((someKeep & 1) == 0) 40 else 41
+            val expectedOption = if ((optionKeep & 1) == 0) 10 else 11
+            val expectedPair = if ((pairKeep & 1) == 0) 2 else 4
+            RiftRegion.peekWindowRank(stream, indexed).get.value +
+              RiftRegion.peekWindowRank(stream, longIndexed).get.value +
+              RiftRegion.peekTableRank(stream, table)._1.value +
+              RiftRegion.peekTableRank(stream, table)._2.value -
+              expectedSome - expectedOption - expectedPair + 42
+          } else 42
+        }
+        assertEquals(42, total)
+        fromRawUSize(RiftAllocator.Impl.statsAllocObjectTotal()).toLong
+      }
+      val setupOnly = run(insertSelected = false)
+      val withSelected = run(insertSelected = true)
+      val delta = withSelected - setupOnly
+
+      assertTrue(
+        s"expected selected stream-window rank Some/Option/Tuple2 factories and payloads to be region allocated, observed $delta region objects",
+        delta >= 14L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def streamingRegionInfersWindowRankClosurePlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      def run(insertValues: Boolean): Long = {
+        RiftAllocator.Impl.statsReset()
+        val total = RiftRegion.streaming { stream ?=>
+          val indexed =
+            RiftRegion.streamWindowIndexedRank[
+              Function1[Int, Int]^{stream}
+            ](10, 8, 1)
+
+          val longIndexed =
+            RiftRegion.streamWindowLongIndexedRank[
+              Function1[Int, Int]^{stream}
+            ](10, 1, 4)
+          val longBucket =
+            RiftRegion.streamWindowBucketFor(stream, longIndexed, 7L)
+
+          val table =
+            RiftRegion.streamWindowTableRank[
+              Function1[Int, Int]^{stream}
+            ](10, 1, 4)
+          val tableBucket =
+            RiftRegion.streamWindowBucketFor(stream, table, 7L)
+
+          if (insertValues) {
+            RiftRegion.putWindowRank(
+              stream,
+              indexed,
+              1,
+              (n: Int) => n + 40,
+              1L
+            )
+
+            val first = (n: Int) => n + 10
+            val second = (n: Int) => n + 20
+            val keep =
+              System.identityHashCode(first) + System.identityHashCode(second)
+            val selected = if ((keep & 1) == 0) first else second
+            RiftRegion.putWindowRankInBucket(
+              stream,
+              longIndexed,
+              longBucket,
+              10L,
+              selected,
+              2L
+            )
+
+            RiftRegion.putTableRankInBucket(
+              stream,
+              table,
+              tableBucket,
+              20L,
+              (n: Int) => n + 1,
+              3L
+            )
+
+            val expectedSelected = if ((keep & 1) == 0) 12 else 22
+            invokeRegionFunction(RiftRegion.peekWindowRank(stream, indexed), 2) +
+              invokeRegionFunction(
+                RiftRegion.peekWindowRank(stream, longIndexed),
+                2
+              ) +
+              invokeRegionFunction(RiftRegion.peekTableRank(stream, table), 2) -
+              42 - expectedSelected - 3 + 42
+          } else 42
+        }
+        assertEquals(42, total)
+        fromRawUSize(RiftAllocator.Impl.statsAllocObjectTotal()).toLong
+      }
+      val setupOnly = run(insertValues = false)
+      val withValues = run(insertValues = true)
+      val delta = withValues - setupOnly
+
+      assertTrue(
+        s"expected stream-window rank closure values to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def streamingRegionInfersWindowRankBranchMatchSyntheticFactoryPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def run(insertSelected: Boolean): Long = {
+        RiftAllocator.Impl.statsReset()
+        val total = RiftRegion.streaming { stream ?=>
+          val indexed =
+            RiftRegion.streamWindowIndexedRank[
+              Option[RiftCheckedLeaf^{stream}]^{stream}
+            ](10, 8, 1)
+
+          val longIndexed =
+            RiftRegion.streamWindowLongIndexedRank[
+              Option[RiftCheckedLeaf^{stream}]^{stream}
+            ](10, 1, 4)
+          val longBucket =
+            RiftRegion.streamWindowBucketFor(stream, longIndexed, 7L)
+
+          val table =
+            RiftRegion.streamWindowTableRank[
+              Tuple2[RiftCheckedLeaf^{stream}, RiftCheckedLeaf^{stream}]^{stream}
+            ](10, 1, 4)
+          val tableBucket =
+            RiftRegion.streamWindowBucketFor(stream, table, 7L)
+
+          if (insertSelected) {
+            val chooseSome = (System.identityHashCode(indexed) & 1) == 0
+            RiftRegion.putWindowRank(
+              stream,
+              indexed,
+              1,
+              if chooseSome then Some(new RiftCheckedLeaf(40))
+              else Some(new RiftCheckedLeaf(41)),
+              1L
+            )
+
+            val optionSelector = System.identityHashCode(longIndexed) & 1
+            RiftRegion.putWindowRankInBucket(
+              stream,
+              longIndexed,
+              longBucket,
+              10L,
+              (optionSelector match
+                case 0 => Option(new RiftCheckedLeaf(10))
+                case _ => Option(new RiftCheckedLeaf(11))
+              ),
+              2L
+            )
+
+            val choosePair = (System.identityHashCode(table) & 1) == 0
+            RiftRegion.putTableRankInBucket(
+              stream,
+              table,
+              tableBucket,
+              20L,
+              if choosePair then
+                Tuple2(new RiftCheckedLeaf(1), new RiftCheckedLeaf(2))
+              else Tuple2(new RiftCheckedLeaf(3), new RiftCheckedLeaf(4)),
+              3L
+            )
+
+            val expectedSome = if chooseSome then 40 else 41
+            val expectedOption = if optionSelector == 0 then 10 else 11
+            val expectedPair = if choosePair then 3 else 7
+            RiftRegion.peekWindowRank(stream, indexed).get.value +
+              RiftRegion.peekWindowRank(stream, longIndexed).get.value +
+              RiftRegion.peekTableRank(stream, table)._1.value +
+              RiftRegion.peekTableRank(stream, table)._2.value -
+              expectedSome - expectedOption - expectedPair + 42
+          } else 42
+        }
+        assertEquals(42, total)
+        fromRawUSize(RiftAllocator.Impl.statsAllocObjectTotal()).toLong
+      }
+      val setupOnly = run(insertSelected = false)
+      val withSelected = run(insertSelected = true)
+      val delta = withSelected - setupOnly
+
+      assertTrue(
+        s"expected branch/match stream-window rank Some/Option/Tuple2 factories and payloads to be region allocated, observed $delta region objects",
+        delta >= 7L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def streamingRegionInfersWindowRankInlineArrayPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      def run(insertValues: Boolean): Long = {
+        RiftAllocator.Impl.statsReset()
+        val total = RiftRegion.streaming { stream ?=>
+          val indexed =
+            RiftRegion.streamWindowIndexedRank[
+              Array[RiftCheckedLeaf^{stream}]^{stream}
+            ](10, 8, 1)
+
+          val longIndexed =
+            RiftRegion.streamWindowLongIndexedRankLexicographic[
+              Array[RiftCheckedLeaf^{stream}]^{stream}
+            ](10, 1, 4)
+          val longBucket =
+            RiftRegion.streamWindowBucketFor(stream, longIndexed, 7L)
+
+          val table =
+            RiftRegion.streamWindowTableRank[
+              Array[RiftCheckedLeaf^{stream}]^{stream}
+            ](10, 1, 4)
+          val tableBucket =
+            RiftRegion.streamWindowBucketFor(stream, table, 7L)
+
+          if (insertValues) {
+            RiftRegion.putWindowRank(
+              stream,
+              indexed,
+              1,
+              new Array[RiftCheckedLeaf^{stream}](1),
+              1L
+            )
+            val indexedLeaves = RiftRegion.peekWindowRank(stream, indexed)
+            indexedLeaves(0) = new RiftCheckedLeaf(10)
+
+            RiftRegion.putWindowRankInBucket(
+              stream,
+              longIndexed,
+              longBucket,
+              10L,
+              new Array[RiftCheckedLeaf^{stream}](1),
+              2L,
+              3L,
+              4L,
+              5L
+            )
+            val longLeaves = RiftRegion.peekWindowRank(stream, longIndexed)
+            longLeaves(0) = new RiftCheckedLeaf(20)
+
+            RiftRegion.putTableRankInBucket(
+              stream,
+              table,
+              tableBucket,
+              20L,
+              new Array[RiftCheckedLeaf^{stream}](1),
+              3L
+            )
+            val tableLeaves = RiftRegion.peekTableRank(stream, table)
+            tableLeaves(0) = new RiftCheckedLeaf(30)
+
+            indexedLeaves(0).value + longLeaves(0).value +
+              tableLeaves(0).value - 60 + 42
+          } else 42
+        }
+        assertEquals(42, total)
+        fromRawUSize(RiftAllocator.Impl.statsAllocObjectTotal()).toLong
+      }
+      val setupOnly = run(insertValues = false)
+      val withValues = run(insertValues = true)
+      val delta = withValues - setupOnly
+
+      assertTrue(
+        s"expected stream-window rank arrays and inline elements to be region allocated, observed $delta region objects",
+        delta >= 6L
+      )
     } finally {
       RiftRegion.shutdown()
     }
@@ -1789,6 +9235,150 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def streamPageTokenAppendWindowInfersChildRegionLocalNewPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val window = RiftRegion.streamPageTokenAppendWindow[Event](10)
+        var sum = 0
+
+        def consume(
+            bucket: RiftRegion.StreamBucket^{stream},
+            cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+        ): Unit = {
+          var current = cursor.nextOwnedOrNull()
+          while (current != null) {
+            val event = current.asInstanceOf[Event^{stream}]
+            sum += event.value + bucket.startSeconds.toInt
+            current = cursor.nextOwnedOrNull()
+          }
+        }
+
+        val region =
+          RiftRegion.pageTokenAppendRegionFor(stream, window, 7L, Long.MinValue)(
+            consume
+          )
+        val event: Event^{region} = new Event(41)
+        val widened: Event^{stream} = event
+        RiftRegion.appendPageToken(stream, window, widened)
+
+        RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
+          consume
+        )
+        sum + 1
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(after - before >= 1L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def streamPageTokenAppendWindowInfersOpenChildRegionLocalNewPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val window = RiftRegion.streamPageTokenAppendWindow[Event](10)
+        var sum = 0
+
+        def consume(
+            bucket: RiftRegion.StreamBucket^{stream},
+            cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+        ): Unit = {
+          var current = cursor.nextOwnedOrNull()
+          while (current != null) {
+            val event = current.asInstanceOf[Event^{stream}]
+            sum += event.value + bucket.startSeconds.toInt
+            current = cursor.nextOwnedOrNull()
+          }
+        }
+
+        val region =
+          RiftRegion.pageTokenAppendOpenRegionFor(
+            stream,
+            window,
+            7L,
+            Long.MinValue
+          )(consume)
+        val event: Event^{region} = new Event(41)
+        val widened: Event^{stream} = event
+        RiftRegion.appendPageToken(stream, window, widened)
+
+        RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
+          consume
+        )
+        sum + 1
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(after - before >= 1L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def streamPageTokenAppendWindowInfersRiftOpenHandleLocalNewPlacement()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val window = RiftRegion.streamPageTokenAppendWindow[Event](10)
+        var sum = 0
+
+        def consume(
+            bucket: RiftRegion.StreamBucket^{stream},
+            cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+        ): Unit = {
+          var current = cursor.nextOwnedOrNull()
+          while (current != null) {
+            val event = current.asInstanceOf[Event^{stream}]
+            sum += event.value + bucket.startSeconds.toInt
+            current = cursor.nextOwnedOrNull()
+          }
+        }
+
+        val region =
+          RiftRegion.pageTokenAppendRiftOpenHandleFor(
+            stream,
+            window,
+            7L,
+            Long.MinValue
+          )(consume)
+        val event: Event^{region} = new Event(41)
+        val widened: Event^{stream} = event
+        RiftRegion.appendPageToken(stream, window, widened)
+
+        RiftRegion.closeAllPageTokenAppendBucketsWithCursor(stream, window)(
+          consume
+        )
+        sum + 1
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(after - before >= 1L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def streamPageTokenAppendWindowClosesAfterPartialCursorConsumption()
       : Unit = {
     RiftRegion.init(1)
@@ -2002,6 +9592,92 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def pageTokenMapFilterInfersChildRegionLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val operator = RiftRegion.pageTokenMapFilter[Event](10)
+        var sum = 0
+
+        def consume(
+            bucket: RiftRegion.StreamBucket^{stream},
+            cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+        ): Unit =
+          while (cursor.hasNext)
+            sum += cursor.next().value + bucket.startSeconds.toInt
+
+        val region =
+          RiftRegion.pageTokenMapFilterRegionFor(
+            stream,
+            operator,
+            7L,
+            Long.MinValue
+          )(consume)
+        val event: Event^{region} = new Event(41)
+        val widened: Event^{stream} = event
+        RiftRegion.emitPageTokenMapFilter(stream, operator, widened)
+
+        RiftRegion.closeAllPageTokenMapFilterBucketsWithCursor(stream, operator)(
+          consume
+        )
+        sum + 1
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(after - before >= 1L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def pageTokenMapFilterOpenRegionInfersLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val operator = RiftRegion.pageTokenMapFilter[Event](10)
+        var sum = 0
+
+        def consume(
+            bucket: RiftRegion.StreamBucket^{stream},
+            cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+        ): Unit =
+          while (cursor.hasNext)
+            sum += cursor.next().value + bucket.startSeconds.toInt
+
+        val region =
+          RiftRegion.pageTokenMapFilterOpenRegionFor(
+            stream,
+            operator,
+            7L,
+            Long.MinValue
+          )(consume)
+        val event: Event^{region} = new Event(41)
+        val widened: Event^{stream} = event
+        RiftRegion.emitPageTokenMapFilter(stream, operator, widened)
+
+        RiftRegion.closeAllPageTokenMapFilterBucketsWithCursor(stream, operator)(
+          consume
+        )
+        sum + 1
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(after - before >= 1L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def pageTokenCountByKeyAggregatesAndClosesNoDrain(): Unit = {
     RiftRegion.init(1)
     try {
@@ -2072,6 +9748,108 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def pageTokenCountByKeyInfersChildRegionLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val key: Int, val value: Int)
+            extends RiftRegion.StreamAppendNode
+
+        val operator = RiftRegion.pageTokenCountByKey[Event](10, 8, 2)
+        var sum = 0L
+
+        def consume(
+            bucket: RiftRegion.StreamBucket^{stream},
+            key: Int,
+            count: Int,
+            valueSum: Long
+        ): Unit =
+          sum += bucket.startSeconds + key.toLong + count.toLong + valueSum
+
+        val region =
+          RiftRegion.pageTokenCountByKeyRegionFor(
+            stream,
+            operator,
+            7L,
+            Long.MinValue
+          )(consume)
+        val event: Event^{region} = new Event(2, 40)
+        val widened: Event^{stream} = event
+        RiftRegion.appendPageTokenCountByKey(
+          stream,
+          operator,
+          widened,
+          widened.key,
+          widened.value.toLong
+        )
+
+        RiftRegion.closeAllPageTokenCountByKeyBuckets(stream, operator)(
+          consume
+        )
+        sum
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(43L, total)
+      assertTrue(after - before >= 1L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def pageTokenCountByKeyOpenRegionInfersLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val key: Int, val value: Int)
+            extends RiftRegion.StreamAppendNode
+
+        val operator = RiftRegion.pageTokenCountByKey[Event](10, 8, 2)
+        var sum = 0L
+
+        def consume(
+            bucket: RiftRegion.StreamBucket^{stream},
+            key: Int,
+            count: Int,
+            valueSum: Long
+        ): Unit =
+          sum += bucket.startSeconds + key.toLong + count.toLong + valueSum
+
+        val region =
+          RiftRegion.pageTokenCountByKeyOpenRegionFor(
+            stream,
+            operator,
+            7L,
+            Long.MinValue
+          )(consume)
+        val event: Event^{region} = new Event(2, 40)
+        val widened: Event^{stream} = event
+        RiftRegion.appendPageTokenCountByKey(
+          stream,
+          operator,
+          widened,
+          widened.key,
+          widened.value.toLong
+        )
+
+        RiftRegion.closeAllPageTokenCountByKeyBuckets(stream, operator)(
+          consume
+        )
+        sum
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(43L, total)
+      assertTrue(after - before >= 1L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def epochBufferAllocatesAndDrainsRecords(): Unit = {
     RiftRegion.init(1)
     try {
@@ -2115,6 +9893,46 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def epochBufferRegionInfersLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val buffer = RiftRegion.epochBuffer[Event]()
+        var sum = 0
+
+        def consume(
+            bucket: RiftRegion.StreamBucket^{stream},
+            cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+        ): Unit =
+          while (cursor.hasNext)
+            sum += cursor.next().value + bucket.startSeconds.toInt
+
+        val region = RiftRegion.epochBufferRegionFor(stream, buffer)
+        val first: Event^{region} = new Event(30)
+        val second: Event^{region} = new Event(12)
+        val widenedFirst: Event^{stream} = first
+        val widenedSecond: Event^{stream} = second
+        RiftRegion.appendEpochBuffer(stream, buffer, widenedFirst)
+        RiftRegion.appendEpochBuffer(stream, buffer, widenedSecond)
+        assertEquals(2, RiftRegion.epochBufferLength(stream, buffer))
+
+        RiftRegion.closeEpochBufferWithCursor(stream, buffer)(consume)
+        assertEquals(0, RiftRegion.epochBufferLength(stream, buffer))
+        sum
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(after - before >= 2L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def epochBufferOpenRegionAllocatesAndDrainsRecords(): Unit = {
     RiftRegion.init(1)
     try {
@@ -2151,6 +9969,51 @@ class RiftRegionCheckedTest {
       }
 
       assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def epochBufferOpenRegionInfersLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val buffer = RiftRegion.epochBuffer[Event]()
+        var sum = 0
+
+        def consume(
+            bucket: RiftRegion.StreamBucket^{stream},
+            cursor: RiftRegion.StreamAppendCursor[Event]^{stream}
+        ): Unit = {
+          var current = cursor.nextOwnedOrNull()
+          while (current != null) {
+            val event = current.asInstanceOf[Event^{stream}]
+            sum += event.value + bucket.startSeconds.toInt
+            current = cursor.nextOwnedOrNull()
+          }
+        }
+
+        val region = RiftRegion.epochBufferOpenRegionFor(stream, buffer)
+        val first: Event^{region} = new Event(30)
+        val second: Event^{region} = new Event(12)
+        val widenedFirst: Event^{stream} = first
+        val widenedSecond: Event^{stream} = second
+        RiftRegion.appendEpochBuffer(stream, buffer, widenedFirst)
+        RiftRegion.appendEpochBuffer(stream, buffer, widenedSecond)
+        assertEquals(2, RiftRegion.epochBufferLength(stream, buffer))
+
+        RiftRegion.closeEpochBufferWithCursor(stream, buffer)(consume)
+        assertEquals(0, RiftRegion.epochBufferLength(stream, buffer))
+        sum
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(after - before >= 2L)
     } finally {
       RiftRegion.shutdown()
     }
@@ -2212,6 +10075,38 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def transactionRegionInfersLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int) extends RiftRegion.StreamAppendNode
+
+        val tx = RiftRegion.transactionRegion(1)
+        val input = RiftRegion.transactionList[Event](stream, tx, 0)
+        val region = RiftRegion.transactionRegionFor(stream, tx)
+        val event: Event^{region} = new Event(42)
+        val widened: Event^{stream} = event
+        RiftRegion.appendTransactionList(stream, input, widened)
+
+        var sum = 0
+        RiftRegion.drainTransactionListWithCursor(stream, input) { cursor =>
+          while (cursor.hasNext)
+            sum += cursor.next().value
+        }
+        RiftRegion.closeTransactionRegion(stream, tx)
+        sum
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(after - before >= 1L)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def streamChunkAppendWindowAllocatesAndDrainsRecords(): Unit = {
     RiftRegion.init(1)
     try {
@@ -2253,6 +10148,45 @@ class RiftRegionCheckedTest {
       }
 
       assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def streamChunkAppendWindowInfersLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val value: Int)
+
+        val window = RiftRegion.streamChunkAppendWindow[Event](10, 2)
+        var sum = 0
+
+        def consume(
+            bucket: RiftRegion.StreamBucket^{stream},
+            cursor: RiftRegion.StreamChunkCursor[Event]^{stream}
+        ): Unit =
+          while (cursor.hasNext)
+            sum += cursor.next().value + bucket.startSeconds.toInt
+
+        val region =
+          RiftRegion.chunkAppendRegionFor(stream, window, 7L, Long.MinValue)(
+            consume
+          )
+        val event: Event^{region} = new Event(41)
+        val widened: Event^{stream} = event
+        RiftRegion.appendChunkToken(stream, window, widened)
+        RiftRegion.closeAllChunkAppendBucketsWithCursor(stream, window)(
+          consume
+        )
+        sum + 1
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+
+      assertEquals(42, total)
+      assertTrue(after - before >= 1L)
     } finally {
       RiftRegion.shutdown()
     }
@@ -2618,6 +10552,64 @@ class RiftRegionCheckedTest {
       }
 
       assertEquals(42, total)
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def epochFoldInfersChildRegionLocalNewPlacement(): Unit = {
+    RiftRegion.init(1)
+    try {
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.streaming { stream ?=>
+        final class Event(val key: Int, val delta: Long, val value: Int)
+            extends RiftRegion.StreamAppendNode
+
+        val fold = RiftRegion.epochFold[Event](10, 16)
+        val region = RiftRegion.epochFoldRegionFor(stream, fold, 7L)
+        val first: Event^{region} = new Event(3, 20L, 20)
+        val second: Event^{region} = new Event(3, 21L, 21)
+        val widenedFirst: Event^{stream} = first
+        val widenedSecond: Event^{stream} = second
+        val firstSum =
+          RiftRegion.putEpochFold(
+            stream,
+            fold,
+            widenedFirst.key,
+            widenedFirst.delta,
+            widenedFirst
+          )
+        val secondSum =
+          RiftRegion.putEpochFold(
+            stream,
+            fold,
+            widenedSecond.key,
+            widenedSecond.delta,
+            widenedSecond
+          )
+
+        assertEquals(20L, firstSum)
+        assertEquals(41L, secondSum)
+        assertEquals(2, RiftRegion.epochFoldCount(stream, fold, 3))
+
+        var closed = 0
+        RiftRegion.closeEpochFoldCurrentBucketAndClear(stream, fold) {
+          (_, cursor) =>
+            while (cursor.hasNext)
+              closed += cursor.next().value
+        }
+
+        closed + 1
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected epochFoldRegionFor local new records to be region allocated, observed $delta region objects",
+        delta >= 2L
+      )
     } finally {
       RiftRegion.shutdown()
     }

@@ -5,6 +5,7 @@ import dotty.tools.FatalError
 import dotty.tools.backend.ScalaPrimitivesOps._
 import dotty.tools.backend.jvm.DottyBackendInterface.symExtensions
 import dotty.tools.dotc.ast.desugar
+import dotty.tools.dotc.cc.CapturingType
 import dotty.tools.dotc.util.Property
 import dotty.tools.dotc.util.Spans.*
 import dotty.tools.dotc.{ast, core, report, transform}
@@ -157,13 +158,51 @@ trait NirGenExpr(using Context) {
       tree.symbol.info.show.contains(heapRootName)
     }
 
+    private def isPrimitiveType(tpe: Type): Boolean = {
+      val sym = tpe.widenDealias.typeSymbol
+      sym.isPrimitiveValueClass || sym == defn.UnitClass
+    }
+
     private def isPrimitiveOrNull(tree: Tree): Boolean =
       tree match {
         case Literal(Constant(null)) => true
         case Literal(_)              => true
+        case _                       => isPrimitiveType(tree.tpe)
+      }
+
+    private def isCheckedRiftAllocationOwnerValue(tree: Tree): Boolean =
+      tree match {
+        case TypeApply(Select(qualifier, nme.asInstanceOf_), _) =>
+          isCheckedRiftAllocationOwnerType(tree.tpe) ||
+            tree
+              .getAttachment(NonErasedType)
+              .exists(isCheckedRiftAllocationOwnerType) ||
+            isCheckedRiftAllocationOwnerValue(qualifier)
+        case Typed(expr, _) =>
+          isCheckedRiftAllocationOwnerType(tree.tpe) ||
+            tree
+              .getAttachment(NonErasedType)
+              .exists(isCheckedRiftAllocationOwnerType) ||
+            isCheckedRiftAllocationOwnerValue(expr)
+        case Inlined(_, _, expr) =>
+          isCheckedRiftAllocationOwnerType(tree.tpe) ||
+            tree
+              .getAttachment(NonErasedType)
+              .exists(isCheckedRiftAllocationOwnerType) ||
+            isCheckedRiftAllocationOwnerValue(expr)
+        case Block(_, expr) =>
+          isCheckedRiftAllocationOwnerType(tree.tpe) ||
+            tree
+              .getAttachment(NonErasedType)
+              .exists(isCheckedRiftAllocationOwnerType) ||
+            isCheckedRiftAllocationOwnerValue(expr)
         case _ =>
-          val sym = tree.tpe.widenDealias.typeSymbol
-          sym.isPrimitiveValueClass || sym == defn.UnitClass
+          isCheckedRiftAllocationOwnerType(tree.tpe) ||
+            tree
+              .getAttachment(NonErasedType)
+              .exists(isCheckedRiftAllocationOwnerType) ||
+            (tree.symbol != NoSymbol &&
+              isCheckedRiftAllocationOwnerType(tree.symbol.info.finalResultType))
       }
 
     private def isNullLiteral(tree: Tree): Boolean =
@@ -297,29 +336,760 @@ trait NirGenExpr(using Context) {
       }
 
     private def isAllowedRiftConstructorArg(tree: Tree): Boolean =
-      isPrimitiveOrNull(tree) ||
-        isStableStaticHeapReference(tree) ||
-        isRiftHeapRootTree(tree) ||
-        isRiftAllocationTree(tree) ||
-        isKnownRiftRegionValue(tree)
+      isAllowedRiftConstructorArg(tree, allowDirectRegionConstruct = false)
+
+    private def isAllowedRiftConstructorArg(
+        tree: Tree,
+        allowDirectRegionConstruct: Boolean
+    ): Boolean =
+      tree match {
+        case If(_, thenp, elsep) =>
+          isAllowedRiftConstructorArg(thenp, allowDirectRegionConstruct) &&
+            isAllowedRiftConstructorArg(elsep, allowDirectRegionConstruct)
+        case Match(_, cases) =>
+          cases.nonEmpty && cases.forall { case CaseDef(_, _, body) =>
+            isAllowedRiftConstructorArg(body, allowDirectRegionConstruct)
+          }
+        case Return(expr, _) =>
+          isAllowedRiftConstructorArg(expr, allowDirectRegionConstruct)
+        case Labeled(_, body) =>
+          val values = labelReturnExprs(body)
+          values.nonEmpty &&
+            values.forall(isAllowedRiftConstructorArg(_, allowDirectRegionConstruct))
+        case TypeApply(Select(qualifier, nme.asInstanceOf_), _) =>
+          isAllowedRiftConstructorArg(qualifier, allowDirectRegionConstruct)
+        case Typed(expr, _) =>
+          isAllowedRiftConstructorArg(expr, allowDirectRegionConstruct)
+        case Inlined(_, _, expr) =>
+          isAllowedRiftConstructorArg(expr, allowDirectRegionConstruct)
+        case Block(_, expr) =>
+          isAllowedRiftConstructorArg(expr, allowDirectRegionConstruct)
+        case _ =>
+          val regionPlaced =
+            isRiftAllocationTree(tree) || isKnownRiftRegionValue(tree)
+          val directConstruct = directRegionConstructApply(tree)
+          val directConstructAllowed =
+            directConstruct.exists { app =>
+              (regionPlaced || allowDirectRegionConstruct) &&
+                (isScalaRuntimeArraysNewArray(calledSymbol(app)) ||
+                  app.args.forall { arg =>
+                    isAllowedRiftConstructorArg(
+                      arg,
+                      allowDirectRegionConstruct = true
+                    )
+                  })
+            }
+          isPrimitiveOrNull(tree) ||
+          isStableStaticHeapReference(tree) ||
+          isRiftHeapRootTree(tree) ||
+          isCapturedRiftRegionParam(tree) ||
+          (regionPlaced && directConstruct.isEmpty) ||
+          directConstructAllowed
+      }
+
+    private def inferredDecisionOwner(sym: Symbol): Option[Symbol] =
+      RiftRegionInference.allocationDecisions.get(sym).collect {
+        case RiftRegionInference.AllocationDecision(
+              RiftRegionInference.AllocationOwner.Region(owner),
+              _,
+              _
+            ) =>
+          owner
+      }
+
+    private def isAllowedRiftClosureCapture(
+        tree: Tree,
+        ownerSym: Option[Symbol]
+      ): Boolean =
+      isAllowedRiftConstructorArg(tree) ||
+        isCurrentRegionOwnedClosureReceiver(tree, ownerSym) ||
+        ownerSym.exists { owner =>
+          isCheckedRiftAllocationOwnerValue(tree) &&
+          (tree.symbol == owner ||
+            inferredDecisionOwner(tree.symbol).contains(owner))
+        }
+
+    private def isCurrentRegionOwnedClosureReceiver(
+        tree: Tree,
+        ownerSym: Option[Symbol]
+    ): Boolean =
+      tree match {
+        case This(_) =>
+          ownerSym.exists { owner =>
+            tree.symbol == curClassSym.get &&
+            List(
+              RiftRegionInference.inferredClosureBodyOwners.get(
+                curMethodSym.get
+              ),
+              RiftRegionInference.inferredClosureValueOwners.get(
+                curMethodSym.get
+              )
+            ).flatten.contains(owner)
+          }
+        case TypeApply(Select(qualifier, nme.asInstanceOf_), _) =>
+          isCurrentRegionOwnedClosureReceiver(qualifier, ownerSym)
+        case Typed(expr, _) =>
+          isCurrentRegionOwnedClosureReceiver(expr, ownerSym)
+        case Inlined(_, _, expr) =>
+          isCurrentRegionOwnedClosureReceiver(expr, ownerSym)
+        case Block(_, expr) =>
+          isCurrentRegionOwnedClosureReceiver(expr, ownerSym)
+        case _ =>
+          false
+      }
+
+    private def ownerSymbolRuntimeValues(sym: Symbol): List[nir.Val] =
+      (
+        inferredRiftOwnerValue(sym).toList :::
+          inferredDecisionOwner(sym).flatMap(inferredRiftOwnerValue).toList
+      ).distinct
+
+    private def ownerSymbolResolvesToValue(
+        sym: Symbol,
+        owner: nir.Val
+    ): Boolean =
+      ownerSymbolRuntimeValues(sym).contains(owner)
 
     private def typeMentionsRiftCapture(tpe: Type): Boolean = {
       def mentions(show: String): Boolean =
-        show.contains("^{")
+        show.contains("^{") || show.contains("->{")
       mentions(tpe.show) || mentions(tpe.widenDealias.show)
     }
 
     private def treeTypeMentionsRiftCapture(tree: Tree): Boolean =
       typeMentionsRiftCapture(tree.tpe) ||
+        (tree.symbol != NoSymbol && typeMentionsRiftCapture(tree.symbol.info)) ||
         tree
           .getAttachment(NonErasedType)
           .exists(typeMentionsRiftCapture)
+
+    private def isCapturedRiftRegionParam(tree: Tree): Boolean =
+      !isPrimitiveOrNull(tree) &&
+        (tree match {
+          case Ident(_) =>
+            val sym = tree.symbol
+            sym != NoSymbol &&
+              (sym.is(Param) || sym.owner == curMethodSym.get) &&
+              (treeTypeMentionsRiftCapture(tree) ||
+                typeMentionsRiftCapture(sym.info))
+          case TypeApply(Select(qualifier, nme.asInstanceOf_), _) =>
+            isCapturedRiftRegionParam(qualifier)
+          case Typed(expr, _)      => isCapturedRiftRegionParam(expr)
+          case Inlined(_, _, expr) => isCapturedRiftRegionParam(expr)
+          case Block(_, expr)      => isCapturedRiftRegionParam(expr)
+          case _                   => false
+        })
+
+    private def captureOwnerNames(tpe: Type): List[String] = {
+      val CapturePattern = """(?:\^|->)\{([^}]*)\}""".r
+      List(tpe.show, tpe.widenDealias.show).flatMap { text =>
+        CapturePattern
+          .findAllMatchIn(text)
+          .flatMap(_.group(1).split(","))
+          .map(_.trim)
+          .filter(_.nonEmpty)
+      }.distinct
+    }
+
+    private def uncapturedType(tpe: Type): Type =
+      try
+        CapturingType
+          .decomposeCapturingType(tpe)
+          .map((parent, _) => parent)
+          .getOrElse(tpe)
+      catch {
+        case _: Throwable => tpe
+      }
+
+    private def typeCandidates(tpe: Type): List[Type] =
+      List(
+        tpe,
+        tpe.widenDealias,
+        uncapturedType(tpe),
+        uncapturedType(tpe.widenDealias)
+      )
+
+    private def arrayElementType(tpe: Type): Option[Type] =
+      typeCandidates(tpe).collectFirst {
+        case AppliedType(_, elem :: Nil) => elem
+      }
+
+    private def arrayElementTypes(array: Tree): List[Type] =
+      (
+        array.tpe :: array
+          .getAttachment(NonErasedType)
+          .toList :::
+          Option
+            .when(array.symbol != NoSymbol)(array.symbol.info)
+          .toList
+      ).flatMap(arrayElementType).distinct
+
+    private def capturedOwnerValuesFromTypes(types: List[Type]): List[nir.Val] =
+      types.flatMap(inferredRiftOwnerValueFromCapturedType).distinct
+
+    private def capturedArrayOwnerValues(array: Tree): List[nir.Val] =
+      capturedOwnerValuesFromTypes(
+        array.tpe :: array
+          .getAttachment(NonErasedType)
+          .toList :::
+          Option
+            .when(array.symbol != NoSymbol)(array.symbol.info)
+            .toList
+      )
+
+    private def inferredArrayValueOwner(array: Tree): Option[nir.Val] =
+      RiftRegionInference.inferredAllocationOwners
+        .get(array.symbol)
+        .orElse(inferredDecisionOwner(array.symbol))
+        .flatMap(inferredRiftOwnerValue)
+
+    private def prepareDirectClosureValueWithOwner(
+        value: Tree,
+        owner: nir.Val
+    ): Unit =
+      directReturnedClosures(value).foreach { closure =>
+        capturedClosureOwnerSym(closure)
+          .filter(ownerSymbolResolvesToValue(_, owner))
+          .foreach { ownerSym =>
+            attachDirectClosureOwnerValue(closure, ownerSym, owner)
+          }
+      }
+
+    private def prepareDirectRiftArrayStoreValue(
+        array: Tree,
+        value: Tree
+    ): Unit = {
+      RiftRegionInference.inferredArrayElementOwners
+        .get(array.symbol)
+        .foreach { ownerSym =>
+          val owner = inferredRiftOwnerValue(ownerSym)
+          owner.foreach { owner =>
+            directReturnedClosures(value).foreach { closure =>
+              attachDirectClosureOwnerValue(closure, ownerSym, owner)
+            }
+          }
+          owner.foreach { owner =>
+            directReturnedRegionConstructApplies(value).foreach { app =>
+              attachRiftAllocationOwnerValue(app, owner)
+            }
+          }
+        }
+      arrayElementTypes(array)
+        .find(typeMentionsRiftCapture)
+        .foreach { expected =>
+          inferredRiftOwnerValueFromCapturedType(expected).foreach { owner =>
+            prepareDirectClosureValueWithOwner(value, owner)
+          }
+          inferDirectRiftAllocationFromExpectedType(value, expected)
+        }
+      capturedArrayOwnerValues(array) match {
+        case owner :: Nil =>
+          prepareDirectClosureValueWithOwner(value, owner)
+        case _ => ()
+      }
+      inferredArrayValueOwner(array).foreach { owner =>
+        prepareDirectClosureValueWithOwner(value, owner)
+      }
+    }
+
+    private def directNewApply(tree: Tree): Option[Apply] =
+      tree match {
+        case app @ Apply(Select(New(_), nme.CONSTRUCTOR), _) => Some(app)
+        case app @ Apply(TypeApply(Select(New(_), nme.CONSTRUCTOR), _), _) =>
+          Some(app)
+        case Typed(expr, _)                                  => directNewApply(expr)
+        case Inlined(_, _, expr)                             => directNewApply(expr)
+        case Block(_, expr)                                  => directNewApply(expr)
+        case _                                               => None
+      }
+
+    private def directSomeApply(tree: Tree): Option[Apply] =
+      tree match {
+        case app @ Apply(_, _ :: Nil) if isScalaSomeApply(calledSymbol(app)) =>
+          Some(app)
+        case Typed(expr, _)      => directSomeApply(expr)
+        case Inlined(_, _, expr) => directSomeApply(expr)
+        case Block(_, expr)      => directSomeApply(expr)
+        case _                   => None
+      }
+
+    private def directOptionApply(tree: Tree): Option[Apply] =
+      tree match {
+        case app @ Apply(_, _ :: Nil) if isScalaOptionApply(calledSymbol(app)) =>
+          Some(app)
+        case Typed(expr, _)      => directOptionApply(expr)
+        case Inlined(_, _, expr) => directOptionApply(expr)
+        case Block(_, expr)      => directOptionApply(expr)
+        case _                   => None
+      }
+
+    private def directTupleApply(tree: Tree): Option[Apply] =
+      tree match {
+        case app @ Apply(_, args) if isScalaTupleApply(calledSymbol(app), args.size) =>
+          Some(app)
+        case Typed(expr, _)      => directTupleApply(expr)
+        case Inlined(_, _, expr) => directTupleApply(expr)
+        case Block(_, expr)      => directTupleApply(expr)
+        case _                   => None
+      }
+
+    private def directArrayApply(tree: Tree): Option[Apply] =
+      tree match {
+        case app @ Apply(_, _) if isScalaRuntimeArraysNewArray(calledSymbol(app)) =>
+          Some(app)
+        case TypeApply(Select(expr, nme.asInstanceOf_), _) =>
+          directArrayApply(expr)
+        case Typed(expr, _)      => directArrayApply(expr)
+        case Inlined(_, _, expr) => directArrayApply(expr)
+        case Block(_, expr)      => directArrayApply(expr)
+        case _                   => None
+      }
+
+    private def directClosure(tree: Tree): Option[Closure] =
+      tree match {
+        case closure: Closure                              => Some(closure)
+        case Typed(expr, _)                                => directClosure(expr)
+        case Inlined(_, _, expr)                           => directClosure(expr)
+        case Block(_, expr)                                => directClosure(expr)
+        case TypeApply(Select(expr, nme.asInstanceOf_), _) => directClosure(expr)
+        case _                                             => None
+      }
+
+    private def directReturnedClosures(tree: Tree): List[Closure] =
+      directClosure(tree).toList match {
+        case found @ (_ :: _) => found
+        case Nil =>
+          tree match {
+            case Typed(expr, _) =>
+              directReturnedClosures(expr)
+            case Inlined(_, _, expr) =>
+              directReturnedClosures(expr)
+            case Block(_, expr) =>
+              directReturnedClosures(expr)
+            case TypeApply(Select(expr, nme.asInstanceOf_), _) =>
+              directReturnedClosures(expr)
+            case If(_, thenp, elsep) =>
+              directReturnedClosures(thenp) :::
+                directReturnedClosures(elsep)
+            case Match(_, cases) =>
+              cases.flatMap { case CaseDef(_, _, body) =>
+                directReturnedClosures(body)
+              }
+            case _ =>
+              Nil
+          }
+      }
+
+    private def capturedClosureOwnerSym(
+        closure: Closure
+    ): Option[Symbol] = {
+      val owners =
+        closure.env
+          .filter(isCheckedRiftAllocationOwnerValue)
+          .map(_.symbol)
+          .filter(_ != NoSymbol)
+          .distinct
+      owners match {
+        case owner :: Nil => Some(owner)
+        case _            => None
+      }
+    }
+
+    def prepareDirectReturnedClosureAllocation(tree: Tree): Unit =
+      directReturnedClosures(tree).foreach { closure =>
+        if !closure.hasAttachment(AllocationZoneInstance) then
+          val ownerSym =
+            inferredClosureOwnerSym(closure).orElse(
+              capturedClosureOwnerSym(closure)
+            )
+          val owner = ownerSym.flatMap(inferredRiftOwnerValue)
+          owner.foreach { owner =>
+            closure.putAttachment(AllocationZoneInstance, owner)
+            ownerSym.foreach { sym =>
+              closure.putAttachment(
+                NirDefinitions.InferredRiftAllocationOwner,
+                sym
+              )
+            }
+          }
+      }
+
+    def prepareDirectReturnedRiftAllocation(tree: Tree): Unit =
+      RiftRegionInference.inferredClosureBodyOwners
+        .get(curMethodSym.get)
+        .orElse(
+          RiftRegionInference.inferredClosureValueOwners.get(curMethodSym.get)
+        )
+        .foreach { ownerSym =>
+          inferredRiftOwnerValue(ownerSym).foreach { owner =>
+            val localConstructs = mutable.Map.empty[Symbol, List[Apply]]
+            val localAliases = mutable.Map.empty[Symbol, List[Symbol]]
+            val localClosures = mutable.Map.empty[Symbol, List[Closure]]
+            val localClosureAliases = mutable.Map.empty[Symbol, List[Symbol]]
+
+            def scan(tree: Tree): Unit =
+              tree match {
+                case vd: ValDef if !vd.symbol.is(Mutable) =>
+                  val apps = directReturnedRegionConstructApplies(vd.rhs)
+                  if apps.nonEmpty then localConstructs.update(vd.symbol, apps)
+                  val aliases = returnedLocalIdents(vd.rhs)
+                  if aliases.nonEmpty then localAliases.update(vd.symbol, aliases)
+                  val closures = directReturnedClosures(vd.rhs)
+                  if closures.nonEmpty then {
+                    closures.foreach { closure =>
+                      attachDirectClosureOwnerValue(closure, ownerSym, owner)
+                    }
+                    localClosures.update(vd.symbol, closures)
+                    riftRegionAllocatedSyms += vd.symbol
+                  }
+                  val closureAliases = aliases.filter { alias =>
+                    localClosures.contains(alias) ||
+                    localClosureAliases.contains(alias)
+                  }
+                  if closureAliases.nonEmpty then {
+                    localClosureAliases.update(vd.symbol, closureAliases)
+                    riftRegionAllocatedSyms += vd.symbol
+                  }
+                  scan(vd.rhs)
+                case vd: ValDef =>
+                  localConstructs.remove(vd.symbol)
+                  localAliases.remove(vd.symbol)
+                  localClosures.remove(vd.symbol)
+                  localClosureAliases.remove(vd.symbol)
+                case Typed(expr, _) =>
+                  scan(expr)
+                case Inlined(_, _, expr) =>
+                  scan(expr)
+                case Block(stats, expr) =>
+                  stats.foreach(scan)
+                  scan(expr)
+                case TypeApply(Select(expr, nme.asInstanceOf_), _) =>
+                  scan(expr)
+                case Return(expr, _) =>
+                  scan(expr)
+                case Labeled(_, body) =>
+                  scan(body)
+                case If(_, thenp, elsep) =>
+                  scan(thenp)
+                  scan(elsep)
+                case Match(_, cases) =>
+                  cases.foreach { case CaseDef(_, _, body) => scan(body) }
+                case _ => ()
+              }
+
+            def resolveLocalConstructs(
+                sym: Symbol,
+                seen: Set[Symbol] = Set.empty
+            ): List[Apply] =
+              if sym == NoSymbol || seen.contains(sym) then Nil
+              else
+                localConstructs.getOrElse(sym, Nil) :::
+                  localAliases
+                    .getOrElse(sym, Nil)
+                    .flatMap(resolveLocalConstructs(_, seen + sym))
+
+            scan(tree)
+
+            val apps =
+              (
+                directReturnedRegionConstructApplies(tree) :::
+                  returnedLocalIdents(tree).flatMap(resolveLocalConstructs(_))
+              ).distinct
+
+            apps.foreach { app =>
+              attachRiftAllocationOwnerValue(app, owner, Some(ownerSym))
+            }
+          }
+        }
+
+    private def inferredClosureOwnerSym(closure: Closure): Option[Symbol] =
+      closure
+        .getAttachment(NirDefinitions.InferredRiftAllocationOwner)
+        .orElse {
+          val Closure(_, fun, _) = closure: @unchecked
+          RiftRegionInference.inferredClosureValueOwners.get(fun.symbol)
+        }
+        .orElse(
+          RiftRegionInference
+            .sourceSpanKey(closure.srcPos)
+            .flatMap(RiftRegionInference.inferredClosureOwnersBySourceSpan.get)
+        )
+        .orElse {
+          val captureOwnerSyms =
+            closure.env
+              .flatMap(env =>
+                RiftRegionInference.inferredAllocationOwners
+                  .get(env.symbol)
+                  .toList
+              )
+              .distinct
+          captureOwnerSyms match {
+            case owner :: Nil => Some(owner)
+            case _            => None
+          }
+        }
+        .orElse(
+          closure
+            .getAttachment(NonErasedType)
+            .flatMap(inferredClosureEnvOwnerSym(closure, _))
+        )
+        .orElse(inferredClosureEnvOwnerSym(closure, closure.tpe))
+
+    private def directRegionConstructApply(tree: Tree): Option[Apply] =
+      directNewApply(tree)
+        .orElse(directSomeApply(tree))
+        .orElse(directOptionApply(tree))
+        .orElse(directTupleApply(tree))
+        .orElse(directArrayApply(tree))
+
+    private def directReturnedRegionConstructApplies(
+        tree: Tree
+    ): List[Apply] =
+      directRegionConstructApply(tree).toList match {
+        case found @ (_ :: _) => found
+        case Nil =>
+          tree match {
+            case Typed(expr, _) =>
+              directReturnedRegionConstructApplies(expr)
+            case Inlined(_, _, expr) =>
+              directReturnedRegionConstructApplies(expr)
+            case Block(_, expr) =>
+              directReturnedRegionConstructApplies(expr)
+            case TypeApply(Select(expr, nme.asInstanceOf_), _) =>
+              directReturnedRegionConstructApplies(expr)
+            case Return(expr, _) =>
+              directReturnedRegionConstructApplies(expr)
+            case Labeled(_, body) =>
+              directReturnedRegionConstructApplies(body)
+            case If(_, thenp, elsep) =>
+              directReturnedRegionConstructApplies(thenp) :::
+                directReturnedRegionConstructApplies(elsep)
+            case Match(_, cases) =>
+              cases.flatMap { case CaseDef(_, _, body) =>
+                directReturnedRegionConstructApplies(body)
+              }
+            case _ =>
+              Nil
+          }
+      }
+
+    private def attachNestedDirectRiftAllocations(
+        tree: Tree,
+        owner: nir.Val,
+        ownerSym: Option[Symbol] = None
+    ): Unit = {
+      directReturnedClosures(tree).foreach { closure =>
+        if !closure.hasAttachment(AllocationZoneInstance) then
+          closure.putAttachment(AllocationZoneInstance, owner)
+        ownerSym.foreach { sym =>
+          closure.putAttachment(
+            NirDefinitions.InferredRiftAllocationOwner,
+            sym
+          )
+        }
+      }
+      directRegionConstructApply(tree).foreach { nested =>
+        if !nested.hasAttachment(AllocationZoneInstance) then
+          nested.putAttachment(AllocationZoneInstance, owner)
+        nested.args.foreach(
+          attachNestedDirectRiftAllocations(_, owner, ownerSym)
+        )
+      }
+    }
+
+    private def inferredRiftOwnerValue(ownerSym: Symbol): Option[nir.Val] = {
+      val env = curMethodEnv.get
+      val ownerTypes =
+        List(
+          ownerSym.info.resultType,
+          ownerSym.info.resultType.widenDealias,
+          ownerSym.info,
+          ownerSym.info.widenDealias
+        ).filter(tpe => tpe != NoType && !tpe.isInstanceOf[MethodType])
+          .distinct
+
+      env
+        .get(ownerSym)
+        .orElse(env.getUniqueBySymbolName(ownerSym))
+        .orElse(
+          ownerTypes.view
+            .flatMap(tpe => env.getUniqueByType(genType(tpe)))
+            .headOption
+        )
+    }
+
+    private def inferredRiftOwnerValueFromCapturedType(
+        tpe: Type
+    ): Option[nir.Val] = {
+      val owners =
+        captureOwnerNames(tpe)
+          .flatMap(curMethodEnv.get.getUniqueBySymbolName)
+          .distinct
+      owners match {
+        case owner :: Nil => Some(owner)
+        case _            => None
+      }
+    }
+
+    private def capturedClosureOwnerValueFromType(
+        closure: Closure
+    ): Option[nir.Val] = {
+      val owners =
+        captureOwnerNames(closure.tpe)
+          .flatMap(curMethodEnv.get.getUniqueBySymbolName)
+          .distinct
+      owners match {
+        case owner :: Nil => Some(owner)
+        case _            => None
+      }
+    }
+
+    private def closureCapturesOwnerValue(
+        closure: Closure,
+        owner: nir.Val
+    ): Boolean =
+      capturedClosureOwnerSym(closure)
+        .exists(ownerSymbolResolvesToValue(_, owner)) ||
+        capturedClosureOwnerValueFromType(closure).contains(owner)
+
+    private def attachDirectClosureOwnerValue(
+        closure: Closure,
+        ownerSym: Symbol,
+        owner: nir.Val
+    ): Unit =
+      if closureCapturesOwnerValue(closure, owner) then {
+        if !closure.hasAttachment(AllocationZoneInstance) then
+          closure.putAttachment(AllocationZoneInstance, owner)
+        closure.putAttachment(
+          NirDefinitions.InferredRiftAllocationOwner,
+          ownerSym
+        )
+      }
+
+    private def prepareDirectClosureOwnerTokenValue(
+        ownerTree: Tree,
+        value: Tree
+    ): Unit =
+      if isCheckedRiftAllocationOwnerValue(ownerTree) then
+        directLocalIdent(ownerTree)
+          .orElse(Option(ownerTree.symbol).filter(_ != NoSymbol))
+          .flatMap(ownerSym => inferredRiftOwnerValue(ownerSym).map(ownerSym -> _))
+          .foreach { (ownerSym, owner) =>
+            directReturnedClosures(value).foreach { closure =>
+              attachDirectClosureOwnerValue(closure, ownerSym, owner)
+            }
+          }
+
+    private def inferredClosureEnvOwnerSym(
+        closure: Closure,
+        tpe: Type
+    ): Option[Symbol] = {
+      val ownerNames = captureOwnerNames(tpe).toSet
+      val matches =
+        closure.env.flatMap { env =>
+          val sym = env.symbol
+          Option.when(
+            sym != NoSymbol &&
+              ownerNames.contains(sym.name.toString) &&
+              isCheckedRiftAllocationOwnerValue(env)
+          )(sym)
+        }.distinct
+      matches match {
+        case owner :: Nil => Some(owner)
+        case _            => None
+      }
+    }
+
+    private def attachInferredRiftAllocationOwner(
+        app: Apply,
+        ownerSym: Symbol
+    ): Option[nir.Val] =
+      inferredRiftOwnerValue(ownerSym)
+        .map(owner => attachRiftAllocationOwnerValue(app, owner, Some(ownerSym)))
+
+    private def attachRiftAllocationOwnerValue(
+        app: Apply,
+        owner: nir.Val,
+        ownerSym: Option[Symbol] = None
+    ): nir.Val = {
+      val Apply(_, args) = app: @unchecked
+      args.foreach(attachNestedDirectRiftAllocations(_, owner, ownerSym))
+      if !isScalaRuntimeArraysNewArray(calledSymbol(app)) then
+        checkRiftConstructorArgs(args)
+      if !app.hasAttachment(AllocationZoneInstance) then
+        app.putAttachment(AllocationZoneInstance, owner)
+      owner
+    }
+
+    private def inferDirectRiftAllocationFromExpectedType(
+        rhs: Tree,
+        expected: Type
+    ): Option[nir.Val] = {
+      var attached: Option[nir.Val] = None
+      inferredRiftOwnerValueFromCapturedType(expected).foreach { owner =>
+        directReturnedRegionConstructApplies(rhs).foreach { app =>
+          attachRiftAllocationOwnerValue(app, owner)
+          attached = Some(owner)
+        }
+      }
+      attached
+    }
+
+    private def inferDirectRiftAllocation(app: Apply): Option[nir.Val] =
+      app
+        .getAttachment(NirDefinitions.InferredRiftAllocationOwner)
+        .orElse(
+          RiftRegionInference
+            .sourceSpanKey(app.srcPos)
+            .flatMap(
+              RiftRegionInference.inferredAllocationOwnersBySourceSpan.get
+            )
+        )
+        .flatMap(attachInferredRiftAllocationOwner(app, _))
+
+    private def inferredAllocationOwnerForTarget(
+        target: Symbol
+    ): Option[Symbol] =
+      RiftRegionInference.inferredAllocationOwners.get(target).orElse {
+        val matches =
+          RiftRegionInference.inferredAllocationOwners.iterator
+            .collect {
+              case (candidate, owner) if candidate.name == target.name =>
+                owner
+            }
+            .toList
+            .distinct
+        matches match {
+          case owner :: Nil => Some(owner)
+          case _            => None
+        }
+      }
+
+    private def inferDirectRiftAllocation(
+        target: Symbol,
+        rhs: Tree
+    ): Option[nir.Val] = {
+      var attached: Option[nir.Val] = None
+      directReturnedRegionConstructApplies(rhs).foreach { app =>
+        app.getAttachment(NirDefinitions.InferredRiftAllocationOwner)
+          .orElse(inferredAllocationOwnerForTarget(target))
+          .flatMap(attachInferredRiftAllocationOwner(app, _))
+          .foreach(owner => attached = Some(owner))
+      }
+      attached
+    }
 
     private def isRiftRegionCapturedHeapTree(tree: Tree): Boolean =
       tree match {
         case Apply(Select(New(_), nme.CONSTRUCTOR), args) =>
           args.exists(treeCarriesRiftCapture)
-        case Apply(fun, args) if fun.symbol == defn.newArrayMethod =>
+        case app @ Apply(_, args) if isScalaRuntimeArraysNewArray(calledSymbol(app)) =>
+          args.exists(treeCarriesRiftCapture)
+        case app @ Apply(_, args) if isScalaSomeApply(calledSymbol(app)) =>
+          args.exists(treeCarriesRiftCapture)
+        case app @ Apply(_, args) if isScalaOptionApply(calledSymbol(app)) =>
+          args.exists(treeCarriesRiftCapture)
+        case app @ Apply(_, args) if isScalaTupleApply(calledSymbol(app), args.size) =>
           args.exists(treeCarriesRiftCapture)
         case Apply(fun, args) =>
           riftRegionCapturedHeapSyms.contains(fun.symbol)
@@ -327,6 +1097,16 @@ trait NirGenExpr(using Context) {
           env.exists(treeCarriesRiftCapture) ||
             treeCarriesRiftCapture(fun) ||
             treeTypeMentionsRiftCapture(tree)
+        case If(_, thenp, elsep) =>
+          treeCarriesRiftCapture(thenp) || treeCarriesRiftCapture(elsep)
+        case Match(_, cases) =>
+          cases.exists { case CaseDef(_, _, body) =>
+            treeCarriesRiftCapture(body)
+          }
+        case Return(expr, _) =>
+          treeCarriesRiftCapture(expr)
+        case Labeled(_, body) =>
+          labelReturnExprs(body).exists(treeCarriesRiftCapture)
         case TypeApply(Select(qualifier, nme.asInstanceOf_), _) =>
           treeCarriesRiftCapture(qualifier)
         case Typed(expr, _) =>
@@ -343,6 +1123,28 @@ trait NirGenExpr(using Context) {
       isRiftAllocationTree(tree) ||
         isKnownRiftRegionValue(tree) ||
         isRiftRegionCapturedHeapTree(tree)
+
+    private def labelReturnExprs(tree: Tree): List[Tree] =
+      tree match {
+        case Return(expr, _) =>
+          expr :: Nil
+        case Labeled(_, body) =>
+          labelReturnExprs(body)
+        case Block(stats, expr) =>
+          stats.flatMap(labelReturnExprs) ::: labelReturnExprs(expr)
+        case If(_, thenp, elsep) =>
+          labelReturnExprs(thenp) ::: labelReturnExprs(elsep)
+        case Match(_, cases) =>
+          cases.flatMap { case CaseDef(_, _, body) =>
+            labelReturnExprs(body)
+          }
+        case Typed(expr, _) =>
+          labelReturnExprs(expr)
+        case Inlined(_, _, expr) =>
+          labelReturnExprs(expr)
+        case _ =>
+          Nil
+      }
 
     private def isInsideRiftRegionImplementation: Boolean =
       curClassSym.get.fullName.toString.startsWith(
@@ -373,32 +1175,216 @@ trait NirGenExpr(using Context) {
           value.srcPos
         )
 
+    private val riftAllocationRejectMessage =
+      "Rift checked region allocation cannot store an unrooted heap object; use RiftRegion.root(value) for heap metadata."
+
+    private def hasRegionPlacedDirectConstructShape(tree: Tree): Boolean =
+      directRegionConstructApply(tree).exists { app =>
+        isRiftAllocationTree(app) || isKnownRiftRegionValue(app)
+      } ||
+        (tree match {
+          case If(_, thenp, elsep) =>
+            hasRegionPlacedDirectConstructShape(thenp) ||
+              hasRegionPlacedDirectConstructShape(elsep)
+          case Match(_, cases) =>
+            cases.exists { case CaseDef(_, _, body) =>
+              hasRegionPlacedDirectConstructShape(body)
+            }
+          case Return(expr, _) =>
+            hasRegionPlacedDirectConstructShape(expr)
+          case Labeled(_, body) =>
+            labelReturnExprs(body).exists(hasRegionPlacedDirectConstructShape)
+          case TypeApply(Select(qualifier, nme.asInstanceOf_), _) =>
+            hasRegionPlacedDirectConstructShape(qualifier)
+          case Typed(expr, _) =>
+            hasRegionPlacedDirectConstructShape(expr)
+          case Inlined(_, _, expr) =>
+            hasRegionPlacedDirectConstructShape(expr)
+          case Block(_, expr) =>
+            hasRegionPlacedDirectConstructShape(expr)
+          case _ =>
+            false
+        })
+
+    private def disallowedRiftContainerValueMessage(
+        value: Tree,
+        defaultMessage: String
+    ): String =
+      if hasRegionPlacedDirectConstructShape(value) then riftAllocationRejectMessage
+      else defaultMessage
+
     private def checkRiftConstructorArgs(args: List[Tree]): Unit =
       args.foreach { arg =>
         if !isAllowedRiftConstructorArg(arg) then
-          report.error(
-            "Rift checked region allocation cannot store an unrooted heap object; use RiftRegion.root(value) for heap metadata.",
-            arg.srcPos
-          )
+          report.error(riftAllocationRejectMessage, arg.srcPos)
       }
 
+    private def isRiftRegionArrayValue(array: Tree): Boolean =
+      isKnownRiftRegionValue(array) || treeTypeMentionsRiftCapture(array)
+
     private def checkRiftArrayStore(array: Tree, value: Tree): Unit =
-      if isKnownRiftRegionValue(array) && !isAllowedRiftConstructorArg(value)
+      if isRiftRegionArrayValue(array) then
+        prepareDirectRiftArrayStoreValue(array, value)
+      if isRiftRegionArrayValue(array) && !isAllowedRiftConstructorArg(value)
       then
         report.error(
-          "Rift checked region array store cannot store an unrooted heap object; use RiftRegion.root(value) for heap metadata.",
+          disallowedRiftContainerValueMessage(
+            value,
+            "Rift checked region array store cannot store an unrooted heap object; use RiftRegion.root(value) for heap metadata."
+          ),
           value.srcPos
         )
-      else if !isKnownRiftRegionValue(array) && treeCarriesRiftCapture(value)
+      else if !isRiftRegionArrayValue(array) && treeCarriesRiftCapture(value)
       then riftRegionCapturedHeapSyms += array.symbol
 
     private def checkRiftObjectBufferAppend(value: Tree): Unit =
       if !isAllowedRiftConstructorArg(value)
       then
         report.error(
-          "Rift checked object buffer cannot store an unrooted heap object; use RiftRegion.root(value) for heap metadata.",
+          disallowedRiftContainerValueMessage(
+            value,
+            "Rift checked object buffer cannot store an unrooted heap object; use RiftRegion.root(value) for heap metadata."
+          ),
           value.srcPos
         )
+
+    private def appliedArguments(tree: Tree): List[Tree] =
+      tree match {
+        case Apply(fun, args)     => appliedArguments(fun) ::: args
+        case TypeApply(fun, _)    => appliedArguments(fun)
+        case Typed(expr, _)       => appliedArguments(expr)
+        case Inlined(_, _, expr)  => appliedArguments(expr)
+        case _                    => Nil
+      }
+
+    private def fullMethodArgumentPairs(
+        app: Apply,
+        sym: Symbol
+    ): List[(Symbol, Tree)] = {
+      val params = sym.paramSymss.flatten.filterNot(_.isType)
+      val args = appliedArguments(app)
+      if params.nonEmpty && args.length >= params.length then
+        params.zip(args).take(params.length)
+      else Nil
+    }
+
+    private def directLocalIdent(tree: Tree): Option[Symbol] =
+      tree match {
+        case id: Ident                                      => Some(id.symbol)
+        case Typed(expr, _)                                => directLocalIdent(expr)
+        case Inlined(_, _, expr)                           => directLocalIdent(expr)
+        case Block(Nil, expr)                              => directLocalIdent(expr)
+        case TypeApply(Select(expr, nme.asInstanceOf_), _) => directLocalIdent(expr)
+        case _                                             => None
+      }
+
+    private def returnedLocalIdents(tree: Tree): List[Symbol] =
+      tree match {
+        case id: Ident =>
+          id.symbol :: Nil
+        case Return(expr, _) =>
+          returnedLocalIdents(expr)
+        case Labeled(_, body) =>
+          returnedLocalIdents(body)
+        case Typed(expr, _) =>
+          returnedLocalIdents(expr)
+        case Inlined(_, _, expr) =>
+          returnedLocalIdents(expr)
+        case Block(_, expr) =>
+          returnedLocalIdents(expr)
+        case TypeApply(Select(expr, nme.asInstanceOf_), _) =>
+          returnedLocalIdents(expr)
+        case If(_, thenp, elsep) =>
+          returnedLocalIdents(thenp) ::: returnedLocalIdents(elsep)
+        case Match(_, cases) =>
+          cases.flatMap { case CaseDef(_, _, body) =>
+            returnedLocalIdents(body)
+          }
+        case _ =>
+          Nil
+      }
+
+    private def methodOwnerSymbolSubstitutions(
+        pairs: List[(Symbol, Tree)]
+    ): Map[String, Symbol] =
+      pairs.flatMap { (param, value) =>
+        if isCheckedRiftAllocationOwnerType(param.info) then
+          directLocalIdent(value)
+            .filter(owner => owner != NoSymbol)
+            .filter(owner =>
+              isCheckedRiftAllocationOwnerValue(value) ||
+                isCheckedRiftAllocationOwnerType(owner.info)
+            )
+            .map(owner => param.name.toString -> owner)
+        else None
+      }.toMap
+
+    private def prepareRiftCapturedMethodArgumentAllocations(
+        app: Apply,
+        sym: Symbol
+    ): Unit =
+      if !sym.isClassConstructor &&
+        !isRuntimeRiftAllocateSymbol(sym) &&
+        !isRiftRegionRuntimeAllocatorForwarder(app, sym)
+      then {
+        val pairs = fullMethodArgumentPairs(app, sym)
+        val ownerSubstitutions = methodOwnerSymbolSubstitutions(pairs)
+        if ownerSubstitutions.nonEmpty then
+          pairs.foreach { (param, value) =>
+            if typeMentionsRiftCapture(param.info) &&
+              !isCheckedRiftAllocationOwnerType(param.info) &&
+              !isRiftRegionRuntimeAllocatorForwarderParam(param)
+            then {
+              val owners =
+                captureOwnerNames(param.info)
+                  .flatMap(ownerSubstitutions.get)
+                  .distinct
+              owners match {
+                case owner :: Nil =>
+                  inferredRiftOwnerValue(owner).foreach { ownerValue =>
+                    directReturnedClosures(value).foreach { closure =>
+                      attachDirectClosureOwnerValue(
+                        closure,
+                        owner,
+                        ownerValue
+                      )
+                    }
+                  }
+                  directReturnedRegionConstructApplies(value).foreach { construct =>
+                    if !construct.hasAttachment(
+                        NirDefinitions.InferredRiftAllocationOwner
+                      )
+                    then
+                      construct.putAttachment(
+                        NirDefinitions.InferredRiftAllocationOwner,
+                        owner
+                      )
+                  }
+                case _ => ()
+              }
+            }
+          }
+      }
+
+    private def checkRiftCapturedMethodArguments(
+        app: Apply,
+        sym: Symbol
+    ): Unit =
+      if !sym.isClassConstructor &&
+        !isRuntimeRiftAllocateSymbol(sym) &&
+        !isRiftRegionRuntimeAllocatorForwarder(app, sym)
+      then
+        fullMethodArgumentPairs(app, sym).foreach { (param, value) =>
+          if typeMentionsRiftCapture(param.info) &&
+            !isCheckedRiftAllocationOwnerType(param.info) &&
+            !isRiftRegionRuntimeAllocatorForwarderParam(param) &&
+            !isAllowedRiftConstructorArg(value)
+          then
+            report.error(
+              "Rift checked region method argument cannot pass an unrooted heap object; use RiftRegion.root(value) for heap metadata.",
+              value.srcPos
+            )
+        }
 
     private def riftCheckedContainerValueArg(args: List[Tree]): Tree =
       if args.length >= 7 then args(args.length - 5)
@@ -421,6 +1407,25 @@ trait NirGenExpr(using Context) {
         case _                 => tree.symbol
       }
 
+    private def isScalaSomeApply(sym: Symbol): Boolean =
+      sym.name.toString == "apply" &&
+        sym.owner.fullName.toString.stripSuffix("$") == "scala.Some"
+
+    private def isScalaOptionApply(sym: Symbol): Boolean =
+      sym.name.toString == "apply" &&
+        sym.owner.fullName.toString.stripSuffix("$") == "scala.Option"
+
+    private def isScalaTupleApply(sym: Symbol, argCount: Int): Boolean =
+      sym.name.toString == "apply" &&
+        argCount >= 2 &&
+        argCount <= 22 &&
+        sym.owner.fullName.toString.stripSuffix("$") == s"scala.Tuple$argCount"
+
+    private def isScalaRuntimeArraysNewArray(sym: Symbol): Boolean =
+      sym == defn.newArrayMethod ||
+        (sym.name.toString == "newArray" &&
+          sym.owner.fullName.toString.stripSuffix("$") == "scala.runtime.Arrays")
+
     private def isHeapSetterApply(tree: Tree): Boolean = {
       val sym = calledSymbol(tree)
       sym.name.toString.endsWith("_=")
@@ -437,6 +1442,47 @@ trait NirGenExpr(using Context) {
         defnNir.RuntimeRiftAllocator_allocateOpen.exists(_ == calledSymbol(tree)) ||
         defnNir.RuntimeRiftAllocator_allocateOpenHandle.exists(_ == calledSymbol(tree)) ||
         defnNir.RuntimeRiftAllocator_allocateOpenHandleNoZero.exists(_ == calledSymbol(tree))
+
+    private def isRuntimeRiftAllocateSymbol(sym: Symbol): Boolean =
+      sym.fullName.toString.contains("scala.scalanative.runtime.RiftAllocator") &&
+        (sym.name.toString == "allocate" ||
+          sym.name.toString == "allocateOpen" ||
+          sym.name.toString == "allocateOpenHandle" ||
+          sym.name.toString == "allocateOpenHandleNoZero")
+
+    private def isRuntimeRiftAllocateName(name: String): Boolean =
+      name == "allocate" ||
+        name == "allocateOpen" ||
+        name == "allocateOpenHandle" ||
+        name == "allocateOpenHandleNoZero"
+
+    private def isRiftRegionImplementationSource(tree: Tree): Boolean =
+      tree.sourcePos.span.exists &&
+        tree.sourcePos.source.exists &&
+        tree.sourcePos.source.file.absolute.jpath.toString
+          .endsWith("scala/scalanative/memory/RiftRegion.scala")
+
+    private def isInsideRiftRegionImplementationSource: Boolean = {
+      val pos = curMethodSym.get.sourcePos
+      pos.span.exists &&
+        pos.source.exists &&
+        pos.source.file.absolute.jpath.toString
+          .endsWith("scala/scalanative/memory/RiftRegion.scala")
+    }
+
+    private def isRiftRegionRuntimeAllocatorForwarder(
+        app: Apply,
+        sym: Symbol
+    ): Boolean =
+      isRiftRegionImplementationSource(app) &&
+        (isRuntimeRiftAllocateName(sym.name.toString) ||
+          isRuntimeRiftAllocateName(calledSymbol(app).name.toString))
+
+    private def isRiftRegionRuntimeAllocatorForwarderParam(
+        param: Symbol
+    ): Boolean =
+      isInsideRiftRegionImplementationSource &&
+        isRuntimeRiftAllocateName(param.owner.name.toString)
 
     private def isRuntimeRiftAllocateInCheckedRegion(tree: Tree): Boolean =
       tree match {
@@ -457,6 +1503,15 @@ trait NirGenExpr(using Context) {
 
     private def isRiftAllocationTree(tree: Tree): Boolean =
       tree match {
+        case _ if tree.hasAttachment(AllocationZoneInstance) =>
+          true
+        case _ if tree.hasAttachment(NirDefinitions.InferredRiftAllocationOwner) =>
+          true
+        case app: Apply
+            if RiftRegionInference
+              .sourceSpanKey(app.srcPos)
+              .exists(RiftRegionInference.inferredAllocationOwnersBySourceSpan.contains) =>
+          true
         case app: Apply =>
           isRuntimeRiftAllocateInCheckedRegion(app) ||
             isRuntimeSafeZoneAllocateInCheckedRift(app) ||
@@ -468,7 +1523,25 @@ trait NirGenExpr(using Context) {
         case Typed(expr, _)      => isRiftAllocationTree(expr)
         case Inlined(_, _, expr) => isRiftAllocationTree(expr)
         case Block(_, expr)      => isRiftAllocationTree(expr)
+        case closure: Closure    => inferredClosureOwnerSym(closure).nonEmpty
         case _                   => false
+      }
+
+    private def isInferredRiftMethodReturn(tree: Tree): Boolean =
+      tree match {
+        case Apply(fun, _) =>
+          RiftRegionInference.inferredMethodReturnOwners.contains(fun.symbol) ||
+            isInferredRiftMethodReturn(fun)
+        case TypeApply(fun, _) =>
+          isInferredRiftMethodReturn(fun)
+        case Typed(expr, _) =>
+          isInferredRiftMethodReturn(expr)
+        case Inlined(_, _, expr) =>
+          isInferredRiftMethodReturn(expr)
+        case Block(Nil, expr) =>
+          isInferredRiftMethodReturn(expr)
+        case _ =>
+          RiftRegionInference.inferredMethodReturnOwners.contains(tree.symbol)
       }
 
     private def isStableConstructorFieldSelect(tree: Select): Boolean =
@@ -476,22 +1549,41 @@ trait NirGenExpr(using Context) {
 
     private def isKnownRiftRegionValue(tree: Tree): Boolean =
       if isPrimitiveOrNull(tree) then false
+      else if tree.hasAttachment(AllocationZoneInstance) ||
+        tree.hasAttachment(NirDefinitions.InferredRiftAllocationOwner)
+      then true
       else tree match {
         case Apply(select @ Select(qualifier, _), Nil)
             if isStableConstructorFieldSelect(select) =>
           isKnownRiftRegionValue(qualifier)
         case Apply(fun, Nil) =>
-          riftRegionAllocatedSyms.contains(fun.symbol) ||
+          RiftRegionInference.inferredMethodReturnOwners.contains(fun.symbol) ||
+            riftRegionAllocatedSyms.contains(fun.symbol) ||
             isKnownRiftRegionValue(fun)
+        case app: Apply if isInferredRiftMethodReturn(app) =>
+          true
         case TypeApply(Select(qualifier, nme.asInstanceOf_), _) =>
           isKnownRiftRegionValue(qualifier)
         case select @ Select(qualifier, _)
             if isStableConstructorFieldSelect(select) =>
           isKnownRiftRegionValue(qualifier)
+        case If(_, thenp, elsep) =>
+          isKnownRiftRegionValue(thenp) && isKnownRiftRegionValue(elsep)
+        case Match(_, cases) =>
+          cases.nonEmpty && cases.forall { case CaseDef(_, _, body) =>
+            isKnownRiftRegionValue(body)
+          }
+        case Return(expr, _) =>
+          isKnownRiftRegionValue(expr)
+        case Labeled(_, body) =>
+          val values = labelReturnExprs(body)
+          values.nonEmpty && values.forall(isKnownRiftRegionValue)
         case Typed(expr, _)      => isKnownRiftRegionValue(expr)
         case Inlined(_, _, expr) => isKnownRiftRegionValue(expr)
         case Block(_, expr)      => isKnownRiftRegionValue(expr)
-        case _                   => riftRegionAllocatedSyms.contains(tree.symbol)
+        case _ =>
+          riftRegionAllocatedSyms.contains(tree.symbol) ||
+            RiftRegionInference.inferredAllocationOwners.contains(tree.symbol)
       }
 
     private def isSafeRiftMutableVarValue(tree: Tree): Boolean =
@@ -508,6 +1600,12 @@ trait NirGenExpr(using Context) {
       def qualifier0 = qualifierOf(fun)
       def qualifier = qualifier0.withSpan(qualifier0.span.orElse(fun.span))
       def arg = args.head
+      def prepareCheckedOwnerClosureValue(value: Tree): Unit =
+        (qualifier :: args)
+          .find(isCheckedRiftAllocationOwnerValue)
+          .foreach(prepareDirectClosureOwnerTokenValue(_, value))
+      prepareRiftCapturedMethodArgumentAllocations(app, sym)
+      checkRiftCapturedMethodArguments(app, sym)
 
       inline def fail(msg: String)(using Context) = {
         report.error(msg, app.srcPos)
@@ -537,6 +1635,7 @@ trait NirGenExpr(using Context) {
             args
           )
         case _ if isRiftObjectBufferAppend(app) =>
+          prepareCheckedOwnerClosureValue(args.last)
           checkRiftObjectBufferAppend(args.last)
           genApplyMethod(
             sym,
@@ -545,6 +1644,7 @@ trait NirGenExpr(using Context) {
             args
           )
         case _ if isRiftRegionPriorityQueuePush(app) =>
+          prepareCheckedOwnerClosureValue(args(args.length - 2))
           checkRiftObjectBufferAppend(args(args.length - 2))
           genApplyMethod(
             sym,
@@ -553,7 +1653,9 @@ trait NirGenExpr(using Context) {
             args
           )
         case _ if isRiftRegionIndexedPriorityQueuePut(app) =>
-          checkRiftObjectBufferAppend(riftCheckedContainerValueArg(args))
+          val value = riftCheckedContainerValueArg(args)
+          prepareCheckedOwnerClosureValue(value)
+          checkRiftObjectBufferAppend(value)
           genApplyMethod(
             sym,
             statically = sym.isClassConstructor,
@@ -561,7 +1663,9 @@ trait NirGenExpr(using Context) {
             args
           )
         case _ if isRiftStreamWindowIndexedRankPut(app) =>
-          checkRiftObjectBufferAppend(riftCheckedContainerValueArg(args))
+          val value = riftCheckedContainerValueArg(args)
+          prepareCheckedOwnerClosureValue(value)
+          checkRiftObjectBufferAppend(value)
           genApplyMethod(
             sym,
             statically = sym.isClassConstructor,
@@ -569,13 +1673,66 @@ trait NirGenExpr(using Context) {
             args
           )
         case _ if isRiftStreamAppendWindowAppend(app) =>
-          checkRiftObjectBufferAppend(riftStreamAppendValueArg(app, args))
+          val value = riftStreamAppendValueArg(app, args)
+          prepareCheckedOwnerClosureValue(value)
+          checkRiftObjectBufferAppend(value)
           genApplyMethod(
             sym,
             statically = sym.isClassConstructor,
             qualifier,
             args
           )
+        case _ if isScalaSomeApply(calledSymbol(app)) =>
+          inferDirectRiftAllocation(app)
+          app.getAttachment(AllocationZoneInstance) match {
+            case Some(zone) => genApplyRegionSome(app, args, zone)
+            case None =>
+              fun match {
+                case _: TypeApply => genApplyTypeApply(app)
+                case _ =>
+                  genApplyMethod(
+                    sym,
+                    statically = sym.isClassConstructor,
+                    qualifier,
+                    args
+                  )
+              }
+          }
+        case _ if isScalaOptionApply(calledSymbol(app)) =>
+          inferDirectRiftAllocation(app)
+          app.getAttachment(AllocationZoneInstance) match {
+            case Some(zone) => genApplyRegionOption(app, args, zone)
+            case None =>
+              fun match {
+                case _: TypeApply => genApplyTypeApply(app)
+                case _ =>
+                  genApplyMethod(
+                    sym,
+                    statically = sym.isClassConstructor,
+                    qualifier,
+                    args
+                  )
+              }
+          }
+        case _ if isScalaTupleApply(calledSymbol(app), args.size) =>
+          inferDirectRiftAllocation(app)
+          app.getAttachment(AllocationZoneInstance) match {
+            case Some(zone) => genApplyRegionTuple(app, args, zone)
+            case None =>
+              fun match {
+                case _: TypeApply => genApplyTypeApply(app)
+                case _ =>
+                  genApplyMethod(
+                    sym,
+                    statically = sym.isClassConstructor,
+                    qualifier,
+                    args
+                  )
+              }
+          }
+        case TypeApply(Select(New(_), nme.CONSTRUCTOR), _) =>
+          inferDirectRiftAllocation(app)
+          genApplyNew(app)
         case _: TypeApply           => genApplyTypeApply(app)
         case Select(Super(_, _), _) =>
           genApplyMethod(
@@ -585,8 +1742,10 @@ trait NirGenExpr(using Context) {
             args
           )
         case Select(New(_), nme.CONSTRUCTOR) =>
+          inferDirectRiftAllocation(app)
           genApplyNew(app)
-        case _ if sym == defn.newArrayMethod =>
+        case _ if isScalaRuntimeArraysNewArray(sym) =>
+          inferDirectRiftAllocation(app)
           val Seq(
             Literal(componentType: Constant),
             arrayType,
@@ -646,11 +1805,22 @@ trait NirGenExpr(using Context) {
           }
 
         case id: Ident =>
+          val inferredRiftRegionValue =
+            inferDirectRiftAllocation(id.symbol, rhsp).isDefined
+          val inferredRiftMethodReturnValue =
+            isInferredRiftMethodReturn(rhsp)
           val safeRiftMutableRegionValue =
             isSafeRiftMutableVarValue(rhsp)
-          if safeRiftMutableRegionValue then riftRegionAllocatedSyms += id.symbol
+          if safeRiftMutableRegionValue || inferredRiftRegionValue ||
+            inferredRiftMethodReturnValue
+          then
+            riftRegionAllocatedSyms += id.symbol
           else riftRegionAllocatedSyms -= id.symbol
-          if treeCarriesRiftCapture(rhsp) && !safeRiftMutableRegionValue then
+          if treeCarriesRiftCapture(rhsp) &&
+            !safeRiftMutableRegionValue &&
+            !inferredRiftRegionValue &&
+            !inferredRiftMethodReturnValue
+          then
             riftRegionCapturedHeapSyms += id.symbol
           else riftRegionCapturedHeapSyms -= id.symbol
           val rhs = genExpr(rhsp)
@@ -919,7 +2089,42 @@ trait NirGenExpr(using Context) {
       }
 
       def allocateClosure() = {
-        val alloc = buf.classalloc(anonClassName, unwind)
+        val bodyOwnerSym =
+          RiftRegionInference.inferredClosureBodyOwners.get(funSym)
+        val inferredOwnerSym = inferredClosureOwnerSym(tree)
+        val resolvedOwner =
+          (
+            tree
+              .getAttachment(NirDefinitions.InferredRiftAllocationOwner)
+              .toList :::
+              inferredOwnerSym.toList :::
+              bodyOwnerSym.toList
+          ).distinct.view
+            .flatMap(sym => inferredRiftOwnerValue(sym).map(sym -> _))
+            .headOption
+        val explicitZone =
+          tree.getAttachment(AllocationZoneInstance).orElse {
+            tree
+              .getAttachment(NirDefinitions.InferredRiftAllocationOwner)
+              .flatMap(inferredRiftOwnerValue)
+          }
+        val ownerSym =
+          resolvedOwner
+            .map(_._1)
+            .orElse(inferredOwnerSym)
+            .orElse(bodyOwnerSym)
+        val captureZone = resolvedOwner.map(_._2)
+        val zone = explicitZone.orElse(captureZone)
+        zone.foreach { _ =>
+          allCaptureValues.foreach { capture =>
+            if !isAllowedRiftClosureCapture(capture, ownerSym) then
+              report.error(
+                "Rift checked region allocation cannot store an unrooted heap object; use RiftRegion.root(value) for heap metadata.",
+                capture.srcPos
+              )
+          }
+        }
+        val alloc = buf.classalloc(anonClassName, unwind, zone)
         val captures = allCaptureValues.map(genExpr)
         buf.call(
           ctorTy,
@@ -1498,8 +2703,84 @@ trait NirGenExpr(using Context) {
       given nir.SourcePosition = vd.span
       val localNames = curMethodLocalNames.get
       val isMutable = curMethodInfo.mutableVars.contains(vd.symbol)
+      directClosure(vd.rhs).foreach { closure =>
+        if !closure.hasAttachment(AllocationZoneInstance) then
+          val capturedEnclosingBodyOwner =
+            if isMutable then None
+            else
+              val enclosingOwnerSyms =
+                List(
+                  RiftRegionInference.inferredClosureBodyOwners
+                    .get(curMethodSym.get),
+                  RiftRegionInference.inferredClosureValueOwners
+                    .get(curMethodSym.get)
+                ).flatten.distinct
+              enclosingOwnerSyms.view
+                .flatMap { bodyOwnerSym =>
+                  for
+                    bodyOwner <- inferredRiftOwnerValue(bodyOwnerSym)
+                    capturedOwner <- capturedClosureOwnerSym(closure)
+                      .flatMap(inferredRiftOwnerValue)
+                      .orElse(capturedClosureOwnerValueFromType(closure))
+                    if capturedOwner == bodyOwner
+                  yield bodyOwnerSym -> bodyOwner
+                }
+                .headOption
+          val capturedMethodParamOwner =
+            if isMutable then None
+            else
+              val currentParams = curMethodSym.get.paramSymss.flatten.toSet
+              capturedClosureOwnerSym(closure).flatMap { capturedSym =>
+                val ownerSym =
+                  inferredDecisionOwner(capturedSym).getOrElse(capturedSym)
+                Option.when(currentParams.contains(ownerSym))(ownerSym)
+              }.flatMap { ownerSym =>
+                inferredRiftOwnerValue(ownerSym).map(ownerSym -> _)
+              }
+          val capturedTypedClosureOwner =
+            Option.when(
+              typeMentionsRiftCapture(vd.tpt.tpe) ||
+                typeMentionsRiftCapture(vd.symbol.info)
+            )(capturedClosureOwnerSym(closure)).flatten
+          val ownerSym =
+            RiftRegionInference.inferredAllocationOwners
+              .get(vd.symbol)
+              .orElse(inferredClosureEnvOwnerSym(closure, vd.tpt.tpe))
+              .orElse(inferredClosureEnvOwnerSym(closure, vd.symbol.info))
+              .orElse(capturedTypedClosureOwner)
+              .orElse(capturedEnclosingBodyOwner.map(_._1))
+              .orElse(capturedMethodParamOwner.map(_._1))
+          val owner =
+            RiftRegionInference.inferredAllocationOwners
+              .get(vd.symbol)
+              .flatMap(inferredRiftOwnerValue)
+              .orElse(inferredRiftOwnerValueFromCapturedType(vd.tpt.tpe))
+              .orElse(inferredRiftOwnerValueFromCapturedType(vd.symbol.info))
+              .orElse(capturedTypedClosureOwner.flatMap(inferredRiftOwnerValue))
+              .orElse(capturedEnclosingBodyOwner.map(_._2))
+              .orElse(capturedMethodParamOwner.map(_._2))
+          owner.foreach { owner =>
+            closure.putAttachment(AllocationZoneInstance, owner)
+          }
+          ownerSym.foreach { owner =>
+            closure.putAttachment(
+              NirDefinitions.InferredRiftAllocationOwner,
+              owner
+            )
+          }
+      }
+      val inferredRiftRegionValue =
+        inferDirectRiftAllocation(vd.symbol, vd.rhs)
+          .orElse(inferDirectRiftAllocationFromExpectedType(vd.rhs, vd.tpt.tpe))
+          .orElse(
+            inferDirectRiftAllocationFromExpectedType(vd.rhs, vd.symbol.info)
+          )
+          .isDefined
       val isRiftRegionValue =
-        isRiftAllocationTree(vd.rhs) || isKnownRiftRegionValue(vd.rhs)
+        inferredRiftRegionValue ||
+          isInferredRiftMethodReturn(vd.rhs) ||
+          isRiftAllocationTree(vd.rhs) ||
+          isKnownRiftRegionValue(vd.rhs)
       val isRiftRegionCapturedHeapValue =
         treeCarriesRiftCapture(vd.rhs) && !isRiftRegionValue
       val isSafeRiftMutableRegionValue =
@@ -1742,6 +3023,77 @@ trait NirGenExpr(using Context) {
       val alloc = buf.classalloc(genTypeName(clssym), unwind, zone)
       genApplyMethod(ctorsym, statically = true, alloc, args)
       alloc
+    }
+
+    private def genApplyRegionSome(
+        app: Apply,
+        args: List[Tree],
+        zone: nir.Val
+    )(using
+        nir.SourcePosition
+    ): nir.Val = {
+      val clssym = defnNir.ScalaSomeClass
+      val ctorsym = clssym.asClass.primaryConstructor
+      genApplyNew(
+        clssym = clssym,
+        ctorsym = ctorsym,
+        args = args,
+        zone = Some(zone)
+      )
+    }
+
+    private def genApplyRegionOption(
+        app: Apply,
+        args: List[Tree],
+        zone: nir.Val
+    )(using
+        nir.SourcePosition
+    ): nir.Val = {
+      val valueTree = args.head
+      val value = genExpr(valueTree)
+      val isNone, isSome, merge = fresh()
+      val retty = genType(app.tpe)
+      val mergeValue = nir.Val.Local(fresh(), retty)
+      val valueIsNull =
+        buf.comp(nir.Comp.Ieq, nir.Rt.Object, value, nir.Val.Null, unwind)
+
+      buf.branch(valueIsNull, nir.Next(isNone), nir.Next(isSome))
+
+      buf.label(isNone)
+      buf.jumpExcludeUnitValue(retty)(
+        merge,
+        genModule(defnNir.ScalaNoneModule)
+      )
+
+      buf.label(isSome)
+      val clssym = defnNir.ScalaSomeClass
+      val ctorsym = clssym.asClass.primaryConstructor
+      val some = genApplyNew(
+        clssym = clssym,
+        ctorsym = ctorsym,
+        args = ValTree(valueTree)(value) :: Nil,
+        zone = Some(zone)
+      )
+      buf.jumpExcludeUnitValue(retty)(merge, some)
+
+      buf.labelExcludeUnitValue(merge, mergeValue)
+    }
+
+    private def genApplyRegionTuple(
+        app: Apply,
+        args: List[Tree],
+        zone: nir.Val
+    )(using
+        nir.SourcePosition
+    ): nir.Val = {
+      val clssym = app.tpe.widenDealias.typeSymbol
+      val ctorsym = clssym.asClass.primaryConstructor
+      genApplyNew(
+        clssym = clssym,
+        ctorsym = ctorsym,
+        args = args,
+        zone = Some(zone)
+      )
     }
 
     def genApplyModuleMethod(
@@ -3091,12 +4443,13 @@ trait NirGenExpr(using Context) {
 
     def genSafeZoneAlloc(app: Apply): nir.Val = {
       val Apply(_, List(sz, tree)) = app
+      val allocationTree = directArrayApply(tree).getOrElse(tree)
       // For new expression with a specified safe zone, e.g. `new {sz} T(...)`,
       // it's translated to `allocate(sz, new T(...))` in TyperPhase.
       tree match {
         case Apply(Select(New(_), nme.CONSTRUCTOR), args)       =>
           if isCheckedRiftRegionType(sz.tpe) then checkRiftConstructorArgs(args)
-        case Apply(fun, _) if fun.symbol == defn.newArrayMethod =>
+        case _ if directArrayApply(tree).isDefined              =>
         case _                                                  =>
           report.error(
             s"Unexpected tree in scala.scalanative.runtime.SafeZoneAllocator.allocate: `${tree}`",
@@ -3104,34 +4457,35 @@ trait NirGenExpr(using Context) {
           )
       }
       // Put the zone into the attachment of `new T(...)`.
-      if tree.hasAttachment(AllocationZoneInstance) then
+      if allocationTree.hasAttachment(AllocationZoneInstance) then
         report.warning(
           s"Allocation zone handle is already attached to ${tree}, which is unexpected.",
           tree.srcPos
         )
-      tree.putAttachment(AllocationZoneInstance, genExpr(sz))
+      allocationTree.putAttachment(AllocationZoneInstance, genExpr(sz))
       genExpr(tree)
     }
 
     def genRiftAlloc(app: Apply): nir.Val = {
       val Apply(_, List(region, tree)) = app
+      val allocationTree = directArrayApply(tree).getOrElse(tree)
       tree match {
         case Apply(Select(New(_), nme.CONSTRUCTOR), args)       =>
           if isCheckedRiftAllocationOwnerType(region.tpe) then
             checkRiftConstructorArgs(args)
-        case Apply(fun, _) if fun.symbol == defn.newArrayMethod =>
+        case _ if directArrayApply(tree).isDefined              =>
         case _                                                  =>
           report.error(
             s"Unexpected tree in scala.scalanative.runtime.RiftAllocator.allocate: `${tree}`",
             tree.srcPos
           )
       }
-      if tree.hasAttachment(AllocationZoneInstance) then
+      if allocationTree.hasAttachment(AllocationZoneInstance) then
         report.warning(
           s"Allocation zone handle is already attached to ${tree}, which is unexpected.",
           tree.srcPos
         )
-      tree.putAttachment(AllocationZoneInstance, genExpr(region))
+      allocationTree.putAttachment(AllocationZoneInstance, genExpr(region))
       genExpr(tree)
     }
 

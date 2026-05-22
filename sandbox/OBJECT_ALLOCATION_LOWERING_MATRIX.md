@@ -1,7 +1,7 @@
 # Object Allocation Lowering Matrix
 
 Date: 2026-05-05
-Last updated: 2026-05-16 16:45 CEST
+Last updated: 2026-05-20 00:05 CEST
 
 Status: refined retained-region-array matrix validated at 20k smoke, 100k, 1M,
 and 10M, plus focused final-clean allocator-counter, cached-stats,
@@ -774,6 +774,33 @@ warm rerun; its L2 region-op time is already near 1 ms, so stable-state/query
 CPU and capsule/traversal work dominate. Keep `cache-large` as the current
 throughput-biased candidate, but do not promote it as a broad application win
 until at least two representative rows improve under L1.
+
+## Stats-Disabled Object Fast-Path Gate
+
+Date/time: 2026-05-20 00:05 CEST.
+
+This gate validates the runtime change that routes final-clean managed-object
+allocation through a no-stats inline helper when the region-local
+`alloc_stats_enabled` flag is false. The stats-enabled diagnostic path remains
+available for L2/allocation-counter rows. A first stats-enabled 5M trial
+exposed extra branch cost, so the implementation was refined to read the flag
+once; only the final-clean row below is accepted as the focused evidence.
+
+Artifacts:
+
+- `/Users/siyaoliu/rift/cache/object-allocation-nostats-fastpath-finalclean-5m-20260520`
+
+Final-clean 5M x 5 runs, one warmup:
+
+| Mode | Median ms | GC median ms | Region op ms | Slow alloc ms | Checksum |
+|---|---:|---:|---:|---:|---:|
+| `rift-checked-rift` | 64.485 | 0.000 | 2.060 | 1.000 | `-1183547843768457859` |
+| `rift-checked-safezone-improved-32k` | 67.074 | 0.000 | 0.000 | 0.000 | `-1183547843768457859` |
+
+Interpretation: the checked Rift row improves over the previous documented
+current-slab-zeroed final-clean row (`68.998 ms`) with matching checksum and
+zero GC. This is a focused allocation-body cleanup. It does not change object
+construction semantics, field stores, or zero-initialization rules.
 
 ## Interpretation
 

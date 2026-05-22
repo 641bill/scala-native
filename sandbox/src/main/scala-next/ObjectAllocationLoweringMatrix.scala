@@ -485,6 +485,180 @@ object ObjectAllocationLoweringMatrixHelpers {
     checksum
   }
 
+  private def runCheckedScopedExplicitBody()(using
+      region: RiftRegion.ScopedRegion^
+  ): Long = {
+    val cfg = ObjectAllocationLoweringConfig
+    final class CheckedRecord(
+        val a: Int,
+        val b: Int,
+        val c: Long,
+        var d: Int
+    )
+    val records: Array[CheckedRecord^{region}]^{region} =
+      RiftRegion.alloc(new Array[CheckedRecord^{region}](cfg.objects))
+    var checksum = 0L
+    var i = 0
+    while (i < cfg.objects) {
+      val seed = mix(i * 1103515245 + 12345)
+      val record: CheckedRecord^{region} =
+        RiftRegion.alloc(new CheckedRecord(
+          seed,
+          seed >>> 3,
+          seed.toLong * 1315423911L,
+          seed & 255
+        ))
+      record.d += record.a & 7
+      records(i) = record
+      i += 1
+    }
+    i = 0
+    while (i < records.length) {
+      val record = records(i)
+      if (i % cfg.sampleEvery == 0)
+        checksum = fold(checksum, record.a, record.b, record.c, record.d)
+      i += 1
+    }
+    checksum
+  }
+
+  private def runCheckedScopedExplicitReferenceBody()(using
+      region: RiftRegion.ScopedRegion^
+  ): Long = {
+    val cfg = ObjectAllocationLoweringConfig
+    final class CheckedRefMetadata(val salt: Int)
+    final class CheckedRefRecord(
+        val a: Int,
+        val prev: CheckedRefRecord^{region},
+        val metadata: CheckedRefMetadata^{region},
+        var d: Int
+    )
+    val records: Array[CheckedRefRecord^{region}]^{region} =
+      RiftRegion.alloc(new Array[CheckedRefRecord^{region}](cfg.objects))
+    val metadata: CheckedRefMetadata^{region} =
+      RiftRegion.alloc(new CheckedRefMetadata(0x5eed))
+    var prev: CheckedRefRecord^{region} = null
+    var checksum = 0L
+    var i = 0
+    while (i < cfg.objects) {
+      val seed = mix(i * 1103515245 + 12345)
+      val record: CheckedRefRecord^{region} =
+        RiftRegion.alloc(new CheckedRefRecord(seed, prev, metadata, seed & 255))
+      record.d += record.a & 7
+      records(i) = record
+      prev = record
+      i += 1
+    }
+    i = 0
+    while (i < records.length) {
+      val record = records(i)
+      if (i % cfg.sampleEvery == 0) {
+        val prevA = if (record.prev == null) 0 else record.prev.a
+        checksum =
+          foldRef(checksum, record.a, prevA, record.metadata.salt, record.d)
+      }
+      i += 1
+    }
+    checksum
+  }
+
+  private def runCheckedScopedInferredBody()(using
+      region: RiftRegion.ScopedRegion^
+  ): Long = {
+    val cfg = ObjectAllocationLoweringConfig
+    final class CheckedRecord(
+        val a: Int,
+        val b: Int,
+        val c: Long,
+        var d: Int
+    )
+    val records: Array[CheckedRecord^{region}]^{region} =
+      RiftRegion.alloc(new Array[CheckedRecord^{region}](cfg.objects))
+    var checksum = 0L
+    var i = 0
+    while (i < cfg.objects) {
+      val seed = mix(i * 1103515245 + 12345)
+      val record: CheckedRecord^{region} =
+        new CheckedRecord(
+          seed,
+          seed >>> 3,
+          seed.toLong * 1315423911L,
+          seed & 255
+        )
+      record.d += record.a & 7
+      records(i) = record
+      i += 1
+    }
+    i = 0
+    while (i < records.length) {
+      val record = records(i)
+      if (i % cfg.sampleEvery == 0)
+        checksum = fold(checksum, record.a, record.b, record.c, record.d)
+      i += 1
+    }
+    checksum
+  }
+
+  private def runCheckedScopedInferredReferenceBody()(using
+      region: RiftRegion.ScopedRegion^
+  ): Long = {
+    val cfg = ObjectAllocationLoweringConfig
+    final class CheckedRefMetadata(val salt: Int)
+    final class CheckedRefRecord(
+        val a: Int,
+        val prev: CheckedRefRecord^{region},
+        val metadata: CheckedRefMetadata^{region},
+        var d: Int
+    )
+    val records: Array[CheckedRefRecord^{region}]^{region} =
+      RiftRegion.alloc(new Array[CheckedRefRecord^{region}](cfg.objects))
+    val metadata: CheckedRefMetadata^{region} =
+      new CheckedRefMetadata(0x5eed)
+    var prev: CheckedRefRecord^{region} = null
+    var checksum = 0L
+    var i = 0
+    while (i < cfg.objects) {
+      val seed = mix(i * 1103515245 + 12345)
+      val record: CheckedRefRecord^{region} =
+        new CheckedRefRecord(seed, prev, metadata, seed & 255)
+      record.d += record.a & 7
+      records(i) = record
+      prev = record
+      i += 1
+    }
+    i = 0
+    while (i < records.length) {
+      val record = records(i)
+      if (i % cfg.sampleEvery == 0) {
+        val prevA = if (record.prev == null) 0 else record.prev.a
+        checksum =
+          foldRef(checksum, record.a, prevA, record.metadata.salt, record.d)
+      }
+      i += 1
+    }
+    checksum
+  }
+
+  private def runCheckedScopedExplicit(): Long = {
+    val checksum = RiftRegion.scoped { region ?=>
+      if (ObjectAllocationLoweringConfig.recordShape == "reference")
+        runCheckedScopedExplicitReferenceBody()
+      else runCheckedScopedExplicitBody()
+    }
+    checksumSink = checksum
+    checksum
+  }
+
+  private def runCheckedScopedInferred(): Long = {
+    val checksum = RiftRegion.scoped { region ?=>
+      if (ObjectAllocationLoweringConfig.recordShape == "reference")
+        runCheckedScopedInferredReferenceBody()
+      else runCheckedScopedInferredBody()
+    }
+    checksumSink = checksum
+    checksum
+  }
+
   private def runCheckedNoZeroOpenHandleBody()(using
       region: RiftNoZeroOpenStreamingHandle^
   ): Long = {
@@ -637,6 +811,10 @@ object ObjectAllocationLoweringMatrixHelpers {
       case "rift-checked-rift-open-handle-dirty-slab" |
           "checked-rift-open-handle-dirty-slab" =>
         "rift-checked-rift-open-handle-dirty-slab"
+      case "rift-checked-scoped-explicit" | "checked-scoped-explicit" =>
+        "rift-checked-scoped-explicit"
+      case "rift-checked-scoped-inferred" | "checked-scoped-inferred" =>
+        "rift-checked-scoped-inferred"
       case "rift-checked-safezone-32k" | "rift-checked-safezone-improved-32k" =>
         "rift-checked-safezone-improved-32k"
       case other =>
@@ -649,7 +827,9 @@ object ObjectAllocationLoweringMatrixHelpers {
       mode == "rift-checked-rift" ||
       mode == "rift-checked-rift-open-handle" ||
       mode == "rift-checked-rift-open-handle-nozero-unsafe" ||
-      mode == "rift-checked-rift-open-handle-dirty-slab"
+      mode == "rift-checked-rift-open-handle-dirty-slab" ||
+      mode == "rift-checked-scoped-explicit" ||
+      mode == "rift-checked-scoped-inferred"
 
   private def runMode(mode: String): Long =
     mode match {
@@ -671,6 +851,8 @@ object ObjectAllocationLoweringMatrixHelpers {
         runCheckedRiftNoZeroOpenHandle()
       case "rift-checked-rift-open-handle-dirty-slab" =>
         runCheckedRiftOpenHandle()
+      case "rift-checked-scoped-explicit" => runCheckedScopedExplicit()
+      case "rift-checked-scoped-inferred" => runCheckedScopedInferred()
       case "rift-checked-safezone-improved-32k" => runCheckedSafeZone()
     }
 

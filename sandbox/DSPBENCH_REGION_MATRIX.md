@@ -1,7 +1,7 @@
 # DSPBench Region Matrix
 
 Date: 2026-05-07
-Last updated: 2026-05-17 15:08 CEST
+Last updated: 2026-05-21 13:46 CEST
 
 Status: implemented three local DSPBench-family real-input candidates: Spike
 Detection, Fraud Detection, and Log Processing. This is not an exact DSPBench
@@ -940,6 +940,40 @@ the current direct-epoch implementation requires an indexable/generated source
 to process one bucket as a lexical epoch. Real file-backed Fraud/Log rows remain
 page-token rows until a streaming bucket iterator or preloaded real-input path
 is added.
+
+## Page-Token Active-Handle Source-Placement Follow-Up
+
+Date/time: 2026-05-21 13:46 CEST.
+
+The Rift checked page-token path now has an inferred source mode,
+`rift-checked-page-token-inferred` / `checked-region-stream-inferred`.
+It uses the same page-token topology and query logic as
+`rift-checked-page-token`, but constructs `CheckedRecord` with ordinary `new`
+under the selected `pageTokenAppendRiftOpenHandleFor` owner before widening the
+record to the parent stream owner for `appendPageToken`. The existing explicit
+checked page-token, open-region legacy, and checked scoped controls remain
+available.
+
+Focused real-input smoke:
+`/tmp/dspbench-page-token-inferred-smoke-20260521`. The runner native-linked
+`DSPBenchRegionMatrix`, then ran one 20k-record file-backed iteration for
+Fraud q2 and Log q2 with warmups `0`.
+
+| Query | Mode | Median ms | Median GC ms | Rift op ms | Region objects | Checksum/output |
+|---|---|---:|---:|---:|---:|---|
+| `fraud-q2-alert-window` | `heap-immix` | `3410.313` | `328.060` | `0.000` | `0` | match |
+| `fraud-q2-alert-window` | `rift-checked-page-token` | `3370.597` | `314.588` | `0.242` | `80111` | match |
+| `fraud-q2-alert-window` | `rift-checked-page-token-inferred` | `3377.076` | `323.574` | `0.288` | `80111` | match |
+| `log-q2-window` | `heap-immix` | `1585.773` | `164.286` | `0.000` | `0` | match |
+| `log-q2-window` | `rift-checked-page-token` | `1577.425` | `159.093` | `0.226` | `60000` | match |
+| `log-q2-window` | `rift-checked-page-token-inferred` | `1563.487` | `158.116` | `0.258` | `60000` | match |
+
+Fraud rows matched checksum `-1399594498030869762` and output count `98`.
+Log rows matched checksum `2172779649197205352` and output count `5`.
+This is source-use evidence for the existing page-token open-handle owner
+inference path. It is not an L1/L2 speed claim and does not change the earlier
+DSPBench interpretation: file-backed Fraud/Log remain parser/replay/runtime
+dominated real-input controls.
 
 ## Fraud q2 Retained-Epoch Reclaim Control
 

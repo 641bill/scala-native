@@ -264,47 +264,58 @@ object BenchmarkInputSupport {
 
     def linesRead: Long = linesReadTotal
 
-    private def nextByte(): Int = {
-      if (readOffset >= readLimit) {
-        readLimit = input.read(readBuffer)
-        readOffset = 0
-        if (readLimit <= 0) return -1
-        bytesReadTotal += readLimit.toLong
-      }
-      val value = readBuffer(readOffset) & 0xff
-      readOffset += 1
-      value
-    }
-
-    private def append(value: Int): Unit = {
-      if (currentLength >= lineBuffer.length) {
-        val grown = new Array[Byte](lineBuffer.length << 1)
-        System.arraycopy(lineBuffer, 0, grown, 0, lineBuffer.length)
+    private def ensureLineCapacity(required: Int): Unit =
+      if (required > lineBuffer.length) {
+        var nextLength = lineBuffer.length
+        while (nextLength < required) nextLength <<= 1
+        val grown = new Array[Byte](nextLength)
+        System.arraycopy(lineBuffer, 0, grown, 0, currentLength)
         lineBuffer = grown
       }
-      lineBuffer(currentLength) = value.toByte
-      currentLength += 1
-    }
 
     def readLine(): Int = {
       currentLength = 0
-      var value = nextByte()
-      while (value >= 0) {
-        if (value == '\n') {
+      while (true) {
+        if (readOffset >= readLimit) {
+          readLimit = input.read(readBuffer)
+          readOffset = 0
+          if (readLimit <= 0) {
+            if (currentLength == 0) return -1
+            if (lineBuffer(currentLength - 1) == '\r'.toByte)
+              currentLength -= 1
+            linesReadTotal += 1L
+            return currentLength
+          }
+          bytesReadTotal += readLimit.toLong
+        }
+
+        var newline = readOffset
+        while (newline < readLimit && readBuffer(newline) != '\n'.toByte)
+          newline += 1
+
+        val chunkLength = newline - readOffset
+        if (chunkLength > 0) {
+          ensureLineCapacity(currentLength + chunkLength)
+          System.arraycopy(
+            readBuffer,
+            readOffset,
+            lineBuffer,
+            currentLength,
+            chunkLength
+          )
+          currentLength += chunkLength
+        }
+        readOffset = newline
+
+        if (readOffset < readLimit && readBuffer(readOffset) == '\n'.toByte) {
+          readOffset += 1
           if (currentLength > 0 && lineBuffer(currentLength - 1) == '\r'.toByte)
             currentLength -= 1
           linesReadTotal += 1L
           return currentLength
         }
-        append(value)
-        value = nextByte()
       }
-      if (currentLength == 0) -1
-      else {
-        if (lineBuffer(currentLength - 1) == '\r'.toByte) currentLength -= 1
-        linesReadTotal += 1L
-        currentLength
-      }
+      -1
     }
 
     def close(): Unit =

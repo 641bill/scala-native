@@ -196,6 +196,32 @@ class NirCodeGen(val settings: GenNIR.Settings)(using ctx: Context)
     var isUsingLinktimeResolvedValue: Boolean = false
 
     def enter(sym: Symbol, value: nir.Val): Unit = env += sym -> value
+    def get(sym: Symbol): Option[nir.Val] = env.get(sym)
+    def getUniqueBySymbolName(sym: Symbol): Option[nir.Val] = {
+      getUniqueBySymbolName(sym.name.toString)
+    }
+    def getUniqueBySymbolName(name: String): Option[nir.Val] = {
+      val matches =
+        env.iterator
+          .collect {
+            case (candidate, value) if candidate.name.toString == name =>
+              value
+          }
+          .toList
+          .distinct
+      matches match {
+        case value :: Nil => Some(value)
+        case _            => None
+      }
+    }
+    def getUniqueByType(ty: nir.Type): Option[nir.Val] = {
+      val matches =
+        env.valuesIterator.filter(_.ty == ty).toList.distinct
+      matches match {
+        case value :: Nil => Some(value)
+        case _            => None
+      }
+    }
     def enterLabel(ld: Labeled): nir.Local = {
       val local = fresh()
       enter(ld.bind.symbol, nir.Val.Local(local, nir.Type.Ptr))

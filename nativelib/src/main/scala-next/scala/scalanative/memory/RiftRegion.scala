@@ -284,7 +284,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    *  topology primitive for linked object graphs whose whole structure dies at
    *  a scoped region boundary, such as ListOfLists-style workloads.
    */
-  final class RegionList[T <: RegionListNode] private[memory] (
+  final class RegionList[T <: RegionListNode^] private[memory] (
       private[memory] var headNode: Object,
       private[memory] var length0: Int
   )
@@ -562,7 +562,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    *  records which child bucket owns each key, so bucket close can unlink
    *  parent-visible rank references before the child region closes.
    */
-  final class StreamWindowIndexedRank[T <: Object] private[memory] (
+  final class StreamWindowIndexedRank[T <: Object^] private[memory] (
       private[memory] val buckets: StreamBucketArena,
       private[memory] val queue: RegionIndexedPriorityQueue[T],
       private[memory] val ownerPresentByKey: Array[Boolean],
@@ -649,7 +649,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    *  remapping layer. Bucket close unlinks parent-visible rank references
    *  before the child region is closed.
    */
-  final class StreamWindowLongIndexedRank[T <: Object] private[memory] (
+  final class StreamWindowLongIndexedRank[T <: Object^] private[memory] (
       private[memory] val buckets: StreamBucketArena,
       private[memory] val queue: RegionLongIndexedPriorityQueue[T],
       private var ownerKeys: Array[Long],
@@ -865,7 +865,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    *  bucket-owner links. The binary heap stores table slots, so bucket close can
    *  unlink parent-visible state by slot before the child bucket closes.
    */
-  final class StreamWindowTableRank[T <: Object] private[memory] (
+  final class StreamWindowTableRank[T <: Object^] private[memory] (
       private[memory] val buckets: StreamBucketArena,
       private var keys: Array[Long],
       private var states: Array[Byte],
@@ -1644,7 +1644,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    *  checker can reject cross-region values. Direct heap values are rejected by
    *  the checked compiler path unless wrapped in a `HeapRoot`.
    */
-  final class ObjectBuffer[T <: Object] private[memory] (
+  final class ObjectBuffer[T <: Object^] private[memory] (
       private val items: Array[Object]
   ) {
     private var used = 0
@@ -1674,7 +1674,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    *  array in the same region and leaves the old array to be reclaimed when the
    *  region closes or resets.
    */
-  final class RegionBuffer[T <: Object] private[memory] (
+  final class RegionBuffer[T <: Object^] private[memory] (
       private var items: Array[Object]
   ) {
     private var used = 0
@@ -1723,7 +1723,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    *  top-k/ranking state without each benchmark hand-rolling its own checked
    *  heap arrays.
    */
-  final class RegionPriorityQueue[T <: Object] private[memory] (
+  final class RegionPriorityQueue[T <: Object^] private[memory] (
       private var items: Array[Object],
       private var priorities: Array[Long]
   ) {
@@ -1840,7 +1840,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    *  priority/key arrays are region-owned. The queue object remains heap
    *  control metadata captured by the owner region.
    */
-  final class RegionIndexedPriorityQueue[T <: Object] private[memory] (
+  final class RegionIndexedPriorityQueue[T <: Object^] private[memory] (
       private var items: Array[Object],
       private var priorities: Array[Long],
       private var priority2s: Array[Long],
@@ -2190,7 +2190,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    *  keeps the ranked values in a binary heap and maps arbitrary `Long` keys to
    *  heap positions through an open-addressed region-owned table.
    */
-  final class RegionLongIndexedPriorityQueue[T <: Object] private[memory] (
+  final class RegionLongIndexedPriorityQueue[T <: Object^] private[memory] (
       private var items: Array[Object],
       private var priorities: Array[Long],
       private var priority2s: Array[Long],
@@ -3141,6 +3141,18 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     try body(using region)
     finally RiftAllocator.Impl.reset(region.handle)
 
+  private[scalanative] final def resetOpenHandleImpl(
+      region: RiftOpenStreamingHandle^
+  ): Unit =
+    RiftAllocator.Impl.reset(region.handle)
+
+  private[scalanative] transparent inline def resetOpenHandleInline[T](
+      inline body: (RiftOpenStreamingHandle^) ?=> T
+  )(using region: RiftOpenStreamingHandle^, canReturn: CanReturnFromRegion[T]): T =
+    val owner: RiftOpenStreamingHandle^ = region
+    try body(using owner)
+    finally resetOpenHandleImpl(owner)
+
   /** Opens a checked page-token map/filter operator.
    *
    *  This is the reusable operator-owned API for SELECT/filter/project-style
@@ -3330,7 +3342,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   }
 
   /** Allocates an empty checked linked list in `region`. */
-  def regionList[T <: RegionListNode]()(using
+  def regionList[T <: RegionListNode^]()(using
       region: RiftRegion^
   ): RegionList[T]^{region} =
     alloc(new RegionList[T](null, 0))
@@ -4852,7 +4864,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     list.length0
 
   /** Prepends `value` to a checked region-owned linked list. */
-  def prependRegionList[T <: RegionListNode](
+  def prependRegionList[T <: RegionListNode^](
       region: RiftRegion^,
       list: RegionList[T]^{region},
       value: T^{region}
@@ -4863,21 +4875,21 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   }
 
   /** Returns the current head of a checked region-owned linked list. */
-  def regionListHead[T <: RegionListNode](
+  def regionListHead[T <: RegionListNode^](
       region: RiftRegion^,
       list: RegionList[T]^{region}
   ): T^{region} =
     list.headNode.asInstanceOf[T^{region}]
 
   /** Returns the next node in a checked region-owned linked list. */
-  def regionListNext[T <: RegionListNode](
+  def regionListNext[T <: RegionListNode^](
       region: RiftRegion^,
       value: T^{region}
   ): T^{region} =
     value.regionListNext.asInstanceOf[T^{region}]
 
   /** Returns the number of nodes in a checked region-owned linked list. */
-  def regionListLength[T <: RegionListNode](
+  def regionListLength[T <: RegionListNode^](
       region: RiftRegion^,
       list: RegionList[T]^{region}
   ): Int =
@@ -5500,7 +5512,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     region.retainHeapRoot(value)
 
   /** Allocates a fixed-capacity checked object buffer in the implicit region. */
-  def objectBuffer[T <: Object](capacity: Int)(using
+  def objectBuffer[T <: Object^](capacity: Int)(using
       region: RiftRegion^
   ): ObjectBuffer[T]^{region} = {
     val items: Array[Object] =
@@ -5509,7 +5521,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   }
 
   /** Allocates a growable checked buffer in the implicit region. */
-  def regionBuffer[T <: Object](initialCapacity: Int = 4)(using
+  def regionBuffer[T <: Object^](initialCapacity: Int = 4)(using
       region: RiftRegion^
   ): RegionBuffer[T]^{region} = {
     val capacity = if (initialCapacity <= 0) 1 else initialCapacity
@@ -5519,7 +5531,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   }
 
   /** Allocates a checked max-priority queue in the implicit region. */
-  def regionPriorityQueue[T <: Object](initialCapacity: Int = 4)(using
+  def regionPriorityQueue[T <: Object^](initialCapacity: Int = 4)(using
       region: RiftRegion^
   ): RegionPriorityQueue[T]^{region} = {
     val capacity = if (initialCapacity <= 0) 1 else initialCapacity
@@ -5530,7 +5542,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   }
 
   /** Allocates a checked dense-key indexed max-priority queue. */
-  def regionIndexedPriorityQueue[T <: Object](
+  def regionIndexedPriorityQueue[T <: Object^](
       keyCapacity: Int,
       initialCapacity: Int = 4
   )(using region: RiftRegion^): RegionIndexedPriorityQueue[T]^{region} = {
@@ -5556,7 +5568,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   /** Allocates a checked dense-key indexed queue with four lexicographic
    *  priority components. Larger components rank first at each level.
    */
-  def regionIndexedPriorityQueueLexicographic[T <: Object](
+  def regionIndexedPriorityQueueLexicographic[T <: Object^](
       keyCapacity: Int,
       initialCapacity: Int = 4
   )(using region: RiftRegion^): RegionIndexedPriorityQueue[T]^{region} = {
@@ -5606,7 +5618,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    *  packed route id, and forcing them through a dense side table would add
    *  benchmark-specific plumbing.
    */
-  def regionLongIndexedPriorityQueue[T <: Object](
+  def regionLongIndexedPriorityQueue[T <: Object^](
       initialCapacity: Int = 4,
       initialTableCapacity: Int = 16
   )(using region: RiftRegion^): RegionLongIndexedPriorityQueue[T]^{region} = {
@@ -5637,7 +5649,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   /** Allocates a checked long-key indexed queue with four lexicographic
    *  priority components. Larger components rank first at each level.
    */
-  def regionLongIndexedPriorityQueueLexicographic[T <: Object](
+  def regionLongIndexedPriorityQueueLexicographic[T <: Object^](
       initialCapacity: Int = 4,
       initialTableCapacity: Int = 16
   )(using region: RiftRegion^): RegionLongIndexedPriorityQueue[T]^{region} = {
@@ -5675,7 +5687,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    *  in a child bucket; close then removes those keys before closing the child
    *  region.
    */
-  def streamWindowIndexedRank[T <: Object](
+  def streamWindowIndexedRank[T <: Object^](
       bucketSeconds: Long,
       keyCapacity: Int,
       initialCapacity: Int = 4
@@ -5699,7 +5711,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   /** Allocates a checked stream-window rank whose dense-key queue uses four
    *  lexicographic priority components.
    */
-  def streamWindowIndexedRankLexicographic[T <: Object](
+  def streamWindowIndexedRankLexicographic[T <: Object^](
       bucketSeconds: Long,
       keyCapacity: Int,
       initialCapacity: Int = 4
@@ -5722,7 +5734,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   }
 
   /** Allocates a checked stream-window rank for arbitrary long keys. */
-  def streamWindowLongIndexedRank[T <: Object](
+  def streamWindowLongIndexedRank[T <: Object^](
       bucketSeconds: Long,
       initialCapacity: Int = 4,
       initialTableCapacity: Int = 16
@@ -5754,7 +5766,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   /** Allocates a checked long-key stream-window rank with four lexicographic
    *  priority components.
    */
-  def streamWindowLongIndexedRankLexicographic[T <: Object](
+  def streamWindowLongIndexedRankLexicographic[T <: Object^](
       bucketSeconds: Long,
       initialCapacity: Int = 4,
       initialTableCapacity: Int = 16
@@ -5790,7 +5802,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    *  keys. The table owns lookup, rank heap positions, values, priorities, and
    *  bucket cleanup links.
    */
-  def streamWindowTableRank[T <: Object](
+  def streamWindowTableRank[T <: Object^](
       bucketSeconds: Long,
       initialRankCapacity: Int = 4,
       initialTableCapacity: Int = 16
@@ -5830,7 +5842,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   /** Allocates an experimental fused stream-window rank whose table stores
    *  four lexicographic priority components.
    */
-  def streamWindowTableRankLexicographic[T <: Object](
+  def streamWindowTableRankLexicographic[T <: Object^](
       bucketSeconds: Long,
       initialRankCapacity: Int = 4,
       initialTableCapacity: Int = 16
@@ -5871,7 +5883,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   }
 
   /** Appends `value` to a checked object buffer owned by `owner`. */
-  def append[T <: Object](
+  def append[T <: Object^](
       owner: RiftRegion^,
       buffer: ObjectBuffer[T]^{owner},
       value: T^{owner}
@@ -5879,7 +5891,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     buffer.appendTrusted(value.asInstanceOf[Object])
 
   /** Reads an element from a checked object buffer owned by `owner`. */
-  def get[T <: Object](
+  def get[T <: Object^](
       owner: RiftRegion^,
       buffer: ObjectBuffer[T]^{owner},
       index: Int
@@ -5887,14 +5899,14 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     buffer.applyTrusted(index).asInstanceOf[T^{owner}]
 
   /** Returns the number of elements appended to a checked object buffer. */
-  def length[T <: Object](
+  def length[T <: Object^](
       owner: RiftRegion^,
       buffer: ObjectBuffer[T]^{owner}
   ): Int =
     buffer.length
 
   /** Appends `value` to a growable checked buffer owned by `owner`. */
-  def append[T <: Object](
+  def append[T <: Object^](
       owner: RiftRegion^,
       buffer: RegionBuffer[T]^{owner},
       value: T^{owner}
@@ -5902,7 +5914,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     buffer.appendTrusted(owner, value.asInstanceOf[Object])
 
   /** Reads an element from a growable checked buffer owned by `owner`. */
-  def get[T <: Object](
+  def get[T <: Object^](
       owner: RiftRegion^,
       buffer: RegionBuffer[T]^{owner},
       index: Int
@@ -5910,21 +5922,21 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     buffer.applyTrusted(index).asInstanceOf[T^{owner}]
 
   /** Returns the number of elements appended to a growable checked buffer. */
-  def length[T <: Object](
+  def length[T <: Object^](
       owner: RiftRegion^,
       buffer: RegionBuffer[T]^{owner}
   ): Int =
     buffer.length
 
   /** Returns the current backing capacity of a growable checked buffer. */
-  def capacity[T <: Object](
+  def capacity[T <: Object^](
       owner: RiftRegion^,
       buffer: RegionBuffer[T]^{owner}
   ): Int =
     buffer.capacity
 
   /** Pushes `value` into a checked max-priority queue owned by `owner`. */
-  def push[T <: Object](
+  def push[T <: Object^](
       owner: RiftRegion^,
       queue: RegionPriorityQueue[T]^{owner},
       value: T^{owner},
@@ -5933,42 +5945,42 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     queue.pushTrusted(owner, value.asInstanceOf[Object], priority)
 
   /** Reads the highest-priority value without removing it. */
-  def peek[T <: Object](
+  def peek[T <: Object^](
       owner: RiftRegion^,
       queue: RegionPriorityQueue[T]^{owner}
   ): T^{owner} =
     queue.peekTrusted().asInstanceOf[T^{owner}]
 
   /** Reads the highest priority without removing its value. */
-  def peekPriority[T <: Object](
+  def peekPriority[T <: Object^](
       owner: RiftRegion^,
       queue: RegionPriorityQueue[T]^{owner}
   ): Long =
     queue.peekPriorityTrusted()
 
   /** Removes and returns the highest-priority value. */
-  def pop[T <: Object](
+  def pop[T <: Object^](
       owner: RiftRegion^,
       queue: RegionPriorityQueue[T]^{owner}
   ): T^{owner} =
     queue.popTrusted().asInstanceOf[T^{owner}]
 
   /** Returns the number of elements in a checked max-priority queue. */
-  def length[T <: Object](
+  def length[T <: Object^](
       owner: RiftRegion^,
       queue: RegionPriorityQueue[T]^{owner}
   ): Int =
     queue.length
 
   /** Returns the current backing capacity of a checked max-priority queue. */
-  def capacity[T <: Object](
+  def capacity[T <: Object^](
       owner: RiftRegion^,
       queue: RegionPriorityQueue[T]^{owner}
   ): Int =
     queue.capacity
 
   /** Inserts or replaces `value` for `key` in an indexed priority queue. */
-  def put[T <: Object](
+  def put[T <: Object^](
       owner: RiftRegion^,
       queue: RegionIndexedPriorityQueue[T]^{owner},
       key: Int,
@@ -5980,7 +5992,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   /** Inserts or replaces `value` with four lexicographic priority components.
    *  Larger components rank first at each tie-break level.
    */
-  def put[T <: Object](
+  def put[T <: Object^](
       owner: RiftRegion^,
       queue: RegionIndexedPriorityQueue[T]^{owner},
       key: Int,
@@ -6001,7 +6013,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Updates `key`'s priority if it is present. */
-  def updatePriority[T <: Object](
+  def updatePriority[T <: Object^](
       owner: RiftRegion^,
       queue: RegionIndexedPriorityQueue[T]^{owner},
       key: Int,
@@ -6010,7 +6022,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     queue.updatePriorityTrusted(key, priority)
 
   /** Updates `key`'s lexicographic priority if it is present. */
-  def updatePriority[T <: Object](
+  def updatePriority[T <: Object^](
       owner: RiftRegion^,
       queue: RegionIndexedPriorityQueue[T]^{owner},
       key: Int,
@@ -6028,7 +6040,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Removes `key` if it is present. */
-  def remove[T <: Object](
+  def remove[T <: Object^](
       owner: RiftRegion^,
       queue: RegionIndexedPriorityQueue[T]^{owner},
       key: Int
@@ -6036,7 +6048,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     queue.removeTrusted(key)
 
   /** Returns true when `key` is present. */
-  def contains[T <: Object](
+  def contains[T <: Object^](
       owner: RiftRegion^,
       queue: RegionIndexedPriorityQueue[T]^{owner},
       key: Int
@@ -6044,7 +6056,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     queue.containsTrusted(key)
 
   /** Reads the value for `key`. */
-  def get[T <: Object](
+  def get[T <: Object^](
       owner: RiftRegion^,
       queue: RegionIndexedPriorityQueue[T]^{owner},
       key: Int
@@ -6052,56 +6064,56 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     queue.getTrusted(key).asInstanceOf[T^{owner}]
 
   /** Reads the highest-priority indexed value without removing it. */
-  def peek[T <: Object](
+  def peek[T <: Object^](
       owner: RiftRegion^,
       queue: RegionIndexedPriorityQueue[T]^{owner}
   ): T^{owner} =
     queue.peekTrusted().asInstanceOf[T^{owner}]
 
   /** Reads the dense key of the highest-priority indexed value. */
-  def peekKey[T <: Object](
+  def peekKey[T <: Object^](
       owner: RiftRegion^,
       queue: RegionIndexedPriorityQueue[T]^{owner}
   ): Int =
     queue.peekKeyTrusted()
 
   /** Reads the highest indexed priority without removing its value. */
-  def peekPriority[T <: Object](
+  def peekPriority[T <: Object^](
       owner: RiftRegion^,
       queue: RegionIndexedPriorityQueue[T]^{owner}
   ): Long =
     queue.peekPriorityTrusted()
 
   /** Removes and returns the highest-priority indexed value. */
-  def pop[T <: Object](
+  def pop[T <: Object^](
       owner: RiftRegion^,
       queue: RegionIndexedPriorityQueue[T]^{owner}
   ): T^{owner} =
     queue.popTrusted().asInstanceOf[T^{owner}]
 
   /** Returns the number of elements in an indexed priority queue. */
-  def length[T <: Object](
+  def length[T <: Object^](
       owner: RiftRegion^,
       queue: RegionIndexedPriorityQueue[T]^{owner}
   ): Int =
     queue.length
 
   /** Returns the current heap backing capacity of an indexed priority queue. */
-  def capacity[T <: Object](
+  def capacity[T <: Object^](
       owner: RiftRegion^,
       queue: RegionIndexedPriorityQueue[T]^{owner}
   ): Int =
     queue.capacity
 
   /** Returns the dense-key table capacity of an indexed priority queue. */
-  def keyCapacity[T <: Object](
+  def keyCapacity[T <: Object^](
       owner: RiftRegion^,
       queue: RegionIndexedPriorityQueue[T]^{owner}
   ): Int =
     queue.keyCapacity
 
   /** Inserts or replaces `value` for a long key in an indexed queue. */
-  def put[T <: Object](
+  def put[T <: Object^](
       owner: RiftRegion^,
       queue: RegionLongIndexedPriorityQueue[T]^{owner},
       key: Long,
@@ -6113,7 +6125,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   /** Inserts or replaces `value` with four lexicographic priority components.
    *  Larger components rank first at each tie-break level.
    */
-  def put[T <: Object](
+  def put[T <: Object^](
       owner: RiftRegion^,
       queue: RegionLongIndexedPriorityQueue[T]^{owner},
       key: Long,
@@ -6134,7 +6146,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Updates `key`'s priority if it is present. */
-  def updatePriority[T <: Object](
+  def updatePriority[T <: Object^](
       owner: RiftRegion^,
       queue: RegionLongIndexedPriorityQueue[T]^{owner},
       key: Long,
@@ -6143,7 +6155,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     queue.updatePriorityTrusted(key, priority)
 
   /** Updates `key`'s lexicographic priority if it is present. */
-  def updatePriority[T <: Object](
+  def updatePriority[T <: Object^](
       owner: RiftRegion^,
       queue: RegionLongIndexedPriorityQueue[T]^{owner},
       key: Long,
@@ -6161,7 +6173,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Removes `key` if it is present. */
-  def remove[T <: Object](
+  def remove[T <: Object^](
       owner: RiftRegion^,
       queue: RegionLongIndexedPriorityQueue[T]^{owner},
       key: Long
@@ -6169,7 +6181,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     queue.removeTrusted(key)
 
   /** Returns true when `key` is present. */
-  def contains[T <: Object](
+  def contains[T <: Object^](
       owner: RiftRegion^,
       queue: RegionLongIndexedPriorityQueue[T]^{owner},
       key: Long
@@ -6177,7 +6189,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     queue.containsTrusted(key)
 
   /** Reads the value for `key`. */
-  def get[T <: Object](
+  def get[T <: Object^](
       owner: RiftRegion^,
       queue: RegionLongIndexedPriorityQueue[T]^{owner},
       key: Long
@@ -6185,56 +6197,56 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     queue.getTrusted(key).asInstanceOf[T^{owner}]
 
   /** Reads the highest-priority long-key indexed value without removing it. */
-  def peek[T <: Object](
+  def peek[T <: Object^](
       owner: RiftRegion^,
       queue: RegionLongIndexedPriorityQueue[T]^{owner}
   ): T^{owner} =
     queue.peekTrusted().asInstanceOf[T^{owner}]
 
   /** Reads the long key of the highest-priority indexed value. */
-  def peekKey[T <: Object](
+  def peekKey[T <: Object^](
       owner: RiftRegion^,
       queue: RegionLongIndexedPriorityQueue[T]^{owner}
   ): Long =
     queue.peekKeyTrusted()
 
   /** Reads the highest indexed priority without removing its value. */
-  def peekPriority[T <: Object](
+  def peekPriority[T <: Object^](
       owner: RiftRegion^,
       queue: RegionLongIndexedPriorityQueue[T]^{owner}
   ): Long =
     queue.peekPriorityTrusted()
 
   /** Removes and returns the highest-priority indexed value. */
-  def pop[T <: Object](
+  def pop[T <: Object^](
       owner: RiftRegion^,
       queue: RegionLongIndexedPriorityQueue[T]^{owner}
   ): T^{owner} =
     queue.popTrusted().asInstanceOf[T^{owner}]
 
   /** Returns the number of elements in a long-key indexed priority queue. */
-  def length[T <: Object](
+  def length[T <: Object^](
       owner: RiftRegion^,
       queue: RegionLongIndexedPriorityQueue[T]^{owner}
   ): Int =
     queue.length
 
   /** Returns the current heap backing capacity of a long-key indexed queue. */
-  def capacity[T <: Object](
+  def capacity[T <: Object^](
       owner: RiftRegion^,
       queue: RegionLongIndexedPriorityQueue[T]^{owner}
   ): Int =
     queue.capacity
 
   /** Returns the hash-table capacity of a long-key indexed queue. */
-  def tableCapacity[T <: Object](
+  def tableCapacity[T <: Object^](
       owner: RiftRegion^,
       queue: RegionLongIndexedPriorityQueue[T]^{owner}
   ): Int =
     queue.tableCapacity
 
   /** Finds or opens the window-rank bucket containing `timestampSeconds`. */
-  def streamWindowBucketFor[T <: Object](
+  def streamWindowBucketFor[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent},
       timestampSeconds: Long
@@ -6242,7 +6254,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     streamWindowBucketFor(parent, rank, timestampSeconds)(_ => ())
 
   /** Finds or opens the window-rank bucket containing `timestampSeconds`. */
-  def streamWindowBucketFor[T <: Object](
+  def streamWindowBucketFor[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent},
       timestampSeconds: Long
@@ -6254,7 +6266,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )(onOpen)
 
   /** Inserts or replaces a ranked value for `key`. */
-  def putWindowRank[T <: Object](
+  def putWindowRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent},
       key: Int,
@@ -6266,7 +6278,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       .putTrusted(parent, key, value.asInstanceOf[Object], priority)
 
   /** Inserts or replaces a ranked value using four lexicographic priorities. */
-  def putWindowRank[T <: Object](
+  def putWindowRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent},
       key: Int,
@@ -6294,7 +6306,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    *  `closeAllWindowRankBuckets` remove the key from parent-owned rank state
    *  before closing the bucket's child region.
    */
-  def putWindowRankInBucket[T <: Object](
+  def putWindowRankInBucket[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent},
       bucket: StreamBucket^{parent},
@@ -6312,7 +6324,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   /** Inserts or replaces a ranked value owned by `bucket` using four
    *  lexicographic priority components.
    */
-  def putWindowRankInBucket[T <: Object](
+  def putWindowRankInBucket[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent},
       bucket: StreamBucket^{parent},
@@ -6339,7 +6351,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   }
 
   /** Updates `key`'s priority if it is present. */
-  def updateWindowRankPriority[T <: Object](
+  def updateWindowRankPriority[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent},
       key: Int,
@@ -6353,7 +6365,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Updates `key`'s lexicographic priority if it is present. */
-  def updateWindowRankPriority[T <: Object](
+  def updateWindowRankPriority[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent},
       key: Int,
@@ -6373,7 +6385,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Removes `key` if it is present. */
-  def removeWindowRank[T <: Object](
+  def removeWindowRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent},
       key: Int
@@ -6388,7 +6400,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   }
 
   /** Returns true when `key` is present. */
-  def containsWindowRank[T <: Object](
+  def containsWindowRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent},
       key: Int
@@ -6400,7 +6412,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Reads the value for `key`. */
-  def getWindowRank[T <: Object](
+  def getWindowRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent},
       key: Int
@@ -6412,7 +6424,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Reads the highest-priority ranked value without removing it. */
-  def peekWindowRank[T <: Object](
+  def peekWindowRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent}
   ): T^{parent} =
@@ -6422,7 +6434,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Reads the dense key of the highest-priority ranked value. */
-  def peekWindowRankKey[T <: Object](
+  def peekWindowRankKey[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent}
   ): Int =
@@ -6432,7 +6444,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Reads the highest priority without removing the ranked value. */
-  def peekWindowRankPriority[T <: Object](
+  def peekWindowRankPriority[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent}
   ): Long =
@@ -6442,7 +6454,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Removes and returns the highest-priority ranked value. */
-  def popWindowRank[T <: Object](
+  def popWindowRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent}
   ): T^{parent} =
@@ -6452,7 +6464,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Returns the number of ranked values. */
-  def windowRankLength[T <: Object](
+  def windowRankLength[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent}
   ): Int =
@@ -6462,7 +6474,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Returns true if closing before `cutoffSeconds` would close a bucket. */
-  def hasWindowRankBucketsBefore[T <: Object](
+  def hasWindowRankBucketsBefore[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent},
       cutoffSeconds: Long
@@ -6474,7 +6486,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Closes window-rank buckets fully before `cutoffSeconds`. */
-  def closeWindowRankBucketsBefore[T <: Object](
+  def closeWindowRankBucketsBefore[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent},
       cutoffSeconds: Long
@@ -6495,7 +6507,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    *  `cleanupEntry` runs after the key is removed from parent-owned rank state
    *  but before the child bucket closes.
    */
-  def closeWindowRankBucketsBeforeWithEntries[T <: Object](
+  def closeWindowRankBucketsBeforeWithEntries[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent},
       cutoffSeconds: Long
@@ -6515,7 +6527,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
 
   /** Closes every window-rank bucket. */
-  def closeAllWindowRankBuckets[T <: Object](
+  def closeAllWindowRankBuckets[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent}
   )(cleanup: StreamBucket^{parent} => Unit): Unit =
@@ -6528,7 +6540,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
 
   /** Closes every window-rank bucket and reports each removed ranked entry. */
-  def closeAllWindowRankBucketsWithEntries[T <: Object](
+  def closeAllWindowRankBucketsWithEntries[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowIndexedRank[T]^{parent}
   )(
@@ -6546,7 +6558,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
 
   /** Finds or opens the long-key window-rank bucket containing timestamp. */
-  def streamWindowBucketFor[T <: Object](
+  def streamWindowBucketFor[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent},
       timestampSeconds: Long
@@ -6554,7 +6566,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     streamWindowBucketFor(parent, rank, timestampSeconds)(_ => ())
 
   /** Finds or opens the long-key window-rank bucket containing timestamp. */
-  def streamWindowBucketFor[T <: Object](
+  def streamWindowBucketFor[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent},
       timestampSeconds: Long
@@ -6566,7 +6578,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )(onOpen)
 
   /** Inserts or replaces a long-key ranked value for `key`. */
-  def putWindowRank[T <: Object](
+  def putWindowRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent},
       key: Long,
@@ -6580,7 +6592,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   /** Inserts or replaces a long-key ranked value using lexicographic
    *  priorities.
    */
-  def putWindowRank[T <: Object](
+  def putWindowRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent},
       key: Long,
@@ -6603,7 +6615,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       )
 
   /** Inserts or replaces a long-key ranked value owned by `bucket`. */
-  def putWindowRankInBucket[T <: Object](
+  def putWindowRankInBucket[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent},
       bucket: StreamBucket^{parent},
@@ -6621,7 +6633,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   /** Inserts or replaces a long-key ranked value owned by `bucket` using
    *  lexicographic priorities.
    */
-  def putWindowRankInBucket[T <: Object](
+  def putWindowRankInBucket[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent},
       bucket: StreamBucket^{parent},
@@ -6648,7 +6660,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   }
 
   /** Updates a long-key rank priority if the key is present. */
-  def updateWindowRankPriority[T <: Object](
+  def updateWindowRankPriority[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent},
       key: Long,
@@ -6662,7 +6674,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Updates a long-key lexicographic rank priority if the key is present. */
-  def updateWindowRankPriority[T <: Object](
+  def updateWindowRankPriority[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent},
       key: Long,
@@ -6682,7 +6694,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Removes a long key if it is present. */
-  def removeWindowRank[T <: Object](
+  def removeWindowRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent},
       key: Long
@@ -6697,7 +6709,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   }
 
   /** Returns true when a long key is present. */
-  def containsWindowRank[T <: Object](
+  def containsWindowRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent},
       key: Long
@@ -6709,7 +6721,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Reads the ranked value for a long key. */
-  def getWindowRank[T <: Object](
+  def getWindowRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent},
       key: Long
@@ -6721,7 +6733,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Reads the highest-priority long-key ranked value without removing it. */
-  def peekWindowRank[T <: Object](
+  def peekWindowRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent}
   ): T^{parent} =
@@ -6731,7 +6743,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Reads the long key of the highest-priority ranked value. */
-  def peekWindowRankKey[T <: Object](
+  def peekWindowRankKey[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent}
   ): Long =
@@ -6741,7 +6753,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Reads the highest priority without removing the ranked value. */
-  def peekWindowRankPriority[T <: Object](
+  def peekWindowRankPriority[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent}
   ): Long =
@@ -6751,7 +6763,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Removes and returns the highest-priority long-key ranked value. */
-  def popWindowRank[T <: Object](
+  def popWindowRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent}
   ): T^{parent} =
@@ -6761,7 +6773,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Returns the number of long-key ranked values. */
-  def windowRankLength[T <: Object](
+  def windowRankLength[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent}
   ): Int =
@@ -6771,7 +6783,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Returns true if closing before `cutoffSeconds` would close a bucket. */
-  def hasWindowRankBucketsBefore[T <: Object](
+  def hasWindowRankBucketsBefore[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent},
       cutoffSeconds: Long
@@ -6783,7 +6795,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Closes long-key window-rank buckets fully before `cutoffSeconds`. */
-  def closeWindowRankBucketsBefore[T <: Object](
+  def closeWindowRankBucketsBefore[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent},
       cutoffSeconds: Long
@@ -6798,7 +6810,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
 
   /** Closes long-key window-rank buckets and reports removed entries. */
-  def closeWindowRankBucketsBeforeWithEntries[T <: Object](
+  def closeWindowRankBucketsBeforeWithEntries[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent},
       cutoffSeconds: Long
@@ -6818,7 +6830,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
 
   /** Closes every long-key window-rank bucket. */
-  def closeAllWindowRankBuckets[T <: Object](
+  def closeAllWindowRankBuckets[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent}
   )(cleanup: StreamBucket^{parent} => Unit): Unit =
@@ -6831,7 +6843,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
 
   /** Closes every long-key window-rank bucket and reports removed entries. */
-  def closeAllWindowRankBucketsWithEntries[T <: Object](
+  def closeAllWindowRankBucketsWithEntries[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowLongIndexedRank[T]^{parent}
   )(
@@ -6849,7 +6861,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
 
   /** Finds or opens the fused table-rank bucket containing timestamp. */
-  def streamWindowBucketFor[T <: Object](
+  def streamWindowBucketFor[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent},
       timestampSeconds: Long
@@ -6857,7 +6869,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     streamWindowBucketFor(parent, rank, timestampSeconds)(_ => ())
 
   /** Finds or opens the fused table-rank bucket containing timestamp. */
-  def streamWindowBucketFor[T <: Object](
+  def streamWindowBucketFor[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent},
       timestampSeconds: Long
@@ -6869,7 +6881,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )(onOpen)
 
   /** Inserts or replaces a fused table-rank value owned by `bucket`. */
-  def putTableRankInBucket[T <: Object](
+  def putTableRankInBucket[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent},
       bucket: StreamBucket^{parent},
@@ -6890,7 +6902,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   /** Inserts or replaces a fused table-rank value using lexicographic
    *  priorities.
    */
-  def putTableRankInBucket[T <: Object](
+  def putTableRankInBucket[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent},
       bucket: StreamBucket^{parent},
@@ -6915,7 +6927,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   }
 
   /** Updates a fused table-rank priority if the key is present. */
-  def updateTableRankPriority[T <: Object](
+  def updateTableRankPriority[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent},
       key: Long,
@@ -6924,7 +6936,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     rank.updatePriorityTrusted(key, priority)
 
   /** Updates a fused table-rank lexicographic priority if the key is present. */
-  def updateTableRankPriority[T <: Object](
+  def updateTableRankPriority[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent},
       key: Long,
@@ -6936,7 +6948,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     rank.updatePriorityTrusted(key, priority1, priority2, priority3, priority4)
 
   /** Removes a fused table-rank key if it is present. */
-  def removeTableRank[T <: Object](
+  def removeTableRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent},
       key: Long
@@ -6944,7 +6956,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     rank.removeTrusted(key)
 
   /** Returns true when a table-rank key is present. */
-  def containsTableRank[T <: Object](
+  def containsTableRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent},
       key: Long
@@ -6952,7 +6964,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     rank.containsTrusted(key)
 
   /** Reads the ranked value for a table-rank key. */
-  def getTableRank[T <: Object](
+  def getTableRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent},
       key: Long
@@ -6960,35 +6972,35 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     rank.getTrusted(key).asInstanceOf[T^{parent}]
 
   /** Reads the highest-priority table-ranked value without removing it. */
-  def peekTableRank[T <: Object](
+  def peekTableRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent}
   ): T^{parent} =
     rank.peekTrusted().asInstanceOf[T^{parent}]
 
   /** Reads the key of the highest-priority table-ranked value. */
-  def peekTableRankKey[T <: Object](
+  def peekTableRankKey[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent}
   ): Long =
     rank.peekKeyTrusted()
 
   /** Reads the highest table-rank priority without removing the value. */
-  def peekTableRankPriority[T <: Object](
+  def peekTableRankPriority[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent}
   ): Long =
     rank.peekPriorityTrusted()
 
   /** Removes and returns the highest-priority table-ranked value. */
-  def popTableRank[T <: Object](
+  def popTableRank[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent}
   ): T^{parent} =
     rank.popTrusted().asInstanceOf[T^{parent}]
 
   /** Copies the best table-ranked values into `result` without mutating rank. */
-  def copyTableRankTopK[T <: Object](
+  def copyTableRankTopK[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent},
       result: Array[T^{parent}]^{parent},
@@ -7002,7 +7014,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Enables or disables opt-in diagnostics for a fused table-rank. */
-  def setTableRankDiagnosticsEnabled[T <: Object](
+  def setTableRankDiagnosticsEnabled[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent},
       enabled: Boolean
@@ -7010,28 +7022,28 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     rank.setDiagnosticsEnabled(enabled)
 
   /** Clears opt-in diagnostics counters for a fused table-rank. */
-  def resetTableRankDiagnostics[T <: Object](
+  def resetTableRankDiagnostics[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent}
   ): Unit =
     rank.resetDiagnostics()
 
   /** Returns a compact diagnostics summary for a fused table-rank. */
-  def tableRankDiagnostics[T <: Object](
+  def tableRankDiagnostics[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent}
   ): String =
     rank.diagnosticSummaryTrusted()
 
   /** Returns the number of table-ranked values. */
-  def tableRankLength[T <: Object](
+  def tableRankLength[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent}
   ): Int =
     rank.length
 
   /** Returns true if closing before `cutoffSeconds` would close a bucket. */
-  def hasTableRankBucketsBefore[T <: Object](
+  def hasTableRankBucketsBefore[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent},
       cutoffSeconds: Long
@@ -7043,7 +7055,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     )
 
   /** Closes fused table-rank buckets fully before `cutoffSeconds`. */
-  def closeTableRankBucketsBefore[T <: Object](
+  def closeTableRankBucketsBefore[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent},
       cutoffSeconds: Long
@@ -7058,7 +7070,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
 
   /** Closes fused table-rank buckets and reports removed entries. */
-  def closeTableRankBucketsBeforeWithEntries[T <: Object](
+  def closeTableRankBucketsBeforeWithEntries[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent},
       cutoffSeconds: Long
@@ -7078,7 +7090,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
 
   /** Closes every fused table-rank bucket. */
-  def closeAllTableRankBuckets[T <: Object](
+  def closeAllTableRankBuckets[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent}
   )(cleanup: StreamBucket^{parent} => Unit): Unit =
@@ -7091,7 +7103,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
     }
 
   /** Closes every fused table-rank bucket and reports removed entries. */
-  def closeAllTableRankBucketsWithEntries[T <: Object](
+  def closeAllTableRankBucketsWithEntries[T <: Object^](
       parent: StreamingRegion^,
       rank: StreamWindowTableRank[T]^{parent}
   )(
@@ -7116,47 +7128,47 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
    */
   extension (owner: RiftRegion^)
     @targetName("appendToObjectBuffer")
-    def append[T <: Object](
+    def append[T <: Object^](
         buffer: ObjectBuffer[T]^{owner},
         value: T^{owner}
     ): Unit =
       buffer.appendTrusted(value.asInstanceOf[Object])
 
     @targetName("getFromObjectBuffer")
-    def get[T <: Object](
+    def get[T <: Object^](
         buffer: ObjectBuffer[T]^{owner},
         index: Int
     ): T^{owner} =
       RiftRegion.get(owner, buffer, index)
 
     @targetName("objectBufferLength")
-    def length[T <: Object](buffer: ObjectBuffer[T]^{owner}): Int =
+    def length[T <: Object^](buffer: ObjectBuffer[T]^{owner}): Int =
       RiftRegion.length(owner, buffer)
 
     @targetName("appendToRegionBuffer")
-    def append[T <: Object](
+    def append[T <: Object^](
         buffer: RegionBuffer[T]^{owner},
         value: T^{owner}
     ): Unit =
       buffer.appendTrusted(owner, value.asInstanceOf[Object])
 
     @targetName("getFromRegionBuffer")
-    def get[T <: Object](
+    def get[T <: Object^](
         buffer: RegionBuffer[T]^{owner},
         index: Int
     ): T^{owner} =
       RiftRegion.get(owner, buffer, index)
 
     @targetName("regionBufferLength")
-    def length[T <: Object](buffer: RegionBuffer[T]^{owner}): Int =
+    def length[T <: Object^](buffer: RegionBuffer[T]^{owner}): Int =
       RiftRegion.length(owner, buffer)
 
     @targetName("regionBufferCapacity")
-    def capacity[T <: Object](buffer: RegionBuffer[T]^{owner}): Int =
+    def capacity[T <: Object^](buffer: RegionBuffer[T]^{owner}): Int =
       RiftRegion.capacity(owner, buffer)
 
     @targetName("pushToRegionPriorityQueue")
-    def push[T <: Object](
+    def push[T <: Object^](
         queue: RegionPriorityQueue[T]^{owner},
         value: T^{owner},
         priority: Long
@@ -7164,33 +7176,33 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       queue.pushTrusted(owner, value.asInstanceOf[Object], priority)
 
     @targetName("peekFromRegionPriorityQueue")
-    def peek[T <: Object](
+    def peek[T <: Object^](
         queue: RegionPriorityQueue[T]^{owner}
     ): T^{owner} =
       RiftRegion.peek(owner, queue)
 
     @targetName("peekPriorityFromRegionPriorityQueue")
-    def peekPriority[T <: Object](
+    def peekPriority[T <: Object^](
         queue: RegionPriorityQueue[T]^{owner}
     ): Long =
       RiftRegion.peekPriority(owner, queue)
 
     @targetName("popFromRegionPriorityQueue")
-    def pop[T <: Object](
+    def pop[T <: Object^](
         queue: RegionPriorityQueue[T]^{owner}
     ): T^{owner} =
       RiftRegion.pop(owner, queue)
 
     @targetName("regionPriorityQueueLength")
-    def length[T <: Object](queue: RegionPriorityQueue[T]^{owner}): Int =
+    def length[T <: Object^](queue: RegionPriorityQueue[T]^{owner}): Int =
       RiftRegion.length(owner, queue)
 
     @targetName("regionPriorityQueueCapacity")
-    def capacity[T <: Object](queue: RegionPriorityQueue[T]^{owner}): Int =
+    def capacity[T <: Object^](queue: RegionPriorityQueue[T]^{owner}): Int =
       RiftRegion.capacity(owner, queue)
 
     @targetName("putToRegionIndexedPriorityQueue")
-    def put[T <: Object](
+    def put[T <: Object^](
         queue: RegionIndexedPriorityQueue[T]^{owner},
         key: Int,
         value: T^{owner},
@@ -7199,7 +7211,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       queue.putTrusted(owner, key, value.asInstanceOf[Object], priority)
 
     @targetName("putLexicographicToRegionIndexedPriorityQueue")
-    def put[T <: Object](
+    def put[T <: Object^](
         queue: RegionIndexedPriorityQueue[T]^{owner},
         key: Int,
         value: T^{owner},
@@ -7219,7 +7231,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       )
 
     @targetName("updateRegionIndexedPriorityQueuePriority")
-    def updatePriority[T <: Object](
+    def updatePriority[T <: Object^](
         queue: RegionIndexedPriorityQueue[T]^{owner},
         key: Int,
         priority: Long
@@ -7227,7 +7239,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       RiftRegion.updatePriority(owner, queue, key, priority)
 
     @targetName("updateRegionIndexedPriorityQueueLexicographicPriority")
-    def updatePriority[T <: Object](
+    def updatePriority[T <: Object^](
         queue: RegionIndexedPriorityQueue[T]^{owner},
         key: Int,
         priority1: Long,
@@ -7246,70 +7258,70 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       )
 
     @targetName("removeFromRegionIndexedPriorityQueue")
-    def remove[T <: Object](
+    def remove[T <: Object^](
         queue: RegionIndexedPriorityQueue[T]^{owner},
         key: Int
     ): Boolean =
       RiftRegion.remove(owner, queue, key)
 
     @targetName("containsInRegionIndexedPriorityQueue")
-    def contains[T <: Object](
+    def contains[T <: Object^](
         queue: RegionIndexedPriorityQueue[T]^{owner},
         key: Int
     ): Boolean =
       RiftRegion.contains(owner, queue, key)
 
     @targetName("getFromRegionIndexedPriorityQueue")
-    def get[T <: Object](
+    def get[T <: Object^](
         queue: RegionIndexedPriorityQueue[T]^{owner},
         key: Int
     ): T^{owner} =
       RiftRegion.get(owner, queue, key)
 
     @targetName("peekFromRegionIndexedPriorityQueue")
-    def peek[T <: Object](
+    def peek[T <: Object^](
         queue: RegionIndexedPriorityQueue[T]^{owner}
     ): T^{owner} =
       RiftRegion.peek(owner, queue)
 
     @targetName("peekKeyFromRegionIndexedPriorityQueue")
-    def peekKey[T <: Object](
+    def peekKey[T <: Object^](
         queue: RegionIndexedPriorityQueue[T]^{owner}
     ): Int =
       RiftRegion.peekKey(owner, queue)
 
     @targetName("peekPriorityFromRegionIndexedPriorityQueue")
-    def peekPriority[T <: Object](
+    def peekPriority[T <: Object^](
         queue: RegionIndexedPriorityQueue[T]^{owner}
     ): Long =
       RiftRegion.peekPriority(owner, queue)
 
     @targetName("popFromRegionIndexedPriorityQueue")
-    def pop[T <: Object](
+    def pop[T <: Object^](
         queue: RegionIndexedPriorityQueue[T]^{owner}
     ): T^{owner} =
       RiftRegion.pop(owner, queue)
 
     @targetName("regionIndexedPriorityQueueLength")
-    def length[T <: Object](
+    def length[T <: Object^](
         queue: RegionIndexedPriorityQueue[T]^{owner}
     ): Int =
       RiftRegion.length(owner, queue)
 
     @targetName("regionIndexedPriorityQueueCapacity")
-    def capacity[T <: Object](
+    def capacity[T <: Object^](
         queue: RegionIndexedPriorityQueue[T]^{owner}
     ): Int =
       RiftRegion.capacity(owner, queue)
 
     @targetName("regionIndexedPriorityQueueKeyCapacity")
-    def keyCapacity[T <: Object](
+    def keyCapacity[T <: Object^](
         queue: RegionIndexedPriorityQueue[T]^{owner}
     ): Int =
       RiftRegion.keyCapacity(owner, queue)
 
     @targetName("putToRegionLongIndexedPriorityQueue")
-    def put[T <: Object](
+    def put[T <: Object^](
         queue: RegionLongIndexedPriorityQueue[T]^{owner},
         key: Long,
         value: T^{owner},
@@ -7318,7 +7330,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       queue.putTrusted(owner, key, value.asInstanceOf[Object], priority)
 
     @targetName("putLexicographicToRegionLongIndexedPriorityQueue")
-    def put[T <: Object](
+    def put[T <: Object^](
         queue: RegionLongIndexedPriorityQueue[T]^{owner},
         key: Long,
         value: T^{owner},
@@ -7338,7 +7350,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       )
 
     @targetName("updateRegionLongIndexedPriorityQueuePriority")
-    def updatePriority[T <: Object](
+    def updatePriority[T <: Object^](
         queue: RegionLongIndexedPriorityQueue[T]^{owner},
         key: Long,
         priority: Long
@@ -7346,7 +7358,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       RiftRegion.updatePriority(owner, queue, key, priority)
 
     @targetName("updateRegionLongIndexedPriorityQueueLexicographicPriority")
-    def updatePriority[T <: Object](
+    def updatePriority[T <: Object^](
         queue: RegionLongIndexedPriorityQueue[T]^{owner},
         key: Long,
         priority1: Long,
@@ -7365,64 +7377,64 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       )
 
     @targetName("removeFromRegionLongIndexedPriorityQueue")
-    def remove[T <: Object](
+    def remove[T <: Object^](
         queue: RegionLongIndexedPriorityQueue[T]^{owner},
         key: Long
     ): Boolean =
       RiftRegion.remove(owner, queue, key)
 
     @targetName("containsInRegionLongIndexedPriorityQueue")
-    def contains[T <: Object](
+    def contains[T <: Object^](
         queue: RegionLongIndexedPriorityQueue[T]^{owner},
         key: Long
     ): Boolean =
       RiftRegion.contains(owner, queue, key)
 
     @targetName("getFromRegionLongIndexedPriorityQueue")
-    def get[T <: Object](
+    def get[T <: Object^](
         queue: RegionLongIndexedPriorityQueue[T]^{owner},
         key: Long
     ): T^{owner} =
       RiftRegion.get(owner, queue, key)
 
     @targetName("peekFromRegionLongIndexedPriorityQueue")
-    def peek[T <: Object](
+    def peek[T <: Object^](
         queue: RegionLongIndexedPriorityQueue[T]^{owner}
     ): T^{owner} =
       RiftRegion.peek(owner, queue)
 
     @targetName("peekKeyFromRegionLongIndexedPriorityQueue")
-    def peekKey[T <: Object](
+    def peekKey[T <: Object^](
         queue: RegionLongIndexedPriorityQueue[T]^{owner}
     ): Long =
       RiftRegion.peekKey(owner, queue)
 
     @targetName("peekPriorityFromRegionLongIndexedPriorityQueue")
-    def peekPriority[T <: Object](
+    def peekPriority[T <: Object^](
         queue: RegionLongIndexedPriorityQueue[T]^{owner}
     ): Long =
       RiftRegion.peekPriority(owner, queue)
 
     @targetName("popFromRegionLongIndexedPriorityQueue")
-    def pop[T <: Object](
+    def pop[T <: Object^](
         queue: RegionLongIndexedPriorityQueue[T]^{owner}
     ): T^{owner} =
       RiftRegion.pop(owner, queue)
 
     @targetName("regionLongIndexedPriorityQueueLength")
-    def length[T <: Object](
+    def length[T <: Object^](
         queue: RegionLongIndexedPriorityQueue[T]^{owner}
     ): Int =
       RiftRegion.length(owner, queue)
 
     @targetName("regionLongIndexedPriorityQueueCapacity")
-    def capacity[T <: Object](
+    def capacity[T <: Object^](
         queue: RegionLongIndexedPriorityQueue[T]^{owner}
     ): Int =
       RiftRegion.capacity(owner, queue)
 
     @targetName("regionLongIndexedPriorityQueueTableCapacity")
-    def tableCapacity[T <: Object](
+    def tableCapacity[T <: Object^](
         queue: RegionLongIndexedPriorityQueue[T]^{owner}
     ): Int =
       RiftRegion.tableCapacity(owner, queue)
