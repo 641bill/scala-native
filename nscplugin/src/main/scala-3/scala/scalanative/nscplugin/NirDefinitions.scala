@@ -98,6 +98,8 @@ final class NirDefinitions()(using ctx: Context) {
   // Scala standard library allocation shapes recognized by Rift inference.
   @tu lazy val ScalaSomeClass = requiredClass("scala.Some")
   @tu lazy val ScalaNoneModule = requiredModule("scala.None")
+  @tu lazy val ScalaLeftClass = requiredClass("scala.util.Left")
+  @tu lazy val ScalaRightClass = requiredClass("scala.util.Right")
 
   @tu lazy val RuntimePackage_toRawSizeAlts = RuntimePackageClass
     .alternatives("toRawSize")

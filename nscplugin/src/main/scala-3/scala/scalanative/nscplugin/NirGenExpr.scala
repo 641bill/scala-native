@@ -406,7 +406,10 @@ trait NirGenExpr(using Context) {
         ownerSym.exists { owner =>
           isCheckedRiftAllocationOwnerValue(tree) &&
           (tree.symbol == owner ||
-            inferredDecisionOwner(tree.symbol).contains(owner))
+            inferredDecisionOwner(tree.symbol).contains(owner) ||
+            ownerSymbolRuntimeValues(tree.symbol).exists(
+              ownerSymbolRuntimeValues(owner).contains
+            ))
         }
 
     private def isCurrentRegionOwnedClosureReceiver(
@@ -623,6 +626,16 @@ trait NirGenExpr(using Context) {
         case _                   => None
       }
 
+    private def directEitherApply(tree: Tree): Option[Apply] =
+      tree match {
+        case app @ Apply(_, _ :: Nil) if isScalaEitherApply(calledSymbol(app)) =>
+          Some(app)
+        case Typed(expr, _)      => directEitherApply(expr)
+        case Inlined(_, _, expr) => directEitherApply(expr)
+        case Block(_, expr)      => directEitherApply(expr)
+        case _                   => None
+      }
+
     private def directTupleApply(tree: Tree): Option[Apply] =
       tree match {
         case app @ Apply(_, args) if isScalaTupleApply(calledSymbol(app), args.size) =>
@@ -695,7 +708,96 @@ trait NirGenExpr(using Context) {
       }
     }
 
+    private def inferredMethodReturnOwnerSym(sym: Symbol): Option[Symbol] =
+      val exact = RiftRegionInference.inferredMethodReturnOwners.get(sym)
+      val span =
+        RiftRegionInference
+          .sourceSpanKey(sym.srcPos)
+          .flatMap(
+            RiftRegionInference.inferredMethodReturnOwnersBySourceSpan.get
+          )
+      val line =
+        RiftRegionInference
+          .sourceLineKey(sym.srcPos, sym.name.toString)
+          .flatMap { key =>
+            RiftRegionInference.inferredMethodReturnOwnersBySourceLine
+              .get(key)
+              .flatMap { owners =>
+                owners.toList.distinct match {
+                  case owner :: Nil => Some(owner)
+                  case _            => None
+                }
+              }
+          }
+      exact.orElse(span).orElse(line)
+
     def prepareDirectReturnedClosureAllocation(tree: Tree): Unit =
+      inferredMethodReturnOwnerSym(curMethodSym.get)
+        .flatMap(ownerSym => inferredRiftOwnerValue(ownerSym).map(ownerSym -> _))
+        .foreach { (ownerSym, owner) =>
+          val localClosures = mutable.Map.empty[Symbol, List[Closure]]
+          val localClosureAliases = mutable.Map.empty[Symbol, List[Symbol]]
+
+          def closureTargets(
+              sym: Symbol,
+              seen: Set[Symbol] = Set.empty
+          ): List[Closure] =
+            if sym == NoSymbol || seen.contains(sym) then Nil
+            else
+              localClosures.getOrElse(sym, Nil) :::
+                localClosureAliases
+                  .getOrElse(sym, Nil)
+                  .flatMap(closureTargets(_, seen + sym))
+
+          def scan(current: Tree): Unit =
+            current match {
+              case vd: ValDef if !vd.symbol.is(Mutable) =>
+                val closures = directReturnedClosures(vd.rhs)
+                if closures.nonEmpty then
+                  localClosures.update(vd.symbol, closures)
+                else {
+                  val aliases = returnedLocalIdents(vd.rhs).filter { alias =>
+                    localClosures.contains(alias) ||
+                    localClosureAliases.contains(alias)
+                  }
+                  if aliases.nonEmpty then
+                    localClosureAliases.update(vd.symbol, aliases)
+                  else localClosureAliases.remove(vd.symbol)
+                  localClosures.remove(vd.symbol)
+                }
+                scan(vd.rhs)
+              case vd: ValDef =>
+                localClosures.remove(vd.symbol)
+                localClosureAliases.remove(vd.symbol)
+              case Typed(expr, _) =>
+                scan(expr)
+              case Inlined(_, _, expr) =>
+                scan(expr)
+              case Block(stats, expr) =>
+                stats.foreach(scan)
+                scan(expr)
+              case TypeApply(Select(expr, nme.asInstanceOf_), _) =>
+                scan(expr)
+              case Return(expr, _) =>
+                scan(expr)
+              case Labeled(_, body) =>
+                scan(body)
+              case If(_, thenp, elsep) =>
+                scan(thenp)
+                scan(elsep)
+              case Match(_, cases) =>
+                cases.foreach { case CaseDef(_, _, body) => scan(body) }
+              case _ => ()
+            }
+
+          scan(tree)
+          returnedLocalIdents(tree)
+            .flatMap(sym => closureTargets(sym))
+            .distinct
+            .foreach { closure =>
+              attachDirectClosureOwnerValue(closure, ownerSym, owner)
+            }
+        }
       directReturnedClosures(tree).foreach { closure =>
         if !closure.hasAttachment(AllocationZoneInstance) then
           val ownerSym =
@@ -715,12 +817,15 @@ trait NirGenExpr(using Context) {
       }
 
     def prepareDirectReturnedRiftAllocation(tree: Tree): Unit =
-      RiftRegionInference.inferredClosureBodyOwners
-        .get(curMethodSym.get)
-        .orElse(
-          RiftRegionInference.inferredClosureValueOwners.get(curMethodSym.get)
-        )
-        .foreach { ownerSym =>
+      (
+        RiftRegionInference.inferredClosureBodyOwners
+          .get(curMethodSym.get)
+          .toList :::
+          RiftRegionInference.inferredClosureValueOwners
+            .get(curMethodSym.get)
+            .toList :::
+          inferredMethodReturnOwnerSym(curMethodSym.get).toList
+      ).distinct.foreach { ownerSym =>
           inferredRiftOwnerValue(ownerSym).foreach { owner =>
             val localConstructs = mutable.Map.empty[Symbol, List[Apply]]
             val localAliases = mutable.Map.empty[Symbol, List[Symbol]]
@@ -814,6 +919,20 @@ trait NirGenExpr(using Context) {
             .sourceSpanKey(closure.srcPos)
             .flatMap(RiftRegionInference.inferredClosureOwnersBySourceSpan.get)
         )
+        .orElse(
+          RiftRegionInference
+            .sourceLineKey(closure.srcPos)
+            .flatMap { key =>
+              RiftRegionInference.inferredClosureOwnersBySourceLine
+                .get(key)
+                .flatMap { owners =>
+                  owners.toList.distinct match {
+                    case owner :: Nil => Some(owner)
+                    case _            => None
+                  }
+                }
+            }
+        )
         .orElse {
           val captureOwnerSyms =
             closure.env
@@ -839,6 +958,7 @@ trait NirGenExpr(using Context) {
       directNewApply(tree)
         .orElse(directSomeApply(tree))
         .orElse(directOptionApply(tree))
+        .orElse(directEitherApply(tree))
         .orElse(directTupleApply(tree))
         .orElse(directArrayApply(tree))
 
@@ -1088,6 +1208,8 @@ trait NirGenExpr(using Context) {
         case app @ Apply(_, args) if isScalaSomeApply(calledSymbol(app)) =>
           args.exists(treeCarriesRiftCapture)
         case app @ Apply(_, args) if isScalaOptionApply(calledSymbol(app)) =>
+          args.exists(treeCarriesRiftCapture)
+        case app @ Apply(_, args) if isScalaEitherApply(calledSymbol(app)) =>
           args.exists(treeCarriesRiftCapture)
         case app @ Apply(_, args) if isScalaTupleApply(calledSymbol(app), args.size) =>
           args.exists(treeCarriesRiftCapture)
@@ -1415,6 +1537,17 @@ trait NirGenExpr(using Context) {
       sym.name.toString == "apply" &&
         sym.owner.fullName.toString.stripSuffix("$") == "scala.Option"
 
+    private def isScalaEitherApply(sym: Symbol): Boolean = {
+      if sym == NoSymbol then false
+      else {
+        val ownerSym = sym.owner
+        val owner =
+          if ownerSym == NoSymbol then "" else ownerSym.fullName.toString.stripSuffix("$")
+        sym.name.toString == "apply" &&
+          (owner == "scala.util.Left" || owner == "scala.util.Right")
+      }
+    }
+
     private def isScalaTupleApply(sym: Symbol, argCount: Int): Boolean =
       sym.name.toString == "apply" &&
         argCount >= 2 &&
@@ -1714,6 +1847,22 @@ trait NirGenExpr(using Context) {
                   )
               }
           }
+        case _ if isScalaEitherApply(calledSymbol(app)) =>
+          inferDirectRiftAllocation(app)
+          app.getAttachment(AllocationZoneInstance) match {
+            case Some(zone) => genApplyRegionEither(app, args, zone)
+            case None =>
+              fun match {
+                case _: TypeApply => genApplyTypeApply(app)
+                case _ =>
+                  genApplyMethod(
+                    sym,
+                    statically = sym.isClassConstructor,
+                    qualifier,
+                    args
+                  )
+              }
+          }
         case _ if isScalaTupleApply(calledSymbol(app), args.size) =>
           inferDirectRiftAllocation(app)
           app.getAttachment(AllocationZoneInstance) match {
@@ -1901,6 +2050,25 @@ trait NirGenExpr(using Context) {
         if (isStaticCall) env
         else qualifierOf(fun) :: env
       val captureSyms = allCaptureValues.map(_.symbol)
+
+      // Look up allocation effect for effect-polymorphic closures.
+      // If the closure has an allocation effect (its expected type has a
+      // captured owner), resolve the owner value so the lambda body can
+      // use it for allocation.
+      val allocationEffectOwner: Option[(Symbol, nir.Val)] =
+        RiftRegionInference.inferredClosureAllocationEffects
+          .get(funSym)
+          .orElse(
+            RiftRegionInference
+              .sourceSpanKey(tree.srcPos)
+              .flatMap(
+                RiftRegionInference.inferredClosureAllocationEffectsBySourceSpan
+                  .get
+              )
+          )
+          .flatMap { ownerSym =>
+            inferredRiftOwnerValue(ownerSym).map(ownerSym -> _)
+          }
       val captureTypesAndNames = {
         for
           (tree, idx) <- allCaptureValues.zipWithIndex
@@ -2018,6 +2186,14 @@ trait NirGenExpr(using Context) {
             curMethodInfo := CollectMethodInfo(),
             curUnwindHandler := None
           ) {
+            // Register allocation effect owner in the lambda body's environment.
+            // This enables effect-polymorphic closures: the closure body can
+            // allocate in the owner region even if it doesn't explicitly capture
+            // the owner term.
+            allocationEffectOwner.foreach { (ownerSym, ownerValue) =>
+              curMethodEnv.get.enter(ownerSym, ownerValue)
+            }
+
             val self = nir.Val.Local(fresh(), selfType)
             val params = sigTypes.map(nir.Val.Local(fresh(), _))
 
@@ -2113,8 +2289,11 @@ trait NirGenExpr(using Context) {
             .map(_._1)
             .orElse(inferredOwnerSym)
             .orElse(bodyOwnerSym)
+            .orElse(allocationEffectOwner.map(_._1))
         val captureZone = resolvedOwner.map(_._2)
-        val zone = explicitZone.orElse(captureZone)
+        // Also check for allocation effect owners (effect-polymorphic closures)
+        val allocationEffectZone = allocationEffectOwner.map(_._2)
+        val zone = explicitZone.orElse(captureZone).orElse(allocationEffectZone)
         zone.foreach { _ =>
           allCaptureValues.foreach { capture =>
             if !isAllowedRiftClosureCapture(capture, ownerSym) then
@@ -3077,6 +3256,26 @@ trait NirGenExpr(using Context) {
       buf.jumpExcludeUnitValue(retty)(merge, some)
 
       buf.labelExcludeUnitValue(merge, mergeValue)
+    }
+
+    private def genApplyRegionEither(
+        app: Apply,
+        args: List[Tree],
+        zone: nir.Val
+    )(using
+        nir.SourcePosition
+    ): nir.Val = {
+      val owner = calledSymbol(app).owner.fullName.toString.stripSuffix("$")
+      val clssym =
+        if owner == "scala.util.Left" then defnNir.ScalaLeftClass
+        else defnNir.ScalaRightClass
+      val ctorsym = clssym.asClass.primaryConstructor
+      genApplyNew(
+        clssym = clssym,
+        ctorsym = ctorsym,
+        args = args,
+        zone = Some(zone)
+      )
     }
 
     private def genApplyRegionTuple(

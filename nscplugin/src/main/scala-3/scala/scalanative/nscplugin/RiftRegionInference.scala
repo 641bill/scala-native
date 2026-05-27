@@ -34,6 +34,12 @@ object RiftRegionInference {
   private[nscplugin] val inferredMethodReturnOwners
       : mutable.Map[Symbol, Symbol] =
     mutable.Map.empty
+  private[nscplugin] val inferredMethodReturnOwnersBySourceSpan
+      : mutable.Map[(String, Int, Int), Symbol] =
+    mutable.Map.empty
+  private[nscplugin] val inferredMethodReturnOwnersBySourceLine
+      : mutable.Map[(String, String, Int), mutable.Set[Symbol]] =
+    mutable.Map.empty
   private[nscplugin] val inferredMethodReturnLocalOwners
       : mutable.Map[Symbol, Symbol] =
     mutable.Map.empty
@@ -55,6 +61,22 @@ object RiftRegionInference {
   private[nscplugin] val inferredClosureOwnersBySourceSpan
       : mutable.Map[(String, Int, Int), Symbol] =
     mutable.Map.empty
+  private[nscplugin] val inferredClosureOwnersBySourceLine
+      : mutable.Map[(String, Int), mutable.Set[Symbol]] =
+    mutable.Map.empty
+  // Allocation effect tracking: maps closure symbols to their allocation
+  // effect owner. A closure has an allocation effect when its expected type
+  // has a captured owner (e.g., Function1[Int, T]^{r}), meaning the closure
+  // body should be able to allocate in region r even if it doesn't explicitly
+  // capture r. This is the ReML-style effect polymorphism mechanism.
+  private[nscplugin] val inferredClosureAllocationEffects
+      : mutable.Map[Symbol, Symbol] =
+    mutable.Map.empty
+  // Source-span-based allocation effect tracking for lambda-lifted closures
+  // where the original symbol may not survive lambda lifting.
+  private[nscplugin] val inferredClosureAllocationEffectsBySourceSpan
+      : mutable.Map[(String, Int, Int), Symbol] =
+    mutable.Map.empty
 
   private[nscplugin] def sourceSpanKey(
       pos: dotty.tools.dotc.util.SrcPos
@@ -66,6 +88,39 @@ object RiftRegionInference {
           sourcePos.source.file.absolute.jpath.toString,
           sourcePos.span.start,
           sourcePos.span.end
+        )
+      )
+    else None
+  }
+
+  private[nscplugin] def normalizedMethodName(name: String): String =
+    name.replaceAll("\\$\\d+$", "")
+
+  private[nscplugin] def sourceLineKey(
+      pos: dotty.tools.dotc.util.SrcPos,
+      methodName: String
+  )(using dotty.tools.dotc.core.Contexts.Context): Option[(String, String, Int)] = {
+    val sourcePos = pos.sourcePos
+    if sourcePos.span.exists && sourcePos.source.exists then
+      Some(
+        (
+          sourcePos.source.file.absolute.jpath.toString,
+          normalizedMethodName(methodName),
+          sourcePos.startLine
+        )
+      )
+    else None
+  }
+
+  private[nscplugin] def sourceLineKey(
+      pos: dotty.tools.dotc.util.SrcPos
+  )(using dotty.tools.dotc.core.Contexts.Context): Option[(String, Int)] = {
+    val sourcePos = pos.sourcePos
+    if sourcePos.span.exists && sourcePos.source.exists then
+      Some(
+        (
+          sourcePos.source.file.absolute.jpath.toString,
+          sourcePos.startLine
         )
       )
     else None
@@ -105,6 +160,8 @@ class RiftRegionInference(
   )(using Context): List[CompilationUnit] = {
     RiftRegionInference.inferredAllocationOwners.clear()
     RiftRegionInference.inferredMethodReturnOwners.clear()
+    RiftRegionInference.inferredMethodReturnOwnersBySourceSpan.clear()
+    RiftRegionInference.inferredMethodReturnOwnersBySourceLine.clear()
     RiftRegionInference.inferredMethodReturnLocalOwners.clear()
     RiftRegionInference.inferredClosureBodyOwners.clear()
     RiftRegionInference.inferredClosureValueOwners.clear()
@@ -112,6 +169,9 @@ class RiftRegionInference(
     RiftRegionInference.allocationDecisions.clear()
     RiftRegionInference.inferredAllocationOwnersBySourceSpan.clear()
     RiftRegionInference.inferredClosureOwnersBySourceSpan.clear()
+    RiftRegionInference.inferredClosureOwnersBySourceLine.clear()
+    RiftRegionInference.inferredClosureAllocationEffects.clear()
+    RiftRegionInference.inferredClosureAllocationEffectsBySourceSpan.clear()
     directlyNewAllocatedSyms.clear()
     localRegionConstructAllocatedApps.clear()
     localAllocatedSyms.clear()
@@ -226,6 +286,71 @@ class RiftRegionInference(
     }
   }
 
+  private def treeMentionsRuntimeOwnerValue(
+      tree: Tree,
+      owner: Symbol
+  )(using Context): Boolean = {
+    val canonical = canonicalOwner(owner)
+
+    def matchesOwner(sym: Symbol): Boolean =
+      sym != NoSymbol &&
+        (canonicalOwner(sym) == canonical ||
+          localOwnerAliases
+            .get(sym)
+            .map(canonicalOwner)
+            .contains(canonical))
+
+    def loop(current: Tree): Boolean =
+      current match {
+        case _: TypeTree =>
+          false
+        case Ident(_) =>
+          matchesOwner(current.symbol)
+        case Select(qualifier, _) =>
+          matchesOwner(current.symbol) || loop(qualifier)
+        case Apply(fun, args) =>
+          loop(fun) || args.exists(loop)
+        case TypeApply(fun, _) =>
+          loop(fun)
+        case vd: ValDef =>
+          loop(vd.rhs)
+        case dd: DefDef =>
+          loop(dd.rhs)
+        case Block(stats, expr) =>
+          stats.exists(loop) || loop(expr)
+        case Typed(expr, _) =>
+          loop(expr)
+        case Inlined(_, _, expr) =>
+          loop(expr)
+        case Return(expr, _) =>
+          loop(expr)
+        case Labeled(_, body) =>
+          loop(body)
+        case Assign(lhs, rhs) =>
+          loop(lhs) || loop(rhs)
+        case If(cond, thenp, elsep) =>
+          loop(cond) || loop(thenp) || loop(elsep)
+        case Match(selector, cases) =>
+          loop(selector) || cases.exists {
+            case CaseDef(_, guard, body) => loop(guard) || loop(body)
+          }
+        case Closure(env, fun, _) =>
+          env.exists(loop) || loop(fun)
+        case Try(expr, cases, finalizer) =>
+          loop(expr) ||
+            cases.exists { case CaseDef(_, guard, body) =>
+              loop(guard) || loop(body)
+            } ||
+            loop(finalizer)
+        case WhileDo(cond, body) =>
+          loop(cond) || loop(body)
+        case _ =>
+          false
+      }
+
+    loop(tree)
+  }
+
   private def markDirectConstructOwner(
       app: Apply,
       owner: Symbol,
@@ -248,6 +373,44 @@ class RiftRegionInference(
       reason,
       app.srcPos
     )
+  }
+
+  private def markMethodReturnOwner(dd: DefDef, owner: Symbol)(using Context): Unit = {
+    val canonical = canonicalOwner(owner)
+    RiftRegionInference.inferredMethodReturnOwners.update(dd.symbol, canonical)
+    RiftRegionInference.sourceSpanKey(dd.srcPos).foreach { key =>
+      RiftRegionInference.inferredMethodReturnOwnersBySourceSpan.update(
+        key,
+        canonical
+      )
+    }
+    RiftRegionInference
+      .sourceLineKey(dd.srcPos, dd.symbol.name.toString)
+      .foreach { key =>
+        val owners =
+          RiftRegionInference.inferredMethodReturnOwnersBySourceLine
+            .getOrElseUpdate(key, mutable.Set.empty)
+        owners += canonical
+      }
+  }
+
+  private def markClosureSourceOwner(
+      closure: Closure,
+      owner: Symbol
+  )(using Context): Unit = {
+    val canonical = canonicalOwner(owner)
+    RiftRegionInference.sourceSpanKey(closure.srcPos).foreach { key =>
+      RiftRegionInference.inferredClosureOwnersBySourceSpan.update(
+        key,
+        canonical
+      )
+    }
+    RiftRegionInference.sourceLineKey(closure.srcPos).foreach { key =>
+      val owners =
+        RiftRegionInference.inferredClosureOwnersBySourceLine
+          .getOrElseUpdate(key, mutable.Set.empty)
+      owners += canonical
+    }
   }
 
   private def registerLocalCaptureOwner(sym: Symbol)(using Context): Unit =
@@ -408,6 +571,16 @@ class RiftRegionInference(
       case Typed(expr, _)      => directOptionApply(expr)
       case Inlined(_, _, expr) => directOptionApply(expr)
       case Block(_, expr)      => directOptionApply(expr)
+      case _                   => None
+    }
+
+  private def directEitherApply(tree: Tree)(using Context): Option[Apply] =
+    tree match {
+      case app @ Apply(_, _ :: Nil) if isScalaEitherApply(calledSymbol(app)) =>
+        Some(app)
+      case Typed(expr, _)      => directEitherApply(expr)
+      case Inlined(_, _, expr) => directEitherApply(expr)
+      case Block(_, expr)      => directEitherApply(expr)
       case _                   => None
     }
 
@@ -654,6 +827,7 @@ class RiftRegionInference(
     directNewApply(tree)
       .orElse(directSomeApply(tree))
       .orElse(directOptionApply(tree))
+      .orElse(directEitherApply(tree))
       .orElse(directTupleApply(tree))
       .orElse(directArrayApply(tree))
 
@@ -826,6 +1000,17 @@ class RiftRegionInference(
   private def isScalaOptionApply(sym: Symbol)(using Context): Boolean =
     sym.name.toString == "apply" &&
       sym.owner.fullName.toString.stripSuffix("$") == "scala.Option"
+
+  private def isScalaEitherApply(sym: Symbol)(using Context): Boolean = {
+    if sym == NoSymbol then false
+    else {
+      val ownerSym = sym.owner
+      val owner =
+        if ownerSym == NoSymbol then "" else ownerSym.fullName.toString.stripSuffix("$")
+      sym.name.toString == "apply" &&
+        (owner == "scala.util.Left" || owner == "scala.util.Right")
+    }
+  }
 
   private def isScalaTupleApply(sym: Symbol, argCount: Int)(using Context): Boolean =
     sym.name.toString == "apply" &&
@@ -1595,6 +1780,15 @@ class RiftRegionInference(
               owner,
               "closure method argument body return is constrained by a captured checked region owner"
             )
+            // Also mark allocation effect for effect-polymorphic closures.
+            // When a closure with an allocation effect is passed to a method
+            // with an owner-token parameter, the effect is instantiated with
+            // the actual owner from the call site.
+            markClosureAllocationEffect(
+              closure,
+              owner,
+              "closure method argument allocation effect is instantiated by checked region owner"
+            )
             val closureSym = calledSymbol(closure)
             if closureSym != NoSymbol then
               updateDecision(
@@ -1940,6 +2134,42 @@ class RiftRegionInference(
     }
   }
 
+  // Mark allocation effect for a closure whose expected type has a captured
+  // owner, even if the closure doesn't explicitly capture the owner.
+  // This is the ReML-style effect polymorphism mechanism: the closure type
+  // carries the allocation effect, and the caller will inject the owner
+  // handle at the call site.
+  private def markClosureAllocationEffect(
+      closure: Closure,
+      owner: Symbol,
+      reason: String
+  )(using Context): Unit = {
+    val Closure(_, fun, _) = closure: @unchecked
+    val funSym = fun.symbol
+    val canonical = canonicalOwner(owner)
+    if funSym != NoSymbol then {
+      // Record the allocation effect on the closure symbol
+      RiftRegionInference.inferredClosureAllocationEffects.update(
+        funSym,
+        canonical
+      )
+      // Also mark the closure body owner so the inference phase knows
+      // the closure body should be treated as region-allocated.
+      RiftRegionInference.inferredClosureBodyOwners.update(funSym, canonical)
+      // Also record by source span for lambda-lifted closures
+      RiftRegionInference.sourceSpanKey(closure.srcPos).foreach { key =>
+        RiftRegionInference.inferredClosureAllocationEffectsBySourceSpan
+          .update(key, canonical)
+      }
+      updateDecision(
+        funSym,
+        RiftRegionInference.AllocationOwner.Region(canonical),
+        reason,
+        closure.srcPos
+      )
+    }
+  }
+
   private def markDirectClosureRegionOwner(
       closure: Closure,
       owner: Symbol,
@@ -1955,12 +2185,7 @@ class RiftRegionInference(
       NirDefinitions.InferredRiftAllocationOwner,
       canonical
     )
-    RiftRegionInference.sourceSpanKey(closure.srcPos).foreach { key =>
-      RiftRegionInference.inferredClosureOwnersBySourceSpan.update(
-        key,
-        canonical
-      )
-    }
+    markClosureSourceOwner(closure, canonical)
     markClosureBodyOwner(closure, canonical, bodyReason)
     val closureSym = calledSymbol(closure)
     if closureSym != NoSymbol then
@@ -2005,12 +2230,7 @@ class RiftRegionInference(
           NirDefinitions.InferredRiftAllocationOwner,
           canonical
         )
-        RiftRegionInference.sourceSpanKey(closure.srcPos).foreach { key =>
-          RiftRegionInference.inferredClosureOwnersBySourceSpan.update(
-            key,
-            canonical
-          )
-        }
+        markClosureSourceOwner(closure, canonical)
         markRegionOwner(target, canonical, reason, pos)
         markClosureBodyOwner(closure, canonical, bodyReason)
     }
@@ -2026,6 +2246,12 @@ class RiftRegionInference(
   )(using Context): Unit = {
     directReturnedClosures(valueTree).foreach { closure =>
       markDirectClosureRegionOwner(closure, owner, directReason, bodyReason)
+      // Also mark allocation effect for effect-polymorphic closures
+      markClosureAllocationEffect(
+        closure,
+        owner,
+        "closure value allocation effect is constrained by checked region owner token"
+      )
     }
     returnedLocalIdents(valueTree)
       .flatMap(localClosureAllocationPairs)
@@ -2039,6 +2265,12 @@ class RiftRegionInference(
           bodyReason,
           conflictReason,
           valueTree.srcPos
+        )
+        // Also mark allocation effect for local closures
+        markClosureAllocationEffect(
+          closure,
+          owner,
+          "local closure allocation effect is constrained by checked region owner token"
         )
       }
   }
@@ -2275,13 +2507,37 @@ class RiftRegionInference(
             owner,
             "closure body return is constrained by a captured checked region owner"
           )
+          // Also mark the allocation effect for effect-polymorphic closures.
+          // This enables the caller to inject the owner handle at the call site
+          // even if the closure doesn't explicitly capture the owner.
+          markClosureAllocationEffect(
+            closure,
+            owner,
+            "closure expected type has an allocation effect in a checked region"
+          )
         case first :: second :: _ =>
           markRejected(
             target,
             s"ambiguous captured closure owners: ${first.name} and ${second.name}",
             closure.srcPos
           )
-        case Nil => ()
+        case Nil =>
+          // No owner found from captured types, but check if the expected type
+          // itself has a captured owner that could serve as an allocation effect.
+          // This handles the case where the closure type is e.g. Function1[Int, T]^{r}
+          // but the closure body doesn't explicitly capture r.
+          val expectedOnlyOwners = captureOwnerSymbols(expected, owner)
+            .distinct
+            .filter(isRiftInferredAllocationOwnerSymbol)
+          expectedOnlyOwners match {
+            case effectOwner :: Nil =>
+              markClosureAllocationEffect(
+                closure,
+                effectOwner,
+                "closure expected type has an allocation effect in a checked region (expected-type only)"
+              )
+            case _ => ()
+          }
       }
     }
 
@@ -2301,6 +2557,15 @@ class RiftRegionInference(
         .distinct
         .filter(isRiftInferredAllocationOwnerSymbol)
       val owners = capturedOwners.filter(methodRegionParams.contains)
+      val lexicalOwner =
+        if owners.isEmpty then
+          capturedOwners match {
+            case owner :: Nil if treeMentionsRuntimeOwnerValue(dd.rhs, owner) =>
+              Some(canonicalOwner(owner))
+            case _ =>
+              None
+          }
+        else None
       apps.foreach { app =>
         owners match {
           case owner :: Nil =>
@@ -2309,10 +2574,7 @@ class RiftRegionInference(
               owner,
               "direct new method result type is captured by a checked region"
             )
-            RiftRegionInference.inferredMethodReturnOwners.update(
-              dd.symbol,
-              owner
-            )
+            markMethodReturnOwner(dd, owner)
             updateDecision(
               dd.symbol,
               RiftRegionInference.AllocationOwner.Region(owner),
@@ -2334,11 +2596,33 @@ class RiftRegionInference(
               s"ambiguous captured method result owners: ${first.name} and ${second.name}",
               app.srcPos
             )
-          case _ => ()
+          case _ =>
+            lexicalOwner.foreach { owner =>
+              markDirectConstructOwner(
+                app,
+                owner,
+                "direct method result type is constrained by a unique lexical checked owner type and runtime owner term"
+              )
+              markMethodReturnOwner(dd, owner)
+              updateDecision(
+                dd.symbol,
+                RiftRegionInference.AllocationOwner.Region(owner),
+                "method returns direct allocation constrained by a unique lexical checked owner type and runtime owner term",
+                app.srcPos
+              )
+              markNestedClosureOwnerConstrainedAllocations(
+                owner,
+                dd.rhs,
+                "nested direct closure method result is constrained by a unique lexical checked owner type",
+                "nested local closure method result is constrained by a unique lexical checked owner type",
+                "nested closure method result body return is constrained by a unique lexical checked owner type",
+                "conflicting inferred nested lexical method-result local closure owners"
+              )
+            }
         }
       }
       val firstApp = apps.head
-      if owners.isEmpty && capturedOwners.nonEmpty then
+      if owners.isEmpty && lexicalOwner.isEmpty && capturedOwners.nonEmpty then
         updateDecision(
           dd.symbol,
           RiftRegionInference.AllocationOwner.Heap,
@@ -2384,10 +2668,7 @@ class RiftRegionInference(
               NirDefinitions.InferredRiftAllocationOwner,
               owner
             )
-            RiftRegionInference.inferredMethodReturnOwners.update(
-              dd.symbol,
-              owner
-            )
+            markMethodReturnOwner(dd, owner)
             updateDecision(
               dd.symbol,
               RiftRegionInference.AllocationOwner.Region(owner),
@@ -2483,10 +2764,7 @@ class RiftRegionInference(
                     dd.rhs.srcPos
                   )
                 }
-                RiftRegionInference.inferredMethodReturnOwners.update(
-                  dd.symbol,
-                  canonical
-                )
+                markMethodReturnOwner(dd, canonical)
                 updateDecision(
                   dd.symbol,
                   RiftRegionInference.AllocationOwner.Region(canonical),
@@ -2506,13 +2784,58 @@ class RiftRegionInference(
               )
             }
           case _ =>
-            if capturedOwners.nonEmpty then
-              updateDecision(
-                dd.symbol,
-                RiftRegionInference.AllocationOwner.Heap,
-                "captured method result owner is not a method parameter with a runtime handle",
-                dd.rhs.srcPos
-              )
+            capturedOwners match {
+              case owner :: Nil
+                  if treeMentionsRuntimeOwnerValue(dd.rhs, owner) =>
+                val canonical = canonicalOwner(owner)
+                val conflicting =
+                  (existingOwner.toList ++ existingAllocationOwners)
+                    .find(_ != canonical)
+                conflicting match {
+                  case Some(previous) =>
+                    val rejectedTargets =
+                      if allocationTargets.nonEmpty then target :: allocationTargets
+                      else target :: Nil
+                    rejectedTargets.distinct.foreach { rejectedTarget =>
+                      markRejected(
+                        rejectedTarget,
+                        s"conflicting inferred lexical-owner method-local owners: ${previous.name} and ${canonical.name}",
+                        dd.rhs.srcPos
+                      )
+                    }
+                  case None =>
+                    markSelectedAliasOwner(
+                      target,
+                      allocationTargets,
+                      canonical,
+                      "selected local allocation alias is returned from a method with a unique lexical checked owner type",
+                      dd.rhs.srcPos
+                    )
+                    allocationTargets.foreach { allocationTarget =>
+                      markLocalRegionConstructOwner(
+                        allocationTarget,
+                        canonical,
+                        "local direct new or selected allocation is returned from a method with a unique lexical checked owner type and runtime owner term",
+                        dd.rhs.srcPos
+                      )
+                    }
+                    markMethodReturnOwner(dd, canonical)
+                    updateDecision(
+                      dd.symbol,
+                      RiftRegionInference.AllocationOwner.Region(canonical),
+                      "method returns local region allocation constrained by a unique lexical checked owner type and runtime owner term",
+                      dd.rhs.srcPos
+                    )
+                }
+              case _ =>
+                if capturedOwners.nonEmpty then
+                  updateDecision(
+                    dd.symbol,
+                    RiftRegionInference.AllocationOwner.Heap,
+                    "captured method result owner is not a method parameter with a runtime handle",
+                    dd.rhs.srcPos
+                  )
+            }
         }
     }
   }
@@ -2556,10 +2879,7 @@ class RiftRegionInference(
                   "local closure is returned from a method with a captured region result",
                   dd.rhs.srcPos
                 )
-                RiftRegionInference.inferredMethodReturnOwners.update(
-                  dd.symbol,
-                  canonical
-                )
+                markMethodReturnOwner(dd, canonical)
                 updateDecision(
                   dd.symbol,
                   RiftRegionInference.AllocationOwner.Region(canonical),
@@ -2585,19 +2905,60 @@ class RiftRegionInference(
               dd.rhs.srcPos
             )
           case _ =>
-            if capturedOwners.nonEmpty then {
-              updateDecision(
-                target,
-                RiftRegionInference.AllocationOwner.Heap,
-                "captured local closure method result owner is not a method parameter with a runtime handle",
-                dd.rhs.srcPos
-              )
-              updateDecision(
-                dd.symbol,
-                RiftRegionInference.AllocationOwner.Heap,
-                "captured local closure method result owner is not a method parameter with a runtime handle",
-                dd.rhs.srcPos
-              )
+            capturedOwners match {
+              case owner :: Nil =>
+                val canonical = canonicalOwner(owner)
+                val existingOwner =
+                  RiftRegionInference.inferredAllocationOwners
+                    .get(target)
+                    .map(canonicalOwner)
+                existingOwner match {
+                  case Some(previous) if previous != canonical =>
+                    markRejected(
+                      target,
+                      s"conflicting inferred lexical-owner local closure owners: ${previous.name} and ${canonical.name}",
+                      dd.rhs.srcPos
+                    )
+                  case _ =>
+                    closure.putAttachment(
+                      NirDefinitions.InferredRiftAllocationOwner,
+                      canonical
+                    )
+                    markClosureSourceOwner(closure, canonical)
+                    markRegionOwner(
+                      target,
+                      canonical,
+                      "local closure is returned from a method with a unique lexical checked owner type",
+                      dd.rhs.srcPos
+                    )
+                    markMethodReturnOwner(dd, canonical)
+                    updateDecision(
+                      dd.symbol,
+                      RiftRegionInference.AllocationOwner.Region(canonical),
+                      "method returns local closure constrained by a unique lexical checked owner type",
+                      dd.rhs.srcPos
+                    )
+                    markClosureBodyOwner(
+                      closure,
+                      canonical,
+                      "method-returned local closure body return is constrained by a unique lexical checked owner type"
+                    )
+                }
+              case _ =>
+                if capturedOwners.nonEmpty then {
+                  updateDecision(
+                    target,
+                    RiftRegionInference.AllocationOwner.Heap,
+                    "captured local closure method result owner is not a method parameter and no unique runtime owner value is captured",
+                    dd.rhs.srcPos
+                  )
+                  updateDecision(
+                    dd.symbol,
+                    RiftRegionInference.AllocationOwner.Heap,
+                    "captured local closure method result owner is not a method parameter and no unique runtime owner value is captured",
+                    dd.rhs.srcPos
+                  )
+                }
             }
         }
       }
@@ -2792,6 +3153,14 @@ class RiftRegionInference(
         List(dd.tpt.tpe, dd.tpe, dd.symbol.info.finalResultType)
           .filter(typeMentionsRiftCapture)
       val methodRegionParams = dd.symbol.paramSymss.flatten.toSet
+      val forwardedOwners =
+        (
+          calls.flatMap(app =>
+            RiftRegionInference.inferredMethodReturnOwners.get(
+              calledSymbol(app)
+            )
+          ) ::: localForwardOwners
+        ).map(canonicalOwner).distinct
       val capturedOwners =
         expectedTypes
           .flatMap { expected =>
@@ -2804,10 +3173,7 @@ class RiftRegionInference(
       val owners = capturedOwners.filter(methodRegionParams.contains)
       owners match {
         case owner :: Nil =>
-          RiftRegionInference.inferredMethodReturnOwners.update(
-            dd.symbol,
-            owner
-          )
+          markMethodReturnOwner(dd, owner)
           updateDecision(
             dd.symbol,
             RiftRegionInference.AllocationOwner.Region(owner),
@@ -2822,13 +3188,50 @@ class RiftRegionInference(
             calls.headOption.map(_.srcPos).getOrElse(dd.rhs.srcPos)
           )
         case _ =>
-          if capturedOwners.nonEmpty then
-            updateDecision(
-              dd.symbol,
-              RiftRegionInference.AllocationOwner.Heap,
-              "captured forwarded method result owner is not a method parameter with a runtime handle",
-              calls.headOption.map(_.srcPos).getOrElse(dd.rhs.srcPos)
-            )
+          capturedOwners match {
+            case owner :: Nil
+                if treeMentionsRuntimeOwnerValue(dd.rhs, owner) =>
+              val canonical = canonicalOwner(owner)
+              forwardedOwners match {
+                case forwarded :: Nil if forwarded == canonical =>
+                  markMethodReturnOwner(dd, canonical)
+                  updateDecision(
+                    dd.symbol,
+                    RiftRegionInference.AllocationOwner.Region(canonical),
+                    "method forwards an inferred region-returning method result constrained by a unique lexical checked owner type and runtime owner term",
+                    calls.headOption.map(_.srcPos).getOrElse(dd.rhs.srcPos)
+                  )
+                case forwarded :: Nil =>
+                  updateDecision(
+                    dd.symbol,
+                    RiftRegionInference.AllocationOwner.Rejected,
+                    s"conflicting forwarded lexical method result owners: ${forwarded.name} and ${canonical.name}",
+                    calls.headOption.map(_.srcPos).getOrElse(dd.rhs.srcPos)
+                  )
+                case first :: second :: _ =>
+                  updateDecision(
+                    dd.symbol,
+                    RiftRegionInference.AllocationOwner.Rejected,
+                    s"ambiguous forwarded lexical method result owners: ${first.name} and ${second.name}",
+                    calls.headOption.map(_.srcPos).getOrElse(dd.rhs.srcPos)
+                  )
+                case Nil =>
+                  updateDecision(
+                    dd.symbol,
+                    RiftRegionInference.AllocationOwner.Heap,
+                    "forwarded method result has no concrete inferred owner to match the lexical checked owner",
+                    calls.headOption.map(_.srcPos).getOrElse(dd.rhs.srcPos)
+                  )
+              }
+            case _ =>
+              if capturedOwners.nonEmpty then
+                updateDecision(
+                  dd.symbol,
+                  RiftRegionInference.AllocationOwner.Heap,
+                  "captured forwarded method result owner is not a method parameter with a runtime handle",
+                  calls.headOption.map(_.srcPos).getOrElse(dd.rhs.srcPos)
+                )
+          }
       }
     }
   }

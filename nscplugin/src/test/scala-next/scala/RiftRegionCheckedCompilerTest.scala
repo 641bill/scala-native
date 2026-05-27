@@ -449,6 +449,23 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked region allocation cannot store an unrooted heap object"
     )
 
+  @Test def eitherPrimitiveLiteralRequiresBoxingSupport(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val either: Either[Int, Int]^{region} = Left(40)
+      |    either match
+      |      case Left(value)  => value
+      |      case Right(value) => value
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
   @Test def tuple2OfRegionValueCanBeRegionLocal(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking
@@ -1622,6 +1639,165 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked region allocation cannot store an unrooted heap object"
     )
 
+  @Test def inferredRegionOwnedClosureBodyCanReturnEitherInlineClosure()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val make: Function1[
+      |      Int,
+      |      Either[
+      |        Function1[Int, Box^{region}]^{region},
+      |        Function1[Int, Box^{region}]^{region}
+      |      ]^{region}
+      |    ]^{region} =
+      |      (base: Int) =>
+      |        val owner = region
+      |        if flag then
+      |          Left(
+      |            (value: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: Box^{owner} = new Box(base + value + keepOwner)
+      |              box
+      |          )
+      |        else
+      |          Right(
+      |            (value: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: Box^{owner} = new Box(base + value + 1 + keepOwner)
+      |              box
+      |          )
+      |    val fn = make(40) match
+      |      case Left(value)  => value
+      |      case Right(value) => value
+      |    fn(2).value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRegionOwnedClosureBodyEitherInlineClosureRejectsUnrootedMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |
+      |def bad(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val metadata = new Metadata(40)
+      |    val make: Function1[
+      |      Int,
+      |      Either[
+      |        Function1[Int, Entry^{region}]^{region},
+      |        Function1[Int, Entry^{region}]^{region}
+      |      ]^{region}
+      |    ]^{region} =
+      |      (base: Int) =>
+      |        val owner = region
+      |        if flag then
+      |          Left(
+      |            (value: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val entry: Entry^{owner} = new Entry(metadata)
+      |              if keepOwner == -1 then entry else entry
+      |          )
+      |        else
+      |          Right(
+      |            (value: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val entry: Entry^{owner} = new Entry(metadata)
+      |              if keepOwner == -1 then entry else entry
+      |          )
+      |    val fn = make(2) match
+      |      case Left(value)  => value
+      |      case Right(value) => value
+      |    fn(0).metadata.value
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRegionOwnedClosureBodyCanReturnEitherSelectedLocalClosure()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val make: Function1[
+      |      Boolean,
+      |      Either[
+      |        Function1[Int, Box^{region}]^{region},
+      |        Function1[Int, Box^{region}]^{region}
+      |      ]^{region}
+      |    ]^{region} =
+      |      (chooseFirst: Boolean) =>
+      |        val owner = region
+      |        val first = (value: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val box: Box^{owner} = new Box(value + 40 + keepOwner)
+      |          box
+      |        val second = (value: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val box: Box^{owner} = new Box(value + 41 + keepOwner)
+      |          box
+      |        if chooseFirst then Left(first) else Right(second)
+      |    val expected = if flag then 42 else 43
+      |    val fn = make(flag) match
+      |      case Left(value)  => value
+      |      case Right(value) => value
+      |    fn(2).value - expected + 42
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRegionOwnedClosureBodyEitherSelectedLocalClosureRejectsUnrootedMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |
+      |def bad(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val metadata = new Metadata(40)
+      |    val make: Function1[
+      |      Boolean,
+      |      Either[
+      |        Function1[Int, Entry^{region}]^{region},
+      |        Function1[Int, Entry^{region}]^{region}
+      |      ]^{region}
+      |    ]^{region} =
+      |      (chooseFirst: Boolean) =>
+      |        val owner = region
+      |        val first = (value: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val entry: Entry^{owner} = new Entry(metadata)
+      |          if keepOwner == -1 then entry else entry
+      |        val second = (value: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val entry: Entry^{owner} = new Entry(metadata)
+      |          if keepOwner == -1 then entry else entry
+      |        if chooseFirst then Left(first) else Right(second)
+      |    val fn = make(flag) match
+      |      case Left(value)  => value
+      |      case Right(value) => value
+      |    fn(2).metadata.value
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
   @Test def inferredRegionOwnedMethodReturnedClosureBodyCanAllocateWithCapturedOwnerTerm()
       : Unit =
     assertCompiles("""
@@ -2124,6 +2300,122 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked region allocation cannot store an unrooted heap object"
     )
 
+  @Test def inferredRegionOwnedClosureBodyCanCallEitherReturningMethod()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |
+      |def build(value: Int)(using r: RiftRegion.ScopedRegion^): Either[Box^{r}, Box^{r}]^{r} =
+      |  if value >= 0 then Left(new Box(value)) else Right(new Box(0))
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Either[Box^{r}, Box^{r}]^{r}]^{r} =
+      |  (value: Int) =>
+      |    val owner = r
+      |    val keepOwner = System.identityHashCode(owner) & 0
+      |    build(value + keepOwner)(using owner)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(42) match
+      |      case Left(box) => box.value
+      |      case Right(box) => box.value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRegionOwnedClosureBodyEitherCalleeRejectsUnrootedMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def build(metadata: Metadata)(using r: RiftRegion.ScopedRegion^): Either[Metadata, Metadata]^{r} =
+      |  if System.identityHashCode(metadata) >= 0 then Left(metadata)
+      |  else Right(metadata)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Either[Metadata, Metadata]^{r}]^{r} =
+      |  val metadata = new Metadata(40)
+      |  (value: Int) =>
+      |    val owner = r
+      |    val keepOwner = System.identityHashCode(owner) & 0
+      |    if keepOwner == -1 then build(metadata)(using owner)
+      |    else build(metadata)(using owner)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(2).fold(_.value, _.value)
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRegionOwnedClosureBodyCanCallSelectedEitherReturningMethod()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |
+      |def build(value: Int)(using r: RiftRegion.ScopedRegion^): Either[Box^{r}, Box^{r}]^{r} =
+      |  val first: Either[Box^{r}, Box^{r}]^{r} =
+      |    Left(new Box(value))
+      |  val second: Either[Box^{r}, Box^{r}]^{r} =
+      |    Right(new Box(value + 1))
+      |  val keepFactories =
+      |    System.identityHashCode(first) + System.identityHashCode(second)
+      |  if value + (keepFactories & 0) >= 0 then first else second
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Either[Box^{r}, Box^{r}]^{r}]^{r} =
+      |  (value: Int) =>
+      |    val owner = r
+      |    val keepOwner = System.identityHashCode(owner) & 0
+      |    build(value + keepOwner)(using owner)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(42) match
+      |      case Left(box) => box.value
+      |      case Right(box) => box.value - 1
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRegionOwnedClosureBodySelectedEitherCalleeRejectsUnrootedMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def build(metadata: Metadata)(using r: RiftRegion.ScopedRegion^): Either[Metadata, Metadata]^{r} =
+      |  val first: Either[Metadata, Metadata]^{r} = Left(metadata)
+      |  val second: Either[Metadata, Metadata]^{r} = Right(metadata)
+      |  if System.identityHashCode(first) >= 0 then first else second
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Either[Metadata, Metadata]^{r}]^{r} =
+      |  val metadata = new Metadata(40)
+      |  (value: Int) =>
+      |    val owner = r
+      |    val keepOwner = System.identityHashCode(owner) & 0
+      |    build(metadata)(using owner)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(2).fold(_.value, _.value)
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
   @Test def inferredRegionOwnedForwardedMethodReturnedClosureBodyCanAllocateWithCapturedOwnerTerm()
       : Unit =
     assertCompiles("""
@@ -2329,6 +2621,704 @@ class RiftRegionCheckedCompilerTest {
       |def bad(): Int =
       |  RiftRegion.scoped { region ?=>
       |    make(using region)(2).metadata.value
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperReturnedLocalClosureBodyCanAllocateWithCapturedOwnerTerm()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Function1[Int, Box^{r}]^{r}]^{r} =
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Function1[Int, Box^{owner}]^{owner} =
+      |      val inner =
+      |        (value: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val box: Box^{owner} = new Box(base + offset + value + keepOwner)
+      |          box
+      |      inner
+      |    build(base)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(20)(2).value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperReturnedLocalClosureBodyRejectsUnrootedMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Function1[Int, Entry^{r}]^{r}]^{r} =
+      |  val metadata = new Metadata(40)
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Function1[Int, Entry^{owner}]^{owner} =
+      |      val inner =
+      |        (value: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val entry: Entry^{owner} = new Entry(metadata)
+      |          entry
+      |      inner
+      |    build(base)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(20)(2).metadata.value
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperReturnedLocalAllocationCanAllocateWithCapturedOwnerTerm()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Box^{r}]^{r} =
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Box^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      val box: Box^{owner} = new Box(base + offset + keepOwner)
+      |      box
+      |    build(base)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(42).value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperReturnedLocalAllocationRejectsUnrootedMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Entry^{r}]^{r} =
+      |  val metadata = new Metadata(40)
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Entry^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      val entry: Entry^{owner} = new Entry(metadata)
+      |      entry
+      |    build(base)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(20).metadata.value
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperDirectBranchAllocationCanAllocateWithCapturedOwnerTerm()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Box^{r}]^{r} =
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Box^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      if offset >= 0 then new Box(base + offset + keepOwner)
+      |      else new Box(keepOwner)
+      |    build(base)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(42).value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperDirectBranchAllocationRejectsUnrootedMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Entry^{r}]^{r} =
+      |  val metadata = new Metadata(40)
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Entry^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      if offset >= 0 then new Entry(metadata)
+      |      else new Entry(metadata)
+      |    build(base)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(20).metadata.value
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperDirectMatchAllocationCanAllocateWithCapturedOwnerTerm()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Box^{r}]^{r} =
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Box^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      offset match
+      |        case n if n >= 0 => new Box(base + n + keepOwner)
+      |        case _ => new Box(keepOwner)
+      |    build(base)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(42).value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperDirectMatchAllocationRejectsUnrootedMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Entry^{r}]^{r} =
+      |  val metadata = new Metadata(40)
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Entry^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      offset match
+      |        case n if n >= 0 => new Entry(metadata)
+      |        case _ => new Entry(metadata)
+      |    build(base)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(20).metadata.value
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperBranchForwardedAllocationCanAllocateWithCapturedOwnerTerm()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Box^{r}]^{r} =
+      |  (base: Int) =>
+      |    val owner = r
+      |    def allocate(offset: Int): Box^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      new Box(base + offset + keepOwner)
+      |    def build(offset: Int): Box^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      if offset >= 0 then allocate(offset + keepOwner)
+      |      else allocate(keepOwner)
+      |    build(base)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(42).value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperBranchForwardedAllocationRejectsUnrootedMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Entry^{r}]^{r} =
+      |  val metadata = new Metadata(40)
+      |  (base: Int) =>
+      |    val owner = r
+      |    def allocate(offset: Int): Entry^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      new Entry(metadata)
+      |    def build(offset: Int): Entry^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      if offset >= 0 then allocate(offset + keepOwner)
+      |      else allocate(keepOwner)
+      |    build(base)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(20).metadata.value
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperMatchForwardedAllocationCanAllocateWithCapturedOwnerTerm()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Box^{r}]^{r} =
+      |  (base: Int) =>
+      |    val owner = r
+      |    def allocate(offset: Int): Box^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      new Box(base + offset + keepOwner)
+      |    def build(offset: Int): Box^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      offset match
+      |        case n if n >= 0 => allocate(n + keepOwner)
+      |        case _ => allocate(keepOwner)
+      |    build(base)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(42).value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperMatchForwardedAllocationRejectsUnrootedMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Entry^{r}]^{r} =
+      |  val metadata = new Metadata(40)
+      |  (base: Int) =>
+      |    val owner = r
+      |    def allocate(offset: Int): Entry^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      new Entry(metadata)
+      |    def build(offset: Int): Entry^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      offset match
+      |        case n if n >= 0 => allocate(n + keepOwner)
+      |        case _ => allocate(keepOwner)
+      |    build(base)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(20).metadata.value
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperAliasForwardedAllocationCanAllocateWithCapturedOwnerTerm()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Box^{r}]^{r} =
+      |  (base: Int) =>
+      |    val owner = r
+      |    def allocate(offset: Int): Box^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      new Box(base + offset + keepOwner)
+      |    def build(offset: Int): Box^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      val forwarded: Box^{owner} = allocate(offset + keepOwner)
+      |      forwarded
+      |    build(base)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(42).value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperAliasForwardedAllocationRejectsUnrootedMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Entry^{r}]^{r} =
+      |  val metadata = new Metadata(40)
+      |  (base: Int) =>
+      |    val owner = r
+      |    def allocate(offset: Int): Entry^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      new Entry(metadata)
+      |    def build(offset: Int): Entry^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      val forwarded: Entry^{owner} = allocate(offset + keepOwner)
+      |      forwarded
+      |    build(base)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(20).metadata.value
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperReturnedArrayCanAllocateWithCapturedOwnerTerm()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Array[Box^{r}]^{r}]^{r} =
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Array[Box^{r}]^{r} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      val items: Array[Box^{r}]^{r} =
+      |        new Array[Box^{r}](1)
+      |      items(0) = new Box(base + offset + keepOwner)
+      |      items
+      |    build(base)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(42)(0).value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperReturnedArrayRejectsUnrootedMetadataStore()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Array[Metadata]^{r}]^{r} =
+      |  val metadata = new Metadata(40)
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Array[Metadata]^{r} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      val items: Array[Metadata]^{r} =
+      |        new Array[Metadata](1)
+      |      items(0) = metadata
+      |      items
+      |    build(base)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(20)(0).value
+      |  }
+      |""".stripMargin,
+      "Rift checked region array store cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperReturnedPrimitiveArrayCanAllocateWithCapturedOwnerTerm()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Array[Int]^{r}]^{r} =
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Array[Int]^{r} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      val values: Array[Int]^{r} =
+      |        new Array[Int](1)
+      |      values(0) = base + offset + keepOwner
+      |      values
+      |    build(base)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(42)(0)
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperReturnedPrimitiveArrayCannotEscapeHeap()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Array[Int]^{r}]^{r} =
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Array[Int]^{r} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      val values: Array[Int]^{r} =
+      |        new Array[Int](1)
+      |      values(0) = base + offset + keepOwner
+      |      values
+      |    build(base)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val values = make(using region)(42)
+      |    Holder.retained = values
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set {}"
+    )
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperReturnedSomeCanAllocateWithCapturedOwnerTerm()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Option[Box^{r}]^{r}]^{r} =
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Option[Box^{owner}]^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      val result: Option[Box^{owner}]^{owner} =
+      |        Some(new Box(base + offset + keepOwner))
+      |      result
+      |    build(base)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(42).get.value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperReturnedSomeRejectsUnrootedMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Option[Metadata]^{r}]^{r} =
+      |  val metadata = new Metadata(40)
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Option[Metadata]^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      val result: Option[Metadata]^{owner} =
+      |        Some(metadata)
+      |      result
+      |    build(base)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(20).get.value
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperReturnedOptionApplyCanAllocateWithCapturedOwnerTerm()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Option[Box^{r}]^{r}]^{r} =
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Option[Box^{owner}]^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      val result: Option[Box^{owner}]^{owner} =
+      |        Option(new Box(base + offset + keepOwner))
+      |      result
+      |    build(base)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(42).get.value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperReturnedOptionApplyRejectsUnrootedMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Option[Metadata]^{r}]^{r} =
+      |  val metadata = new Metadata(40)
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Option[Metadata]^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      val result: Option[Metadata]^{owner} =
+      |        Option(metadata)
+      |      result
+      |    build(base)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(20).get.value
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperReturnedTupleCanAllocateWithCapturedOwnerTerm()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Tuple2[Box^{r}, Box^{r}]^{r}]^{r} =
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Tuple2[Box^{owner}, Box^{owner}]^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      val result: Tuple2[Box^{owner}, Box^{owner}]^{owner} =
+      |        Tuple2(new Box(base + offset + keepOwner), new Box(1 + keepOwner))
+      |      result
+      |    build(base)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val pair = make(using region)(40)
+      |    pair._1.value + pair._2.value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperReturnedTupleRejectsUnrootedMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Box(val metadata: Metadata)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Tuple2[Box^{r}, Box^{r}]^{r}]^{r} =
+      |  val metadata = new Metadata(40)
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Tuple2[Box^{owner}, Box^{owner}]^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      val result: Tuple2[Box^{owner}, Box^{owner}]^{owner} =
+      |        Tuple2(new Box(metadata), new Box(metadata))
+      |      result
+      |    build(base)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(20)._1.metadata.value
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperReturnedEitherCanAllocateWithCapturedOwnerTerm()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Either[Box^{r}, Box^{r}]^{r}]^{r} =
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Either[Box^{owner}, Box^{owner}]^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      val result: Either[Box^{owner}, Box^{owner}]^{owner} =
+      |        if offset >= 0 then Left(new Box(base + offset + keepOwner))
+      |        else Right(new Box(base + keepOwner))
+      |      result
+      |    build(base)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(42) match
+      |      case Left(box) => box.value
+      |      case Right(box) => box.value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRegionOwnedClosureBodyLocalHelperReturnedEitherRejectsUnrootedMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |final class Box(val metadata: Metadata)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Either[Box^{r}, Box^{r}]^{r}]^{r} =
+      |  val metadata = new Metadata(40)
+      |  (base: Int) =>
+      |    val owner = r
+      |    def build(offset: Int): Either[Box^{owner}, Box^{owner}]^{owner} =
+      |      val keepOwner = System.identityHashCode(owner) & 0
+      |      val result: Either[Box^{owner}, Box^{owner}]^{owner} =
+      |        if offset >= 0 then Left(new Box(metadata))
+      |        else Right(new Box(metadata))
+      |      result
+      |    build(base)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(20) match
+      |      case Left(box) => box.metadata.value
+      |      case Right(box) => box.metadata.value
       |  }
       |""".stripMargin,
       "Rift checked region allocation cannot store an unrooted heap object"
@@ -3665,6 +4655,59 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked region allocation cannot store an unrooted heap object"
     )
 
+  @Test def inferredRegionOwnedMethodArgumentSelectedLocalEitherFactoryCanAllocate()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |
+      |def consume(using r: RiftRegion.ScopedRegion^)(
+      |    either: Either[Box^{r}, Box^{r}]^{r}
+      |): Int =
+      |  either match
+      |    case Left(box) => box.value + 2
+      |    case Right(box) => box.value + 1
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val first: Either[Box^{region}, Box^{region}]^{region} =
+      |      Left(new Box(40))
+      |    val second: Either[Box^{region}, Box^{region}]^{region} =
+      |      Right(new Box(41))
+      |    val selected = if flag then first else second
+      |    consume(using region)(selected)
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRegionOwnedMethodArgumentSelectedLocalEitherFactoryRejectsUnrootedMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def consume(using r: RiftRegion.ScopedRegion^)(
+      |    either: Either[Metadata, Metadata]^{r}
+      |): Int =
+      |  either.fold(_.value, _.value)
+      |
+      |def bad(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val metadata = new Metadata(40)
+      |    val first: Either[Metadata, Metadata]^{region} = Left(metadata)
+      |    val second: Either[Metadata, Metadata]^{region} = Right(metadata)
+      |    val selected = if flag then first else second
+      |    consume(using region)(selected)
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
   @Test def inferredRegionOwnedMethodArgumentSelectedLocalPolymorphicCellCanAllocate()
       : Unit =
     assertCompiles("""
@@ -4082,6 +5125,26 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def inferredRegionOwnedArrayCanStoreInlineEitherFactory(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Leaf(val value: Int)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val items: Array[Either[Leaf^{region}, Leaf^{region}]^{region}]^{region} =
+      |      new Array[Either[Leaf^{region}, Leaf^{region}]^{region}](1)
+      |    items(0) =
+      |      if flag then Left(new Leaf(42)) else Right(new Leaf(42))
+      |    items(0) match
+      |      case Left(leaf) => leaf.value
+      |      case Right(leaf) => leaf.value
+      |  }
+      |""".stripMargin)
+
   @Test def inferredRegionOwnedArrayCanStoreInlineTuple2Factory(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking
@@ -4153,6 +5216,15 @@ class RiftRegionCheckedCompilerTest {
       |    val optionSelected = if flag then optionFirst else optionSecond
       |    optionItems(0) = optionSelected
       |
+      |    val eitherItems: Array[Either[Leaf^{region}, Leaf^{region}]^{region}]^{region} =
+      |      new Array[Either[Leaf^{region}, Leaf^{region}]^{region}](1)
+      |    val eitherFirst: Either[Leaf^{region}, Leaf^{region}]^{region} =
+      |      Left(new Leaf(1))
+      |    val eitherSecond: Either[Leaf^{region}, Leaf^{region}]^{region} =
+      |      Right(new Leaf(2))
+      |    val eitherSelected = if flag then eitherFirst else eitherSecond
+      |    eitherItems(0) = eitherSelected
+      |
       |    val tupleItems: Array[Tuple2[Leaf^{region}, Leaf^{region}]^{region}]^{region} =
       |      new Array[Tuple2[Leaf^{region}, Leaf^{region}]^{region}](1)
       |    val tupleFirst = Tuple2(new Leaf(1), new Leaf(1))
@@ -4162,6 +5234,7 @@ class RiftRegionCheckedCompilerTest {
       |
       |    someItems(0).get.value +
       |      optionItems(0).get.value +
+      |      eitherItems(0).fold(_.value, _.value) +
       |      tupleItems(0)._1.value +
       |      tupleItems(0)._2.value
       |  }
@@ -4388,6 +5461,27 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked region allocation cannot store an unrooted heap object"
     )
 
+  @Test def inferredRegionOwnedArrayCannotInlineStoreEitherWithUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val metadata = new Metadata(41)
+      |    val items: Array[Either[Metadata, Metadata]^{region}]^{region} =
+      |      new Array[Either[Metadata, Metadata]^{region}](1)
+      |    items(0) =
+      |      if flag then Left(metadata) else Right(metadata)
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
   @Test def inferredRegionOwnedArrayCannotStoreBranchFactoryWithUnrootedHeapMetadata()
       : Unit =
     assertDoesNotCompileWith("""
@@ -4467,6 +5561,29 @@ class RiftRegionCheckedCompilerTest {
       |      new Array[Tuple2[Metadata, Metadata]^{region}](1)
       |    val first = Tuple2(metadata, metadata)
       |    val second = Tuple2(metadata, metadata)
+      |    val selected = if flag then first else second
+      |    items(0) = selected
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRegionOwnedArrayCannotStoreSelectedEitherWithUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val metadata = new Metadata(41)
+      |    val items: Array[Either[Metadata, Metadata]^{region}]^{region} =
+      |      new Array[Either[Metadata, Metadata]^{region}](1)
+      |    val first: Either[Metadata, Metadata]^{region} = Left(metadata)
+      |    val second: Either[Metadata, Metadata]^{region} = Right(metadata)
       |    val selected = if flag then first else second
       |    items(0) = selected
       |  }
@@ -5491,6 +6608,78 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def streamWindowRanksInferEitherFactoryPlacement(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Leaf(val value: Int)
+      |
+      |def ok(flag: Boolean, selector: Int): Int =
+      |  RiftRegion.streaming { stream ?=>
+      |    val indexed =
+      |      RiftRegion.streamWindowIndexedRank[
+      |        Either[Leaf^{stream}, Leaf^{stream}]^{stream}
+      |      ](10, 8, 1)
+      |    val indexedLow: Either[Leaf^{stream}, Leaf^{stream}]^{stream} =
+      |      Left(new Leaf(10))
+      |    val indexedHigh: Either[Leaf^{stream}, Leaf^{stream}]^{stream} =
+      |      Right(new Leaf(40))
+      |    val indexedSelected = if flag then indexedLow else indexedHigh
+      |    RiftRegion.putWindowRank(stream, indexed, 1, indexedSelected, 1L)
+      |
+      |    val longIndexed =
+      |      RiftRegion.streamWindowLongIndexedRankLexicographic[
+      |        Either[Leaf^{stream}, Leaf^{stream}]^{stream}
+      |      ](10, 1, 4)
+      |    val longBucket =
+      |      RiftRegion.streamWindowBucketFor(stream, longIndexed, 7L)
+      |    RiftRegion.putWindowRankInBucket(
+      |      stream,
+      |      longIndexed,
+      |      longBucket,
+      |      10L,
+      |      (selector match
+      |        case 0 => Left(new Leaf(1))
+      |        case _ => Right(new Leaf(2))
+      |      ),
+      |      2L,
+      |      3L,
+      |      4L,
+      |      5L
+      |    )
+      |
+      |    val table =
+      |      RiftRegion.streamWindowTableRank[
+      |        Either[Leaf^{stream}, Leaf^{stream}]^{stream}
+      |      ](10, 1, 4)
+      |    val tableBucket =
+      |      RiftRegion.streamWindowBucketFor(stream, table, 7L)
+      |    RiftRegion.putTableRankInBucket(
+      |      stream,
+      |      table,
+      |      tableBucket,
+      |      20L,
+      |      if flag then Left(new Leaf(3)) else Right(new Leaf(4)),
+      |      3L
+      |    )
+      |
+      |    val indexedValue =
+      |      RiftRegion.peekWindowRank(stream, indexed) match
+      |        case Left(value)  => value.value
+      |        case Right(value) => value.value
+      |    val longValue =
+      |      RiftRegion.peekWindowRank(stream, longIndexed) match
+      |        case Left(value)  => value.value
+      |        case Right(value) => value.value
+      |    val tableValue =
+      |      RiftRegion.peekTableRank(stream, table) match
+      |        case Left(value)  => value.value
+      |        case Right(value) => value.value
+      |    indexedValue + longValue + tableValue
+      |  }
+      |""".stripMargin)
+
   @Test def streamWindowRanksInferInlineArrayPlacement(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking
@@ -6130,6 +7319,62 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked region allocation cannot store an unrooted heap object"
     )
 
+  @Test def streamWindowIndexedRankSelectedEitherCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    val rank =
+      |      RiftRegion.streamWindowIndexedRank[
+      |        Either[Metadata, Metadata]^{stream}
+      |      ](10, 8, 1)
+      |    val metadata = new Metadata(10)
+      |    val first: Either[Metadata, Metadata]^{stream} = Left(metadata)
+      |    val second: Either[Metadata, Metadata]^{stream} = Right(metadata)
+      |    val selected = if flag then first else second
+      |    RiftRegion.putWindowRank(stream, rank, 1, selected, 1L)
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def streamWindowTableRankMatchEitherCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(selector: Int): Unit =
+      |  RiftRegion.streaming { stream ?=>
+      |    val rank =
+      |      RiftRegion.streamWindowTableRank[
+      |        Either[Metadata, Metadata]^{stream}
+      |      ](10, 1, 4)
+      |    val bucket = RiftRegion.streamWindowBucketFor(stream, rank, 7L)
+      |    val metadata = new Metadata(10)
+      |    RiftRegion.putTableRankInBucket(
+      |      stream,
+      |      rank,
+      |      bucket,
+      |      1L,
+      |      (selector match
+      |        case 0 => Left(metadata)
+      |        case _ => Right(metadata)
+      |      ),
+      |      1L
+      |    )
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
   @Test def objectBufferCannotStoreInnerScopedValue(): Unit =
     assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
@@ -6400,6 +7645,65 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def regionPriorityQueuesInferEitherFactoryPlacement(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Leaf(val value: Int)
+      |
+      |def ok(flag: Boolean, selector: Int): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val plain =
+      |      RiftRegion.regionPriorityQueue[
+      |        Either[Leaf^{region}, Leaf^{region}]^{region}
+      |      ](1)
+      |    val plainLow: Either[Leaf^{region}, Leaf^{region}]^{region} =
+      |      Left(new Leaf(10))
+      |    val plainHigh: Either[Leaf^{region}, Leaf^{region}]^{region} =
+      |      Right(new Leaf(40))
+      |    val plainSelected = if flag then plainLow else plainHigh
+      |    region.push(plain, plainSelected, 1L)
+      |
+      |    val indexed =
+      |      RiftRegion.regionIndexedPriorityQueue[
+      |        Either[Leaf^{region}, Leaf^{region}]^{region}
+      |      ](4, 1)
+      |    RiftRegion.put(
+      |      region,
+      |      indexed,
+      |      1,
+      |      if flag then Left(new Leaf(1)) else Right(new Leaf(2)),
+      |      2L
+      |    )
+      |
+      |    val longIndexed =
+      |      RiftRegion.regionLongIndexedPriorityQueue[
+      |        Either[Leaf^{region}, Leaf^{region}]^{region}
+      |      ](1, 4)
+      |    region.put(
+      |      longIndexed,
+      |      10L,
+      |      selector match
+      |        case 0 => Left(new Leaf(3))
+      |        case _ => Right(new Leaf(4)),
+      |      3L
+      |    )
+      |
+      |    val plainLeaf = region.peek(plain) match
+      |      case Left(value)  => value
+      |      case Right(value) => value
+      |    val indexedLeaf = region.peek(indexed) match
+      |      case Left(value)  => value
+      |      case Right(value) => value
+      |    val longLeaf = region.peek(longIndexed) match
+      |      case Left(value)  => value
+      |      case Right(value) => value
+      |    plainLeaf.value + indexedLeaf.value + longLeaf.value
+      |  }
+      |""".stripMargin)
+
   @Test def regionPriorityQueuesInferSelectedNestedSyntheticFactoryPlacement()
       : Unit =
     assertCompiles("""
@@ -6539,6 +7843,77 @@ class RiftRegionCheckedCompilerTest {
       |    region.get(indexed, 1).get.value +
       |      region.get(indexed, 2).get.value +
       |      region.get(longIndexed, 10L)._1.value
+      |  }
+      |""".stripMargin)
+
+  @Test def regionLexicographicPriorityQueuesInferEitherFactoryPlacement()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Leaf(val value: Int)
+      |
+      |def ok(flag: Boolean, selector: Int): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val indexed =
+      |      RiftRegion.regionIndexedPriorityQueueLexicographic[
+      |        Either[Leaf^{region}, Leaf^{region}]^{region}
+      |      ](4, 1)
+      |    val indexedLow: Either[Leaf^{region}, Leaf^{region}]^{region} =
+      |      Left(new Leaf(10))
+      |    val indexedHigh: Either[Leaf^{region}, Leaf^{region}]^{region} =
+      |      Right(new Leaf(40))
+      |    val indexedSelected = if flag then indexedLow else indexedHigh
+      |    region.put(indexed, 1, indexedSelected, 1L, 2L, 3L, 4L)
+      |    RiftRegion.put(
+      |      region,
+      |      indexed,
+      |      2,
+      |      if flag then Left(new Leaf(1)) else Right(new Leaf(2)),
+      |      2L,
+      |      3L,
+      |      4L,
+      |      5L
+      |    )
+      |
+      |    val longIndexed =
+      |      RiftRegion.regionLongIndexedPriorityQueueLexicographic[
+      |        Either[Leaf^{region}, Leaf^{region}]^{region}
+      |      ](1, 4)
+      |    val longLow: Either[Leaf^{region}, Leaf^{region}]^{region} =
+      |      Left(new Leaf(3))
+      |    val longHigh: Either[Leaf^{region}, Leaf^{region}]^{region} =
+      |      Right(new Leaf(4))
+      |    val longSelected = if flag then longLow else longHigh
+      |    region.put(longIndexed, 10L, longSelected, 3L, 4L, 5L, 6L)
+      |    region.put(
+      |      longIndexed,
+      |      20L,
+      |      selector match
+      |        case 0 => Left(new Leaf(5))
+      |        case _ => Right(new Leaf(6)),
+      |      4L,
+      |      5L,
+      |      6L,
+      |      7L
+      |    )
+      |
+      |    val indexedSelectedLeaf = region.get(indexed, 1) match
+      |      case Left(value)  => value
+      |      case Right(value) => value
+      |    val indexedBranchLeaf = region.get(indexed, 2) match
+      |      case Left(value)  => value
+      |      case Right(value) => value
+      |    val longSelectedLeaf = region.get(longIndexed, 10L) match
+      |      case Left(value)  => value
+      |      case Right(value) => value
+      |    val longBranchLeaf = region.get(longIndexed, 20L) match
+      |      case Left(value)  => value
+      |      case Right(value) => value
+      |    indexedSelectedLeaf.value + indexedBranchLeaf.value +
+      |      longSelectedLeaf.value + longBranchLeaf.value
       |  }
       |""".stripMargin)
 
@@ -6902,6 +8277,58 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked region allocation cannot store an unrooted heap object"
     )
 
+  @Test def inferredSelectedRegionPriorityQueueEitherCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val queue =
+      |      RiftRegion.regionPriorityQueue[
+      |        Either[Metadata, Metadata]^{region}
+      |      ](1)
+      |    val metadata = new Metadata(10)
+      |    val first: Either[Metadata, Metadata]^{region} = Left(metadata)
+      |    val second: Either[Metadata, Metadata]^{region} = Right(metadata)
+      |    val selected = if flag then first else second
+      |    region.push(queue, selected, 1L)
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredBranchRegionIndexedPriorityQueueEitherCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val queue =
+      |      RiftRegion.regionIndexedPriorityQueue[
+      |        Either[Metadata, Metadata]^{region}
+      |      ](4)
+      |    val metadata = new Metadata(10)
+      |    region.put(
+      |      queue,
+      |      1,
+      |      if flag then Left(metadata) else Right(metadata),
+      |      1L
+      |    )
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
   @Test def inferredSelectedRegionIndexedPriorityQueueOptionCannotStoreUnrootedHeapMetadata()
       : Unit =
     assertDoesNotCompileWith("""
@@ -6941,6 +8368,31 @@ class RiftRegionCheckedCompilerTest {
       |    val metadata = new Metadata(10)
       |    val first = Tuple2(metadata, metadata)
       |    val second = Tuple2(metadata, metadata)
+      |    val selected = if flag then first else second
+      |    region.put(queue, 1L, selected, 1L)
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredSelectedRegionLongIndexedPriorityQueueEitherCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val queue =
+      |      RiftRegion.regionLongIndexedPriorityQueue[
+      |        Either[Metadata, Metadata]^{region}
+      |      ](1, 4)
+      |    val metadata = new Metadata(10)
+      |    val first: Either[Metadata, Metadata]^{region} = Left(metadata)
+      |    val second: Either[Metadata, Metadata]^{region} = Right(metadata)
       |    val selected = if flag then first else second
       |    region.put(queue, 1L, selected, 1L)
       |  }
@@ -7015,6 +8467,64 @@ class RiftRegionCheckedCompilerTest {
       |    val second = Tuple2(metadata, metadata)
       |    val selected = if flag then first else second
       |    RiftRegion.put(region, queue, 1L, selected, 1L, 2L, 3L, 4L)
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredSelectedRegionIndexedPriorityQueueLexicographicEitherCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val queue =
+      |      RiftRegion.regionIndexedPriorityQueueLexicographic[
+      |        Either[Metadata, Metadata]^{region}
+      |      ](4, 1)
+      |    val metadata = new Metadata(10)
+      |    val first: Either[Metadata, Metadata]^{region} = Left(metadata)
+      |    val second: Either[Metadata, Metadata]^{region} = Right(metadata)
+      |    val selected = if flag then first else second
+      |    region.put(queue, 1, selected, 1L, 2L, 3L, 4L)
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredMatchRegionLongIndexedPriorityQueueLexicographicEitherCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(selector: Int): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val queue =
+      |      RiftRegion.regionLongIndexedPriorityQueueLexicographic[
+      |        Either[Metadata, Metadata]^{region}
+      |      ](1, 4)
+      |    val metadata = new Metadata(10)
+      |    RiftRegion.put(
+      |      region,
+      |      queue,
+      |      1L,
+      |      selector match
+      |        case 0 => Left(metadata)
+      |        case _ => Right(metadata),
+      |      1L,
+      |      2L,
+      |      3L,
+      |      4L
+      |    )
       |  }
       |""".stripMargin,
       "Rift checked region allocation cannot store an unrooted heap object"
@@ -10026,6 +11536,53 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked region allocation cannot store an unrooted heap object"
     )
 
+  @Test def localMethodRegionParamArgumentInfersInlineEitherFactoryPlacement()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Leaf(val value: Int)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def consume(using r: RiftRegion.ScopedRegion^)(
+      |        either: Either[Leaf^{r}, Leaf^{r}]^{r}
+      |    ): Int =
+      |      either match
+      |        case Left(leaf) => leaf.value
+      |        case Right(leaf) => leaf.value
+      |    consume(using region)(
+      |      if flag then Left(new Leaf(42)) else Right(new Leaf(42))
+      |    )
+      |  }
+      |""".stripMargin)
+
+  @Test def localMethodRegionParamArgumentInferredEitherFactoryCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def consume(using r: RiftRegion.ScopedRegion^)(
+      |        either: Either[Metadata, Metadata]^{r}
+      |    ): Int =
+      |      either.fold(_.value, _.value)
+      |    val metadata = new Metadata(41)
+      |    consume(using region)(
+      |      if flag then Left(metadata) else Right(metadata)
+      |    )
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
   @Test def localMethodRegionParamArgumentInfersInlineTuple2FactoryPlacement()
       : Unit =
     assertCompiles("""
@@ -10738,6 +12295,243 @@ class RiftRegionCheckedCompilerTest {
       "cannot flow into capture set {}"
     )
 
+  @Test def localPolymorphicMethodRegionParamInfersEitherFactoryPlacement()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Leaf(val value: Int)
+      |final class Branch(val value: Int)
+      |
+      |def ok(): Int =
+      |  def make[A, B](chooseLeft: Boolean)(
+      |      using r: RiftRegion.ScopedRegion^
+      |  )(
+      |      left: A^{r},
+      |      right: B^{r}
+      |  ): Either[A^{r}, B^{r}]^{r} =
+      |    if chooseLeft then Left(left) else Right(right)
+      |
+      |  RiftRegion.scoped { region ?=>
+      |    val either =
+      |      make[Leaf, Branch](true)(using region)(new Leaf(40), new Branch(2))
+      |    either match
+      |      case Left(leaf) => leaf.value + 2
+      |      case Right(branch) => branch.value + 40
+      |  }
+      |""".stripMargin)
+
+  @Test def localPolymorphicMethodRegionParamEitherFactoryCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |final class Leaf(val value: Int)
+      |
+      |def heapMetadata(): Metadata = new Metadata(41)
+      |
+      |def bad(): Int =
+      |  def make[A, B](chooseLeft: Boolean)(
+      |      using r: RiftRegion.ScopedRegion^
+      |  )(
+      |      left: A^{r},
+      |      right: B^{r}
+      |  ): Either[A^{r}, B^{r}]^{r} =
+      |    if chooseLeft then Left(left) else Right(right)
+      |
+      |  RiftRegion.scoped { region ?=>
+      |    val either =
+      |      make[Metadata, Leaf](true)(using region)(
+      |        heapMetadata(),
+      |        new Leaf(1)
+      |      )
+      |    either.fold(_.value, _.value)
+      |  }
+      |""".stripMargin,
+      "Rift checked region method argument cannot pass an unrooted heap object"
+    )
+
+  @Test def localPolymorphicMethodRegionParamEitherFactoryCannotEscapeAsAnyRef()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Leaf(val value: Int)
+      |final class Branch(val value: Int)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(): Unit =
+      |  def make[A, B](chooseLeft: Boolean)(
+      |      using r: RiftRegion.ScopedRegion^
+      |  )(
+      |      left: A^{r},
+      |      right: B^{r}
+      |  ): Either[A^{r}, B^{r}]^{r} =
+      |    if chooseLeft then Left(left) else Right(right)
+      |
+      |  RiftRegion.scoped { region ?=>
+      |    val either =
+      |      make[Leaf, Branch](true)(using region)(new Leaf(42), new Branch(0))
+      |    Holder.retained = either
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set {}"
+    )
+
+  @Test def localPolymorphicMethodRegionParamInfersBranchForwardedEitherFactoryPlacement()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Leaf(val value: Int)
+      |final class Branch(val value: Int)
+      |
+      |def ok(): Int =
+      |  def make[A, B](chooseLeft: Boolean)(
+      |      using r: RiftRegion.ScopedRegion^
+      |  )(
+      |      left: A^{r},
+      |      right: B^{r}
+      |  ): Either[A^{r}, B^{r}]^{r} =
+      |    if chooseLeft then Left(left) else Right(right)
+      |
+      |  def branch[A, B](flag: Boolean)(
+      |      using r: RiftRegion.ScopedRegion^
+      |  )(
+      |      left: A^{r},
+      |      right: B^{r}
+      |  ): Either[A^{r}, B^{r}]^{r} =
+      |    if flag then make[A, B](true)(using r)(left, right)
+      |    else make[A, B](false)(using r)(left, right)
+      |
+      |  def matched[A, B](selector: Int)(
+      |      using r: RiftRegion.ScopedRegion^
+      |  )(
+      |      left: A^{r},
+      |      right: B^{r}
+      |  ): Either[A^{r}, B^{r}]^{r} =
+      |    selector match
+      |      case 0 => make[A, B](false)(using r)(left, right)
+      |      case _ => make[A, B](true)(using r)(left, right)
+      |
+      |  RiftRegion.scoped { region ?=>
+      |    val first =
+      |      branch[Leaf, Branch](true)(using region)(
+      |        new Leaf(20),
+      |        new Branch(0)
+      |      )
+      |    val second =
+      |      matched[Leaf, Branch](0)(using region)(
+      |        new Leaf(0),
+      |        new Branch(22)
+      |      )
+      |    val firstValue = first match
+      |      case Left(leaf) => leaf.value
+      |      case Right(branch) => branch.value
+      |    val secondValue = second match
+      |      case Left(leaf) => leaf.value
+      |      case Right(branch) => branch.value
+      |    firstValue + secondValue
+      |  }
+      |""".stripMargin)
+
+  @Test def localPolymorphicMethodRegionParamBranchForwardedEitherCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |final class Leaf(val value: Int)
+      |
+      |def heapMetadata(): Metadata = new Metadata(41)
+      |
+      |def bad(): Int =
+      |  def make[A, B](chooseLeft: Boolean)(
+      |      using r: RiftRegion.ScopedRegion^
+      |  )(
+      |      left: A^{r},
+      |      right: B^{r}
+      |  ): Either[A^{r}, B^{r}]^{r} =
+      |    if chooseLeft then Left(left) else Right(right)
+      |
+      |  def branch[A, B](flag: Boolean)(
+      |      using r: RiftRegion.ScopedRegion^
+      |  )(
+      |      left: A^{r},
+      |      right: B^{r}
+      |  ): Either[A^{r}, B^{r}]^{r} =
+      |    if flag then make[A, B](true)(using r)(left, right)
+      |    else make[A, B](false)(using r)(left, right)
+      |
+      |  RiftRegion.scoped { region ?=>
+      |    val either =
+      |      branch[Metadata, Leaf](true)(using region)(
+      |        heapMetadata(),
+      |        new Leaf(1)
+      |      )
+      |    either.fold(_.value, _.value)
+      |  }
+      |""".stripMargin,
+      "Rift checked region method argument cannot pass an unrooted heap object"
+    )
+
+  @Test def localPolymorphicMethodRegionParamMatchForwardedEitherCannotEscapeAsAnyRef()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Leaf(val value: Int)
+      |final class Branch(val value: Int)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(): Unit =
+      |  def make[A, B](chooseLeft: Boolean)(
+      |      using r: RiftRegion.ScopedRegion^
+      |  )(
+      |      left: A^{r},
+      |      right: B^{r}
+      |  ): Either[A^{r}, B^{r}]^{r} =
+      |    if chooseLeft then Left(left) else Right(right)
+      |
+      |  def matched[A, B](selector: Int)(
+      |      using r: RiftRegion.ScopedRegion^
+      |  )(
+      |      left: A^{r},
+      |      right: B^{r}
+      |  ): Either[A^{r}, B^{r}]^{r} =
+      |    selector match
+      |      case 0 => make[A, B](false)(using r)(left, right)
+      |      case _ => make[A, B](true)(using r)(left, right)
+      |
+      |  RiftRegion.scoped { region ?=>
+      |    val either =
+      |      matched[Leaf, Branch](0)(using region)(
+      |        new Leaf(0),
+      |        new Branch(42)
+      |      )
+      |    Holder.retained = either
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set {}"
+    )
+
   @Test def localPolymorphicMethodRegionParamInfersTuple2FactoryPlacement()
       : Unit =
     assertCompiles("""
@@ -11062,6 +12856,70 @@ class RiftRegionCheckedCompilerTest {
       |        case _ => make(0)(using r)
       |    val option = wrap(0)(using region)
       |    option.get.value + 2
+      |  }
+      |""".stripMargin)
+
+  @Test def localMethodRegionParamInfersEitherFactoryPlacement(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    final class Node(val value: Int)
+      |    def make(value: Int)(using r: RiftRegion.ScopedRegion^)
+      |        : Either[Node^{r}, Node^{r}]^{r} =
+      |      if flag then Left(new Node(value)) else Right(new Node(value + 1))
+      |    make(40)(using region) match
+      |      case Left(node) => node.value + 2
+      |      case Right(node) => node.value + 1
+      |  }
+      |""".stripMargin)
+
+  @Test def localMethodRegionParamInfersBranchForwardedEitherFactoryPlacement()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    final class Node(val value: Int)
+      |    def make(value: Int)(using r: RiftRegion.ScopedRegion^)
+      |        : Either[Node^{r}, Node^{r}]^{r} =
+      |      if value >= 0 then Left(new Node(value)) else Right(new Node(0))
+      |    def wrap(flag: Boolean)(using r: RiftRegion.ScopedRegion^)
+      |        : Either[Node^{r}, Node^{r}]^{r} =
+      |      if flag then make(40)(using r) else make(-1)(using r)
+      |    wrap(true)(using region) match
+      |      case Left(node) => node.value + 2
+      |      case Right(node) => node.value
+      |  }
+      |""".stripMargin)
+
+  @Test def localMethodRegionParamInfersMatchForwardedEitherFactoryPlacement()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    final class Node(val value: Int)
+      |    def make(value: Int)(using r: RiftRegion.ScopedRegion^)
+      |        : Either[Node^{r}, Node^{r}]^{r} =
+      |      if value >= 0 then Left(new Node(value)) else Right(new Node(0))
+      |    def wrap(selector: Int)(using r: RiftRegion.ScopedRegion^)
+      |        : Either[Node^{r}, Node^{r}]^{r} =
+      |      selector match
+      |        case 0 => make(40)(using r)
+      |        case _ => make(-1)(using r)
+      |    wrap(0)(using region) match
+      |      case Left(node) => node.value + 2
+      |      case Right(node) => node.value
       |  }
       |""".stripMargin)
 
@@ -11440,6 +13298,58 @@ class RiftRegionCheckedCompilerTest {
       |  RiftRegion.scoped { region ?=>
       |    val option = wrap(0)(using region)
       |    Holder.retained = option
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set {}"
+    )
+
+  @Test def inferredLocalMethodEitherFactoryCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    def make(using r: RiftRegion.ScopedRegion^)
+      |        : Either[Metadata, Metadata]^{r} =
+      |      val metadata = new Metadata(1)
+      |      if flag then Left(metadata) else Right(metadata)
+      |    val either = make(using region)
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredMatchForwardedLocalMethodEitherFactoryCannotEscapeHeap()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Node(val value: Int)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def make(value: Int)(using r: RiftRegion.ScopedRegion^)
+      |    : Either[Node^{r}, Node^{r}]^{r} =
+      |  if value >= 0 then Left(new Node(value)) else Right(new Node(0))
+      |
+      |def wrap(selector: Int)(using r: RiftRegion.ScopedRegion^)
+      |    : Either[Node^{r}, Node^{r}]^{r} =
+      |  selector match
+      |    case 0 => make(40)(using r)
+      |    case _ => make(-1)(using r)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val either = wrap(0)(using region)
+      |    Holder.retained = either
       |  }
       |""".stripMargin,
       "cannot flow into capture set {}"
@@ -12339,6 +14249,61 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def regionListInfersEitherFactoryPlacement(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Leaf(val value: Int)
+      |
+      |def ok(flag: Boolean, selector: Int): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    final class EitherNode(
+      |        val either: Either[Leaf^{region}, Leaf^{region}]^{region}
+      |    ) extends RiftRegion.RegionListNode
+      |    val selectedList = RiftRegion.regionList[EitherNode]()
+      |    val branchList = RiftRegion.regionList[EitherNode]()
+      |    val matchList = RiftRegion.regionList[EitherNode]()
+      |
+      |    val selectedLow: Either[Leaf^{region}, Leaf^{region}]^{region} =
+      |      Left(new Leaf(40))
+      |    val selectedHigh: Either[Leaf^{region}, Leaf^{region}]^{region} =
+      |      Right(new Leaf(41))
+      |    val selected = if flag then selectedLow else selectedHigh
+      |    RiftRegion.prependRegionList(
+      |      region,
+      |      selectedList,
+      |      new EitherNode(selected)
+      |    )
+      |
+      |    RiftRegion.prependRegionList(
+      |      region,
+      |      branchList,
+      |      if flag then new EitherNode(Left(new Leaf(10)))
+      |      else new EitherNode(Right(new Leaf(11)))
+      |    )
+      |
+      |    RiftRegion.prependRegionList(
+      |      region,
+      |      matchList,
+      |      selector match
+      |        case 0 => new EitherNode(Left(new Leaf(1)))
+      |        case _ => new EitherNode(Right(new Leaf(2)))
+      |    )
+      |
+      |    def eitherValue(
+      |        either: Either[Leaf^{region}, Leaf^{region}]^{region}
+      |    ): Int =
+      |      either match
+      |        case Left(value)  => value.value
+      |        case Right(value) => value.value
+      |
+      |    eitherValue(RiftRegion.regionListHead(region, selectedList).either) +
+      |      eitherValue(RiftRegion.regionListHead(region, branchList).either) +
+      |      eitherValue(RiftRegion.regionListHead(region, matchList).either)
+      |  }
+      |""".stripMargin)
+
   @Test def objectBufferInfersLocalNewPlacement(): Unit =
     assertCompiles("""
       |import scala.language.experimental.captureChecking
@@ -12689,6 +14654,78 @@ class RiftRegionCheckedCompilerTest {
       |    region.get(someBuffer, 0).get.value +
       |      region.get(optionBuffer, 0).get.value +
       |      region.get(pairBuffer, 0)._1.value
+      |  }
+      |""".stripMargin)
+
+  @Test def buffersInferEitherFactoryPlacement(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Leaf(val value: Int)
+      |
+      |def ok(flag: Boolean, selector: Int): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val objectSelectedBuffer =
+      |      RiftRegion.objectBuffer[
+      |        Either[Leaf^{region}, Leaf^{region}]^{region}
+      |      ](1)
+      |    val objectFirst: Either[Leaf^{region}, Leaf^{region}]^{region} =
+      |      Left(new Leaf(40))
+      |    val objectSecond: Either[Leaf^{region}, Leaf^{region}]^{region} =
+      |      Right(new Leaf(41))
+      |    val objectSelected = if flag then objectFirst else objectSecond
+      |    RiftRegion.append(region, objectSelectedBuffer, objectSelected)
+      |
+      |    val regionSelectedBuffer =
+      |      RiftRegion.regionBuffer[
+      |        Either[Leaf^{region}, Leaf^{region}]^{region}
+      |      ](1)
+      |    val regionFirst: Either[Leaf^{region}, Leaf^{region}]^{region} =
+      |      Left(new Leaf(10))
+      |    val regionSecond: Either[Leaf^{region}, Leaf^{region}]^{region} =
+      |      Right(new Leaf(11))
+      |    val regionSelected = if flag then regionFirst else regionSecond
+      |    region.append(regionSelectedBuffer, regionSelected)
+      |
+      |    val objectBranchBuffer =
+      |      RiftRegion.objectBuffer[
+      |        Either[Leaf^{region}, Leaf^{region}]^{region}
+      |      ](1)
+      |    RiftRegion.append(
+      |      region,
+      |      objectBranchBuffer,
+      |      if flag then Left(new Leaf(1)) else Right(new Leaf(2))
+      |    )
+      |
+      |    val regionMatchBuffer =
+      |      RiftRegion.regionBuffer[
+      |        Either[Leaf^{region}, Leaf^{region}]^{region}
+      |      ](1)
+      |    region.append(
+      |      regionMatchBuffer,
+      |      selector match
+      |        case 0 => Left(new Leaf(3))
+      |        case _ => Right(new Leaf(4))
+      |    )
+      |
+      |    val objectSelectedLeaf =
+      |      RiftRegion.get(region, objectSelectedBuffer, 0) match
+      |        case Left(value)  => value
+      |        case Right(value) => value
+      |    val regionSelectedLeaf = region.get(regionSelectedBuffer, 0) match
+      |      case Left(value)  => value
+      |      case Right(value) => value
+      |    val objectBranchLeaf =
+      |      RiftRegion.get(region, objectBranchBuffer, 0) match
+      |        case Left(value)  => value
+      |        case Right(value) => value
+      |    val regionMatchLeaf = region.get(regionMatchBuffer, 0) match
+      |      case Left(value)  => value
+      |      case Right(value) => value
+      |    objectSelectedLeaf.value + regionSelectedLeaf.value +
+      |      objectBranchLeaf.value + regionMatchLeaf.value
       |  }
       |""".stripMargin)
 
@@ -13106,6 +15143,763 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def inferredMethodReturnedWrapperCanStoreInlineClosureBodyAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Wrapper[Box^{r}]^{r} =
+      |      val owner = r
+      |      new Wrapper[Box^{r}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val box: Box^{owner} = new Box(n + 40 + keepOwner)
+      |          box
+      |      )
+      |
+      |    makeWrapper(using region).make(2).value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredMethodReturnedWrapperCanStoreSelectedClosureBodyAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Wrapper[Box^{r}]^{r} =
+      |      val owner = r
+      |      val first = (n: Int) =>
+      |        val keepOwner = System.identityHashCode(owner) & 0
+      |        val box: Box^{owner} = new Box(n + 40 + keepOwner)
+      |        box
+      |      val second = (n: Int) =>
+      |        val keepOwner = System.identityHashCode(owner) & 0
+      |        val box: Box^{owner} = new Box(n + 41 + keepOwner)
+      |        box
+      |      val selected = if flag then first else second
+      |      new Wrapper[Box^{r}](selected)
+      |
+      |    makeWrapper(flag)(using region).make(2).value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredForwardedMethodReturnedWrapperCanStoreInlineClosureBodyAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Wrapper[Box^{r}]^{r} =
+      |      val owner = r
+      |      new Wrapper[Box^{r}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val box: Box^{owner} = new Box(n + 40 + keepOwner)
+      |          box
+      |      )
+      |
+      |    def forward(using r: RiftRegion.ScopedRegion^): Wrapper[Box^{r}]^{r} =
+      |      makeWrapper(using r)
+      |
+      |    forward(using region).make(2).value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredBranchForwardedMethodReturnedWrapperCanStoreSelectedClosureBodyAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Wrapper[Box^{r}]^{r} =
+      |      val owner = r
+      |      val first = (n: Int) =>
+      |        val keepOwner = System.identityHashCode(owner) & 0
+      |        val box: Box^{owner} = new Box(n + 40 + keepOwner)
+      |        box
+      |      val second = (n: Int) =>
+      |        val keepOwner = System.identityHashCode(owner) & 0
+      |        val box: Box^{owner} = new Box(n + 41 + keepOwner)
+      |        box
+      |      val selected = if flag then first else second
+      |      new Wrapper[Box^{r}](selected)
+      |
+      |    def forward(flag: Boolean)(
+      |        using r: RiftRegion.ScopedRegion^
+      |    ): Wrapper[Box^{r}]^{r} =
+      |      if flag then makeWrapper(true)(using r)
+      |      else makeWrapper(false)(using r)
+      |
+      |    forward(flag)(using region).make(2).value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredAliasForwardedMethodReturnedWrapperCaptureWideningFallsBack()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Wrapper[Box^{r}]^{r} =
+      |      val owner = r
+      |      val first = (n: Int) =>
+      |        val keepOwner = System.identityHashCode(owner) & 0
+      |        val box: Box^{owner} = new Box(n + 40 + keepOwner)
+      |        box
+      |      val second = (n: Int) =>
+      |        val keepOwner = System.identityHashCode(owner) & 0
+      |        val box: Box^{owner} = new Box(n + 41 + keepOwner)
+      |        box
+      |      val selected = if flag then first else second
+      |      new Wrapper[Box^{r}](selected)
+      |
+      |    def forward(flag: Boolean)(
+      |        using r: RiftRegion.ScopedRegion^
+      |    ): Wrapper[Box^{r}]^{r} =
+      |      val first: Wrapper[Box^{r}]^{r} = makeWrapper(true)(using r)
+      |      val second: Wrapper[Box^{r}]^{r} = makeWrapper(false)(using r)
+      |      val selected: Wrapper[Box^{r}]^{r} =
+      |        if flag then first else second
+      |      selected
+      |
+      |    forward(flag)(using region).make(2).value
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
+  @Test def inferredMatchForwardedMethodReturnedWrapperCaptureWideningFallsBack()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(selector: Int): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Wrapper[Box^{r}]^{r} =
+      |      val owner = r
+      |      val first = (n: Int) =>
+      |        val keepOwner = System.identityHashCode(owner) & 0
+      |        val box: Box^{owner} = new Box(n + 40 + keepOwner)
+      |        box
+      |      val second = (n: Int) =>
+      |        val keepOwner = System.identityHashCode(owner) & 0
+      |        val box: Box^{owner} = new Box(n + 41 + keepOwner)
+      |        box
+      |      val selected = if flag then first else second
+      |      new Wrapper[Box^{r}](selected)
+      |
+      |    def forward(selector: Int)(
+      |        using r: RiftRegion.ScopedRegion^
+      |    ): Wrapper[Box^{r}]^{r} =
+      |      val result: Wrapper[Box^{r}]^{r} =
+      |        selector match
+      |          case 0 => makeWrapper(true)(using r)
+      |          case _ => makeWrapper(false)(using r)
+      |      result
+      |
+      |    forward(selector)(using region).make(2).value
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
+  @Test def inferredMethodReturnedSomeWrapperClosureCaptureWideningFallsBack()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      Some(
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(r) & 0
+      |            val box: Box^{r} = new Box(n + 40 + keepOwner)
+      |            box
+      |        )
+      |      )
+      |
+      |    makeWrapper(using region).get.make(2).value
+      |  }
+      |""".stripMargin,
+      "does not conform"
+    )
+
+  @Test def inferredMethodReturnedSomeWrapperCanStoreNestedPayloadAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      Some(new Wrapper[Box^{r}](new Box(42)))
+      |
+      |    makeWrapper(using region).get.value.value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredForwardedMethodReturnedSomeWrapperCanStoreNestedPayloadAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(value: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      Some(new Wrapper[Box^{r}](new Box(value)))
+      |
+      |    def forward(value: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      makeWrapper(value)(using r)
+      |
+      |    def branch(value: Int, flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then forward(value)(using r)
+      |      else makeWrapper(value + 1)(using r)
+      |
+      |    branch(42, flag)(using region).get.value.value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredMethodReturnedOptionWrapperCanStoreNestedPayloadAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      Option(new Wrapper[Box^{r}](new Box(42)))
+      |
+      |    makeWrapper(using region).get.value.value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredForwardedMethodReturnedOptionWrapperCanStoreNestedPayloadAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(value: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      Option(new Wrapper[Box^{r}](new Box(value)))
+      |
+      |    def forward(value: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      makeWrapper(value)(using r)
+      |
+      |    def branch(value: Int, flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then forward(value)(using r)
+      |      else makeWrapper(value + 1)(using r)
+      |
+      |    branch(42, flag)(using region).get.value.value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredMethodReturnedEitherWrapperCanStoreNestedPayloadAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def ok(left: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(value: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      if left then Left(new Wrapper[Box^{r}](new Box(value)))
+      |      else Right(new Wrapper[Box^{r}](new Box(value + 1)))
+      |
+      |    val either
+      |        : Either[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[Box^{region}]^{region}
+      |        ]^{region} =
+      |      makeWrapper(41)(using region)
+      |    42 + (System.identityHashCode(either) & 0)
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredForwardedMethodReturnedEitherWrapperCanStoreNestedPayloadAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def ok(flag: Boolean, left: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      if left then Left(new Wrapper[Box^{r}](new Box(value)))
+      |      else Right(new Wrapper[Box^{r}](new Box(value + 1)))
+      |
+      |    def forward(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      makeWrapper(value, left)(using r)
+      |
+      |    def branch(value: Int, flag: Boolean, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then forward(value, left)(using r)
+      |      else makeWrapper(value + 1, left)(using r)
+      |
+      |    val either
+      |        : Either[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[Box^{region}]^{region}
+      |        ]^{region} =
+      |      branch(42, flag, left)(using region)
+      |    42 + (System.identityHashCode(either) & 0)
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredMethodReturnedEitherWrapperFieldExtractionCaptureWideningFallsBack()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def ok(left: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(value: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      if left then Left(new Wrapper[Box^{r}](new Box(value)))
+      |      else Right(new Wrapper[Box^{r}](new Box(value + 1)))
+      |
+      |    makeWrapper(41)(using region) match
+      |      case Left(wrapper) => wrapper.value.value + 1
+      |      case Right(wrapper) => wrapper.value.value
+      |  }
+      |""".stripMargin,
+      "does not conform"
+    )
+
+  @Test def inferredMethodReturnedOptionEitherCanStoreNestedPayloadAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |
+      |def ok(left: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeOption(value: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Either[Box^{r}, Box^{r}]^{r}]^{r} =
+      |      if left then Option(Left(new Box(value)))
+      |      else Option(Right(new Box(value + 1)))
+      |
+      |    val option: Option[Either[Box^{region}, Box^{region}]^{region}]^{region} =
+      |      makeOption(41)(using region)
+      |    42 + (System.identityHashCode(option) & 0)
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredForwardedMethodReturnedOptionEitherCanStoreNestedPayloadAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |
+      |def ok(flag: Boolean, left: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeOption(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Either[Box^{r}, Box^{r}]^{r}]^{r} =
+      |      if left then Option(Left(new Box(value)))
+      |      else Option(Right(new Box(value + 1)))
+      |
+      |    def forward(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Either[Box^{r}, Box^{r}]^{r}]^{r} =
+      |      makeOption(value, left)(using r)
+      |
+      |    def branch(value: Int, flag: Boolean, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Either[Box^{r}, Box^{r}]^{r}]^{r} =
+      |      if flag then forward(value, left)(using r)
+      |      else makeOption(value + 1, left)(using r)
+      |
+      |    val option: Option[Either[Box^{region}, Box^{region}]^{region}]^{region} =
+      |      branch(42, flag, left)(using region)
+      |    42 + (System.identityHashCode(option) & 0)
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredMethodReturnedEitherOptionCanStoreNestedPayloadAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |
+      |def ok(left: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeEither(value: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Option[Box^{r}]^{r}, Option[Box^{r}]^{r}]^{r} =
+      |      if left then Left(Option(new Box(value)))
+      |      else Right(Option(new Box(value + 1)))
+      |
+      |    val either
+      |        : Either[
+      |          Option[Box^{region}]^{region},
+      |          Option[Box^{region}]^{region}
+      |        ]^{region} =
+      |      makeEither(41)(using region)
+      |    42 + (System.identityHashCode(either) & 0)
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredForwardedMethodReturnedEitherOptionCanStoreNestedPayloadAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |
+      |def ok(flag: Boolean, left: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeEither(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Option[Box^{r}]^{r}, Option[Box^{r}]^{r}]^{r} =
+      |      if left then Left(Option(new Box(value)))
+      |      else Right(Option(new Box(value + 1)))
+      |
+      |    def forward(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Option[Box^{r}]^{r}, Option[Box^{r}]^{r}]^{r} =
+      |      makeEither(value, left)(using r)
+      |
+      |    def branch(value: Int, flag: Boolean, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Option[Box^{r}]^{r}, Option[Box^{r}]^{r}]^{r} =
+      |      if flag then forward(value, left)(using r)
+      |      else makeEither(value + 1, left)(using r)
+      |
+      |    val either
+      |        : Either[
+      |          Option[Box^{region}]^{region},
+      |          Option[Box^{region}]^{region}
+      |        ]^{region} =
+      |      branch(42, flag, left)(using region)
+      |    42 + (System.identityHashCode(either) & 0)
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredSelectedMethodReturnedEitherOptionCanStoreNestedPayloadAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |
+      |def ok(left: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeEither(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Option[Box^{r}]^{r}, Option[Box^{r}]^{r}]^{r} =
+      |      val first
+      |          : Either[Option[Box^{r}]^{r}, Option[Box^{r}]^{r}]^{r} =
+      |        Left(Option(new Box(value)))
+      |      val second
+      |          : Either[Option[Box^{r}]^{r}, Option[Box^{r}]^{r}]^{r} =
+      |        Right(Option(new Box(value + 1)))
+      |      val selected
+      |          : Either[Option[Box^{r}]^{r}, Option[Box^{r}]^{r}]^{r} =
+      |        if left then first else second
+      |      selected
+      |
+      |    val either
+      |        : Either[
+      |          Option[Box^{region}]^{region},
+      |          Option[Box^{region}]^{region}
+      |        ]^{region} =
+      |      makeEither(41, left)(using region)
+      |    42 + (System.identityHashCode(either) & 0)
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredForwardedSelectedMethodReturnedEitherOptionCanStoreNestedPayloadAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |
+      |def ok(flag: Boolean, left: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeEither(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Option[Box^{r}]^{r}, Option[Box^{r}]^{r}]^{r} =
+      |      val first
+      |          : Either[Option[Box^{r}]^{r}, Option[Box^{r}]^{r}]^{r} =
+      |        Left(Option(new Box(value)))
+      |      val second
+      |          : Either[Option[Box^{r}]^{r}, Option[Box^{r}]^{r}]^{r} =
+      |        Right(Option(new Box(value + 1)))
+      |      val selected
+      |          : Either[Option[Box^{r}]^{r}, Option[Box^{r}]^{r}]^{r} =
+      |        if left then first else second
+      |      selected
+      |
+      |    def forward(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Option[Box^{r}]^{r}, Option[Box^{r}]^{r}]^{r} =
+      |      makeEither(value, left)(using r)
+      |
+      |    def branch(value: Int, flag: Boolean, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Option[Box^{r}]^{r}, Option[Box^{r}]^{r}]^{r} =
+      |      if flag then forward(value, left)(using r)
+      |      else makeEither(value + 1, left)(using r)
+      |
+      |    val either
+      |        : Either[
+      |          Option[Box^{region}]^{region},
+      |          Option[Box^{region}]^{region}
+      |        ]^{region} =
+      |      branch(42, flag, left)(using region)
+      |    42 + (System.identityHashCode(either) & 0)
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredMethodReturnedTupleWrapperCaptureWideningFallsBack()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makePair(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      Tuple2(
+      |        new Wrapper[Box^{r}](new Box(20)),
+      |        new Wrapper[Box^{r}](new Box(22))
+      |      )
+      |
+      |    val pair = makePair(using region)
+      |    pair._1.value.value + pair._2.value.value
+      |  }
+      |""".stripMargin,
+      "does not conform"
+    )
+
+  @Test def inferredForwardedMethodReturnedTupleWrapperCaptureWideningFallsBack()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makePair(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      Tuple2(
+      |        new Wrapper[Box^{r}](new Box(base)),
+      |        new Wrapper[Box^{r}](new Box(base + 2))
+      |      )
+      |
+      |    def forward(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      makePair(base)(using r)
+      |
+      |    def branch(base: Int, flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then forward(base)(using r)
+      |      else makePair(base + 1)(using r)
+      |
+      |    val pair = branch(20, flag)(using region)
+      |    val expected = if flag then 42 else 44
+      |    pair._1.value.value + pair._2.value.value - expected + 42
+      |  }
+      |""".stripMargin,
+      "does not conform"
+    )
+
+  @Test def inferredMatchForwardedMethodReturnedSomeWrapperCaptureWideningFallsBack()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def ok(selector: Int): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(value: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      Some(new Wrapper[Box^{r}](new Box(value)))
+      |
+      |    def forward(value: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      makeWrapper(value)(using r)
+      |
+      |    def matched(value: Int, selector: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      selector match
+      |        case 0 => forward(value)(using r)
+      |        case _ => makeWrapper(value + 1)(using r)
+      |
+      |    val expected = if selector == 0 then 42 else 43
+      |    matched(42, selector)(using region).get.value.value - expected + 42
+      |  }
+      |""".stripMargin,
+      "does not conform"
+    )
+
+  @Test def inferredSelectedMethodReturnedSomeWrapperCaptureWideningFallsBack()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      val first: Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |        Some(new Wrapper[Box^{r}](new Box(40)))
+      |      val second: Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |        Some(new Wrapper[Box^{r}](new Box(41)))
+      |      val selected: Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |        if flag then first else second
+      |      selected
+      |
+      |    makeWrapper(flag)(using region).get.value.value
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
   @Test def inferredObjectBufferClosureCannotCaptureUnrootedHeapMetadata()
       : Unit =
     assertDoesNotCompileWith("""
@@ -13168,6 +15962,398 @@ class RiftRegionCheckedCompilerTest {
       |          if keepOwner == -1 then entry else entry
       |      )
       |    val entry = wrapper.make(2)
+      |    System.identityHashCode(entry)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredAliasForwardedMethodReturnedWrapperClosureBodyCaptureWideningFallsBack()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Wrapper[Entry^{r}]^{r} =
+      |      val owner = r
+      |      val metadata = new Metadata(40)
+      |      new Wrapper[Entry^{r}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val entry: Entry^{owner} = new Entry(metadata)
+      |          if keepOwner == -1 then entry else entry
+      |      )
+      |
+      |    def forward(flag: Boolean)(
+      |        using r: RiftRegion.ScopedRegion^
+      |    ): Wrapper[Entry^{r}]^{r} =
+      |      val first: Wrapper[Entry^{r}]^{r} = makeWrapper(using r)
+      |      val second: Wrapper[Entry^{r}]^{r} = makeWrapper(using r)
+      |      val selected: Wrapper[Entry^{r}]^{r} =
+      |        if flag then first else second
+      |      selected
+      |
+      |    val entry = forward(flag)(using region).make(2)
+      |    System.identityHashCode(entry)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
+  @Test def inferredMethodReturnedSomeWrapperCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Metadata]^{r}]^{r} =
+      |      val metadata = new Metadata(40)
+      |      Some(new Wrapper[Metadata](metadata))
+      |
+      |    val wrapper = makeWrapper(using region).get
+      |    System.identityHashCode(wrapper)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredForwardedMethodReturnedSomeWrapperCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(value: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Metadata]^{r}]^{r} =
+      |      val metadata = new Metadata(value)
+      |      Some(new Wrapper[Metadata](metadata))
+      |
+      |    def forward(value: Int, flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Metadata]^{r}]^{r} =
+      |      if flag then makeWrapper(value)(using r)
+      |      else makeWrapper(value + 1)(using r)
+      |
+      |    val wrapper = forward(40, flag)(using region).get
+      |    System.identityHashCode(wrapper)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredForwardedMethodReturnedOptionWrapperCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(value: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Metadata]^{r}]^{r} =
+      |      val metadata = new Metadata(value)
+      |      Option(new Wrapper[Metadata](metadata))
+      |
+      |    def forward(value: Int, flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Metadata]^{r}]^{r} =
+      |      if flag then makeWrapper(value)(using r)
+      |      else makeWrapper(value + 1)(using r)
+      |
+      |    val wrapper = forward(40, flag)(using region).get
+      |    System.identityHashCode(wrapper)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredForwardedMethodReturnedEitherWrapperCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def bad(flag: Boolean, left: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Wrapper[Metadata]^{r}, Wrapper[Metadata]^{r}]^{r} =
+      |      val metadata = new Metadata(value)
+      |      if left then Left(new Wrapper[Metadata](metadata))
+      |      else Right(new Wrapper[Metadata](metadata))
+      |
+      |    def forward(value: Int, flag: Boolean, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Wrapper[Metadata]^{r}, Wrapper[Metadata]^{r}]^{r} =
+      |      if flag then makeWrapper(value, left)(using r)
+      |      else makeWrapper(value + 1, left)(using r)
+      |
+      |    val either = forward(40, flag, left)(using region)
+      |    System.identityHashCode(either)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredForwardedMethodReturnedOptionEitherCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(flag: Boolean, left: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeOption(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Either[Metadata, Metadata]^{r}]^{r} =
+      |      val metadata = new Metadata(value)
+      |      if left then Option(Left(metadata))
+      |      else Option(Right(metadata))
+      |
+      |    def forward(value: Int, flag: Boolean, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Either[Metadata, Metadata]^{r}]^{r} =
+      |      if flag then makeOption(value, left)(using r)
+      |      else makeOption(value + 1, left)(using r)
+      |
+      |    val option = forward(40, flag, left)(using region)
+      |    System.identityHashCode(option)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredForwardedMethodReturnedEitherOptionCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(flag: Boolean, left: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeEither(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Option[Metadata]^{r}, Option[Metadata]^{r}]^{r} =
+      |      val metadata = new Metadata(value)
+      |      if left then Left(Option(metadata))
+      |      else Right(Option(metadata))
+      |
+      |    def forward(value: Int, flag: Boolean, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Option[Metadata]^{r}, Option[Metadata]^{r}]^{r} =
+      |      if flag then makeEither(value, left)(using r)
+      |      else makeEither(value + 1, left)(using r)
+      |
+      |    val either = forward(40, flag, left)(using region)
+      |    System.identityHashCode(either)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredSelectedMethodReturnedEitherOptionCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(left: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeEither(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Option[Metadata]^{r}, Option[Metadata]^{r}]^{r} =
+      |      val metadata = new Metadata(value)
+      |      val first
+      |          : Either[Option[Metadata]^{r}, Option[Metadata]^{r}]^{r} =
+      |        Left(Option(metadata))
+      |      val second
+      |          : Either[Option[Metadata]^{r}, Option[Metadata]^{r}]^{r} =
+      |        Right(Option(metadata))
+      |      val selected
+      |          : Either[Option[Metadata]^{r}, Option[Metadata]^{r}]^{r} =
+      |        if left then first else second
+      |      selected
+      |
+      |    val either = makeEither(40, left)(using region)
+      |    System.identityHashCode(either)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredForwardedMethodReturnedTupleWrapperCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    def makePair(value: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Metadata]^{r}, Wrapper[Metadata]^{r}]^{r} =
+      |      val metadata = new Metadata(value)
+      |      Tuple2(
+      |        new Wrapper[Metadata](metadata),
+      |        new Wrapper[Metadata](metadata)
+      |      )
+      |
+      |    def forward(value: Int, flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Metadata]^{r}, Wrapper[Metadata]^{r}]^{r} =
+      |      if flag then makePair(value)(using r)
+      |      else makePair(value + 1)(using r)
+      |
+      |    val pair = forward(40, flag)(using region)
+      |    System.identityHashCode(pair)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredMatchForwardedMethodReturnedSomeWrapperCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def bad(selector: Int): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(value: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Metadata]^{r}]^{r} =
+      |      val metadata = new Metadata(value)
+      |      Some(new Wrapper[Metadata](metadata))
+      |
+      |    def matched(value: Int, selector: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Metadata]^{r}]^{r} =
+      |      selector match
+      |        case 0 => makeWrapper(value)(using r)
+      |        case _ => makeWrapper(value + 1)(using r)
+      |
+      |    val wrapper = matched(40, selector)(using region).get
+      |    System.identityHashCode(wrapper)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredForwardedMethodReturnedWrapperClosureBodyCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Wrapper[Entry^{r}]^{r} =
+      |      val owner = r
+      |      val metadata = new Metadata(40)
+      |      new Wrapper[Entry^{r}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val entry: Entry^{owner} = new Entry(metadata)
+      |          if keepOwner == -1 then entry else entry
+      |      )
+      |
+      |    def forward(using r: RiftRegion.ScopedRegion^): Wrapper[Entry^{r}]^{r} =
+      |      makeWrapper(using r)
+      |
+      |    val entry = forward(using region).make(2)
+      |    System.identityHashCode(entry)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredMethodReturnedWrapperClosureBodyCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Wrapper[Entry^{r}]^{r} =
+      |      val owner = r
+      |      val metadata = new Metadata(40)
+      |      new Wrapper[Entry^{r}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val entry: Entry^{owner} = new Entry(metadata)
+      |          if keepOwner == -1 then entry else entry
+      |      )
+      |
+      |    val entry = makeWrapper(using region).make(2)
       |    System.identityHashCode(entry)
       |    ()
       |  }
@@ -13457,6 +16643,53 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked region allocation cannot store an unrooted heap object"
     )
 
+  @Test def inferredSelectedObjectBufferEitherCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val buffer =
+      |      RiftRegion.objectBuffer[Either[Metadata, Metadata]^{region}](1)
+      |    val metadata = new Metadata(1)
+      |    val first: Either[Metadata, Metadata]^{region} = Left(metadata)
+      |    val second: Either[Metadata, Metadata]^{region} = Right(metadata)
+      |    val selected = if flag then first else second
+      |    RiftRegion.append(region, buffer, selected)
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredBranchObjectBufferEitherCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val buffer =
+      |      RiftRegion.objectBuffer[Either[Metadata, Metadata]^{region}](1)
+      |    val metadata = new Metadata(1)
+      |    RiftRegion.append(
+      |      region,
+      |      buffer,
+      |      if flag then Left(metadata) else Right(metadata)
+      |    )
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
   @Test def inferredSelectedNestedObjectBufferOptionCannotStoreUnrootedHeapMetadata()
       : Unit =
     assertDoesNotCompileWith("""
@@ -13604,6 +16837,54 @@ class RiftRegionCheckedCompilerTest {
       |    val second = Tuple2(metadata, metadata)
       |    val selected = if flag then first else second
       |    region.append(buffer, selected)
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredSelectedRegionBufferEitherCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val buffer =
+      |      RiftRegion.regionBuffer[Either[Metadata, Metadata]^{region}](1)
+      |    val metadata = new Metadata(1)
+      |    val first: Either[Metadata, Metadata]^{region} = Left(metadata)
+      |    val second: Either[Metadata, Metadata]^{region} = Right(metadata)
+      |    val selected = if flag then first else second
+      |    region.append(buffer, selected)
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredMatchRegionBufferEitherCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(selector: Int): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val buffer =
+      |      RiftRegion.regionBuffer[Either[Metadata, Metadata]^{region}](1)
+      |    val metadata = new Metadata(1)
+      |    region.append(
+      |      buffer,
+      |      selector match
+      |        case 0 => Left(metadata)
+      |        case _ => Right(metadata)
+      |    )
       |  }
       |""".stripMargin,
       "Rift checked region allocation cannot store an unrooted heap object"
@@ -13796,6 +17077,56 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked region allocation cannot store an unrooted heap object"
     )
 
+  @Test def inferredBranchRegionListEitherCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    final class Node(
+      |        val either: Either[Metadata, Metadata]^{region}
+      |    ) extends RiftRegion.RegionListNode
+      |    val list = RiftRegion.regionList[Node]()
+      |    val metadata = new Metadata(1)
+      |    RiftRegion.prependRegionList(
+      |      region,
+      |      list,
+      |      if flag then new Node(Left(metadata))
+      |      else new Node(Right(metadata))
+      |    )
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredSelectedNestedRegionListEitherCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    final class Node(
+      |        val either: Either[Metadata, Metadata]^{region}
+      |    ) extends RiftRegion.RegionListNode
+      |    val list = RiftRegion.regionList[Node]()
+      |    val metadata = new Metadata(1)
+      |    val first: Either[Metadata, Metadata]^{region} = Left(metadata)
+      |    val second: Either[Metadata, Metadata]^{region} = Right(metadata)
+      |    val selected = if flag then first else second
+      |    RiftRegion.prependRegionList(region, list, new Node(selected))
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
   @Test def regionListDoesNotInferMutableLocalNewPlacement(): Unit =
     assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
@@ -13976,4 +17307,80 @@ class RiftRegionCheckedCompilerTest {
       |""".stripMargin,
       "Capability `region` outlives its scope"
     )
+
+  // Effect-polymorphic closure tests:
+  // A closure whose expected type has a captured owner should be able to
+  // allocate in that region, even if it doesn't explicitly capture the owner.
+  // This is the ReML-style allocation effect mechanism.
+  @Test def effectPolymorphicClosureBodyCanAllocateWithExpectedTypeOwner()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Box^{r}]^{r} =
+      |  (value: Int) =>
+      |    new Box(value)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(42).value
+      |  }
+      |""".stripMargin)
+
+  @Test def effectPolymorphicClosureBodyCanReturnOptionFactory()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Option[Box^{r}]^{r}]^{r} =
+      |  (value: Int) =>
+      |    Some(new Box(value))
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(42).get.value
+      |  }
+      |""".stripMargin)
+
+  // Effect instantiation at call sites:
+  // Closures with allocation effects can be passed to owner-token methods.
+  @Test def effectPolymorphicClosureCanBePassedToOwnerTokenMethod()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def consume(using r: RiftRegion.ScopedRegion^)(f: Function1[Int, Box^{r}]^{r}): Int =
+      |  f(42).value
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    consume(using region)((value: Int) => new Box(value))
+      |  }
+      |""".stripMargin)
+
+  @Test def effectPolymorphicClosureCanBePassedToBufferAppend()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val buffer =
+      |      RiftRegion.objectBuffer[Function1[Int, Box^{region}]^{region}](1)
+      |    RiftRegion.append(region, buffer, (value: Int) => new Box(value))
+      |    RiftRegion.get(region, buffer, 0)(42).value
+      |  }
+      |""".stripMargin)
 }
