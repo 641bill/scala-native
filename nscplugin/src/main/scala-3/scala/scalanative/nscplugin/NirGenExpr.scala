@@ -1075,17 +1075,41 @@ trait NirGenExpr(using Context) {
           if !RiftRegionInference.hasLocalEscapeAllocations(methodSym) then
             return None
 
-          // Create a new region by calling RiftAllocator.Impl.open(Scoped)
-          // For now, return None to fall back to heap allocation.
-          // TODO: Implement actual region creation by generating NIR code
-          // to call the extern function scalanative_rift_region_open(Scoped)
-          // and use the returned handle as the allocation zone.
-          //
-          // The implementation would:
-          // 1. Find the scalanative_rift_region_open function symbol
-          // 2. Generate a call with Scoped (0) as the argument
-          // 3. Use the returned RawPtr as the zone for classalloc
-          // 4. Close the region when the method returns
+          // Create a new region by calling scalanative_rift_region_open(Scoped)
+          createRegionForAutomaticInference().map { region =>
+            automaticRegionCache.update(methodSym, region)
+            region
+          }
+      }
+    }
+
+    // Create a region for automatic region inference by calling
+    // scalanative_rift_region_open(Scoped).
+    // Returns the region handle as a nir.Val.
+    private def createRegionForAutomaticInference(): Option[nir.Val] = {
+      // Get the RuntimeRiftAllocatorImpl_open method symbol
+      val defnNir = NirDefinitions.get
+      val openMethodSymOpt = defnNir.RuntimeRiftAllocatorImpl_open
+
+      openMethodSymOpt match {
+        case Some(openSym) =>
+          // Generate a call to scalanative_rift_region_open(Scoped)
+          // Scoped = 0 in the RiftRegion companion object
+          given nir.SourcePosition = curMethodSym.get.span
+          val fresh = curFresh.get
+
+          // The open function signature: (Int) => RawPtr
+          val openSig = genExternMethodSig(openSym)
+          val openName = genMethodName(openSym)
+          val openMethod = nir.Val.Global(openName, nir.Type.Ptr)
+
+          // Generate the call with Scoped (0) as the argument
+          val scopedKind = nir.Val.Int(0) // Scoped = 0
+          val handle = buf.call(openSig, openMethod, Seq(scopedKind), unwind)
+
+          Some(handle)
+        case None =>
+          // Method symbol not found, fall back to heap allocation
           None
       }
     }
