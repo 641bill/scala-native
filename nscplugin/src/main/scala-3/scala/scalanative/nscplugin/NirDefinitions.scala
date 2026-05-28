@@ -125,6 +125,11 @@ final class NirDefinitions()(using ctx: Context) {
       try Some(mod.requiredMethod("open"))
       catch case _: Throwable => None
     }
+  @tu lazy val RuntimeRiftAllocatorImpl_close: Option[Symbol] =
+    RuntimeRiftAllocatorImplModule.flatMap { mod =>
+      try Some(mod.requiredMethod("close"))
+      catch case _: Throwable => None
+    }
 
   // Runtime intriniscs
   @tu lazy val IntrinsicMarker = RuntimePackageClass.requiredMethod("intrinsic")

@@ -1078,6 +1078,7 @@ trait NirGenExpr(using Context) {
           // Create a new region by calling scalanative_rift_region_open(Scoped)
           createRegionForAutomaticInference().map { region =>
             automaticRegionCache.update(methodSym, region)
+            currentAutomaticRegion = Some(region)
             region
           }
       }
@@ -1114,9 +1115,35 @@ trait NirGenExpr(using Context) {
       }
     }
 
+    // Track the current automatic region for closing
+    private var currentAutomaticRegion: Option[nir.Val] = None
+
+    // Close the automatic region if one was created
+    def closeAutomaticRegion(): Unit = {
+      currentAutomaticRegion.foreach { handle =>
+        // Generate a call to scalanative_rift_region_close(handle)
+        val defnNir = NirDefinitions.get
+        val closeMethodSymOpt = defnNir.RuntimeRiftAllocatorImpl_close
+
+        closeMethodSymOpt match {
+          case Some(closeSym) =>
+            given nir.SourcePosition = nir.SourcePosition.NoPosition
+            val closeSig = genExternMethodSig(closeSym)
+            val closeName = genMethodName(closeSym)
+            val closeMethod = nir.Val.Global(closeName, nir.Type.Ptr)
+            buf.call(closeSig, closeMethod, Seq(handle), unwind)
+          case None =>
+            // Close function not found, skip closing
+            ()
+        }
+      }
+      currentAutomaticRegion = None
+    }
+
     // Clear the automatic region cache for a new method
     private def clearAutomaticRegionCache(): Unit = {
       automaticRegionCache.clear()
+      currentAutomaticRegion = None
     }
 
     private def inferredRiftOwnerValueFromCapturedType(
@@ -3250,11 +3277,19 @@ trait NirGenExpr(using Context) {
           ctor.isClassConstructor,
           "'new' call to non-constructor: " + ctor.name
         )
+        // Check for explicit zone attachment first, then check for
+        // automatic region inference for local-escape allocations.
+        val zone = app.getAttachment(AllocationZoneInstance).orElse {
+          if isLocalEscapeAllocation(app) then
+            getOrCreateAutomaticRegion()
+          else
+            None
+        }
         genApplyNew(
           clssym = sym,
           ctorsym = ctor,
           args = args,
-          zone = app.getAttachment(AllocationZoneInstance)
+          zone = zone
         )
       } else unsupported(s"unexpected new: $sym with targs ${tpe}")
 
