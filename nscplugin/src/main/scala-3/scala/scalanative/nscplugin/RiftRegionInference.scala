@@ -151,29 +151,33 @@ object RiftRegionInference {
     else None
   }
 
-  // Track methods that have automatic region scopes
-  private[nscplugin] val methodsWithAutomaticRegionScopes
-      : mutable.Map[Symbol, Symbol] =
+  // Track methods that have local-escape allocations
+  // This is used by GenNIR to decide whether to wrap method body
+  // in RiftRegion.scoped for automatic region inference.
+  private[nscplugin] val methodsWithLocalEscapeAllocations
+      : mutable.Map[Symbol, List[(Symbol, dotty.tools.dotc.util.SrcPos)]] =
     mutable.Map.empty
 
-  private def markMethodHasAutomaticRegionScopes(
+  // Record that a method has local-escape allocations
+  private[nscplugin] def markMethodHasLocalEscapeAllocations(
       methodSym: Symbol,
-      regionSym: Symbol
+      allocations: List[(Symbol, dotty.tools.dotc.util.SrcPos)]
   ): Unit = {
-    methodsWithAutomaticRegionScopes.update(methodSym, regionSym)
+    if allocations.nonEmpty then
+      methodsWithLocalEscapeAllocations.update(methodSym, allocations)
   }
 
-  // Check if a method has automatic region scopes
-  private[nscplugin] def hasAutomaticRegionScopes(
+  // Check if a method has local-escape allocations
+  private[nscplugin] def hasLocalEscapeAllocations(
       methodSym: Symbol
   ): Boolean =
-    methodsWithAutomaticRegionScopes.contains(methodSym)
+    methodsWithLocalEscapeAllocations.contains(methodSym)
 
-  // Get the synthetic region symbol for a method
-  private[nscplugin] def getAutomaticRegionSymbol(
+  // Get the local-escape allocation sites for a method
+  private[nscplugin] def getLocalEscapeAllocations(
       methodSym: Symbol
-  ): Option[Symbol] =
-    methodsWithAutomaticRegionScopes.get(methodSym)
+  ): List[(Symbol, dotty.tools.dotc.util.SrcPos)] =
+    methodsWithLocalEscapeAllocations.getOrElse(methodSym, Nil)
 }
 
 /** Capture-directed placement for the first ReML-style Rift inference slices.
@@ -223,7 +227,7 @@ class RiftRegionInference(
     RiftRegionInference.inferredClosureAllocationEffectsBySourceSpan.clear()
     RiftRegionInference.allocationEscapeBehavior.clear()
     RiftRegionInference.allocationReachSet.clear()
-    RiftRegionInference.methodsWithAutomaticRegionScopes.clear()
+    RiftRegionInference.methodsWithLocalEscapeAllocations.clear()
     directlyNewAllocatedSyms.clear()
     localRegionConstructAllocatedApps.clear()
     localAllocatedSyms.clear()
@@ -3979,11 +3983,12 @@ class RiftRegionInference(
 
     if localEscapeAllocations.isEmpty then return
 
-    // For now, we only track the escape behavior.
+    // Record the local-escape allocations for this method.
     // GenNIR will use this information to create regions.
-    //
-    // TODO: Implement actual region scope insertion when GenNIR can
-    // create regions based on escape behavior.
+    val allocationInfo = localEscapeAllocations.map { app =>
+      (calledSymbol(app).owner, app.srcPos)
+    }
+    RiftRegionInference.markMethodHasLocalEscapeAllocations(methodSym, allocationInfo)
   }
 
   // Create a synthetic region symbol for a method.

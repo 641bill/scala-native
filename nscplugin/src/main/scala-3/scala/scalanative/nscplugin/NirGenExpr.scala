@@ -1038,10 +1038,10 @@ trait NirGenExpr(using Context) {
         )
         .orElse {
           // Check if this is a synthetic region owner for automatic region inference
-          if RiftRegionInference.hasAutomaticRegionScopes(ownerSym) then
-            createAutomaticRegion(ownerSym)
-          else
-            None
+          // For now, return None to fall back to heap allocation.
+          // TODO: Implement actual region creation when escape analysis
+          // identifies local-escape allocations.
+          None
         }
     }
 
