@@ -1045,32 +1045,31 @@ trait NirGenExpr(using Context) {
         }
     }
 
-    // Cache for automatic regions created for synthetic owners.
-    // Maps synthetic owner symbols to their created region values.
-    private val automaticRegionCache: mutable.Map[Symbol, nir.Val] =
-      mutable.Map.empty
-
-    // Create a region for automatic region inference.
-    // This creates a scoped region that will be used for allocations
-    // marked with the synthetic owner.
-    private def createAutomaticRegion(ownerSym: Symbol): Option[nir.Val] = {
-      // Check if we already created a region for this owner
-      automaticRegionCache.get(ownerSym) match {
-        case Some(region) => Some(region)
-        case None =>
-          // Create a new region by calling RiftRegion.open(Scoped)
-          // For now, return None to fall back to heap allocation.
-          // TODO: Implement actual region creation by calling
-          // RiftAllocator.Impl.open(Scoped) and creating a
-          // MemoryScopedRiftRegion with the handle.
-          // This requires generating NIR code for the runtime calls.
-          None
+    // Check if an allocation is local-escape based on escape analysis
+    private def isLocalEscapeAllocation(app: Apply): Boolean = {
+      val sym = calledSymbol(app)
+      sym.isClassConstructor && {
+        val allocatedSym = sym.owner
+        allocatedSym != NoSymbol &&
+          RiftRegionInference.isLocalEscape(allocatedSym)
       }
     }
 
-    // Clear the automatic region cache for a new method
-    private def clearAutomaticRegionCache(): Unit = {
-      automaticRegionCache.clear()
+    // Get or create a region for automatic region inference.
+    // This creates a scoped region that will be used for local-escape
+    // allocations in the current method.
+    private def getOrCreateAutomaticRegion(): Option[nir.Val] = {
+      // For now, return None to fall back to heap allocation.
+      // TODO: Implement actual region creation by generating NIR code
+      // to call RiftRegion.scoped { region => ... } or
+      // RiftAllocator.Impl.open(Scoped) to create a region.
+      //
+      // The approach would be:
+      // 1. Find the RiftRegion.scoped method symbol
+      // 2. Generate a call to RiftRegion.scoped with a lambda body
+      // 3. The lambda body contains the method body
+      // 4. Use the region parameter as the zone for allocations
+      None
     }
 
     private def inferredRiftOwnerValueFromCapturedType(

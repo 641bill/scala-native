@@ -178,6 +178,20 @@ object RiftRegionInference {
       methodSym: Symbol
   ): List[(Symbol, dotty.tools.dotc.util.SrcPos)] =
     methodsWithLocalEscapeAllocations.getOrElse(methodSym, Nil)
+
+  // Get the escape behavior for an allocation site
+  private[nscplugin] def getEscapeBehavior(
+      sym: Symbol
+  ): Option[EscapeBehavior] =
+    allocationEscapeBehavior.get(sym)
+
+  // Check if an allocation site is local-escape
+  private[nscplugin] def isLocalEscape(sym: Symbol): Boolean =
+    getEscapeBehavior(sym).contains(EscapeBehavior.Local)
+
+  // Check if an allocation site is heap-escape
+  private[nscplugin] def isHeapEscape(sym: Symbol): Boolean =
+    getEscapeBehavior(sym).contains(EscapeBehavior.Heap)
 }
 
 /** Capture-directed placement for the first ReML-style Rift inference slices.
@@ -3937,20 +3951,6 @@ class RiftRegionInference(
   private def isDirectNewApply(tree: Tree)(using Context): Boolean =
     directNewApply(tree).isDefined
 
-  // Get the escape behavior for an allocation site
-  private[nscplugin] def getEscapeBehavior(
-      sym: Symbol
-  ): Option[RiftRegionInference.EscapeBehavior] =
-    RiftRegionInference.allocationEscapeBehavior.get(sym)
-
-  // Check if an allocation site is local-escape
-  private[nscplugin] def isLocalEscape(sym: Symbol): Boolean =
-    getEscapeBehavior(sym).contains(RiftRegionInference.EscapeBehavior.Local)
-
-  // Check if an allocation site is heap-escape
-  private[nscplugin] def isHeapEscape(sym: Symbol): Boolean =
-    getEscapeBehavior(sym).contains(RiftRegionInference.EscapeBehavior.Heap)
-
   // Region scope insertion for automatic region inference (Step 2.2).
   //
   // Current approach: Only track escape behavior without marking allocations.
@@ -3977,7 +3977,7 @@ class RiftRegionInference(
         sym.isClassConstructor && {
           val allocatedSym = sym.owner
           allocatedSym != NoSymbol &&
-            isLocalEscape(allocatedSym)
+            RiftRegionInference.isLocalEscape(allocatedSym)
         }
       }
 
