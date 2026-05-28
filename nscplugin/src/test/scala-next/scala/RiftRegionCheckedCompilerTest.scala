@@ -17383,4 +17383,35 @@ class RiftRegionCheckedCompilerTest {
       |    RiftRegion.get(region, buffer, 0)(42).value
       |  }
       |""".stripMargin)
+
+  // Escape analysis tests for automatic region scope inference (Phase 2)
+  @Test def escapeAnalysisLocalAllocation(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    // This allocation is local-escape: it only lives in this scope
+      |    val box: Box^{region} = new Box(42)
+      |    box.value
+      |  }
+      |""".stripMargin)
+
+  @Test def escapeAnalysisMethodLocalAllocation(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def compute(): Int =
+      |  // Local allocation that doesn't escape the method
+      |  val box = new Box(42)
+      |  box.value + 1
+      |
+      |def ok(): Int = compute()
+      |""".stripMargin)
 }

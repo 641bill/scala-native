@@ -1036,6 +1036,41 @@ trait NirGenExpr(using Context) {
             .flatMap(tpe => env.getUniqueByType(genType(tpe)))
             .headOption
         )
+        .orElse {
+          // Check if this is a synthetic region owner for automatic region inference
+          if RiftRegionInference.hasAutomaticRegionScopes(ownerSym) then
+            createAutomaticRegion(ownerSym)
+          else
+            None
+        }
+    }
+
+    // Cache for automatic regions created for synthetic owners.
+    // Maps synthetic owner symbols to their created region values.
+    private val automaticRegionCache: mutable.Map[Symbol, nir.Val] =
+      mutable.Map.empty
+
+    // Create a region for automatic region inference.
+    // This creates a scoped region that will be used for allocations
+    // marked with the synthetic owner.
+    private def createAutomaticRegion(ownerSym: Symbol): Option[nir.Val] = {
+      // Check if we already created a region for this owner
+      automaticRegionCache.get(ownerSym) match {
+        case Some(region) => Some(region)
+        case None =>
+          // Create a new region by calling RiftRegion.open(Scoped)
+          // For now, return None to fall back to heap allocation.
+          // TODO: Implement actual region creation by calling
+          // RiftAllocator.Impl.open(Scoped) and creating a
+          // MemoryScopedRiftRegion with the handle.
+          // This requires generating NIR code for the runtime calls.
+          None
+      }
+    }
+
+    // Clear the automatic region cache for a new method
+    private def clearAutomaticRegionCache(): Unit = {
+      automaticRegionCache.clear()
     }
 
     private def inferredRiftOwnerValueFromCapturedType(
