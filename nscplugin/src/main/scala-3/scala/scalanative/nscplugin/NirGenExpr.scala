@@ -1055,21 +1055,44 @@ trait NirGenExpr(using Context) {
       }
     }
 
+    // Cache for automatic regions created for local-escape allocations.
+    // Maps method symbols to their created region values.
+    private val automaticRegionCache: mutable.Map[Symbol, nir.Val] =
+      mutable.Map.empty
+
     // Get or create a region for automatic region inference.
     // This creates a scoped region that will be used for local-escape
     // allocations in the current method.
     private def getOrCreateAutomaticRegion(): Option[nir.Val] = {
-      // For now, return None to fall back to heap allocation.
-      // TODO: Implement actual region creation by generating NIR code
-      // to call RiftRegion.scoped { region => ... } or
-      // RiftAllocator.Impl.open(Scoped) to create a region.
-      //
-      // The approach would be:
-      // 1. Find the RiftRegion.scoped method symbol
-      // 2. Generate a call to RiftRegion.scoped with a lambda body
-      // 3. The lambda body contains the method body
-      // 4. Use the region parameter as the zone for allocations
-      None
+      val methodSym = curMethodSym.get
+      if methodSym == NoSymbol then return None
+
+      // Check if we already created a region for this method
+      automaticRegionCache.get(methodSym) match {
+        case Some(region) => Some(region)
+        case None =>
+          // Check if this method has local-escape allocations
+          if !RiftRegionInference.hasLocalEscapeAllocations(methodSym) then
+            return None
+
+          // Create a new region by calling RiftAllocator.Impl.open(Scoped)
+          // For now, return None to fall back to heap allocation.
+          // TODO: Implement actual region creation by generating NIR code
+          // to call the extern function scalanative_rift_region_open(Scoped)
+          // and use the returned handle as the allocation zone.
+          //
+          // The implementation would:
+          // 1. Find the scalanative_rift_region_open function symbol
+          // 2. Generate a call with Scoped (0) as the argument
+          // 3. Use the returned RawPtr as the zone for classalloc
+          // 4. Close the region when the method returns
+          None
+      }
+    }
+
+    // Clear the automatic region cache for a new method
+    private def clearAutomaticRegionCache(): Unit = {
+      automaticRegionCache.clear()
     }
 
     private def inferredRiftOwnerValueFromCapturedType(

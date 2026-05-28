@@ -116,6 +116,11 @@ final class NirDefinitions()(using ctx: Context) {
     optional(RuntimeRiftAllocatorModule.requiredMethod("allocateOpenHandle"))
   @tu lazy val RuntimeRiftAllocator_allocateOpenHandleNoZero =
     optional(RuntimeRiftAllocatorModule.requiredMethod("allocateOpenHandleNoZero"))
+  // RiftAllocator.Impl.open for automatic region inference
+  @tu lazy val RuntimeRiftAllocatorImplModule =
+    optional(RuntimeRiftAllocatorModule.info.member(core.Names.termName("Impl")).symbol)
+  @tu lazy val RuntimeRiftAllocatorImpl_open =
+    optional(RuntimeRiftAllocatorImplModule.flatMap(mod => Some(mod.requiredMethod("open"))))
 
   // Runtime intriniscs
   @tu lazy val IntrinsicMarker = RuntimePackageClass.requiredMethod("intrinsic")
