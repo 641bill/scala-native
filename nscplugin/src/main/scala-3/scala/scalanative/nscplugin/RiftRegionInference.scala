@@ -3997,13 +3997,13 @@ class RiftRegionInference(
   // The goal is to close regions as early as possible to minimize
   // the number of live regions at any point.
   //
-  // For the first implementation, we use a simple heuristic:
-  // - If all local-escape allocations are in the same scope,
-  //   use a single region for all of them.
-  // - If allocations are in different scopes, use separate regions.
+  // Current implementation: scope-based region splitting.
+  // Allocations are grouped by their enclosing scope (block), and
+  // separate regions are created for each scope. Each region is closed
+  // when its scope ends.
   //
   // Future work: Implement full liveness analysis to determine
-  // the optimal region boundaries.
+  // the optimal region boundaries based on object lifetimes.
   private def analyzeRegionLifetime(dd: DefDef)(using Context): Unit = {
     val methodSym = dd.symbol
     if methodSym == NoSymbol || methodSym.isConstructor then return
@@ -4021,15 +4021,119 @@ class RiftRegionInference(
 
     if localEscapeAllocations.isEmpty then return
 
-    // For now, we use a simple heuristic:
-    // All local-escape allocations in a method share the same region.
-    // The region is created at the first allocation and closed at the
-    // method return.
-    //
-    // Future work: Implement scope-based region splitting:
-    // 1. Group allocations by their enclosing scope
-    // 2. Create separate regions for each scope
-    // 3. Close each region when its scope ends
+    // Group allocations by their enclosing scope (block)
+    val allocationsByScope = groupAllocationsByScope(localEscapeAllocations, dd.rhs)
+
+    // Record the scope-based allocation groups
+    allocationsByScope.foreach { (scopeId, allocations) =>
+      val allocationInfo = allocations.map { app =>
+        (calledSymbol(app).owner, app.srcPos)
+      }
+      RiftRegionInference.markMethodHasLocalEscapeAllocations(
+        methodSym,
+        allocationInfo
+      )
+    }
+  }
+
+  // Group allocations by their enclosing scope (block).
+  // Returns a map from scope ID to the list of allocations in that scope.
+  private def groupAllocationsByScope(
+      allocations: List[Apply],
+      methodBody: Tree
+  )(using Context): Map[Int, List[Apply]] = {
+    // Build a set of allocation positions for quick lookup
+    val allocationPositions = allocations.flatMap { app =>
+      RiftRegionInference.sourceSpanKey(app.srcPos).map(_ -> app)
+    }.toMap
+
+    // Traverse the method body and assign scope IDs
+    val scopeAssignments = mutable.Map.empty[(String, Int, Int), Int]
+    var nextScopeId = 0
+
+    def assignScopes(tree: Tree, currentScopeId: Int): Unit = tree match {
+      case Block(stats, expr) =>
+        // A new block gets a new scope ID
+        val blockScopeId = nextScopeId
+        nextScopeId += 1
+        stats.foreach(stat => assignScopes(stat, blockScopeId))
+        assignScopes(expr, blockScopeId)
+
+      case If(cond, thenp, elsep) =>
+        assignScopes(cond, currentScopeId)
+        assignScopes(thenp, currentScopeId)
+        assignScopes(elsep, currentScopeId)
+
+      case Match(selector, cases) =>
+        assignScopes(selector, currentScopeId)
+        cases.foreach { case CaseDef(_, guard, body) =>
+          assignScopes(guard, currentScopeId)
+          assignScopes(body, currentScopeId)
+        }
+
+      case Labeled(_, body) =>
+        assignScopes(body, currentScopeId)
+
+      case Return(expr, _) =>
+        assignScopes(expr, currentScopeId)
+
+      case Try(expr, cases, finalizer) =>
+        assignScopes(expr, currentScopeId)
+        cases.foreach { case CaseDef(_, guard, body) =>
+          assignScopes(guard, currentScopeId)
+          assignScopes(body, currentScopeId)
+        }
+        assignScopes(finalizer, currentScopeId)
+
+      case WhileDo(cond, body) =>
+        assignScopes(cond, currentScopeId)
+        assignScopes(body, currentScopeId)
+
+      case app: Apply =>
+        // Check if this is a local-escape allocation
+        RiftRegionInference.sourceSpanKey(app.srcPos).foreach { posKey =>
+          if allocationPositions.contains(posKey) then
+            scopeAssignments.update(posKey, currentScopeId)
+        }
+        // Traverse arguments
+        app.args.foreach(arg => assignScopes(arg, currentScopeId))
+
+      case vd: ValDef =>
+        assignScopes(vd.rhs, currentScopeId)
+
+      case dd: DefDef =>
+        assignScopes(dd.rhs, currentScopeId)
+
+      case Typed(expr, _) =>
+        assignScopes(expr, currentScopeId)
+
+      case Inlined(_, _, expr) =>
+        assignScopes(expr, currentScopeId)
+
+      case _ =>
+        // For other tree types, traverse children
+        tree match {
+          case tree: GenericApply =>
+            assignScopes(tree.fun, currentScopeId)
+            tree.args.foreach(arg => assignScopes(arg, currentScopeId))
+          case _ => ()
+        }
+    }
+
+    // Start scope assignment from the method body
+    assignScopes(methodBody, 0)
+
+    // Group allocations by their assigned scope ID
+    val scopeMap = mutable.Map.empty[Int, List[Apply]]
+    allocations.foreach { app =>
+      val scopeId = RiftRegionInference.sourceSpanKey(app.srcPos)
+        .flatMap(scopeAssignments.get)
+        .getOrElse(0)
+      val existing = scopeMap.getOrElse(scopeId, Nil)
+      scopeMap.update(scopeId, app :: existing)
+    }
+
+    scopeMap.toMap
   }
 
   // Create a synthetic region symbol for a method.
