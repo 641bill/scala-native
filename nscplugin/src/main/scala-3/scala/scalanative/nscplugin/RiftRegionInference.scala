@@ -3346,12 +3346,16 @@ class RiftRegionInference(
         markForwardedInferredMethodReturn(result)
         // Perform escape analysis for automatic region scope inference
         analyzeEscapeBehavior(result)
-        // TODO: Enable region scope insertion when GenNIR can create
-        // actual regions for synthetic owners.
+        // TODO: Enable region scope insertion when the approach is refined.
         // The current issue is that marking allocations with synthetic
-        // owners breaks existing tests because the inference phase
-        // treats them as region-allocated even when GenNIR can't
-        // create actual regions for them.
+        // owners changes inference decisions but GenNIR can't create
+        // actual regions for synthetic owners, causing test failures.
+        //
+        // Possible solutions:
+        // 1. Don't mark allocations in inference phase - only track escape
+        //    behavior. Let GenNIR handle the transformation.
+        // 2. Use AST transformation to wrap method body in RiftRegion.scoped.
+        // 3. Generate NIR code for region creation in GenNIR.
         // insertRegionScopes(result)
       case _ => ()
     }
@@ -3944,9 +3948,20 @@ class RiftRegionInference(
     getEscapeBehavior(sym).contains(RiftRegionInference.EscapeBehavior.Heap)
 
   // Region scope insertion for automatic region inference (Step 2.2).
-  // Creates a synthetic region owner for a method and marks local-escape
-  // allocations with it. GenNIR will then create a scoped region for
-  // those allocations.
+  //
+  // Current approach: Only track escape behavior without marking allocations.
+  // GenNIR will use the escape information to decide whether to create regions.
+  //
+  // This avoids the issue of marking allocations with synthetic owners,
+  // which changes inference decisions but GenNIR can't create actual regions
+  // for synthetic owners.
+  //
+  // The escape analysis is performed in analyzeEscapeBehavior() which runs
+  // before this function. The escape behavior is stored in
+  // allocationEscapeBehavior and can be queried by GenNIR.
+  //
+  // Future work: GenNIR will use getEscapeBehavior() and isLocalEscape()
+  // to decide whether to wrap allocations in RiftRegion.scoped.
   private def insertRegionScopes(dd: DefDef)(using Context): Unit = {
     val methodSym = dd.symbol
     if methodSym == NoSymbol || methodSym.isConstructor then return
@@ -3964,30 +3979,11 @@ class RiftRegionInference(
 
     if localEscapeAllocations.isEmpty then return
 
-    // Create a synthetic region owner for this method
-    // This will be used to mark allocations that should be region-allocated
-    val syntheticRegionSym = createSyntheticRegionSymbol(methodSym)
-
-    // Mark all local-escape allocations with the synthetic region owner
-    localEscapeAllocations.foreach { app =>
-      val allocatedSym = calledSymbol(app).owner
-      if allocatedSym != NoSymbol then {
-        markRegionOwner(
-          allocatedSym,
-          syntheticRegionSym,
-          "local-escape allocation is automatically placed in inferred region scope",
-          app.srcPos
-        )
-        // Also mark the allocation itself with the synthetic region
-        app.putAttachment(
-          NirDefinitions.InferredRiftAllocationOwner,
-          syntheticRegionSym
-        )
-      }
-    }
-
-    // Mark the method as having automatic region scopes
-    RiftRegionInference.markMethodHasAutomaticRegionScopes(methodSym, syntheticRegionSym)
+    // For now, we only track the escape behavior.
+    // GenNIR will use this information to create regions.
+    //
+    // TODO: Implement actual region scope insertion when GenNIR can
+    // create regions based on escape behavior.
   }
 
   // Create a synthetic region symbol for a method.
