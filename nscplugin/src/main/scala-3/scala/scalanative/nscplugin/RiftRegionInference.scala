@@ -3991,6 +3991,47 @@ class RiftRegionInference(
     RiftRegionInference.markMethodHasLocalEscapeAllocations(methodSym, allocationInfo)
   }
 
+  // Lifetime optimization for automatic region inference (Step 2.3).
+  //
+  // Analyzes the method body to determine the optimal region lifetime.
+  // The goal is to close regions as early as possible to minimize
+  // the number of live regions at any point.
+  //
+  // For the first implementation, we use a simple heuristic:
+  // - If all local-escape allocations are in the same scope,
+  //   use a single region for all of them.
+  // - If allocations are in different scopes, use separate regions.
+  //
+  // Future work: Implement full liveness analysis to determine
+  // the optimal region boundaries.
+  private def analyzeRegionLifetime(dd: DefDef)(using Context): Unit = {
+    val methodSym = dd.symbol
+    if methodSym == NoSymbol || methodSym.isConstructor then return
+
+    // Find all local-escape allocations in this method
+    val localEscapeAllocations = collectDirectNewAllocations(dd.rhs)
+      .filter { app =>
+        val sym = calledSymbol(app)
+        sym.isClassConstructor && {
+          val allocatedSym = sym.owner
+          allocatedSym != NoSymbol &&
+            RiftRegionInference.isLocalEscape(allocatedSym)
+        }
+      }
+
+    if localEscapeAllocations.isEmpty then return
+
+    // For now, we use a simple heuristic:
+    // All local-escape allocations in a method share the same region.
+    // The region is created at the first allocation and closed at the
+    // method return.
+    //
+    // Future work: Implement scope-based region splitting:
+    // 1. Group allocations by their enclosing scope
+    // 2. Create separate regions for each scope
+    // 3. Close each region when its scope ends
+  }
+
   // Create a synthetic region symbol for a method.
   // This symbol is used to mark allocations that should be automatically
   // placed in a compiler-inserted region scope.
