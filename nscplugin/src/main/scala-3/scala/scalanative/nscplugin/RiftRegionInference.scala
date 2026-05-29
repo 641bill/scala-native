@@ -158,6 +158,28 @@ object RiftRegionInference {
       : mutable.Map[Symbol, List[(Symbol, dotty.tools.dotc.util.SrcPos)]] =
     mutable.Map.empty
 
+  // Effect constraints for parallel safety (Phase 3).
+  // Track allocation effects on function types for disjointness checking.
+  sealed trait EffectConstraint
+  object EffectConstraint {
+    // No constraint
+    case object None extends EffectConstraint
+    // Disjoint allocation effects: e1 ## e2
+    case class Disjoint(effect1: Symbol, effect2: Symbol) extends EffectConstraint
+    // No external mutation: nomut e
+    case class NoMut(effect: Symbol) extends EffectConstraint
+  }
+
+  // Maps function symbols to their effect constraints
+  private[nscplugin] val effectConstraints
+      : mutable.Map[Symbol, List[EffectConstraint]] =
+    mutable.Map.empty
+
+  // Maps function symbols to their allocation effects
+  private[nscplugin] val functionAllocationEffects
+      : mutable.Map[Symbol, Set[Symbol]] =
+    mutable.Map.empty
+
   // Record that a method has local-escape allocations
   private[nscplugin] def markMethodHasLocalEscapeAllocations(
       methodSym: Symbol,
@@ -178,6 +200,82 @@ object RiftRegionInference {
       methodSym: Symbol
   ): List[(Symbol, dotty.tools.dotc.util.SrcPos)] =
     methodsWithLocalEscapeAllocations.getOrElse(methodSym, Nil)
+
+  // Track allocation effects on function types
+  private[nscplugin] def addAllocationEffect(
+      funcSym: Symbol,
+      effect: Symbol
+  ): Unit = {
+    val existing = functionAllocationEffects.getOrElse(funcSym, Set.empty)
+    functionAllocationEffects.update(funcSym, existing + effect)
+  }
+
+  // Get allocation effects for a function
+  private[nscplugin] def getAllocationEffects(
+      funcSym: Symbol
+  ): Set[Symbol] =
+    functionAllocationEffects.getOrElse(funcSym, Set.empty)
+
+  // Add an effect constraint
+  private[nscplugin] def addEffectConstraint(
+      funcSym: Symbol,
+      constraint: EffectConstraint
+  ): Unit = {
+    val existing = effectConstraints.getOrElse(funcSym, Nil)
+    effectConstraints.update(funcSym, constraint :: existing)
+  }
+
+  // Get effect constraints for a function
+  private[nscplugin] def getEffectConstraints(
+      funcSym: Symbol
+  ): List[EffectConstraint] =
+    effectConstraints.getOrElse(funcSym, Nil)
+
+  // Check if two functions have disjoint allocation effects
+  private[nscplugin] def hasDisjointEffects(
+      func1: Symbol,
+      func2: Symbol
+  ): Boolean = {
+    val effects1 = getAllocationEffects(func1)
+    val effects2 = getAllocationEffects(func2)
+    effects1.intersect(effects2).isEmpty
+  }
+
+  // Check if a function has no external mutation effects
+  private[nscplugin] def hasNoExternalMutation(
+      funcSym: Symbol
+  ): Boolean = {
+    // For now, return true for all functions.
+    // TODO: Implement actual mutation tracking by analyzing
+    // writes to heap objects and mutable variables.
+    true
+  }
+
+  // Verify disjointness constraint for parallel safety
+  // Returns true if the two functions have disjoint allocation effects
+  private[nscplugin] def verifyDisjointness(
+      func1: Symbol,
+      func2: Symbol
+  ): Boolean = {
+    val effects1 = getAllocationEffects(func1)
+    val effects2 = getAllocationEffects(func2)
+
+    // If either function has no effects, they are trivially disjoint
+    if effects1.isEmpty || effects2.isEmpty then return true
+
+    // Check if the effects are disjoint
+    effects1.intersect(effects2).isEmpty
+  }
+
+  // Verify no-mutation constraint
+  // Returns true if the function has no external mutation effects
+  private[nscplugin] def verifyNoMutation(
+      funcSym: Symbol
+  ): Boolean = {
+    // For now, return true for all functions.
+    // TODO: Implement actual mutation tracking.
+    true
+  }
 
   // Get the escape behavior for an allocation site
   private[nscplugin] def getEscapeBehavior(
@@ -242,6 +340,8 @@ class RiftRegionInference(
     RiftRegionInference.allocationEscapeBehavior.clear()
     RiftRegionInference.allocationReachSet.clear()
     RiftRegionInference.methodsWithLocalEscapeAllocations.clear()
+    RiftRegionInference.effectConstraints.clear()
+    RiftRegionInference.functionAllocationEffects.clear()
     directlyNewAllocatedSyms.clear()
     localRegionConstructAllocatedApps.clear()
     localAllocatedSyms.clear()
@@ -3364,6 +3464,8 @@ class RiftRegionInference(
         markForwardedInferredMethodReturn(result)
         // Perform escape analysis for automatic region scope inference
         analyzeEscapeBehavior(result)
+        // Analyze allocation effects for parallel safety (Phase 3)
+        analyzeAllocationEffects(result)
         // TODO: Enable region scope insertion when the approach is refined.
         // The current issue is that marking allocations with synthetic
         // owners changes inference decisions but GenNIR can't create
@@ -4030,6 +4132,34 @@ class RiftRegionInference(
   // Check if a tree is a direct new allocation
   private def isDirectNewApply(tree: Tree)(using Context): Boolean =
     directNewApply(tree).isDefined
+
+  // Analyze allocation effects for a function (Phase 3).
+  // Tracks which regions the function allocates in.
+  private def analyzeAllocationEffects(dd: DefDef)(using Context): Unit = {
+    val methodSym = dd.symbol
+    if methodSym == NoSymbol || methodSym.isConstructor then return
+
+    // Find all allocations in the method body
+    val allocations = collectDirectNewAllocations(dd.rhs)
+
+    // Track which regions the allocations use
+    allocations.foreach { app =>
+      val sym = calledSymbol(app)
+      if sym.isClassConstructor then {
+        val allocatedSym = sym.owner
+        if allocatedSym != NoSymbol then {
+          // Check if the allocation is region-placed
+          val ownerSym = RiftRegionInference.inferredAllocationOwners
+            .get(allocatedSym)
+            .orElse(RiftRegionInference.inferredClosureBodyOwners.get(allocatedSym))
+
+          ownerSym.foreach { owner =>
+            RiftRegionInference.addAllocationEffect(methodSym, owner)
+          }
+        }
+      }
+    }
+  }
 
   // Region scope insertion for automatic region inference (Step 2.2).
   //

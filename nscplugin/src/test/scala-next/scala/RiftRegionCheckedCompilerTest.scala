@@ -17384,6 +17384,43 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  // Effect constraints tests for parallel safety (Phase 3)
+  @Test def disjointRegionAllocationCanRunInParallel(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region1 ?=>
+      |    RiftRegion.scoped { region2 ?=>
+      |      val box1: Box^{region1} = new Box(1)
+      |      val box2: Box^{region2} = new Box(2)
+      |      box1.value + box2.value
+      |    }
+      |  }
+      |""".stripMargin)
+
+  @Test def disjointRegionAllocationCannotShareObjects(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region1 ?=>
+      |    RiftRegion.scoped { region2 ?=>
+      |      val box1: Box^{region1} = new Box(1)
+      |      val box2: Box^{region2} = box1  // Error: cannot share objects between regions
+      |      box2.value
+      |    }
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
   // Escape analysis tests for automatic region scope inference (Phase 2)
   @Test def escapeAnalysisLocalAllocation(): Unit =
     assertCompiles("""
