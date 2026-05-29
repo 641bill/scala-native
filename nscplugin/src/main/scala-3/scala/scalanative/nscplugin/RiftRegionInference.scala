@@ -3706,19 +3706,24 @@ class RiftRegionInference(
       if sym.isClassConstructor then {
         val allocatedSym = sym.owner
         if allocatedSym != NoSymbol then {
-          // Check if the allocation is already region-placed
-          val alreadyRegionPlaced =
-            RiftRegionInference.inferredAllocationOwners
-              .get(allocatedSym)
-              .exists(isRiftInferredAllocationOwnerSymbol)
-
-          if !alreadyRegionPlaced then {
-            // Analyze where the allocated object flows
-            val escapeBehavior = analyzeObjectEscape(app, dd.rhs)
-            RiftRegionInference.allocationEscapeBehavior.update(
-              allocatedSym,
-              escapeBehavior
-            )
+          // Analyze where the allocated object flows
+          // Note: We analyze all allocations, even those already region-placed,
+          // because the escape analysis provides useful information for
+          // automatic region inference.
+          val escapeBehavior = analyzeObjectEscape(app, dd.rhs)
+          RiftRegionInference.allocationEscapeBehavior.update(
+            allocatedSym,
+            escapeBehavior
+          )
+          // Debug output (can be removed later)
+          if settings.reportDecisions then {
+            val behavior = escapeBehavior match {
+              case RiftRegionInference.EscapeBehavior.Local => "Local"
+              case RiftRegionInference.EscapeBehavior.Heap => "Heap"
+              case RiftRegionInference.EscapeBehavior.Region(owner) => s"Region(${owner.name})"
+              case RiftRegionInference.EscapeBehavior.Unknown => "Unknown"
+            }
+            Console.err.println(s"[rift-escape] ${app.srcPos}: ${allocatedSym.name} -> $behavior")
           }
         }
       }
@@ -3796,30 +3801,35 @@ class RiftRegionInference(
       alloc: Apply,
       methodBody: Tree
   )(using Context): RiftRegionInference.EscapeBehavior = {
-    // For now, use a conservative heuristic:
-    // Only mark allocations as local-escape if they are stored in a
-    // local val and all usages are simple reads (no field access,
-    // no method calls, no closure capture).
+    // An allocation is local-escape if:
+    // 1. It's stored in a local val (not var)
+    // 2. It doesn't escape through:
+    //    - Being stored in a heap field
+    //    - Being returned from the method
+    //    - Being captured by a closure that escapes
+    //    - Being passed to a method that stores it
     //
-    // This is intentionally conservative to avoid breaking existing tests.
-    // Future work can relax these constraints as the escape analysis
-    // becomes more sophisticated.
+    // For now, we use a heuristic:
+    // - If the allocation is in a local val and all usages are reads
+    //   (field access, method calls that return values), it's local-escape
+    // - If the allocation is stored in a mutable variable, it's heap-escape
+    // - If the allocation is returned from the method, it's heap-escape
 
     // Find the val that holds this allocation (if any)
     val parentVal = findParentValDef(alloc, methodBody)
 
     parentVal match {
       case Some(vd) if !vd.symbol.is(Mutable) =>
-        // Check if the val is only used in simple ways
+        // Check if the val is only used in local ways
         val usages = findSymbolUsages(vd.symbol, methodBody)
         if usages.isEmpty then {
           // No usages - object is dead, treat as local-escape
           RiftRegionInference.EscapeBehavior.Local
         } else if usages.forall(isLocalUsage) then {
-          // All usages are simple reads - object is local-escape
+          // All usages are local - object is local-escape
           RiftRegionInference.EscapeBehavior.Local
         } else {
-          // Some usages are not simple reads - assume heap-escape
+          // Some usages are not local - assume heap-escape
           RiftRegionInference.EscapeBehavior.Heap
         }
       case _ =>
@@ -3835,9 +3845,10 @@ class RiftRegionInference(
   )(using Context): Option[ValDef] = {
     var result: Option[ValDef] = None
 
-    def traverse(current: Tree): Unit = current match {
+    def traverse(current: Tree): Unit = if result.isEmpty then current match {
       case vd: ValDef =>
-        if isDirectNewApply(vd.rhs) && calledSymbol(vd.rhs) == calledSymbol(alloc) then
+        // Check if this ValDef directly contains the allocation
+        if containsAllocation(vd.rhs, alloc) then
           result = Some(vd)
         else
           traverse(vd.rhs)
@@ -3849,11 +3860,66 @@ class RiftRegionInference(
         traverse(elsep)
       case Match(_, cases) =>
         cases.foreach { case CaseDef(_, _, body) => traverse(body) }
+      case Labeled(_, body) =>
+        traverse(body)
+      case Return(expr, _) =>
+        traverse(expr)
+      case Try(expr, cases, finalizer) =>
+        traverse(expr)
+        cases.foreach { case CaseDef(_, _, body) => traverse(body) }
+        traverse(finalizer)
+      case WhileDo(cond, body) =>
+        traverse(cond)
+        traverse(body)
+      case Typed(expr, _) =>
+        traverse(expr)
+      case Inlined(_, _, expr) =>
+        traverse(expr)
       case _ => ()
     }
 
     traverse(methodBody)
     result
+  }
+
+  // Check if a tree contains a specific allocation
+  private def containsAllocation(
+      tree: Tree,
+      alloc: Apply
+  )(using Context): Boolean = {
+    var found = false
+
+    def traverse(current: Tree): Unit = if !found then current match {
+      case app: Apply =>
+        // Check if this is the same allocation by comparing source spans
+        val allocKey = RiftRegionInference.sourceSpanKey(alloc.srcPos)
+        val appKey = RiftRegionInference.sourceSpanKey(app.srcPos)
+        if allocKey.isDefined && appKey.isDefined && allocKey == appKey then
+          found = true
+        else
+          app.args.foreach(traverse)
+          traverse(app.fun)
+      case vd: ValDef =>
+        traverse(vd.rhs)
+      case Block(stats, expr) =>
+        stats.foreach(traverse)
+        traverse(expr)
+      case If(_, thenp, elsep) =>
+        traverse(thenp)
+        traverse(elsep)
+      case Match(_, cases) =>
+        cases.foreach { case CaseDef(_, _, body) => traverse(body) }
+      case _ =>
+        current match {
+          case tree: GenericApply =>
+            traverse(tree.fun)
+            tree.args.foreach(traverse)
+          case _ => ()
+        }
+    }
+
+    traverse(tree)
+    found
   }
 
   // Find all usages of a symbol in a tree
@@ -3929,19 +3995,33 @@ class RiftRegionInference(
   }
 
   // Check if a usage is local (doesn't escape the method)
+  // A usage is local if it doesn't cause the object to escape the method.
   private def isLocalUsage(tree: Tree)(using Context): Boolean = tree match {
     case id: Ident =>
       // Reading a local variable is local
       true
     case Select(qualifier, name) =>
-      // Accessing a field of the object
-      // This is a potential escape point - the object might be stored in a heap field
-      // For safety, we conservatively treat field access as non-local
-      false
+      // Accessing a val field is local (the object doesn't escape)
+      // Accessing a var field is potentially non-local
+      val sym = tree.symbol
+      sym != NoSymbol && !sym.is(Mutable)
     case Apply(fun, args) =>
-      // Method call - the object might escape through the method
-      // For safety, we conservatively treat method calls as non-local
+      // Method call - the object might escape through the method.
+      // However, if the object is only used as an argument to a method
+      // that returns a value, it's likely local.
+      // For now, treat method calls as potentially non-local.
+      // TODO: Implement method effect analysis to determine if
+      // the method stores the object.
       false
+    case Typed(expr, _) =>
+      // Type ascription is local
+      isLocalUsage(expr)
+    case Inlined(_, _, expr) =>
+      // Inlined expressions are local
+      isLocalUsage(expr)
+    case Block(stats, expr) =>
+      // Block expressions are local if the final expression is local
+      isLocalUsage(expr)
     case _ =>
       // Other usages - conservatively assume not local
       false
