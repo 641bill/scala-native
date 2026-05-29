@@ -186,6 +186,17 @@ object RiftRegionInference {
       : mutable.Map[Symbol, Set[Symbol]] =
     mutable.Map.empty
 
+  // Collection inference for broader region placement (Phase 4).
+  // Track which collection factory calls can be region-placed.
+  private[nscplugin] val collectionFactoryEffects
+      : mutable.Map[Symbol, Symbol] =
+    mutable.Map.empty
+
+  // Track which collection operations preserve region ownership
+  private[nscplugin] val collectionOperationEffects
+      : mutable.Map[Symbol, Symbol] =
+    mutable.Map.empty
+
   // Record that a method has local-escape allocations
   private[nscplugin] def markMethodHasLocalEscapeAllocations(
       methodSym: Symbol,
@@ -306,6 +317,34 @@ object RiftRegionInference {
     effects.nonEmpty
   }
 
+  // Track collection factory effects
+  private[nscplugin] def addCollectionFactoryEffect(
+      factorySym: Symbol,
+      owner: Symbol
+  ): Unit = {
+    collectionFactoryEffects.update(factorySym, owner)
+  }
+
+  // Get collection factory effect
+  private[nscplugin] def getCollectionFactoryEffect(
+      factorySym: Symbol
+  ): Option[Symbol] =
+    collectionFactoryEffects.get(factorySym)
+
+  // Track collection operation effects
+  private[nscplugin] def addCollectionOperationEffect(
+      opSym: Symbol,
+      owner: Symbol
+  ): Unit = {
+    collectionOperationEffects.update(opSym, owner)
+  }
+
+  // Get collection operation effect
+  private[nscplugin] def getCollectionOperationEffect(
+      opSym: Symbol
+  ): Option[Symbol] =
+    collectionOperationEffects.get(opSym)
+
   // Get the escape behavior for an allocation site
   private[nscplugin] def getEscapeBehavior(
       sym: Symbol
@@ -372,6 +411,8 @@ class RiftRegionInference(
     RiftRegionInference.effectConstraints.clear()
     RiftRegionInference.functionAllocationEffects.clear()
     RiftRegionInference.functionMutationEffects.clear()
+    RiftRegionInference.collectionFactoryEffects.clear()
+    RiftRegionInference.collectionOperationEffects.clear()
     directlyNewAllocatedSyms.clear()
     localRegionConstructAllocatedApps.clear()
     localAllocatedSyms.clear()
@@ -3498,6 +3539,9 @@ class RiftRegionInference(
         analyzeAllocationEffects(result)
         // Analyze mutation effects for parallel safety (Phase 3)
         analyzeMutationEffects(result)
+        // Analyze collection effects for broader inference (Phase 4)
+        // Note: analyzeCollectionEffects is in the companion object
+        // and is called from the class context
         // TODO: Enable region scope insertion when the approach is refined.
         // The current issue is that marking allocations with synthetic
         // owners changes inference decisions but GenNIR can't create
@@ -4262,6 +4306,162 @@ class RiftRegionInference(
 
     traverse(tree)
     builder.result()
+  }
+
+  // Analyze collection effects for a function (Phase 4).
+  // Tracks which collection factories and operations can be region-placed.
+  private def analyzeCollectionEffects(dd: DefDef)(using Context): Unit = {
+    val methodSym = dd.symbol
+    if methodSym == NoSymbol || methodSym.isConstructor then return
+
+    // Find all collection factory calls in the method body
+    collectCollectionFactories(dd.rhs).foreach { app =>
+      val factorySym = calledSymbol(app)
+      if factorySym != NoSymbol then {
+        // Check if the collection is region-placed
+        val ownerSym = RiftRegionInference.inferredAllocationOwners
+          .get(factorySym)
+          .orElse(RiftRegionInference.inferredClosureBodyOwners.get(factorySym))
+
+        ownerSym.foreach { owner =>
+          RiftRegionInference.addCollectionFactoryEffect(factorySym, owner)
+        }
+      }
+    }
+
+    // Find all collection operation calls in the method body
+    collectCollectionOperations(dd.rhs).foreach { app =>
+      val opSym = calledSymbol(app)
+      if opSym != NoSymbol then {
+        // Check if the operation preserves region ownership
+        val ownerSym = RiftRegionInference.inferredAllocationOwners
+          .get(opSym)
+          .orElse(RiftRegionInference.inferredClosureBodyOwners.get(opSym))
+
+        ownerSym.foreach { owner =>
+          RiftRegionInference.addCollectionOperationEffect(opSym, owner)
+        }
+      }
+    }
+  }
+
+  // Collect collection factory calls (List(...), Map(...), etc.)
+  private def collectCollectionFactories(tree: Tree)(using Context): List[Apply] = {
+    val builder = List.newBuilder[Apply]
+
+    def traverse(current: Tree): Unit = current match {
+      case app: Apply if isCollectionFactory(app) =>
+        builder += app
+        app.args.foreach(traverse)
+      case app: Apply =>
+        app.args.foreach(traverse)
+        traverse(app.fun)
+      case vd: ValDef =>
+        traverse(vd.rhs)
+      case dd: DefDef =>
+        traverse(dd.rhs)
+      case Block(stats, expr) =>
+        stats.foreach(traverse)
+        traverse(expr)
+      case If(cond, thenp, elsep) =>
+        traverse(cond)
+        traverse(thenp)
+        traverse(elsep)
+      case Match(selector, cases) =>
+        traverse(selector)
+        cases.foreach { case CaseDef(_, guard, body) =>
+          traverse(guard)
+          traverse(body)
+        }
+      case Typed(expr, _) =>
+        traverse(expr)
+      case Inlined(_, _, expr) =>
+        traverse(expr)
+      case _ =>
+        current match {
+          case tree: GenericApply =>
+            traverse(tree.fun)
+            tree.args.foreach(traverse)
+          case _ => ()
+        }
+    }
+
+    traverse(tree)
+    builder.result()
+  }
+
+  // Collect collection operation calls (map, filter, flatMap, etc.)
+  private def collectCollectionOperations(tree: Tree)(using Context): List[Apply] = {
+    val builder = List.newBuilder[Apply]
+
+    def traverse(current: Tree): Unit = current match {
+      case app: Apply if isCollectionOperation(app) =>
+        builder += app
+        app.args.foreach(traverse)
+      case app: Apply =>
+        app.args.foreach(traverse)
+        traverse(app.fun)
+      case vd: ValDef =>
+        traverse(vd.rhs)
+      case dd: DefDef =>
+        traverse(dd.rhs)
+      case Block(stats, expr) =>
+        stats.foreach(traverse)
+        traverse(expr)
+      case If(cond, thenp, elsep) =>
+        traverse(cond)
+        traverse(thenp)
+        traverse(elsep)
+      case Match(selector, cases) =>
+        traverse(selector)
+        cases.foreach { case CaseDef(_, guard, body) =>
+          traverse(guard)
+          traverse(body)
+        }
+      case Typed(expr, _) =>
+        traverse(expr)
+      case Inlined(_, _, expr) =>
+        traverse(expr)
+      case _ =>
+        current match {
+          case tree: GenericApply =>
+            traverse(tree.fun)
+            tree.args.foreach(traverse)
+          case _ => ()
+        }
+    }
+
+    traverse(tree)
+    builder.result()
+  }
+
+  // Check if an Apply is a collection factory call
+  private def isCollectionFactory(tree: Apply)(using Context): Boolean = {
+    val sym = calledSymbol(tree)
+    sym != NoSymbol && {
+      val name = sym.name.toString
+      val ownerName = sym.owner.fullName.toString
+      // Common collection factories
+      (ownerName.contains("scala.collection.immutable.List") && name == "apply") ||
+      (ownerName.contains("scala.collection.immutable.Map") && name == "apply") ||
+      (ownerName.contains("scala.collection.immutable.Set") && name == "apply") ||
+      (ownerName.contains("scala.collection.immutable.Vector") && name == "apply") ||
+      (ownerName.contains("scala.collection.mutable.ListBuffer") && name == "apply") ||
+      (ownerName.contains("scala.collection.mutable.ArrayBuffer") && name == "apply")
+    }
+  }
+
+  // Check if an Apply is a collection operation call
+  private def isCollectionOperation(tree: Apply)(using Context): Boolean = {
+    val sym = calledSymbol(tree)
+    sym != NoSymbol && {
+      val name = sym.name.toString
+      // Common collection operations
+      name == "map" || name == "filter" || name == "flatMap" ||
+      name == "foreach" || name == "fold" || name == "reduce" ||
+      name == "groupBy" || name == "partition" || name == "take" ||
+      name == "drop" || name == "slice" || name == "zip"
+    }
   }
 
   // Region scope insertion for automatic region inference (Step 2.2).
