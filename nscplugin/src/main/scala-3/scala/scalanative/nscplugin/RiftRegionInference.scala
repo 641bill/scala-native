@@ -180,6 +180,12 @@ object RiftRegionInference {
       : mutable.Map[Symbol, Set[Symbol]] =
     mutable.Map.empty
 
+  // Maps function symbols to their mutation effects
+  // Tracks which heap objects or mutable variables the function writes to
+  private[nscplugin] val functionMutationEffects
+      : mutable.Map[Symbol, Set[Symbol]] =
+    mutable.Map.empty
+
   // Record that a method has local-escape allocations
   private[nscplugin] def markMethodHasLocalEscapeAllocations(
       methodSym: Symbol,
@@ -277,6 +283,29 @@ object RiftRegionInference {
     true
   }
 
+  // Track mutation effects for a function
+  private[nscplugin] def addMutationEffect(
+      funcSym: Symbol,
+      target: Symbol
+  ): Unit = {
+    val existing = functionMutationEffects.getOrElse(funcSym, Set.empty)
+    functionMutationEffects.update(funcSym, existing + target)
+  }
+
+  // Get mutation effects for a function
+  private[nscplugin] def getMutationEffects(
+      funcSym: Symbol
+  ): Set[Symbol] =
+    functionMutationEffects.getOrElse(funcSym, Set.empty)
+
+  // Check if a function has external mutation effects
+  private[nscplugin] def hasExternalMutation(
+      funcSym: Symbol
+  ): Boolean = {
+    val effects = getMutationEffects(funcSym)
+    effects.nonEmpty
+  }
+
   // Get the escape behavior for an allocation site
   private[nscplugin] def getEscapeBehavior(
       sym: Symbol
@@ -342,6 +371,7 @@ class RiftRegionInference(
     RiftRegionInference.methodsWithLocalEscapeAllocations.clear()
     RiftRegionInference.effectConstraints.clear()
     RiftRegionInference.functionAllocationEffects.clear()
+    RiftRegionInference.functionMutationEffects.clear()
     directlyNewAllocatedSyms.clear()
     localRegionConstructAllocatedApps.clear()
     localAllocatedSyms.clear()
@@ -3466,6 +3496,8 @@ class RiftRegionInference(
         analyzeEscapeBehavior(result)
         // Analyze allocation effects for parallel safety (Phase 3)
         analyzeAllocationEffects(result)
+        // Analyze mutation effects for parallel safety (Phase 3)
+        analyzeMutationEffects(result)
         // TODO: Enable region scope insertion when the approach is refined.
         // The current issue is that marking allocations with synthetic
         // owners changes inference decisions but GenNIR can't create
@@ -4159,6 +4191,77 @@ class RiftRegionInference(
         }
       }
     }
+  }
+
+  // Analyze mutation effects for a function (Phase 3).
+  // Tracks which heap objects or mutable variables the function writes to.
+  private def analyzeMutationEffects(dd: DefDef)(using Context): Unit = {
+    val methodSym = dd.symbol
+    if methodSym == NoSymbol || methodSym.isConstructor then return
+
+    // Find all assignments in the method body
+    collectAssignments(dd.rhs).foreach { assign =>
+      val target = assign.lhs.symbol
+      if target != NoSymbol then {
+        // Track the mutation target
+        RiftRegionInference.addMutationEffect(methodSym, target)
+      }
+    }
+  }
+
+  // Collect all assignments in a tree
+  private def collectAssignments(tree: Tree)(using Context): List[Assign] = {
+    val builder = List.newBuilder[Assign]
+
+    def traverse(current: Tree): Unit = current match {
+      case assign: Assign =>
+        builder += assign
+        traverse(assign.rhs)
+      case Block(stats, expr) =>
+        stats.foreach(traverse)
+        traverse(expr)
+      case If(cond, thenp, elsep) =>
+        traverse(cond)
+        traverse(thenp)
+        traverse(elsep)
+      case Match(selector, cases) =>
+        traverse(selector)
+        cases.foreach { case CaseDef(_, guard, body) =>
+          traverse(guard)
+          traverse(body)
+        }
+      case Labeled(_, body) =>
+        traverse(body)
+      case Return(expr, _) =>
+        traverse(expr)
+      case Try(expr, cases, finalizer) =>
+        traverse(expr)
+        cases.foreach { case CaseDef(_, guard, body) =>
+          traverse(guard)
+          traverse(body)
+        }
+        traverse(finalizer)
+      case WhileDo(cond, body) =>
+        traverse(cond)
+        traverse(body)
+      case Typed(expr, _) =>
+        traverse(expr)
+      case Inlined(_, _, expr) =>
+        traverse(expr)
+      case _ =>
+        current match {
+          case tree: GenericApply =>
+            traverse(tree.fun)
+            tree.args.foreach(traverse)
+          case tree: Apply =>
+            traverse(tree.fun)
+            tree.args.foreach(traverse)
+          case _ => ()
+        }
+    }
+
+    traverse(tree)
+    builder.result()
   }
 
   // Region scope insertion for automatic region inference (Step 2.2).
