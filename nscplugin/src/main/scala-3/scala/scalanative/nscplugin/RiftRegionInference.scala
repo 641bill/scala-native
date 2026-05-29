@@ -197,6 +197,17 @@ object RiftRegionInference {
       : mutable.Map[Symbol, Symbol] =
     mutable.Map.empty
 
+  // Higher-order function inference (Phase 4).
+  // Track which higher-order functions propagate region effects.
+  private[nscplugin] val higherOrderFunctionEffects
+      : mutable.Map[Symbol, Symbol] =
+    mutable.Map.empty
+
+  // Track which function arguments have region effects
+  private[nscplugin] val functionArgumentEffects
+      : mutable.Map[Symbol, Symbol] =
+    mutable.Map.empty
+
   // Record that a method has local-escape allocations
   private[nscplugin] def markMethodHasLocalEscapeAllocations(
       methodSym: Symbol,
@@ -345,6 +356,34 @@ object RiftRegionInference {
   ): Option[Symbol] =
     collectionOperationEffects.get(opSym)
 
+  // Track higher-order function effects
+  private[nscplugin] def addHigherOrderFunctionEffect(
+      funcSym: Symbol,
+      owner: Symbol
+  ): Unit = {
+    higherOrderFunctionEffects.update(funcSym, owner)
+  }
+
+  // Get higher-order function effect
+  private[nscplugin] def getHigherOrderFunctionEffect(
+      funcSym: Symbol
+  ): Option[Symbol] =
+    higherOrderFunctionEffects.get(funcSym)
+
+  // Track function argument effects
+  private[nscplugin] def addFunctionArgumentEffect(
+      argSym: Symbol,
+      owner: Symbol
+  ): Unit = {
+    functionArgumentEffects.update(argSym, owner)
+  }
+
+  // Get function argument effect
+  private[nscplugin] def getFunctionArgumentEffect(
+      argSym: Symbol
+  ): Option[Symbol] =
+    functionArgumentEffects.get(argSym)
+
   // Get the escape behavior for an allocation site
   private[nscplugin] def getEscapeBehavior(
       sym: Symbol
@@ -413,6 +452,8 @@ class RiftRegionInference(
     RiftRegionInference.functionMutationEffects.clear()
     RiftRegionInference.collectionFactoryEffects.clear()
     RiftRegionInference.collectionOperationEffects.clear()
+    RiftRegionInference.higherOrderFunctionEffects.clear()
+    RiftRegionInference.functionArgumentEffects.clear()
     directlyNewAllocatedSyms.clear()
     localRegionConstructAllocatedApps.clear()
     localAllocatedSyms.clear()
@@ -3539,9 +3580,8 @@ class RiftRegionInference(
         analyzeAllocationEffects(result)
         // Analyze mutation effects for parallel safety (Phase 3)
         analyzeMutationEffects(result)
-        // Analyze collection effects for broader inference (Phase 4)
-        // Note: analyzeCollectionEffects is in the companion object
-        // and is called from the class context
+        // Analyze higher-order function effects for broader inference (Phase 4)
+        analyzeHigherOrderEffects(result)
         // TODO: Enable region scope insertion when the approach is refined.
         // The current issue is that marking allocations with synthetic
         // owners changes inference decisions but GenNIR can't create
@@ -4461,6 +4501,102 @@ class RiftRegionInference(
       name == "foreach" || name == "fold" || name == "reduce" ||
       name == "groupBy" || name == "partition" || name == "take" ||
       name == "drop" || name == "slice" || name == "zip"
+    }
+  }
+
+  // Analyze higher-order function effects (Phase 4).
+  // Tracks which higher-order functions propagate region effects.
+  private def analyzeHigherOrderEffects(dd: DefDef)(using Context): Unit = {
+    val methodSym = dd.symbol
+    if methodSym == NoSymbol || methodSym.isConstructor then return
+
+    // Find all higher-order function calls in the method body
+    collectHigherOrderCalls(dd.rhs).foreach { app =>
+      val funcSym = calledSymbol(app)
+      if funcSym != NoSymbol then {
+        // Check if the function propagates region effects
+        val ownerSym = RiftRegionInference.inferredAllocationOwners
+          .get(funcSym)
+          .orElse(RiftRegionInference.inferredClosureBodyOwners.get(funcSym))
+
+        ownerSym.foreach { owner =>
+          RiftRegionInference.addHigherOrderFunctionEffect(funcSym, owner)
+        }
+
+        // Track function argument effects
+        app.args.foreach { arg =>
+          val argSym = arg.symbol
+          if argSym != NoSymbol then {
+            val argOwnerSym = RiftRegionInference.inferredAllocationOwners
+              .get(argSym)
+              .orElse(RiftRegionInference.inferredClosureBodyOwners.get(argSym))
+
+            argOwnerSym.foreach { owner =>
+              RiftRegionInference.addFunctionArgumentEffect(argSym, owner)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Collect higher-order function calls (map, filter, flatMap, etc.)
+  private def collectHigherOrderCalls(tree: Tree)(using Context): List[Apply] = {
+    val builder = List.newBuilder[Apply]
+
+    def traverse(current: Tree): Unit = current match {
+      case app: Apply if isHigherOrderCall(app) =>
+        builder += app
+        app.args.foreach(traverse)
+      case app: Apply =>
+        app.args.foreach(traverse)
+        traverse(app.fun)
+      case vd: ValDef =>
+        traverse(vd.rhs)
+      case dd: DefDef =>
+        traverse(dd.rhs)
+      case Block(stats, expr) =>
+        stats.foreach(traverse)
+        traverse(expr)
+      case If(cond, thenp, elsep) =>
+        traverse(cond)
+        traverse(thenp)
+        traverse(elsep)
+      case Match(selector, cases) =>
+        traverse(selector)
+        cases.foreach { case CaseDef(_, guard, body) =>
+          traverse(guard)
+          traverse(body)
+        }
+      case Typed(expr, _) =>
+        traverse(expr)
+      case Inlined(_, _, expr) =>
+        traverse(expr)
+      case _ =>
+        current match {
+          case tree: GenericApply =>
+            traverse(tree.fun)
+            tree.args.foreach(traverse)
+          case _ => ()
+        }
+    }
+
+    traverse(tree)
+    builder.result()
+  }
+
+  // Check if an Apply is a higher-order function call
+  private def isHigherOrderCall(tree: Apply)(using Context): Boolean = {
+    val sym = calledSymbol(tree)
+    sym != NoSymbol && {
+      val name = sym.name.toString
+      // Higher-order functions that take function arguments
+      name == "map" || name == "filter" || name == "flatMap" ||
+      name == "foreach" || name == "fold" || name == "reduce" ||
+      name == "exists" || name == "forall" || name == "count" ||
+      name == "find" || name == "groupBy" || name == "partition" ||
+      name == "sortBy" || name == "sortWith" || name == "takeWhile" ||
+      name == "dropWhile" || name == "span" || name == "splitAt"
     }
   }
 
