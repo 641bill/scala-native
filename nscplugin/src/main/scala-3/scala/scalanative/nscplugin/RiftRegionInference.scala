@@ -219,6 +219,17 @@ object RiftRegionInference {
       : mutable.Map[Symbol, Symbol] =
     mutable.Map.empty
 
+  // HeapRoot elimination (Phase 4).
+  // Track which HeapRoot handles can be eliminated.
+  private[nscplugin] val eliminableHeapRoots
+      : mutable.Set[Symbol] =
+    mutable.Set.empty
+
+  // Track which HeapRoot handles are actually used
+  private[nscplugin] val usedHeapRoots
+      : mutable.Set[Symbol] =
+    mutable.Set.empty
+
   // Record that a method has local-escape allocations
   private[nscplugin] def markMethodHasLocalEscapeAllocations(
       methodSym: Symbol,
@@ -429,6 +440,32 @@ object RiftRegionInference {
   ): Option[Symbol] =
     regionTypeParameters.get(typeParamSym)
 
+  // Track HeapRoot usage
+  private[nscplugin] def addUsedHeapRoot(
+      rootSym: Symbol
+  ): Unit = {
+    usedHeapRoots.add(rootSym)
+  }
+
+  // Check if a HeapRoot is used
+  private[nscplugin] def isHeapRootUsed(
+      rootSym: Symbol
+  ): Boolean =
+    usedHeapRoots.contains(rootSym)
+
+  // Mark a HeapRoot as eliminable
+  private[nscplugin] def markHeapRootEliminable(
+      rootSym: Symbol
+  ): Unit = {
+    eliminableHeapRoots.add(rootSym)
+  }
+
+  // Check if a HeapRoot can be eliminated
+  private[nscplugin] def isHeapRootEliminable(
+      rootSym: Symbol
+  ): Boolean =
+    eliminableHeapRoots.contains(rootSym)
+
   // Get the escape behavior for an allocation site
   private[nscplugin] def getEscapeBehavior(
       sym: Symbol
@@ -501,6 +538,8 @@ class RiftRegionInference(
     RiftRegionInference.functionArgumentEffects.clear()
     RiftRegionInference.regionPolymorphicFunctions.clear()
     RiftRegionInference.regionTypeParameters.clear()
+    RiftRegionInference.eliminableHeapRoots.clear()
+    RiftRegionInference.usedHeapRoots.clear()
     directlyNewAllocatedSyms.clear()
     localRegionConstructAllocatedApps.clear()
     localAllocatedSyms.clear()
@@ -3631,6 +3670,8 @@ class RiftRegionInference(
         analyzeHigherOrderEffects(result)
         // Analyze region polymorphism for broader inference (Phase 4)
         analyzeRegionPolymorphism(result)
+        // Analyze HeapRoot elimination opportunities (Phase 4)
+        analyzeHeapRootElimination(result)
         // TODO: Enable region scope insertion when the approach is refined.
         // The current issue is that marking allocations with synthetic
         // owners changes inference decisions but GenNIR can't create
@@ -4673,6 +4714,135 @@ class RiftRegionInference(
         // TODO: Implement actual region polymorphism inference
       }
     }
+  }
+
+  // Analyze HeapRoot elimination opportunities (Phase 4).
+  // Identifies HeapRoot handles that can be eliminated.
+  private def analyzeHeapRootElimination(dd: DefDef)(using Context): Unit = {
+    val methodSym = dd.symbol
+    if methodSym == NoSymbol || methodSym.isConstructor then return
+
+    // Find all HeapRoot creations in the method body
+    collectHeapRootCreations(dd.rhs).foreach { app =>
+      val rootSym = calledSymbol(app)
+      if rootSym != NoSymbol then {
+        // Check if the HeapRoot is actually used
+        val isUsed = isHeapRootUsedInMethod(rootSym, dd.rhs)
+        if !isUsed then {
+          // HeapRoot is not used, can be eliminated
+          RiftRegionInference.markHeapRootEliminable(rootSym)
+        }
+      }
+    }
+  }
+
+  // Collect HeapRoot creations in a tree
+  private def collectHeapRootCreations(tree: Tree)(using Context): List[Apply] = {
+    val builder = List.newBuilder[Apply]
+
+    def traverse(current: Tree): Unit = current match {
+      case app: Apply if isHeapRootCreation(app) =>
+        builder += app
+        app.args.foreach(traverse)
+      case app: Apply =>
+        app.args.foreach(traverse)
+        traverse(app.fun)
+      case vd: ValDef =>
+        traverse(vd.rhs)
+      case dd: DefDef =>
+        traverse(dd.rhs)
+      case Block(stats, expr) =>
+        stats.foreach(traverse)
+        traverse(expr)
+      case If(cond, thenp, elsep) =>
+        traverse(cond)
+        traverse(thenp)
+        traverse(elsep)
+      case Match(selector, cases) =>
+        traverse(selector)
+        cases.foreach { case CaseDef(_, guard, body) =>
+          traverse(guard)
+          traverse(body)
+        }
+      case Typed(expr, _) =>
+        traverse(expr)
+      case Inlined(_, _, expr) =>
+        traverse(expr)
+      case _ =>
+        current match {
+          case tree: GenericApply =>
+            traverse(tree.fun)
+            tree.args.foreach(traverse)
+          case _ => ()
+        }
+    }
+
+    traverse(tree)
+    builder.result()
+  }
+
+  // Check if an Apply is a HeapRoot creation
+  private def isHeapRootCreation(tree: Apply)(using Context): Boolean = {
+    val sym = calledSymbol(tree)
+    sym != NoSymbol && {
+      val name = sym.name.toString
+      val ownerName = sym.owner.fullName.toString
+      // HeapRoot creation calls
+      (ownerName.contains("scala.scalanative.memory.RiftRegion") && name == "root") ||
+      (ownerName.contains("scala.scalanative.memory.RiftRegion") && name == "HeapRoot")
+    }
+  }
+
+  // Check if a HeapRoot is used in a method body
+  private def isHeapRootUsedInMethod(
+      rootSym: Symbol,
+      methodBody: Tree
+  )(using Context): Boolean = {
+    var found = false
+
+    def traverse(current: Tree): Unit = if !found then current match {
+      case id: Ident if id.symbol == rootSym =>
+        found = true
+      case Select(qualifier, _) if current.symbol == rootSym =>
+        found = true
+        traverse(qualifier)
+      case Apply(fun, args) =>
+        traverse(fun)
+        args.foreach(traverse)
+      case TypeApply(fun, _) =>
+        traverse(fun)
+      case vd: ValDef =>
+        traverse(vd.rhs)
+      case dd: DefDef =>
+        traverse(dd.rhs)
+      case Block(stats, expr) =>
+        stats.foreach(traverse)
+        traverse(expr)
+      case If(cond, thenp, elsep) =>
+        traverse(cond)
+        traverse(thenp)
+        traverse(elsep)
+      case Match(selector, cases) =>
+        traverse(selector)
+        cases.foreach { case CaseDef(_, guard, body) =>
+          traverse(guard)
+          traverse(body)
+        }
+      case Typed(expr, _) =>
+        traverse(expr)
+      case Inlined(_, _, expr) =>
+        traverse(expr)
+      case _ =>
+        current match {
+          case tree: GenericApply =>
+            traverse(tree.fun)
+            tree.args.foreach(traverse)
+          case _ => ()
+        }
+    }
+
+    traverse(methodBody)
+    found
   }
 
   // Region scope insertion for automatic region inference (Step 2.2).
