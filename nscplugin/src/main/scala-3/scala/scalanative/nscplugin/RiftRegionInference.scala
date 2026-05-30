@@ -208,6 +208,17 @@ object RiftRegionInference {
       : mutable.Map[Symbol, Symbol] =
     mutable.Map.empty
 
+  // Region polymorphism (Phase 4).
+  // Track which functions are region-polymorphic.
+  private[nscplugin] val regionPolymorphicFunctions
+      : mutable.Map[Symbol, Symbol] =
+    mutable.Map.empty
+
+  // Track which type parameters are region parameters
+  private[nscplugin] val regionTypeParameters
+      : mutable.Map[Symbol, Symbol] =
+    mutable.Map.empty
+
   // Record that a method has local-escape allocations
   private[nscplugin] def markMethodHasLocalEscapeAllocations(
       methodSym: Symbol,
@@ -384,6 +395,40 @@ object RiftRegionInference {
   ): Option[Symbol] =
     functionArgumentEffects.get(argSym)
 
+  // Track region-polymorphic functions
+  private[nscplugin] def addRegionPolymorphicFunction(
+      funcSym: Symbol,
+      regionParam: Symbol
+  ): Unit = {
+    regionPolymorphicFunctions.update(funcSym, regionParam)
+  }
+
+  // Get region parameter for a function
+  private[nscplugin] def getRegionParameter(
+      funcSym: Symbol
+  ): Option[Symbol] =
+    regionPolymorphicFunctions.get(funcSym)
+
+  // Check if a function is region-polymorphic
+  private[nscplugin] def isRegionPolymorphic(
+      funcSym: Symbol
+  ): Boolean =
+    regionPolymorphicFunctions.contains(funcSym)
+
+  // Track region type parameters
+  private[nscplugin] def addRegionTypeParameter(
+      typeParamSym: Symbol,
+      regionSym: Symbol
+  ): Unit = {
+    regionTypeParameters.update(typeParamSym, regionSym)
+  }
+
+  // Get region for a type parameter
+  private[nscplugin] def getRegionForTypeParameter(
+      typeParamSym: Symbol
+  ): Option[Symbol] =
+    regionTypeParameters.get(typeParamSym)
+
   // Get the escape behavior for an allocation site
   private[nscplugin] def getEscapeBehavior(
       sym: Symbol
@@ -454,6 +499,8 @@ class RiftRegionInference(
     RiftRegionInference.collectionOperationEffects.clear()
     RiftRegionInference.higherOrderFunctionEffects.clear()
     RiftRegionInference.functionArgumentEffects.clear()
+    RiftRegionInference.regionPolymorphicFunctions.clear()
+    RiftRegionInference.regionTypeParameters.clear()
     directlyNewAllocatedSyms.clear()
     localRegionConstructAllocatedApps.clear()
     localAllocatedSyms.clear()
@@ -3582,6 +3629,8 @@ class RiftRegionInference(
         analyzeMutationEffects(result)
         // Analyze higher-order function effects for broader inference (Phase 4)
         analyzeHigherOrderEffects(result)
+        // Analyze region polymorphism for broader inference (Phase 4)
+        analyzeRegionPolymorphism(result)
         // TODO: Enable region scope insertion when the approach is refined.
         // The current issue is that marking allocations with synthetic
         // owners changes inference decisions but GenNIR can't create
@@ -4597,6 +4646,32 @@ class RiftRegionInference(
       name == "find" || name == "groupBy" || name == "partition" ||
       name == "sortBy" || name == "sortWith" || name == "takeWhile" ||
       name == "dropWhile" || name == "span" || name == "splitAt"
+    }
+  }
+
+  // Analyze region polymorphism for a function (Phase 4).
+  // Identifies functions that are generic in which region they allocate in.
+  private def analyzeRegionPolymorphism(dd: DefDef)(using Context): Unit = {
+    val methodSym = dd.symbol
+    if methodSym == NoSymbol || methodSym.isConstructor then return
+
+    // Check if the method has region-captured type parameters
+    val regionParams = methodSym.paramSymss.flatten.filter { param =>
+      param.is(Param) && isRiftInferredAllocationOwnerType(param.info)
+    }
+
+    regionParams.foreach { regionParam =>
+      RiftRegionInference.addRegionPolymorphicFunction(methodSym, regionParam)
+    }
+
+    // Check if the method has type parameters with region bounds
+    methodSym.typeParams.foreach { typeParam =>
+      val bounds = typeParam.info
+      if typeMentionsRiftCapture(bounds) then {
+        // This type parameter has region bounds
+        // For now, we just track it
+        // TODO: Implement actual region polymorphism inference
+      }
     }
   }
 
