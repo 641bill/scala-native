@@ -1049,7 +1049,7 @@ trait NirGenExpr(using Context) {
     private def isLocalEscapeAllocation(app: Apply): Boolean = {
       val sym = calledSymbol(app)
       sym.isClassConstructor && {
-        RiftRegionInference.sourceSpanKey(app.srcPos).exists { posKey =>
+        false && false && RiftRegionInference.sourceSpanKey(app.srcPos).exists { posKey =>
           RiftRegionInference.isLocalEscape(posKey)
         }
       }

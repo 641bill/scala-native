@@ -3663,7 +3663,7 @@ class RiftRegionInference(
     val ddToTransform =
       if dd.symbol.isConstructor || dd.rhs.isEmpty then dd
       else
-        val localEscapes = collectLocalEscapeAllocations(dd)
+        val localEscapes = Nil // collectLocalEscapeAllocations(dd)  // disabled: escape analysis needs constructor-arg safety
         if localEscapes.nonEmpty then
           wrapBodyWithRegionScope(dd, localEscapes) match {
             case Some(wrappedDd) =>
@@ -4221,6 +4221,17 @@ class RiftRegionInference(
     //    - Being stored in a heap field or mutable variable
     //    - Being captured by an escaping closure
     //    - Being passed to an unknown method
+
+    // Guard: standard library allocations always stay on heap.
+    // The escape analysis does not handle raw-pointer or native-interop types.
+    val allocCls = calledSymbol(alloc)
+    if allocCls != NoSymbol then
+      val ownerCls = allocCls.owner
+      if ownerCls != NoSymbol then
+        val pkg = ownerCls.enclosingPackageClass.fullName.toString
+        if pkg.startsWith("scala.scalanative") ||
+           pkg.startsWith("java.") || pkg.startsWith("javax.") then
+          return RiftRegionInference.EscapeBehavior.Heap
 
     // Find the val that holds this allocation (if any)
     val parentVal = findParentValDef(alloc, methodBody)
