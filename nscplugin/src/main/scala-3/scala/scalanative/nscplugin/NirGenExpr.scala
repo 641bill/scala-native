@@ -1049,9 +1049,9 @@ trait NirGenExpr(using Context) {
     private def isLocalEscapeAllocation(app: Apply): Boolean = {
       val sym = calledSymbol(app)
       sym.isClassConstructor && {
-        val allocatedSym = sym.owner
-        allocatedSym != NoSymbol &&
-          RiftRegionInference.isLocalEscape(allocatedSym)
+        RiftRegionInference.sourceSpanKey(app.srcPos).exists { posKey =>
+          RiftRegionInference.isLocalEscape(posKey)
+        }
       }
     }
 
@@ -1061,21 +1061,14 @@ trait NirGenExpr(using Context) {
       mutable.Map.empty
 
     // Get or create a region for automatic region inference.
-    // This creates a scoped region that will be used for local-escape
-    // allocations in the current method.
+    // Calls RiftRegion.open(Scoped) as a Scala method to create a proper
+    // RiftRegion object. This avoids interflow crashes from raw extern calls.
     private def getOrCreateAutomaticRegion(): Option[nir.Val] = {
       val methodSym = curMethodSym.get
       if methodSym == NoSymbol then return None
-
-      // Check if we already created a region for this method
       automaticRegionCache.get(methodSym) match {
         case Some(region) => Some(region)
         case None =>
-          // Check if this method has local-escape allocations
-          if !RiftRegionInference.hasLocalEscapeAllocations(methodSym) then
-            return None
-
-          // Create a new region by calling scalanative_rift_region_open(Scoped)
           createRegionForAutomaticInference().map { region =>
             automaticRegionCache.update(methodSym, region)
             currentAutomaticRegion = Some(region)
@@ -1084,33 +1077,16 @@ trait NirGenExpr(using Context) {
       }
     }
 
-    // Create a region for automatic region inference by calling
-    // scalanative_rift_region_open(Scoped).
-    // Returns the region handle as a nir.Val.
+    // Create a RiftRegion by calling RiftRegion.open(Scoped) as a Scala method.
+    // Returns a proper RiftRegion object compatible with Lower.genClassallocOp zone dispatch.
     private def createRegionForAutomaticInference(): Option[nir.Val] = {
-      // Get the RuntimeRiftAllocatorImpl_open method symbol
       val defnNir = NirDefinitions.get
-      val openMethodSymOpt = defnNir.RuntimeRiftAllocatorImpl_open
-
-      openMethodSymOpt match {
-        case Some(openSym) =>
-          // Generate a call to scalanative_rift_region_open(Scoped)
-          // Scoped = 0 in the RiftRegion companion object
+      (defnNir.RiftRegionModule, defnNir.RiftRegion_open) match {
+        case (Some(module), Some(openSym)) =>
           given nir.SourcePosition = curMethodSym.get.span
-          val fresh = curFresh.get
-
-          // The open function signature: (Int) => RawPtr
-          val openSig = genExternMethodSig(openSym)
-          val openName = genMethodName(openSym)
-          val openMethod = nir.Val.Global(openName, nir.Type.Ptr)
-
-          // Generate the call with Scoped (0) as the argument
-          val scopedKind = nir.Val.Int(0) // Scoped = 0
-          val handle = buf.call(openSig, openMethod, Seq(scopedKind), unwind)
-
-          Some(handle)
-        case None =>
-          // Method symbol not found, fall back to heap allocation
+          val scopedArg = Literal(Constant(1)) // RiftRegion.Scoped = 1
+          Some(genApplyModuleMethod(module, openSym, Seq(scopedArg)))
+        case _ =>
           None
       }
     }
@@ -1118,26 +1094,34 @@ trait NirGenExpr(using Context) {
     // Track the current automatic region for closing
     private var currentAutomaticRegion: Option[nir.Val] = None
 
-    // Close the automatic region if one was created
+    // Close the automatic region if one was created.
+    // Generates a virtual call to region.close() using the RiftRegion class method symbol.
     def closeAutomaticRegion(): Unit = {
-      currentAutomaticRegion.foreach { handle =>
-        // Generate a call to scalanative_rift_region_close(handle)
+      currentAutomaticRegion.foreach { region =>
         val defnNir = NirDefinitions.get
-        val closeMethodSymOpt = defnNir.RuntimeRiftAllocatorImpl_close
-
-        closeMethodSymOpt match {
+        defnNir.RiftRegion_close match {
           case Some(closeSym) =>
             given nir.SourcePosition = nir.SourcePosition.NoPosition
-            val closeSig = genExternMethodSig(closeSym)
-            val closeName = genMethodName(closeSym)
-            val closeMethod = nir.Val.Global(closeName, nir.Type.Ptr)
-            buf.call(closeSig, closeMethod, Seq(handle), unwind)
+            genApplyMethod(closeSym, statically = false, region, Seq.empty)
           case None =>
-            // Close function not found, skip closing
+            // close symbol not found — should not happen if RiftRegion is on classpath
             ()
         }
       }
       currentAutomaticRegion = None
+    }
+
+    // Pre-create automatic region at method start for methods with local-escape
+    // allocations. This ensures the region handle exists before any allocation
+    // site and can be properly closed before the method returns.
+    def precacheAutomaticRegion(): Unit = {
+      val methodSym = curMethodSym.get
+      if methodSym == NoSymbol then return
+      if !RiftRegionInference.hasLocalEscapeAllocations(methodSym) then return
+      createRegionForAutomaticInference().foreach { region =>
+        automaticRegionCache.update(methodSym, region)
+        currentAutomaticRegion = Some(region)
+      }
     }
 
     // Clear the automatic region cache for a new method

@@ -131,6 +131,25 @@ final class NirDefinitions()(using ctx: Context) {
       catch case _: Throwable => None
     }
 
+  // RiftRegion.open for automatic region inference
+  @tu lazy val RiftRegionModule: Option[Symbol] =
+    try Some(requiredModule("scala.scalanative.memory.RiftRegion"))
+    catch case _: Throwable => None
+  @tu lazy val RiftRegion_open: Option[Symbol] =
+    RiftRegionModule.flatMap { mod =>
+      try Some(mod.requiredMethod("open"))
+      catch case _: Throwable => None
+    }
+  @tu lazy val RiftRegion_Scoped: Option[Int] = Some(1) // RiftRegion.Scoped = 1
+  @tu lazy val RiftRegionClass: Option[Symbol] =
+    try Some(requiredClass("scala.scalanative.memory.RiftRegion"))
+    catch case _: Throwable => None
+  @tu lazy val RiftRegion_close: Option[Symbol] =
+    RiftRegionClass.flatMap { cls =>
+      try Some(cls.requiredMethod("close"))
+      catch case _: Throwable => None
+    }
+
   // Runtime intriniscs
   @tu lazy val IntrinsicMarker = RuntimePackageClass.requiredMethod("intrinsic")
   @tu lazy val IntrinsicsModule = requiredModule("scala.scalanative.runtime.Intrinsics")

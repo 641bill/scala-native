@@ -1570,6 +1570,18 @@ private[scalanative] object Lower {
             ),
             unwind
           )
+        case Some(rawZone) if rawZone.ty == nir.Type.Ptr =>
+          // Automatic region inference passes a raw Ptr handle from
+          // scalanative_rift_region_open. Call riftRegionAlloc directly.
+          buf.let(
+            n,
+            nir.Op.Call(
+              riftRegionAllocSig,
+              riftRegionAlloc,
+              Seq(rawZone, rtti(cls).const, nir.Val.Size(size.toInt))
+            ),
+            unwind
+          )
         case Some(rawZone) =>
           val safeZoneLocal = fresh()
           // Zoned allocation is implemented by SafeZone.allocImpl. A checked

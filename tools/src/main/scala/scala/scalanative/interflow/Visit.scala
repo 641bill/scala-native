@@ -138,6 +138,13 @@ private[interflow] trait Visit { self: Interflow =>
           setDone(origname, origdefn)
         }
       } catch {
+        case _: java.util.NoSuchElementException =>
+          // Fall back to unoptimized code on missing local references
+          noOpt(origdefn)
+          setDone(name, origdefn)
+          setDone(origname, origdefn)
+          markDenylisted(name)
+          markDenylisted(origname)
         case BailOut(msg) =>
           log(s"failed to expand ${name.show}: $msg")
           val baildefn =

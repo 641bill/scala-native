@@ -92,9 +92,11 @@ object RiftRegionInference {
     case object Unknown extends EscapeBehavior
   }
 
-  // Maps allocation sites to their escape behavior.
+  // Maps allocation sites (by source position) to their escape behavior.
+  // Keyed by source position so different allocation sites of the same class
+  // can have different escape behaviors.
   private[nscplugin] val allocationEscapeBehavior
-      : mutable.Map[Symbol, EscapeBehavior] =
+      : mutable.Map[(String, Int, Int), EscapeBehavior] =
     mutable.Map.empty
 
   // Maps allocation sites to the set of locations they can reach.
@@ -295,10 +297,9 @@ object RiftRegionInference {
   private[nscplugin] def hasNoExternalMutation(
       funcSym: Symbol
   ): Boolean = {
-    // For now, return true for all functions.
-    // TODO: Implement actual mutation tracking by analyzing
-    // writes to heap objects and mutable variables.
-    true
+    // A function has no external mutation if it has no recorded mutation effects
+    !functionMutationEffects.contains(funcSym) ||
+      functionMutationEffects(funcSym).isEmpty
   }
 
   // Verify disjointness constraint for parallel safety
@@ -322,9 +323,7 @@ object RiftRegionInference {
   private[nscplugin] def verifyNoMutation(
       funcSym: Symbol
   ): Boolean = {
-    // For now, return true for all functions.
-    // TODO: Implement actual mutation tracking.
-    true
+    hasNoExternalMutation(funcSym)
   }
 
   // Track mutation effects for a function
@@ -468,17 +467,17 @@ object RiftRegionInference {
 
   // Get the escape behavior for an allocation site
   private[nscplugin] def getEscapeBehavior(
-      sym: Symbol
+      posKey: (String, Int, Int)
   ): Option[EscapeBehavior] =
-    allocationEscapeBehavior.get(sym)
+    allocationEscapeBehavior.get(posKey)
 
-  // Check if an allocation site is local-escape
-  private[nscplugin] def isLocalEscape(sym: Symbol): Boolean =
-    getEscapeBehavior(sym).contains(EscapeBehavior.Local)
+  // Check if an allocation site is local-escape (by source position)
+  private[nscplugin] def isLocalEscape(posKey: (String, Int, Int)): Boolean =
+    getEscapeBehavior(posKey).contains(EscapeBehavior.Local)
 
-  // Check if an allocation site is heap-escape
-  private[nscplugin] def isHeapEscape(sym: Symbol): Boolean =
-    getEscapeBehavior(sym).contains(EscapeBehavior.Heap)
+  // Check if an allocation site is heap-escape (by source position)
+  private[nscplugin] def isHeapEscape(posKey: (String, Int, Int)): Boolean =
+    getEscapeBehavior(posKey).contains(EscapeBehavior.Heap)
 }
 
 /** Capture-directed placement for the first ReML-style Rift inference slices.
@@ -496,6 +495,7 @@ class RiftRegionInference(
     settings: RiftRegionInference.Settings =
       RiftRegionInference.Settings()
 ) extends PluginPhase {
+  import core.Constants.Constant
   import core.Contexts._
   import core.Flags._
   import core.Names._
@@ -3652,7 +3652,31 @@ class RiftRegionInference(
     markInferredReturnAllocation(dd)
     markInferredReturnClosureAllocation(dd)
     markEarlyClosureBodyReturnConstrainedClosure(dd)
-    val transformed = super.transformDefDef(dd)
+
+    // Run escape analysis on the ORIGINAL dd BEFORE super.transformDefDef.
+    // This populates allocationEscapeBehavior by source-span key.
+    analyzeEscapeBehavior(dd)
+
+    // For methods with local-escape allocations, wrap the body with
+    // try/finally region management at the AST level.
+    // This avoids the SSA dominance violations from the old GenNIR-level approach.
+    val ddToTransform =
+      if dd.symbol.isConstructor || dd.rhs.isEmpty then dd
+      else
+        val localEscapes = collectLocalEscapeAllocations(dd)
+        if localEscapes.nonEmpty then
+          wrapBodyWithRegionScope(dd, localEscapes) match {
+            case Some(wrappedDd) =>
+              if settings.reportDecisions then
+                Console.err.println(
+                  s"""[rift-auto-region] ${dd.symbol.name}: wrapping ${localEscapes.size} local-escape alloc(s)"""
+                )
+              wrappedDd
+            case None => dd
+          }
+        else dd
+
+    val transformed = super.transformDefDef(ddToTransform)
     transformed match {
       case result: DefDef =>
         markClosureBodyReturnConstrainedAllocation(result)
@@ -3660,8 +3684,9 @@ class RiftRegionInference(
         markMethodLocalReturnConstrainedAllocation(result)
         markMethodLocalReturnConstrainedClosure(result)
         markForwardedInferredMethodReturn(result)
-        // Perform escape analysis for automatic region scope inference
-        analyzeEscapeBehavior(result)
+        // analyzeEscapeBehavior already ran above on the original dd
+        // Analyze region lifetimes for automatic region inference
+        analyzeRegionLifetime(result)
         // Analyze allocation effects for parallel safety (Phase 3)
         analyzeAllocationEffects(result)
         // Analyze mutation effects for parallel safety (Phase 3)
@@ -3672,17 +3697,6 @@ class RiftRegionInference(
         analyzeRegionPolymorphism(result)
         // Analyze HeapRoot elimination opportunities (Phase 4)
         analyzeHeapRootElimination(result)
-        // TODO: Enable region scope insertion when the approach is refined.
-        // The current issue is that marking allocations with synthetic
-        // owners changes inference decisions but GenNIR can't create
-        // actual regions for synthetic owners, causing test failures.
-        //
-        // Possible solutions:
-        // 1. Don't mark allocations in inference phase - only track escape
-        //    behavior. Let GenNIR handle the transformation.
-        // 2. Use AST transformation to wrap method body in RiftRegion.scoped.
-        // 3. Generate NIR code for region creation in GenNIR.
-        // insertRegionScopes(result)
       case _ => ()
     }
     transformed
@@ -4015,15 +4029,13 @@ class RiftRegionInference(
         val allocatedSym = sym.owner
         if allocatedSym != NoSymbol then {
           // Analyze where the allocated object flows
-          // Note: We analyze all allocations, even those already region-placed,
-          // because the escape analysis provides useful information for
-          // automatic region inference.
           val escapeBehavior = analyzeObjectEscape(app, dd.rhs)
-          RiftRegionInference.allocationEscapeBehavior.update(
-            allocatedSym,
-            escapeBehavior
-          )
-          // Debug output (can be removed later)
+          RiftRegionInference.sourceSpanKey(app.srcPos).foreach { posKey =>
+            RiftRegionInference.allocationEscapeBehavior.update(
+              posKey,
+              escapeBehavior
+            )
+          }
           if settings.reportDecisions then {
             val behavior = escapeBehavior match {
               case RiftRegionInference.EscapeBehavior.Local => "Local"
@@ -4031,10 +4043,103 @@ class RiftRegionInference(
               case RiftRegionInference.EscapeBehavior.Region(owner) => s"Region(${owner.name})"
               case RiftRegionInference.EscapeBehavior.Unknown => "Unknown"
             }
-            Console.err.println(s"[rift-escape] ${app.srcPos}: ${allocatedSym.name} -> $behavior")
+            Console.err.println(s"[rift-escape] ${dd.symbol.name}: new ${allocatedSym.name} -> $behavior")
           }
         }
       }
+    }
+  }
+
+  // Collect local-escape allocations directly in this method body (not in nested DefDefs).
+  // Only returns allocations not already owned by an explicit region.
+  private def collectLocalEscapeAllocations(dd: DefDef)(using Context): List[Apply] = {
+    val allocs = List.newBuilder[Apply]
+    def walk(tree: Tree): Unit = tree match {
+      case app: Apply if directNewApply(app).isDefined =>
+        allocs += app
+      case _: DefDef =>
+        () // Don't descend into nested methods
+      case app: Apply =>
+        walk(app.fun)
+        app.args.foreach(walk)
+      case Block(stats, expr) =>
+        stats.foreach(walk)
+        walk(expr)
+      case If(cond, thenp, elsep) =>
+        walk(cond); walk(thenp); walk(elsep)
+      case Match(selector, cases) =>
+        walk(selector)
+        cases.foreach { c => walk(c.body) }
+      case Labeled(_, body) =>
+        walk(body)
+      case Try(expr, cases, finalizer) =>
+        walk(expr)
+        cases.foreach { c => walk(c.body) }
+        walk(finalizer)
+      case WhileDo(cond, body) =>
+        walk(cond); walk(body)
+      case Typed(expr, _) =>
+        walk(expr)
+      case Inlined(_, _, expr) =>
+        walk(expr)
+      case vd: ValDef =>
+        walk(vd.rhs)
+      case _ => ()
+    }
+    walk(dd.rhs)
+    allocs.result().filter { app =>
+      !app.hasAttachment(NirDefinitions.InferredRiftAllocationOwner) &&
+        RiftRegionInference.sourceSpanKey(app.srcPos)
+          .exists(RiftRegionInference.isLocalEscape(_))
+    }
+  }
+
+  // Wrap the method body with try/finally region management.
+  // Produces: { val $riftRegion = RiftRegion.open(1); try { body } finally { $riftRegion.close() } }
+  // Attaches InferredRiftAllocationOwner to each local-escape allocation.
+  private def wrapBodyWithRegionScope(
+      dd: DefDef,
+      localEscapes: List[Apply]
+  )(using Context): Option[DefDef] = {
+    val defnNir = NirDefinitions.get
+    (defnNir.RiftRegionModule, defnNir.RiftRegion_open, defnNir.RiftRegion_close, defnNir.RiftRegionClass) match {
+      case (Some(module), Some(openSym), Some(closeSym), Some(regionClass)) =>
+        // Build: RiftRegion.open(1)
+        val openRef = ref(module).select(openSym)
+        val openCall = Apply(openRef, List(Literal(Constant(1))))
+
+        // Create a synthetic symbol for the region variable
+        val regionSym = newSymbol(
+          dd.symbol,
+          termName("$riftRegion"),
+          Synthetic,
+          openCall.tpe
+        ).asTerm
+
+        // Attach InferredRiftAllocationOwner to each local-escape allocation
+        localEscapes.foreach { app =>
+          if !app.hasAttachment(NirDefinitions.InferredRiftAllocationOwner) then
+            app.putAttachment(NirDefinitions.InferredRiftAllocationOwner, regionSym)
+        }
+
+        // Build: val $riftRegion = RiftRegion.open(1)
+        val regionValDef = ValDef(regionSym, openCall)
+
+        // Build: $riftRegion.close()
+        val closeRef = ref(regionSym).select(closeSym)
+        val closeCall = Apply(closeRef, Nil)
+
+        // Build: try { body } finally { $riftRegion.close() }
+        val tryFinally = Try(dd.rhs, Nil, closeCall)
+
+        // Build: { val $riftRegion = ...; try { body } finally { ... } }
+        val wrappedBody = Block(List(regionValDef), tryFinally)
+
+        Some(cpy.DefDef(dd)(rhs = wrappedBody))
+      case _ =>
+        if settings.reportDecisions then
+          Console.err.println(s"[rift-auto-region] ${dd.symbol.name}: cannot wrap - RiftRegion symbols not available")
+        None
     }
   }
 
@@ -4112,34 +4217,21 @@ class RiftRegionInference(
     // An allocation is local-escape if:
     // 1. It's stored in a local val (not var)
     // 2. It doesn't escape through:
-    //    - Being stored in a heap field
     //    - Being returned from the method
-    //    - Being captured by a closure that escapes
-    //    - Being passed to a method that stores it
-    //
-    // For now, we use a heuristic:
-    // - If the allocation is in a local val and all usages are reads
-    //   (field access, method calls that return values), it's local-escape
-    // - If the allocation is stored in a mutable variable, it's heap-escape
-    // - If the allocation is returned from the method, it's heap-escape
+    //    - Being stored in a heap field or mutable variable
+    //    - Being captured by an escaping closure
+    //    - Being passed to an unknown method
 
     // Find the val that holds this allocation (if any)
     val parentVal = findParentValDef(alloc, methodBody)
 
     parentVal match {
       case Some(vd) if !vd.symbol.is(Mutable) =>
-        // Check if the val is only used in local ways
-        val usages = findSymbolUsages(vd.symbol, methodBody)
-        if usages.isEmpty then {
-          // No usages - object is dead, treat as local-escape
-          RiftRegionInference.EscapeBehavior.Local
-        } else if usages.forall(isLocalUsage) then {
-          // All usages are local - object is local-escape
-          RiftRegionInference.EscapeBehavior.Local
-        } else {
-          // Some usages are not local - assume heap-escape
+        // Check if the allocation escapes through any usage
+        if doesAllocationEscape(vd.symbol, methodBody) then
           RiftRegionInference.EscapeBehavior.Heap
-        }
+        else
+          RiftRegionInference.EscapeBehavior.Local
       case _ =>
         // No parent val or mutable val - assume heap-escape
         RiftRegionInference.EscapeBehavior.Heap
@@ -4302,37 +4394,162 @@ class RiftRegionInference(
     usages.result()
   }
 
-  // Check if a usage is local (doesn't escape the method)
-  // A usage is local if it doesn't cause the object to escape the method.
-  private def isLocalUsage(tree: Tree)(using Context): Boolean = tree match {
-    case id: Ident =>
-      // Reading a local variable is local
-      true
-    case Select(qualifier, name) =>
-      // Accessing a val field is local (the object doesn't escape)
-      // Accessing a var field is potentially non-local
-      val sym = tree.symbol
-      sym != NoSymbol && !sym.is(Mutable)
-    case Apply(fun, args) =>
-      // Method call - the object might escape through the method.
-      // However, if the object is only used as an argument to a method
-      // that returns a value, it's likely local.
-      // For now, treat method calls as potentially non-local.
-      // TODO: Implement method effect analysis to determine if
-      // the method stores the object.
-      false
-    case Typed(expr, _) =>
-      // Type ascription is local
-      isLocalUsage(expr)
-    case Inlined(_, _, expr) =>
-      // Inlined expressions are local
-      isLocalUsage(expr)
-    case Block(stats, expr) =>
-      // Block expressions are local if the final expression is local
-      isLocalUsage(expr)
-    case _ =>
-      // Other usages - conservatively assume not local
-      false
+  // Check if an allocation escapes via any of its usages in the method body.
+  // An allocation escapes if it is:
+  // - Returned from the method
+  // - Stored in a heap field (mutable variable or array element)
+  // - Captured by an escaping closure
+  // - Assigned to a mutable variable
+  // Otherwise it is local-escape and can be region-allocated.
+  private def doesAllocationEscape(
+      allocSym: Symbol,
+      methodBody: Tree
+  )(using Context): Boolean = {
+    var escapes = false
+
+    def checkEscape(tree: Tree): Unit = if !escapes then tree match {
+      case Return(expr, _) =>
+        // Check if the returned expression uses the allocation
+        if containsSymbolRef(expr, allocSym) then
+          escapes = true
+
+      case Assign(lhs, rhs) =>
+        // Assignment to a mutable field or array element escapes
+        if containsSymbolRef(rhs, allocSym) then
+          // If lhs is a mutable variable, the object escapes
+          if lhs.symbol != NoSymbol && lhs.symbol.is(Mutable) then
+            escapes = true
+          // If lhs is a Select (field assignment), it escapes
+          else if lhs.isInstanceOf[Select] then
+            escapes = true
+        checkEscape(lhs)
+        checkEscape(rhs)
+
+      case Apply(fun, args) =>
+        // Check if the allocation is passed to a method that stores it.
+        // Heuristic: if the allocation is an argument (not receiver) to a
+        // method, treat it as potentially escaping unless it's a known
+        // pure/value-returning method (toString, hashCode, equals, etc.)
+        val sym = fun.symbol
+        val isKnownPure = sym != NoSymbol && {
+          val name = sym.name.toString
+          name == "toString" || name == "hashCode" || name == "equals" ||
+          name == "##" || name == "ne" || name == "eq" ||
+          name == "getClass" || name == "isInstanceOf" || name == "asInstanceOf"
+        }
+        if !isKnownPure then {
+          // Check if any argument contains the allocation
+          args.foreach { arg =>
+            if containsSymbolRef(arg, allocSym) then
+              // The allocation is passed as an argument - might escape
+              // For now, conservatively assume it escapes through method calls
+              escapes = true
+          }
+        }
+        // Always check the function and receiver
+        checkEscape(fun)
+        args.foreach(checkEscape)
+
+      case Block(stats, expr) =>
+        stats.foreach(checkEscape)
+        checkEscape(expr)
+
+      case If(cond, thenp, elsep) =>
+        checkEscape(cond)
+        checkEscape(thenp)
+        checkEscape(elsep)
+
+      case Match(selector, cases) =>
+        checkEscape(selector)
+        cases.foreach { case CaseDef(_, guard, body) =>
+          checkEscape(guard)
+          checkEscape(body)
+        }
+
+      case Labeled(_, body) =>
+        checkEscape(body)
+
+      case Try(expr, cases, finalizer) =>
+        checkEscape(expr)
+        cases.foreach { case CaseDef(_, _, body) => checkEscape(body) }
+        checkEscape(finalizer)
+
+      case WhileDo(cond, body) =>
+        checkEscape(cond)
+        checkEscape(body)
+
+      case vd: ValDef =>
+        checkEscape(vd.rhs)
+
+      case dd: DefDef =>
+        checkEscape(dd.rhs)
+
+      case Typed(expr, _) =>
+        checkEscape(expr)
+
+      case Inlined(_, _, expr) =>
+        checkEscape(expr)
+
+      case Closure(env, fun, _) =>
+        // Capturing the allocation in a closure might escape
+        env.foreach { e =>
+          if containsSymbolRef(e, allocSym) then
+            escapes = true
+          checkEscape(e)
+        }
+        checkEscape(fun)
+
+      case _ =>
+        tree match {
+          case tree: GenericApply =>
+            checkEscape(tree.fun)
+            tree.args.foreach(checkEscape)
+          case _ => ()
+        }
+    }
+
+    checkEscape(methodBody)
+    escapes
+  }
+
+  // Check if a tree contains a reference to a given symbol
+  private def containsSymbolRef(tree: Tree, sym: Symbol)(using Context): Boolean = {
+    var found = false
+    def traverse(t: Tree): Unit = if !found then t match {
+      case id: Ident if id.symbol == sym =>
+        found = true
+      case Select(qualifier, _) =>
+        if t.symbol == sym then found = true
+        traverse(qualifier)
+      case Apply(fun, args) =>
+        traverse(fun)
+        args.foreach(traverse)
+      case TypeApply(fun, _) =>
+        traverse(fun)
+      case Block(stats, expr) =>
+        stats.foreach(traverse)
+        traverse(expr)
+      case If(cond, thenp, elsep) =>
+        traverse(cond)
+        traverse(thenp)
+        traverse(elsep)
+      case Match(selector, cases) =>
+        traverse(selector)
+        cases.foreach { case CaseDef(_, _, body) => traverse(body) }
+      case Typed(expr, _) =>
+        traverse(expr)
+      case Inlined(_, _, expr) =>
+        traverse(expr)
+      case _ =>
+        t match {
+          case t: GenericApply =>
+            traverse(t.fun)
+            t.args.foreach(traverse)
+          case _ => ()
+        }
+    }
+    traverse(tree)
+    found
   }
 
   // Check if a tree is a direct new allocation
@@ -4869,9 +5086,8 @@ class RiftRegionInference(
       .filter { app =>
         val sym = calledSymbol(app)
         sym.isClassConstructor && {
-          val allocatedSym = sym.owner
-          allocatedSym != NoSymbol &&
-            RiftRegionInference.isLocalEscape(allocatedSym)
+          val posKey = RiftRegionInference.sourceSpanKey(app.srcPos)
+          posKey.exists(RiftRegionInference.isLocalEscape(_))
         }
       }
 
@@ -4903,9 +5119,8 @@ class RiftRegionInference(
       .filter { app =>
         val sym = calledSymbol(app)
         sym.isClassConstructor && {
-          val allocatedSym = sym.owner
-          allocatedSym != NoSymbol &&
-            RiftRegionInference.isLocalEscape(allocatedSym)
+          val posKey = RiftRegionInference.sourceSpanKey(app.srcPos)
+          posKey.exists(RiftRegionInference.isLocalEscape(_))
         }
       }
 
@@ -4944,20 +5159,63 @@ class RiftRegionInference(
       RiftRegionInference.sourceSpanKey(app.srcPos).map(_ -> app)
     }.toMap
 
+    // Track which local variables (by Symbol) hold allocated objects.
+    // Maps variable symbol -> allocation source position key.
+    val varToAllocPos = mutable.Map.empty[Symbol, (String, Int, Int)]
+
+    // First pass: find ValDefs that directly hold allocations
+    def collectVarAllocMappings(tree: Tree): Unit = tree match {
+      case vd: ValDef =>
+        directNewApply(vd.rhs).foreach { alloc =>
+          RiftRegionInference.sourceSpanKey(alloc.srcPos).foreach { posKey =>
+            if allocationPositions.contains(posKey) then
+              varToAllocPos.update(vd.symbol, posKey)
+          }
+        }
+        collectVarAllocMappings(vd.rhs)
+      case Block(stats, expr) =>
+        stats.foreach(collectVarAllocMappings)
+        collectVarAllocMappings(expr)
+      case If(_, thenp, elsep) =>
+        collectVarAllocMappings(thenp)
+        collectVarAllocMappings(elsep)
+      case Match(_, cases) =>
+        cases.foreach { case CaseDef(_, _, body) =>
+          collectVarAllocMappings(body)
+        }
+      case Labeled(_, body) =>
+        collectVarAllocMappings(body)
+      case Try(expr, cases, finalizer) =>
+        collectVarAllocMappings(expr)
+        cases.foreach { case CaseDef(_, _, body) =>
+          collectVarAllocMappings(body)
+        }
+        collectVarAllocMappings(finalizer)
+      case WhileDo(cond, body) =>
+        collectVarAllocMappings(cond)
+        collectVarAllocMappings(body)
+      case Typed(expr, _) =>
+        collectVarAllocMappings(expr)
+      case Inlined(_, _, expr) =>
+        collectVarAllocMappings(expr)
+      case _ => ()
+    }
+    collectVarAllocMappings(methodBody)
+
     // Track the last use of each allocation
     val lastUsePositions = mutable.Map.empty[(String, Int, Int), (String, Int, Int)]
 
     // Traverse the method body and track last uses
     def trackLastUse(tree: Tree, currentPos: (String, Int, Int)): Unit = tree match {
       case id: Ident =>
-        // Check if this identifier refers to an allocated object
-        // For now, we use a simple heuristic: if the identifier is in
-        // the same scope as an allocation, it's a use of that allocation.
-        //
-        // TODO: Implement proper use tracking by:
-        // 1. Tracking which variables hold allocated objects
-        // // 2. Updating last use positions when those variables are used
-        ()
+        // Check if this identifier refers to a variable that holds an allocated object
+        varToAllocPos.get(id.symbol).foreach { allocPosKey =>
+          lastUsePositions.update(allocPosKey, currentPos)
+        }
+
+      case sel @ Select(qualifier, _) =>
+        // Track qualifier usage — e.g., obj.field where obj holds an allocation
+        trackLastUse(qualifier, currentPos)
 
       case Block(stats, expr) =>
         stats.foreach(stat => trackLastUse(stat, currentPos))
@@ -5002,6 +5260,8 @@ class RiftRegionInference(
         }
         // Traverse arguments
         app.args.foreach(arg => trackLastUse(arg, currentPos))
+        // Also track the function part (receiver for method calls)
+        trackLastUse(app.fun, currentPos)
 
       case vd: ValDef =>
         trackLastUse(vd.rhs, currentPos)

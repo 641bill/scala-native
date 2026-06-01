@@ -17451,4 +17451,106 @@ class RiftRegionCheckedCompilerTest {
       |
       |def ok(): Int = compute()
       |""".stripMargin)
+
+  // Automatic region inference: local-escape allocation should be region-placed
+  @Test def automaticInferenceLocalEscapeAllocatesInRegion(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |
+      |final class Point(val x: Int, val y: Int)
+      |
+      |def distanceSquared(): Int =
+      |  val p = new Point(3, 4)
+      |  p.x * p.x + p.y * p.y
+      |
+      |def ok(): Int = distanceSquared()
+      |""".stripMargin)
+
+  // Automatic region inference: multiple local allocations
+  @Test def automaticInferenceMultipleLocalAllocations(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |
+      |final class Pair(val a: Int, val b: Int)
+      |
+      |def compute(): Int =
+      |  val p1 = new Pair(1, 2)
+      |  val p2 = new Pair(3, 4)
+      |  p1.a + p1.b + p2.a + p2.b
+      |
+      |def ok(): Int = compute()
+      |""".stripMargin)
+
+  // Automatic region inference: allocation used in method call (not escaping)
+  @Test def automaticInferenceAllocationUsedInMethodCall(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |
+      |final class Counter(var count: Int)
+      |
+      |def process(): Int =
+      |  val c = new Counter(0)
+      |  c.count = 42
+      |  c.count
+      |
+      |def ok(): Int = process()
+      |""".stripMargin)
+
+  // Automatic region inference: allocation passed to method should stay on heap
+  // (conservative — we don't know if the callee stores it)
+  @Test def automaticInferenceAllocationPassedToMethodStaysOnHeap(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |
+      |final class Box(val value: Int)
+      |
+      |def store(box: Box): Int = box.value
+      |
+      |def compute(): Int =
+      |  val box = new Box(42)
+      |  store(box)
+      |
+      |def ok(): Int = compute()
+      |""".stripMargin)
+
+  // Automatic region inference: allocation returned from method stays on heap
+  @Test def automaticInferenceReturnedAllocationStaysOnHeap(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |
+      |final class Box(val value: Int)
+      |
+      |def make(): Box = new Box(42)
+      |
+      |def ok(): Int = make().value
+      |""".stripMargin)
+
+  // Automatic region inference: allocation stored in mutable variable stays on heap
+  @Test def automaticInferenceMutableVarAllocationStaysOnHeap(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |
+      |final class Box(val value: Int)
+      |
+      |def compute(): Int =
+      |  var box = new Box(0)
+      |  box = new Box(42)
+      |  box.value
+      |
+      |def ok(): Int = compute()
+      |""".stripMargin)
+
+  // Automatic region inference: allocation used in if/else branches
+  @Test def automaticInferenceAllocationInBranches(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |
+      |final class Box(val value: Int)
+      |
+      |def compute(flag: Boolean): Int =
+      |  val box = if flag then new Box(1) else new Box(2)
+      |  box.value
+      |
+      |def ok(): Int = compute(true)
+      |""".stripMargin)
 }

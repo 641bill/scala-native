@@ -457,8 +457,6 @@ trait NirGenStat(using Context) {
       buf.prepareDirectReturnedClosureAllocation(bodyp)
       buf.prepareDirectReturnedRiftAllocation(bodyp)
       genBody()
-      // Close any automatic region that was created for local-escape allocations
-      buf.closeAutomaticRegion()
       nir.ControlFlow.removeDeadBlocks(buf.toSeq)
     }
   }

@@ -13508,4 +13508,81 @@ class RiftRegionCheckedTest {
       RiftRegion.shutdown()
     }
   }
+
+  // Automatic region inference runtime tests
+  // These verify correctness of code with local-escape allocations.
+  // Region allocation verification requires working NIR generation
+  // for automatic region open/close calls (currently disabled).
+  private final class AutoBox(val value: Int)
+  private final class AutoPair(val a: Int, val b: Int)
+
+  @Test def automaticInferenceLocalEscapeComputesCorrectly(): Unit = {
+    val result = {
+      def compute(): Int =
+        val box = new AutoBox(42)
+        box.value
+      compute()
+    }
+    assertEquals(42, result)
+  }
+
+  @Test def automaticInferenceMultipleLocalAllocationsCorrect(): Unit = {
+    val result = {
+      def compute(): Int =
+        val p1 = new AutoPair(1, 2)
+        val p2 = new AutoPair(3, 4)
+        p1.a + p1.b + p2.a + p2.b
+      compute()
+    }
+    assertEquals(10, result)
+  }
+
+  @Test def automaticInferenceLocalEscapeComputesDistanceCorrectly(): Unit = {
+    val result = {
+      def distanceSquared(): Int =
+        val p = new AutoPair(3, 4)
+        p.a * p.a + p.b * p.b
+      distanceSquared()
+    }
+    assertEquals(25, result)
+  }
+
+  @Test def automaticInferenceReturnedValueComputesCorrectly(): Unit = {
+    val result = {
+      def make(): AutoBox = new AutoBox(42)
+      make().value
+    }
+    assertEquals(42, result)
+  }
+
+  @Test def automaticInferenceMutableVarComputesCorrectly(): Unit = {
+    val result = {
+      def compute(): Int =
+        var box = new AutoBox(0)
+        box = new AutoBox(42)
+        box.value
+      compute()
+    }
+    assertEquals(42, result)
+  }
+
+  @Test def automaticInferenceLocalEscapeUsesRegionAllocation(): Unit = {
+    // Verify that local-escape allocations use region memory, not heap.
+    // If automatic inference works, statsAllocObjectTotal should increase.
+    RiftAllocator.Impl.statsReset()
+    val before = fromRawUSize(RiftAllocator.Impl.statsAllocObjectTotal()).toLong
+    def compute(): Int =
+      val box = new AutoBox(42)
+      val p = new AutoPair(3, 4)
+      box.value + p.a + p.b
+    val result = compute()
+    val after = fromRawUSize(RiftAllocator.Impl.statsAllocObjectTotal()).toLong
+    assertEquals(42 + 3 + 4, result)
+    // At least 2 region allocations should have occurred (AutoBox + AutoPair)
+    val delta = after - before
+    assertTrue(
+      s"Expected region allocation delta >= 2, got $delta",
+      delta >= 2
+    )
+  }
 }
