@@ -3663,7 +3663,7 @@ class RiftRegionInference(
     val ddToTransform =
       if dd.symbol.isConstructor || dd.rhs.isEmpty then dd
       else
-        val localEscapes = Nil // collectLocalEscapeAllocations(dd)  // disabled: escape analysis needs constructor-arg safety
+        val localEscapes = collectLocalEscapeAllocations(dd)
         if localEscapes.nonEmpty then
           wrapBodyWithRegionScope(dd, localEscapes) match {
             case Some(wrappedDd) =>
@@ -4231,6 +4231,34 @@ class RiftRegionInference(
         val pkg = ownerCls.enclosingPackageClass.fullName.toString
         if pkg.startsWith("scala.scalanative") ||
            pkg.startsWith("java.") || pkg.startsWith("javax.") then
+          return RiftRegionInference.EscapeBehavior.Heap
+
+    // Guard: allocations with non-literal constructor args stay on heap.
+    // Region memory cannot store unrooted heap object references.
+    if allocCls != NoSymbol && allocCls.isClassConstructor then
+      val ctorParams = allocCls.paramSymss.flatten.filter(!_.isAllOf(Synthetic))
+      val hasNonLiteralArg = ctorParams.zip(alloc.args).exists { (param, arg) =>
+        arg match {
+          case _: Literal => false
+          case id: Ident => id.symbol != NoSymbol && id.symbol.exists && !id.symbol.isAllOf(Synthetic)
+          case _ => true // conservatively assume non-literal args are heap references
+        }
+      }
+      if hasNonLiteralArg then
+        return RiftRegionInference.EscapeBehavior.Heap
+
+    // Guard: classes with body-declared fields stay on heap.
+    // Body-declared fields (non-ParamAccessor) may have heap initializers
+    // that cannot be automatically placed in region memory.
+    if allocCls != NoSymbol && allocCls.isClassConstructor then
+      val clsSym = allocCls.owner
+      if clsSym != NoSymbol && !clsSym.isPrimitiveValueClass then
+        val hasBodyFields = clsSym.info.decls.exists { member =>
+          member.isTerm && !member.is(Method) &&
+          !member.isAllOf(Synthetic | ParamAccessor) &&
+          member.owner == clsSym
+        }
+        if hasBodyFields then
           return RiftRegionInference.EscapeBehavior.Heap
 
     // Find the val that holds this allocation (if any)
