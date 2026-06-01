@@ -4358,7 +4358,7 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
       delta: Long,
       value: T^{parent}
   ): Long = {
-    bucket.child.checkOpen()
+    // bucket.child.checkOpen() delegated to appendWindowUnchecked
     val next = addFoldContribution(
       parent,
       fold.asInstanceOf[StreamWindowFold[T]],
