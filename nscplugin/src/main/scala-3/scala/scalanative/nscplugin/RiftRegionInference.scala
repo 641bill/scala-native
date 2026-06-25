@@ -12,7 +12,10 @@ import scala.collection.mutable
 object RiftRegionInference {
   val name = "scalanative-riftRegionInference"
 
-  final case class Settings(reportDecisions: Boolean = false)
+  final case class Settings(
+      reportDecisions: Boolean = false,
+      enableAutomaticRegionScopes: Boolean = false
+  )
 
   sealed trait AllocationOwner
   object AllocationOwner {
@@ -46,6 +49,12 @@ object RiftRegionInference {
   private[nscplugin] val inferredClosureBodyOwners
       : mutable.Map[Symbol, Symbol] =
     mutable.Map.empty
+  private[nscplugin] val inferredClosureBodyOwnersBySourceSpan
+      : mutable.Map[(String, Int, Int), Symbol] =
+    mutable.Map.empty
+  private[nscplugin] val inferredClosureBodyOwnersBySourceLine
+      : mutable.Map[(String, Int), mutable.Set[Symbol]] =
+    mutable.Map.empty
   private[nscplugin] val inferredClosureValueOwners
       : mutable.Map[Symbol, Symbol] =
     mutable.Map.empty
@@ -77,6 +86,11 @@ object RiftRegionInference {
   private[nscplugin] val inferredClosureAllocationEffectsBySourceSpan
       : mutable.Map[(String, Int, Int), Symbol] =
     mutable.Map.empty
+
+  // Broad automatic local-escape region scope insertion is still a prototype.
+  // Keep it behind an explicit opt-in so ordinary heap/library code keeps the
+  // validated capture-directed heap fallback semantics by default.
+  private[nscplugin] var automaticRegionScopesEnabled: Boolean = false
 
   // Escape analysis for automatic region scope inference.
   // Tracks the escape behavior of each allocation site.
@@ -188,17 +202,6 @@ object RiftRegionInference {
       : mutable.Map[Symbol, Set[Symbol]] =
     mutable.Map.empty
 
-  // Collection inference for broader region placement (Phase 4).
-  // Track which collection factory calls can be region-placed.
-  private[nscplugin] val collectionFactoryEffects
-      : mutable.Map[Symbol, Symbol] =
-    mutable.Map.empty
-
-  // Track which collection operations preserve region ownership
-  private[nscplugin] val collectionOperationEffects
-      : mutable.Map[Symbol, Symbol] =
-    mutable.Map.empty
-
   // Higher-order function inference (Phase 4).
   // Track which higher-order functions propagate region effects.
   private[nscplugin] val higherOrderFunctionEffects
@@ -237,7 +240,7 @@ object RiftRegionInference {
       methodSym: Symbol,
       allocations: List[(Symbol, dotty.tools.dotc.util.SrcPos)]
   ): Unit = {
-    if allocations.nonEmpty then
+    if automaticRegionScopesEnabled && allocations.nonEmpty then
       methodsWithLocalEscapeAllocations.update(methodSym, allocations)
   }
 
@@ -245,7 +248,8 @@ object RiftRegionInference {
   private[nscplugin] def hasLocalEscapeAllocations(
       methodSym: Symbol
   ): Boolean =
-    methodsWithLocalEscapeAllocations.contains(methodSym)
+    automaticRegionScopesEnabled &&
+      methodsWithLocalEscapeAllocations.contains(methodSym)
 
   // Get the local-escape allocation sites for a method
   private[nscplugin] def getLocalEscapeAllocations(
@@ -348,34 +352,6 @@ object RiftRegionInference {
     val effects = getMutationEffects(funcSym)
     effects.nonEmpty
   }
-
-  // Track collection factory effects
-  private[nscplugin] def addCollectionFactoryEffect(
-      factorySym: Symbol,
-      owner: Symbol
-  ): Unit = {
-    collectionFactoryEffects.update(factorySym, owner)
-  }
-
-  // Get collection factory effect
-  private[nscplugin] def getCollectionFactoryEffect(
-      factorySym: Symbol
-  ): Option[Symbol] =
-    collectionFactoryEffects.get(factorySym)
-
-  // Track collection operation effects
-  private[nscplugin] def addCollectionOperationEffect(
-      opSym: Symbol,
-      owner: Symbol
-  ): Unit = {
-    collectionOperationEffects.update(opSym, owner)
-  }
-
-  // Get collection operation effect
-  private[nscplugin] def getCollectionOperationEffect(
-      opSym: Symbol
-  ): Option[Symbol] =
-    collectionOperationEffects.get(opSym)
 
   // Track higher-order function effects
   private[nscplugin] def addHigherOrderFunctionEffect(
@@ -512,12 +488,16 @@ class RiftRegionInference(
   override def runOn(
       units: List[CompilationUnit]
   )(using Context): List[CompilationUnit] = {
+    RiftRegionInference.automaticRegionScopesEnabled =
+      settings.enableAutomaticRegionScopes
     RiftRegionInference.inferredAllocationOwners.clear()
     RiftRegionInference.inferredMethodReturnOwners.clear()
     RiftRegionInference.inferredMethodReturnOwnersBySourceSpan.clear()
     RiftRegionInference.inferredMethodReturnOwnersBySourceLine.clear()
     RiftRegionInference.inferredMethodReturnLocalOwners.clear()
     RiftRegionInference.inferredClosureBodyOwners.clear()
+    RiftRegionInference.inferredClosureBodyOwnersBySourceSpan.clear()
+    RiftRegionInference.inferredClosureBodyOwnersBySourceLine.clear()
     RiftRegionInference.inferredClosureValueOwners.clear()
     RiftRegionInference.inferredArrayElementOwners.clear()
     RiftRegionInference.allocationDecisions.clear()
@@ -532,8 +512,6 @@ class RiftRegionInference(
     RiftRegionInference.effectConstraints.clear()
     RiftRegionInference.functionAllocationEffects.clear()
     RiftRegionInference.functionMutationEffects.clear()
-    RiftRegionInference.collectionFactoryEffects.clear()
-    RiftRegionInference.collectionOperationEffects.clear()
     RiftRegionInference.higherOrderFunctionEffects.clear()
     RiftRegionInference.functionArgumentEffects.clear()
     RiftRegionInference.regionPolymorphicFunctions.clear()
@@ -780,6 +758,53 @@ class RiftRegionInference(
       owners += canonical
     }
   }
+
+  private def markClosureBodySourceOwner(
+      closure: Closure,
+      owner: Symbol
+  )(using Context): Unit = {
+    val canonical = canonicalOwner(owner)
+    RiftRegionInference.sourceSpanKey(closure.srcPos).foreach { key =>
+      RiftRegionInference.inferredClosureBodyOwnersBySourceSpan.update(
+        key,
+        canonical
+      )
+    }
+    RiftRegionInference.sourceLineKey(closure.srcPos).foreach { key =>
+      val owners =
+        RiftRegionInference.inferredClosureBodyOwnersBySourceLine
+          .getOrElseUpdate(key, mutable.Set.empty)
+      owners += canonical
+    }
+  }
+
+  private def closureBodyOwnerForDef(
+      dd: DefDef
+  )(using Context): Option[Symbol] =
+    RiftRegionInference.inferredClosureBodyOwners
+      .get(dd.symbol)
+      .orElse(RiftRegionInference.inferredClosureValueOwners.get(dd.symbol))
+      .orElse(
+        RiftRegionInference
+          .sourceSpanKey(dd.srcPos)
+          .flatMap(
+            RiftRegionInference.inferredClosureBodyOwnersBySourceSpan.get
+          )
+      )
+      .orElse(
+        RiftRegionInference
+          .sourceLineKey(dd.srcPos)
+          .flatMap { key =>
+            RiftRegionInference.inferredClosureBodyOwnersBySourceLine
+              .get(key)
+              .flatMap { owners =>
+                owners.toList.distinct match {
+                  case owner :: Nil => Some(owner)
+                  case _            => None
+                }
+              }
+          }
+      )
 
   private def registerLocalCaptureOwner(sym: Symbol)(using Context): Unit =
     if sym != NoSymbol then
@@ -1070,6 +1095,39 @@ class RiftRegionInference(
     }
     loop(valueTree)
   }
+
+  private def hasNestedRegionConstructArgument(valueTree: Tree)(using Context): Boolean =
+    directRegionConstructApply(valueTree) match {
+      case Some(app) =>
+        app.args.exists { arg =>
+          directRegionConstructApply(arg).nonEmpty ||
+            hasNestedRegionConstructArgument(arg)
+        }
+      case None =>
+        valueTree match {
+          case Typed(expr, _) =>
+            hasNestedRegionConstructArgument(expr)
+          case Inlined(_, _, expr) =>
+            hasNestedRegionConstructArgument(expr)
+          case Block(_, expr) =>
+            hasNestedRegionConstructArgument(expr)
+          case TypeApply(Select(expr, nme.asInstanceOf_), _) =>
+            hasNestedRegionConstructArgument(expr)
+          case Return(expr, _) =>
+            hasNestedRegionConstructArgument(expr)
+          case Labeled(_, body) =>
+            hasNestedRegionConstructArgument(body)
+          case If(_, thenp, elsep) =>
+            hasNestedRegionConstructArgument(thenp) ||
+              hasNestedRegionConstructArgument(elsep)
+          case Match(_, cases) =>
+            cases.exists { case CaseDef(_, _, body) =>
+              hasNestedRegionConstructArgument(body)
+            }
+          case _ =>
+            false
+        }
+    }
 
   private def localClosureAllocationPairsInTree(
       tree: Tree
@@ -1369,16 +1427,115 @@ class RiftRegionInference(
     sym.name.toString == "apply" &&
       sym.owner.fullName.toString.stripSuffix("$") == "scala.Option"
 
+  private def scalaOptionApplyKind(sym: Symbol)(using Context): Option[Boolean] =
+    if isScalaSomeApply(sym) then Some(true)
+    else if isScalaOptionApply(sym) then Some(false)
+    else None
+
   private def isScalaEitherApply(sym: Symbol)(using Context): Boolean = {
-    if sym == NoSymbol then false
+    scalaEitherApplyBranch(sym).isDefined
+  }
+
+  private def scalaEitherApplyBranch(sym: Symbol)(using Context): Option[Boolean] =
+    if sym == NoSymbol then None
     else {
       val ownerSym = sym.owner
       val owner =
         if ownerSym == NoSymbol then "" else ownerSym.fullName.toString.stripSuffix("$")
-      sym.name.toString == "apply" &&
-        (owner == "scala.util.Left" || owner == "scala.util.Right")
+      if sym.name.toString != "apply" then None
+      else if owner == "scala.util.Left" then Some(true)
+      else if owner == "scala.util.Right" then Some(false)
+      else None
+    }
+
+  private def scalaEitherCaseArgs(
+      tpe: Type,
+      caseName: String
+  )(using Context): Option[(Type, Type)] =
+    typeCandidates(tpe).collectFirst {
+      case candidate @ AppliedType(_, left :: right :: Nil)
+          if candidate.typeSymbol.fullName.toString == s"scala.util.$caseName" =>
+        uncapturedType(left) -> uncapturedType(right)
+    }
+
+  private def scalaOptionArg(
+      tpe: Type,
+      allowSome: Boolean
+  )(using Context): Option[Type] =
+    typeCandidates(tpe).collectFirst {
+      case candidate @ AppliedType(_, value :: Nil)
+          if candidate.typeSymbol.fullName.toString == "scala.Option" ||
+            (allowSome &&
+              candidate.typeSymbol.fullName.toString == "scala.Some") =>
+        uncapturedType(value)
+    }
+
+  private def rawScalaOptionConstructor(
+      tree: Tree
+  )(using Context): Option[(Boolean, Tree)] =
+    tree match {
+      case app @ Apply(_, arg :: Nil)
+          if !isRiftRegionImplementationSource(app) =>
+        scalaOptionApplyKind(calledSymbol(app)).map(_ -> arg)
+      case Typed(expr, _) =>
+        rawScalaOptionConstructor(expr)
+      case Inlined(_, _, expr) =>
+        rawScalaOptionConstructor(expr)
+      case Block(Nil, expr) =>
+        rawScalaOptionConstructor(expr)
+      case _ =>
+        None
+    }
+
+  private def rawScalaEitherValueAccessor(
+      tree: Tree
+  )(using Context): Option[(Boolean, Tree, Type, Type)] = {
+    def branchFor(qualifier: Tree): Option[(Boolean, Type, Type)] =
+      scalaEitherCaseArgs(qualifier.tpe, "Left")
+        .map((left, right) => (true, left, right))
+        .orElse(
+          scalaEitherCaseArgs(qualifier.tpe, "Right")
+            .map((left, right) => (false, left, right))
+        )
+
+    tree match {
+      case select @ Select(qualifier, name)
+          if name.toString == "value" && select.symbol.is(Accessor) =>
+        branchFor(qualifier).map((isLeft, left, right) =>
+          (isLeft, qualifier, left, right)
+        )
+      case Apply(select @ Select(qualifier, name), Nil)
+          if name.toString == "value" && select.symbol.is(Accessor) =>
+        branchFor(qualifier).map((isLeft, left, right) =>
+          (isLeft, qualifier, left, right)
+        )
+      case Typed(expr, _) =>
+        rawScalaEitherValueAccessor(expr)
+      case Inlined(_, _, expr) =>
+        rawScalaEitherValueAccessor(expr)
+      case Block(Nil, expr) =>
+        rawScalaEitherValueAccessor(expr)
+      case _ =>
+        None
     }
   }
+
+  private def rawScalaEitherConstructor(
+      tree: Tree
+  )(using Context): Option[(Boolean, Tree)] =
+    tree match {
+      case app @ Apply(_, arg :: Nil)
+          if !isRiftRegionImplementationSource(app) =>
+        scalaEitherApplyBranch(calledSymbol(app)).map(_ -> arg)
+      case Typed(expr, _) =>
+        rawScalaEitherConstructor(expr)
+      case Inlined(_, _, expr) =>
+        rawScalaEitherConstructor(expr)
+      case Block(Nil, expr) =>
+        rawScalaEitherConstructor(expr)
+      case _ =>
+        None
+    }
 
   private def isScalaTupleApply(sym: Symbol, argCount: Int)(using Context): Boolean =
     sym.name.toString == "apply" &&
@@ -2464,11 +2621,20 @@ class RiftRegionInference(
     val ownerInClosureTypeName =
       val ownerNames = captureOwnerNames(closure.tpe).toSet
       ownerNames.contains(canonical.name.toString) ||
-        localOwnerAliases.exists { (alias, target) =>
+      localOwnerAliases.exists { (alias, target) =>
           canonicalOwner(target) == canonical &&
             ownerNames.contains(alias.name.toString)
         }
-    ownerInClosureType || ownerInClosureTypeName || closure.env.exists { env =>
+    ownerInClosureType || ownerInClosureTypeName ||
+      closureEnvCapturesOwner(closure, canonical)
+  }
+
+  private def closureEnvCapturesOwner(
+      closure: Closure,
+      owner: Symbol
+  )(using Context): Boolean = {
+    val canonical = canonicalOwner(owner)
+    closure.env.exists { env =>
       val envOwner = canonicalOwner(env.symbol)
       envOwner == canonical ||
       localOwnerAliases
@@ -2483,6 +2649,82 @@ class RiftRegionInference(
     }
   }
 
+  private def isPrimitiveOrNull(tree: Tree)(using Context): Boolean =
+    tree match {
+      case Literal(Constant(null)) => true
+      case Literal(_)              => true
+      case _ =>
+        val sym = tree.tpe.widenDealias.typeSymbol
+        sym.isPrimitiveValueClass || sym == defn.UnitClass
+    }
+
+  private def isHeapRootType(tpe: Type)(using Context): Boolean = {
+    val heapRootName = "scala.scalanative.memory.RiftRegion.HeapRoot"
+    tpe.show.contains(heapRootName) || tpe.widenDealias.show.contains(heapRootName)
+  }
+
+  private def isStableStaticHeapReference(tree: Tree)(using Context): Boolean =
+    tree match {
+      case Apply(select @ Select(qualifier, _), Nil)
+          if select.symbol.is(Accessor) && !select.symbol.is(Mutable) =>
+        isStableStaticHeapReference(qualifier)
+      case TypeApply(Select(qualifier, nme.asInstanceOf_), _) =>
+        isStableStaticHeapReference(qualifier)
+      case select @ Select(qualifier, _)
+          if select.symbol.is(Accessor) && !select.symbol.is(Mutable) =>
+        isStableStaticHeapReference(qualifier)
+      case Typed(expr, _)      => isStableStaticHeapReference(expr)
+      case Inlined(_, _, expr) => isStableStaticHeapReference(expr)
+      case Block(_, expr)      => isStableStaticHeapReference(expr)
+      case _                   => tree.symbol.is(Module)
+    }
+
+  private def allocationDecisionOwner(sym: Symbol): Option[Symbol] =
+    RiftRegionInference.allocationDecisions.get(sym).collect {
+      case RiftRegionInference.AllocationDecision(
+            RiftRegionInference.AllocationOwner.Region(owner),
+            _,
+            _
+          ) =>
+        owner
+    }
+
+  private def isAllowedRegionClosureCapture(
+      tree: Tree,
+      owner: Symbol
+  )(using Context): Boolean = {
+    val canonical = canonicalOwner(owner)
+    val sym = tree.symbol
+    isPrimitiveOrNull(tree) ||
+    isStableStaticHeapReference(tree) ||
+    isHeapRootType(tree.tpe) ||
+    (sym != NoSymbol && (
+      canonicalOwner(sym) == canonical ||
+        localOwnerAliases.get(sym).map(canonicalOwner).contains(canonical) ||
+        RiftRegionInference.inferredAllocationOwners
+          .get(sym)
+          .map(canonicalOwner)
+          .contains(canonical) ||
+        allocationDecisionOwner(sym).map(canonicalOwner).contains(canonical) ||
+        (sym.is(Param) && typeMentionsRiftCapture(sym.info))
+    ))
+  }
+
+  private def validateRegionClosureCaptures(
+      closure: Closure,
+      owner: Symbol
+  )(using Context): Boolean = {
+    val badCapture =
+      closure.env.find(env => !isAllowedRegionClosureCapture(env, owner))
+    badCapture.foreach { env =>
+      report.error(
+        "Rift checked region allocation cannot store an unrooted heap object; use RiftRegion.root(value) for heap metadata.",
+        env.srcPos
+      )
+    }
+    badCapture.isEmpty
+  }
+
   private def markClosureBodyOwner(
       closure: Closure,
       owner: Symbol,
@@ -2492,13 +2734,14 @@ class RiftRegionInference(
     val funSym = fun.symbol
     if funSym != NoSymbol && closureCapturesOwner(closure, owner) then {
       val canonical = canonicalOwner(owner)
-        RiftRegionInference.inferredClosureBodyOwners.update(funSym, canonical)
-        updateDecision(
-          funSym,
-          RiftRegionInference.AllocationOwner.Region(canonical),
-          reason,
-          closure.srcPos
-        )
+      RiftRegionInference.inferredClosureBodyOwners.update(funSym, canonical)
+      markClosureBodySourceOwner(closure, canonical)
+      updateDecision(
+        funSym,
+        RiftRegionInference.AllocationOwner.Region(canonical),
+        reason,
+        closure.srcPos
+      )
     }
   }
 
@@ -2515,7 +2758,10 @@ class RiftRegionInference(
     val Closure(_, fun, _) = closure: @unchecked
     val funSym = fun.symbol
     val canonical = canonicalOwner(owner)
-    if funSym != NoSymbol then {
+    if funSym != NoSymbol &&
+      !closureEnvCapturesOwner(closure, canonical) &&
+      validateRegionClosureCaptures(closure, canonical)
+    then {
       // Record the allocation effect on the closure symbol
       RiftRegionInference.inferredClosureAllocationEffects.update(
         funSym,
@@ -2524,6 +2770,7 @@ class RiftRegionInference(
       // Also mark the closure body owner so the inference phase knows
       // the closure body should be treated as region-allocated.
       RiftRegionInference.inferredClosureBodyOwners.update(funSym, canonical)
+      markClosureBodySourceOwner(closure, canonical)
       // Also record by source span for lambda-lifted closures
       RiftRegionInference.sourceSpanKey(closure.srcPos).foreach { key =>
         RiftRegionInference.inferredClosureAllocationEffectsBySourceSpan
@@ -2547,22 +2794,24 @@ class RiftRegionInference(
     val canonical = canonicalOwner(owner)
     val Closure(_, fun, _) = closure: @unchecked
     val funSym = fun.symbol
-    if funSym != NoSymbol then
+    if funSym != NoSymbol && validateRegionClosureCaptures(closure, canonical)
+    then {
       RiftRegionInference.inferredClosureValueOwners.update(funSym, canonical)
-    closure.putAttachment(
-      NirDefinitions.InferredRiftAllocationOwner,
-      canonical
-    )
-    markClosureSourceOwner(closure, canonical)
-    markClosureBodyOwner(closure, canonical, bodyReason)
-    val closureSym = calledSymbol(closure)
-    if closureSym != NoSymbol then
-      updateDecision(
-        closureSym,
-        RiftRegionInference.AllocationOwner.Region(canonical),
-        reason,
-        closure.srcPos
+      closure.putAttachment(
+        NirDefinitions.InferredRiftAllocationOwner,
+        canonical
       )
+      markClosureSourceOwner(closure, canonical)
+      markClosureBodyOwner(closure, canonical, bodyReason)
+      val closureSym = calledSymbol(closure)
+      if closureSym != NoSymbol then
+        updateDecision(
+          closureSym,
+          RiftRegionInference.AllocationOwner.Region(canonical),
+          reason,
+          closure.srcPos
+        )
+    }
   }
 
   private def markLocalClosureRegionOwner(
@@ -2589,18 +2838,20 @@ class RiftRegionInference(
       case _ =>
         val Closure(_, fun, _) = closure: @unchecked
         val funSym = fun.symbol
-        if funSym != NoSymbol then
+        if funSym != NoSymbol && validateRegionClosureCaptures(closure, canonical)
+        then {
           RiftRegionInference.inferredClosureValueOwners.update(
             funSym,
             canonical
           )
-        closure.putAttachment(
-          NirDefinitions.InferredRiftAllocationOwner,
-          canonical
-        )
-        markClosureSourceOwner(closure, canonical)
-        markRegionOwner(target, canonical, reason, pos)
-        markClosureBodyOwner(closure, canonical, bodyReason)
+          closure.putAttachment(
+            NirDefinitions.InferredRiftAllocationOwner,
+            canonical
+          )
+          markClosureSourceOwner(closure, canonical)
+          markRegionOwner(target, canonical, reason, pos)
+          markClosureBodyOwner(closure, canonical, bodyReason)
+        }
     }
   }
 
@@ -2799,6 +3050,43 @@ class RiftRegionInference(
         case _: Throwable => Nil
       }
     (fromSet ++ fromNames ++ localFromNames).map(canonicalOwner).distinct
+  }
+
+  private def captureOwnerSymbolsPreservingAliases(
+      tpe: Type,
+      owner: Symbol
+  )(using Context): List[Symbol] = {
+    def symbolsFrom(cs: CaptureSet): List[Symbol] =
+      cs.elems.iterator.toList.map(_.pathOwner).filter(_ != NoSymbol)
+
+    val ownerScope = ownerChain(owner).toSet
+    val localFromNames =
+      captureOwnerNames(tpe).flatMap { name =>
+        localCaptureOwnerSymsByName
+          .get(name)
+          .toList
+          .flatMap(_.toList)
+          .filter(sym => ownerScope.contains(sym.owner))
+      }
+    val fromNames =
+      captureOwnerNames(tpe).flatMap { name =>
+        ownerChain(owner).flatMap(_.paramSymss.flatten).filter {
+          _.name.toString == name
+        }
+      }
+    val fromSet =
+      try {
+        val direct =
+          CapturingType
+            .decomposeCapturingType(tpe)
+            .map((_, cs) => symbolsFrom(cs))
+            .getOrElse(Nil)
+        if direct.nonEmpty then direct
+        else symbolsFrom(CaptureSet.ofType(tpe, followResult = false))
+      } catch {
+        case _: Throwable => Nil
+      }
+    (fromSet ++ fromNames ++ localFromNames).distinct
   }
 
   private def expectedType(vd: ValDef)(using Context): Type =
@@ -3032,22 +3320,30 @@ class RiftRegionInference(
           capturedMethodResultOwners(dd, expectedTypes)
         owners match {
           case owner :: Nil =>
-            closure.putAttachment(
-              NirDefinitions.InferredRiftAllocationOwner,
-              owner
-            )
-            markMethodReturnOwner(dd, owner)
-            updateDecision(
-              dd.symbol,
-              RiftRegionInference.AllocationOwner.Region(owner),
-              "closure method result type is captured by a checked region",
-              closure.srcPos
-            )
-            markClosureBodyOwner(
-              closure,
-              owner,
-              "method-returned closure body return is constrained by a captured checked region owner"
-            )
+            val canonical = canonicalOwner(owner)
+            if validateRegionClosureCaptures(closure, canonical) then {
+              closure.putAttachment(
+                NirDefinitions.InferredRiftAllocationOwner,
+                canonical
+              )
+              markMethodReturnOwner(dd, canonical)
+              updateDecision(
+                dd.symbol,
+                RiftRegionInference.AllocationOwner.Region(canonical),
+                "closure method result type is captured by a checked region",
+                closure.srcPos
+              )
+              markClosureBodyOwner(
+                closure,
+                canonical,
+                "method-returned closure body return is constrained by a captured checked region owner"
+              )
+              markClosureAllocationEffect(
+                closure,
+                canonical,
+                "method-returned closure expected type has an allocation effect in a checked region"
+              )
+            }
           case first :: second :: _ =>
             updateDecision(
               dd.symbol,
@@ -3336,10 +3632,7 @@ class RiftRegionInference(
   private def markClosureBodyReturnConstrainedAllocation(
       dd: DefDef
   )(using Context): Unit =
-    RiftRegionInference.inferredClosureBodyOwners
-      .get(dd.symbol)
-      .orElse(RiftRegionInference.inferredClosureValueOwners.get(dd.symbol))
-      .foreach {
+    closureBodyOwnerForDef(dd).foreach {
       owner =>
         val canonical = canonicalOwner(owner)
         directReturnedNewApplies(dd.rhs).foreach { app =>
@@ -3423,10 +3716,7 @@ class RiftRegionInference(
   private def markClosureBodyReturnConstrainedClosure(
       dd: DefDef
   )(using Context): Unit =
-    RiftRegionInference.inferredClosureBodyOwners
-      .get(dd.symbol)
-      .orElse(RiftRegionInference.inferredClosureValueOwners.get(dd.symbol))
-      .foreach {
+    closureBodyOwnerForDef(dd).foreach {
       owner =>
         val canonical = canonicalOwner(owner)
         directReturnedClosures(dd.rhs).foreach { closure =>
@@ -3435,6 +3725,11 @@ class RiftRegionInference(
             canonical,
             "direct closure-body closure result is captured by a checked region owner",
             "nested closure-body return is constrained by a checked region owner"
+          )
+          markClosureAllocationEffect(
+            closure,
+            canonical,
+            "closure-body returned closure has an allocation effect in a checked region"
           )
           updateDecision(
             dd.symbol,
@@ -3456,6 +3751,11 @@ class RiftRegionInference(
               "conflicting inferred closure-body local closure owners",
               dd.rhs.srcPos
             )
+            markClosureAllocationEffect(
+              closure,
+              canonical,
+              "closure-body returned local closure has an allocation effect in a checked region"
+            )
             updateDecision(
               dd.symbol,
               RiftRegionInference.AllocationOwner.Region(canonical),
@@ -3468,10 +3768,7 @@ class RiftRegionInference(
   private def markEarlyClosureBodyReturnConstrainedClosure(
       dd: DefDef
   )(using Context): Unit =
-    RiftRegionInference.inferredClosureBodyOwners
-      .get(dd.symbol)
-      .orElse(RiftRegionInference.inferredClosureValueOwners.get(dd.symbol))
-      .foreach {
+    closureBodyOwnerForDef(dd).foreach {
       owner =>
         val canonical = canonicalOwner(owner)
         directReturnedClosures(dd.rhs).foreach { closure =>
@@ -3480,6 +3777,11 @@ class RiftRegionInference(
             canonical,
             "direct closure-body closure result is captured by a checked region owner",
             "nested closure-body return is constrained by a checked region owner"
+          )
+          markClosureAllocationEffect(
+            closure,
+            canonical,
+            "closure-body returned closure has an allocation effect in a checked region"
           )
           updateDecision(
             dd.symbol,
@@ -3499,6 +3801,11 @@ class RiftRegionInference(
               "nested local closure-body return is constrained by a checked region owner",
               "conflicting inferred closure-body local closure owners",
               dd.rhs.srcPos
+            )
+            markClosureAllocationEffect(
+              closure,
+              canonical,
+              "closure-body returned local closure has an allocation effect in a checked region"
             )
             updateDecision(
               dd.symbol,
@@ -3654,14 +3961,17 @@ class RiftRegionInference(
     markEarlyClosureBodyReturnConstrainedClosure(dd)
 
     // Run escape analysis on the ORIGINAL dd BEFORE super.transformDefDef.
-    // This populates allocationEscapeBehavior by source-span key.
-    analyzeEscapeBehavior(dd)
+    // This populates allocationEscapeBehavior by source-span key for the
+    // opt-in automatic-scope prototype only.
+    if settings.enableAutomaticRegionScopes then analyzeEscapeBehavior(dd)
 
     // For methods with local-escape allocations, wrap the body with
     // try/finally region management at the AST level.
     // This avoids the SSA dominance violations from the old GenNIR-level approach.
     val ddToTransform =
-      if dd.symbol.isConstructor || dd.rhs.isEmpty then dd
+      if !settings.enableAutomaticRegionScopes ||
+        dd.symbol.isConstructor || dd.rhs.isEmpty
+      then dd
       else
         val localEscapes = collectLocalEscapeAllocations(dd)
         if localEscapes.nonEmpty then
@@ -3703,6 +4013,176 @@ class RiftRegionInference(
   }
 
   override def transformValDef(vd: ValDef)(using Context): Tree = {
+    def rewriteOwnedOptionConstructor(rhs: Tree): Tree =
+      if vd.symbol.is(Mutable) then rhs
+      else
+        rawScalaOptionConstructor(rhs) match {
+          case Some((isSome, value)) =>
+            scalaOptionArg(expectedType(vd), allowSome = isSome) match {
+              case Some(valueType)
+                  if typeMentionsRiftCapture(valueType) &&
+                    (nestedClosureAllocations(value).nonEmpty ||
+                      hasNestedRegionConstructArgument(value)) =>
+                val expectedOwnerCandidates =
+                  captureOwnerSymbolsPreservingAliases(expectedType(vd), ctx.owner)
+                    .filter(isRiftInferredAllocationOwnerSymbol)
+                val canonicalExpectedOwners =
+                  expectedOwnerCandidates.map(canonicalOwner).distinct
+                canonicalExpectedOwners match {
+                  case owner :: Nil =>
+                    val ownerTerm =
+                      expectedOwnerCandidates
+                        .find(candidate => canonicalOwner(candidate) == owner)
+                        .getOrElse(owner)
+                    val defnNir = NirDefinitions.get
+                    val helper =
+                      if isRiftScopedRegionType(owner.info) then
+                        if isSome then defnNir.RiftRegion_ownedScopedSomeInferred
+                        else defnNir.RiftRegion_ownedScopedOptionInferred
+                      else if isRiftOpenStreamingRegionType(owner.info) then
+                        if isSome then defnNir.RiftRegion_ownedOpenSomeInferred
+                        else defnNir.RiftRegion_ownedOpenOptionInferred
+                      else if isRiftOpenStreamingHandleType(owner.info) then
+                        if isSome then
+                          defnNir.RiftRegion_ownedOpenHandleSomeInferred
+                        else defnNir.RiftRegion_ownedOpenHandleOptionInferred
+                      else None
+                    (defnNir.RiftRegionModule, helper) match {
+                      case (Some(module), Some(helperSym)) =>
+                        val call =
+                          ref(module)
+                            .select(helperSym)
+                            .appliedToTypes(valueType :: Nil)
+                            .appliedToTermArgs(ref(ownerTerm) :: Nil)
+                            .appliedToTermArgs(value :: Nil)
+                            .withSpan(rhs.span)
+                        updateDecision(
+                          vd.symbol,
+                          RiftRegionInference.AllocationOwner.Region(ownerTerm),
+                          "raw concrete Option constructor rewritten to owner-preserving Rift construction helper",
+                          rhs.srcPos
+                        )
+                        call
+                      case _ =>
+                        rhs
+                    }
+                  case _ =>
+                    rhs
+                }
+              case Some(_) =>
+                rhs
+              case None =>
+                rhs
+            }
+          case None =>
+            rhs
+        }
+
+    def rewriteOwnedEitherConstructor(rhs: Tree): Tree =
+      if vd.symbol.is(Mutable) then rhs
+      else
+        rawScalaEitherConstructor(rhs) match {
+          case Some((isLeft, value)) =>
+            val caseName = if isLeft then "Left" else "Right"
+            scalaEitherCaseArgs(expectedType(vd), caseName) match {
+              case Some((leftType, rightType)) =>
+                val expectedOwners =
+                  captureOwnerSymbols(expectedType(vd), ctx.owner)
+                    .map(canonicalOwner)
+                    .distinct
+                    .filter(isRiftInferredAllocationOwnerSymbol)
+                expectedOwners match {
+                  case owner :: Nil =>
+                    val defnNir = NirDefinitions.get
+                    val helper =
+                      if isRiftScopedRegionType(owner.info) then
+                        if isLeft then defnNir.RiftRegion_ownedScopedLeftInferred
+                        else defnNir.RiftRegion_ownedScopedRightInferred
+                      else if isRiftOpenStreamingRegionType(owner.info) then
+                        if isLeft then defnNir.RiftRegion_ownedOpenLeftInferred
+                        else defnNir.RiftRegion_ownedOpenRightInferred
+                      else if isRiftOpenStreamingHandleType(owner.info) then
+                        if isLeft then
+                          defnNir.RiftRegion_ownedOpenHandleLeftInferred
+                        else defnNir.RiftRegion_ownedOpenHandleRightInferred
+                      else None
+                    (defnNir.RiftRegionModule, helper) match {
+                      case (Some(module), Some(helperSym)) =>
+                        val call =
+                          ref(module)
+                            .select(helperSym)
+                            .appliedToTypes(leftType :: rightType :: Nil)
+                            .appliedToTermArgs(ref(owner) :: Nil)
+                            .appliedToTermArgs(value :: Nil)
+                            .withSpan(rhs.span)
+                        updateDecision(
+                          vd.symbol,
+                          RiftRegionInference.AllocationOwner.Region(owner),
+                          "raw concrete Either constructor rewritten to owner-preserving Rift construction helper",
+                          rhs.srcPos
+                        )
+                        call
+                      case _ =>
+                        rhs
+                    }
+                  case _ =>
+                    rhs
+                }
+              case None =>
+                rhs
+            }
+          case None =>
+            rhs
+        }
+
+    def rewriteOwnedEitherValueAccessor(rhs: Tree): Tree =
+      if vd.symbol.is(Mutable) then rhs
+      else
+        rawScalaEitherValueAccessor(rhs) match {
+          case Some((isLeft, qualifier, leftType, rightType)) =>
+            val expectedOwners =
+              captureOwnerSymbols(expectedType(vd), ctx.owner)
+                .map(canonicalOwner)
+                .distinct
+                .filter(isRiftInferredAllocationOwnerSymbol)
+            val qualifierOwners =
+              captureOwnerSymbols(qualifier.tpe, ctx.owner)
+                .map(canonicalOwner)
+                .distinct
+                .filter(isRiftInferredAllocationOwnerSymbol)
+            (expectedOwners, qualifierOwners) match {
+              case (owner :: Nil, qualifierOwner :: Nil)
+                  if owner == qualifierOwner =>
+                val defnNir = NirDefinitions.get
+                val helper =
+                  if isLeft then defnNir.RiftRegion_ownedLeftValue
+                  else defnNir.RiftRegion_ownedRightValue
+                (defnNir.RiftRegionModule, helper) match {
+                  case (Some(module), Some(helperSym)) =>
+                    val call =
+                      ref(module)
+                        .select(helperSym)
+                        .appliedToTypes(leftType :: rightType :: Nil)
+                        .appliedToTermArgs(ref(owner) :: Nil)
+                        .appliedToTermArgs(qualifier :: Nil)
+                        .withSpan(rhs.span)
+                    updateDecision(
+                      vd.symbol,
+                      RiftRegionInference.AllocationOwner.Region(owner),
+                      "raw concrete Either.value accessor rewritten to owner-preserving Rift extraction helper",
+                      rhs.srcPos
+                    )
+                    call
+                  case _ =>
+                    rhs
+                }
+              case _ =>
+                rhs
+            }
+          case None =>
+            rhs
+        }
+
     def rememberArrayElementOwner(owner: Symbol): Unit = {
       val canonical = canonicalOwner(owner)
       localArrayElementOwnerSyms.update(vd.symbol, canonical)
@@ -3930,7 +4410,10 @@ class RiftRegionInference(
         vd.symbol
       )
     }
-    vd
+    val optionConstructedRhs = rewriteOwnedOptionConstructor(vd.rhs)
+    val constructedRhs = rewriteOwnedEitherConstructor(optionConstructedRhs)
+    val rewrittenRhs = rewriteOwnedEitherValueAccessor(constructedRhs)
+    if rewrittenRhs eq vd.rhs then vd else cpy.ValDef(vd)(rhs = rewrittenRhs)
   }
 
   override def transformAssign(assign: Assign)(using Context): Tree = {
@@ -4694,8 +5177,8 @@ class RiftRegionInference(
     builder.result()
   }
 
-  // Analyze collection effects for a function (Phase 4).
-  // Tracks which collection factories and operations can be region-placed.
+  // Record conservative fallback diagnostics for unsupported standard-library
+  // collection factories and operations. There is no collection-node lowering.
   private def analyzeCollectionEffects(dd: DefDef)(using Context): Unit = {
     val methodSym = dd.symbol
     if methodSym == NoSymbol || methodSym.isConstructor then return
@@ -4709,9 +5192,16 @@ class RiftRegionInference(
           .get(factorySym)
           .orElse(RiftRegionInference.inferredClosureBodyOwners.get(factorySym))
 
-        ownerSym.foreach { owner =>
-          RiftRegionInference.addCollectionFactoryEffect(factorySym, owner)
-        }
+        if ownerSym.isEmpty &&
+            (typeMentionsRiftCapture(app.tpe) ||
+              app.args.exists(arg => typeMentionsRiftCapture(arg.tpe)))
+        then
+          updateDecision(
+            factorySym,
+            RiftRegionInference.AllocationOwner.Heap,
+            "standard-library collection factory remains heap/library fallback; use a checked Rift collection API for region-owned collection nodes",
+            app.srcPos
+          )
       }
     }
 
@@ -4724,9 +5214,17 @@ class RiftRegionInference(
           .get(opSym)
           .orElse(RiftRegionInference.inferredClosureBodyOwners.get(opSym))
 
-        ownerSym.foreach { owner =>
-          RiftRegionInference.addCollectionOperationEffect(opSym, owner)
-        }
+        if ownerSym.isEmpty &&
+            (typeMentionsRiftCapture(app.tpe) ||
+              typeMentionsRiftCapture(app.fun.tpe) ||
+              app.args.exists(arg => typeMentionsRiftCapture(arg.tpe)))
+        then
+          updateDecision(
+            opSym,
+            RiftRegionInference.AllocationOwner.Heap,
+            "standard-library collection operation remains heap/library fallback; iterator and collection-node ownership need library/runtime support",
+            app.srcPos
+          )
       }
     }
   }
@@ -4843,7 +5341,7 @@ class RiftRegionInference(
     sym != NoSymbol && {
       val name = sym.name.toString
       // Common collection operations
-      name == "map" || name == "filter" || name == "flatMap" ||
+      name == "iterator" || name == "map" || name == "filter" || name == "flatMap" ||
       name == "foreach" || name == "fold" || name == "reduce" ||
       name == "groupBy" || name == "partition" || name == "take" ||
       name == "drop" || name == "slice" || name == "zip"

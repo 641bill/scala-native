@@ -1,7 +1,7 @@
 # NEXMark Region Matrix
 
 Date: 2026-05-01
-Last updated: 2026-05-10 16:05 CEST
+Last updated: 2026-06-01 15:20 CEST
 
 Status: first NEXMark-style methodology benchmark for the broader
 stream-processing win envelope. This is not an exact Apache Beam NEXMark
@@ -28,8 +28,10 @@ Queries:
   bucket-owned while primitive arrays track active seller eligibility.
 - `q4`: category-average shape; bid records are bucket-owned while category
   count/sum state stays in primitive arrays.
-- `q5`: hot-auction sliding-window shape; bid objects are bucket-owned while
-  durable window counts/sums stay in primitive heap arrays.
+- `q5`: hot-auction sliding-window shape; bid objects are bucket-owned. The
+  generic checked path keeps durable window counts/sums in primitive heap
+  arrays; the `rift-checked-fold-api` path uses `StreamWindowFold` for the
+  checked count/sum state.
 - `q8`: new-user/new-auction window join; person, auction, and join-output
   objects are bucket-owned while durable join counts stay in primitive heap
   arrays.
@@ -51,6 +53,7 @@ Modes:
 - `rift-checked`: checked `RiftRegion.streaming` plus
   `StreamAppendWindow`/cursor bucket close.
 - `rift-checked-join-api`: Q8-only checked `StreamJoinWindow` API control.
+- `rift-checked-fold-api`: Q5-only checked `StreamWindowFold` API control.
 - `rift-hp`: trusted low-level HPZone bucket regions.
 - `rift-streaming`: trusted low-level Streaming bucket regions.
 
@@ -77,6 +80,63 @@ Default settings:
 The default runner query set is now
 `q0 q1 q2 q3 q4 q5 q8 q9 q11`. Historical tables below cover only
 `q0/q1/q2/q5/q8` unless explicitly stated otherwise.
+
+## 2026-06-01 Q5 Fold API Follow-Up
+
+This rerun tests NEXMark q5 through the generic `StreamWindowFold` API after
+the focused fold operator gate passed. It is generated methodology evidence,
+not exact Apache Beam runner evidence.
+
+Smoke command:
+
+```bash
+NEXMARK_QUERIES=q5 \
+NEXMARK_MODES="heap rift-checked-fold-api" \
+NEXMARK_EVENTS=20000 \
+NEXMARK_BENCHMARK_RUNS=1 \
+NEXMARK_WARMUPS=0 \
+NEXMARK_OUTPUT_DIR=/Users/siyaoliu/rift/cache/nexmark-q5-fold-api-smoke-20260601 \
+zsh sandbox/run_nexmark_region_matrix.sh
+```
+
+1M L2 command:
+
+```bash
+NEXMARK_BUILD=0 \
+NEXMARK_QUERIES=q5 \
+NEXMARK_MODES="heap rift-checked-fold-api" \
+NEXMARK_EVENTS=1000000 \
+NEXMARK_BENCHMARK_RUNS=3 \
+NEXMARK_WARMUPS=1 \
+NEXMARK_OUTPUT_DIR=/Users/siyaoliu/rift/cache/nexmark-q5-fold-api-1m-l2-20260601 \
+zsh sandbox/run_nexmark_region_matrix.sh
+```
+
+Smoke result:
+
+| Query | Mode | Median ms | GC ms | Rift op ms | Region objects | Opens/closes | RSS bytes | Checksum | Outputs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| q5 | heap | 10.443 | 0.929 | 0.000 | 0 | 0 / 0 | 12533760 | -907778426481885852 | 3 |
+| q5 | rift-checked-fold-api | 6.010 | 0.000 | 0.127 | 20004 | 2 / 2 | 13795328 | -907778426481885852 | 3 |
+
+1M L2 result:
+
+| Query | Mode | Median ms | GC ms | Max GC ms | Runs with GC | Rift op ms | Region objects | Opens/closes | RSS bytes | Checksum | Outputs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| q5 | heap | 470.288 | 29.921 | 52.688 | 3 | 0.000 | 0 | 0 / 0 | 289914880 | 4306382597030909472 | 123 |
+| q5 | rift-checked-fold-api | 419.855 | 0.000 | 0.000 | 0 | 0.204 | 1000004 | 41 / 41 | 219480064 | 4306382597030909472 | 123 |
+
+Interpretation:
+
+- The `StreamWindowFold`-backed checked Q5 path now passes the generated 1M
+  L2 gate: checked is `419.855 ms` versus heap `470.288 ms`, with matching
+  checksum/output, zero checked GC, and about `70 MB` lower RSS.
+- This supersedes the older generic `rift-checked` Q5 path as the current
+  checked Q5 application candidate. It does not by itself validate Beam Q5 or
+  any real input.
+- The top-auction scan remains shared query work. The win comes from using the
+  reusable fold API for checked window count/sum state while keeping the heap
+  control logically aligned.
 
 ## 2026-05-07 Post-Fast-Path Selected Rows
 
@@ -335,7 +395,8 @@ Interpretation:
   current SafeZone Q1 gap and is the fastest Q5 row in this 100k run.
 - Q1 remains a modest trusted Rift row: HPZone is faster than heap and improved
   SafeZone, while checked Rift is slightly slower than both.
-- Q5 remains mostly an aggregate/top-scan shape, not a Rift checked win.
+- This older 100k Q5 table remains an aggregate/top-scan control. The later
+  `rift-checked-fold-api` path above is the current checked Q5 candidate.
 - Q8 is a near-tie among heap, SafeZone, and Rift, with Streaming fastest in
   this local 100k run.
 
@@ -680,10 +741,9 @@ Interpretation:
   higher than heap, so this is an elapsed/GC result rather than a memory win.
 - `q0` is a near tie. Region placement reduces GC and RSS, but passthrough
   work alone does not create a large elapsed win.
-- `q5` is currently not a win at 1M. The region modes cut measured GC roughly
-  in half, but diagnostics show identical operation counts and about `45 ms`
-  of top-auction scans in every mode. The remaining loss is checked
-  framework/container CPU and live-window footprint.
+- The older generic `rift-checked` q5 path was not a win at 1M. The
+  2026-06-01 `rift-checked-fold-api` follow-up above supersedes that path for
+  checked Q5 application experiments.
 - Generic `q8` is the strongest NEXMark-lite checked result: checked Rift is
   `291.832 ms` versus heap `322.210 ms` at 1M, with GC time dropping from
   `27.148 ms` to `7.413 ms`. The packed-count `StreamJoinWindow` API is much
@@ -700,9 +760,9 @@ Interpretation:
   `StreamJoinWindow` as framework evidence until it beats the specialized heap
   join control. The packed-count path narrowed the 1M checked API gap from
   `23.021 ms` to `20.987 ms`, but did not clear the gate.
-- Do not claim `q5` as a window-aggregate win. The next Q5 work should reduce
-  checked per-entry/window-container CPU or change the aggregate-maintenance
-  shape, with the heap version kept logically aligned.
+- Use `rift-checked-fold-api` as the current checked Q5 application candidate.
+  It has a generated 1M L2 win, but it still needs any Beam-default or
+  presentation-facing rerun before broader NEXMark Q5 claims.
 - Continue building reusable checked operators, but always add fair heap
   operator controls when the API specializes the query loop.
 - Do not move back to DEBS ranking/TableRank from this result; TableRank

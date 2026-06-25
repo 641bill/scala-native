@@ -4332,6 +4332,72 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def scopedRegionEffectPolymorphicClosureWithHiddenOwnerFallsBack()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, RiftCheckedLeaf^{r}]^{r} =
+        (value: Int) => new RiftCheckedLeaf(value)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makeLeaf = make(using region)
+        val leaf = makeLeaf(40)
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertEquals(
+        "hidden-owner closure bodies need lambda environment/signature rewriting before body allocations can be region placed",
+        1L,
+        delta
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionEffectPolymorphicClosureOptionFactoryWithHiddenOwnerFallsBack()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      def make(using
+          r: RiftRegion.ScopedRegion^
+      ): Function1[Int, Option[RiftCheckedLeaf^{r}]^{r}]^{r} =
+        (value: Int) => Some(new RiftCheckedLeaf(value))
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val makeLeaf = make(using region)
+        val maybe = makeLeaf(40)
+        val leaf = maybe.get
+        leaf.value + 2 +
+          (System.identityHashCode(makeLeaf) & 0) +
+          (System.identityHashCode(maybe) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertEquals(
+        "hidden-owner closure body factories need lambda environment/signature rewriting before body allocations can be region placed",
+        1L,
+        delta
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def scopedRegionInfersClosureBodyDirectOptionFactoryAllocationWithCapturedOwnerTerm()
       : Unit = {
     RiftRegion.init(1)
@@ -7779,6 +7845,449 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def scopedRegionInfersMethodReturnedTypedSomeWrapperInlineClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      def makeWrapper(using
+          r: RiftRegion.ScopedRegion^
+      ): Option[Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} = {
+        val owner = r
+        val wrapper: Wrapper[RiftCheckedLeaf^{r}]^{r} =
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + 40 + keepOwner)
+            leaf
+          })
+        Some[Wrapper[RiftCheckedLeaf^{r}]^{r}](wrapper)
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val maybe
+            : Option[Wrapper[RiftCheckedLeaf^{region}]^{region}]^{region} =
+          makeWrapper(using region)
+        val wrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} = maybe.get
+        val fn = wrapper.make
+        val leaf: RiftCheckedLeaf^{region} = fn(2)
+        leaf.value +
+          (System.identityHashCode(maybe) & 0) +
+          (System.identityHashCode(wrapper) & 0) +
+          (System.identityHashCode(fn) & 0) +
+          (System.identityHashCode(leaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected method-returned typed Some plus wrapper, inline closure value, and closure-body allocation to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedMethodReturnedTypedSomeWrapperInlineClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      def makeWrapper(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Option[Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} = {
+        val owner = r
+        val wrapper: Wrapper[RiftCheckedLeaf^{r}]^{r} =
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + value + keepOwner)
+            leaf
+          })
+        Some[Wrapper[RiftCheckedLeaf^{r}]^{r}](wrapper)
+      }
+
+      def forward(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Option[Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} =
+        makeWrapper(value)(using r)
+
+      def branch(value: Int, flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Option[Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} =
+        if flag then forward(value)(using r)
+        else makeWrapper(value + 1)(using r)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val direct
+            : Option[Wrapper[RiftCheckedLeaf^{region}]^{region}]^{region} =
+          forward(10)(using region)
+        val forwardedTrue
+            : Option[Wrapper[RiftCheckedLeaf^{region}]^{region}]^{region} =
+          branch(20, true)(using region)
+        val forwardedFalse
+            : Option[Wrapper[RiftCheckedLeaf^{region}]^{region}]^{region} =
+          branch(30, false)(using region)
+        val directWrapper
+            : Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          direct.get
+        val forwardedTrueWrapper
+            : Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          forwardedTrue.get
+        val forwardedFalseWrapper
+            : Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          forwardedFalse.get
+        val directFn = directWrapper.make
+        val forwardedTrueFn = forwardedTrueWrapper.make
+        val forwardedFalseFn = forwardedFalseWrapper.make
+        val directLeaf: RiftCheckedLeaf^{region} = directFn(2)
+        val forwardedTrueLeaf: RiftCheckedLeaf^{region} =
+          forwardedTrueFn(2)
+        val forwardedFalseLeaf: RiftCheckedLeaf^{region} =
+          forwardedFalseFn(2)
+        directLeaf.value + forwardedTrueLeaf.value + forwardedFalseLeaf.value -
+          12 - 22 - 33 + 42 +
+          (System.identityHashCode(direct) & 0) +
+          (System.identityHashCode(forwardedTrue) & 0) +
+          (System.identityHashCode(forwardedFalse) & 0) +
+          (System.identityHashCode(directWrapper) & 0) +
+          (System.identityHashCode(forwardedTrueWrapper) & 0) +
+          (System.identityHashCode(forwardedFalseWrapper) & 0) +
+          (System.identityHashCode(directFn) & 0) +
+          (System.identityHashCode(forwardedTrueFn) & 0) +
+          (System.identityHashCode(forwardedFalseFn) & 0) +
+          (System.identityHashCode(directLeaf) & 0) +
+          (System.identityHashCode(forwardedTrueLeaf) & 0) +
+          (System.identityHashCode(forwardedFalseLeaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected direct and branch-forwarded typed Some plus wrapper, inline closure values, and closure-body allocations to be region allocated, observed $delta region objects",
+        delta >= 12L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOwnedSomeOptionDirectNestedWrapperClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      def makeWrapper(value: Int, useOption: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Option[Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} = {
+        val owner = r
+        if useOption then
+          RiftRegion.ownedOption[Wrapper[RiftCheckedLeaf^{r}]](using r)(
+            new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(n + value + keepOwner)
+              leaf
+            })
+          )
+        else
+          RiftRegion.ownedSome[Wrapper[RiftCheckedLeaf^{r}]](using r)(
+            new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(n + value + keepOwner)
+              leaf
+            })
+          )
+      }
+
+      def forward(value: Int, useOption: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Option[Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} =
+        makeWrapper(value, useOption)(using r)
+
+      def branch(value: Int, flag: Boolean, useOption: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Option[Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} =
+        if flag then forward(value, useOption)(using r)
+        else makeWrapper(value + 1, useOption)(using r)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val direct
+            : Option[Wrapper[RiftCheckedLeaf^{region}]^{region}]^{region} =
+          forward(10, false)(using region)
+        val forwardedTrue
+            : Option[Wrapper[RiftCheckedLeaf^{region}]^{region}]^{region} =
+          branch(20, true, true)(using region)
+        val forwardedFalse
+            : Option[Wrapper[RiftCheckedLeaf^{region}]^{region}]^{region} =
+          branch(30, false, false)(using region)
+
+        val directWrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          direct.get
+        val forwardedTrueWrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          forwardedTrue.get
+        val forwardedFalseWrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          forwardedFalse.get
+
+        val directLeaf: RiftCheckedLeaf^{region} = directWrapper.make(2)
+        val forwardedTrueLeaf: RiftCheckedLeaf^{region} =
+          forwardedTrueWrapper.make(2)
+        val forwardedFalseLeaf: RiftCheckedLeaf^{region} =
+          forwardedFalseWrapper.make(2)
+
+        directLeaf.value + forwardedTrueLeaf.value +
+          forwardedFalseLeaf.value - 67 + 42 +
+          (System.identityHashCode(direct) & 0) +
+          (System.identityHashCode(forwardedTrue) & 0) +
+          (System.identityHashCode(forwardedFalse) & 0) +
+          (System.identityHashCode(directWrapper) & 0) +
+          (System.identityHashCode(forwardedTrueWrapper) & 0) +
+          (System.identityHashCode(forwardedFalseWrapper) & 0) +
+          (System.identityHashCode(directLeaf) & 0) +
+          (System.identityHashCode(forwardedTrueLeaf) & 0) +
+          (System.identityHashCode(forwardedFalseLeaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected owned Some/Option direct-nested wrapper, inline closure values, and closure-body allocations to be region allocated, observed $delta region objects",
+        delta >= 12L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRawSomeOptionDirectNestedWrapperClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      final class OtherLeaf(val value: Int)
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val owner = region
+        val some: Some[Wrapper[RiftCheckedLeaf^{region}]^{region}]^{region} =
+          Some[Wrapper[RiftCheckedLeaf^{region}]^{region}](
+            new Wrapper[RiftCheckedLeaf^{region}]((n: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(n + 40 + keepOwner)
+              leaf
+            })
+          )
+        val option: Option[Wrapper[OtherLeaf^{region}]^{region}]^{region} =
+          Option[Wrapper[OtherLeaf^{region}]^{region}](
+            new Wrapper[OtherLeaf^{region}]((n: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: OtherLeaf^{owner} =
+                new OtherLeaf(n + 50 + keepOwner)
+              leaf
+            })
+          )
+
+        val leftWrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          some.value
+        val rightWrapper: Wrapper[OtherLeaf^{region}]^{region} =
+          option.get
+
+        val leftLeaf: RiftCheckedLeaf^{region} = leftWrapper.make(2)
+        val rightLeaf: OtherLeaf^{region} = rightWrapper.make(3)
+
+        leftLeaf.value + rightLeaf.value - 95 + 42 +
+          (System.identityHashCode(some) & 0) +
+          (System.identityHashCode(option) & 0) +
+          (System.identityHashCode(leftWrapper) & 0) +
+          (System.identityHashCode(rightWrapper) & 0) +
+          (System.identityHashCode(leftLeaf) & 0) +
+          (System.identityHashCode(rightLeaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected raw Some/Option construction plus wrapper records, inline closure values, and closure-body allocations to be region allocated, observed $delta region objects",
+        delta >= 8L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOwnedSomeOptionSelectedAliasWrapperClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      def makeWrapper(flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Option[Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} = {
+        val owner = r
+        val first: Option[Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} =
+          RiftRegion.ownedSome[Wrapper[RiftCheckedLeaf^{r}]](using r)(
+            new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(n + 40 + keepOwner)
+              leaf
+            })
+          )
+        val second: Option[Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} =
+          RiftRegion.ownedOption[Wrapper[RiftCheckedLeaf^{r}]](using r)(
+            new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(n + 41 + keepOwner)
+              leaf
+            })
+          )
+        RiftRegion.ownedSelect[
+          Option[Wrapper[RiftCheckedLeaf^{r}]^{r}]
+        ](using r)(flag, first, second)
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val first: Option[Wrapper[RiftCheckedLeaf^{region}]^{region}]^{region} =
+          makeWrapper(true)(using region)
+        val second: Option[Wrapper[RiftCheckedLeaf^{region}]^{region}]^{region} =
+          makeWrapper(false)(using region)
+
+        val firstWrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          first.get
+        val secondWrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          second.get
+        val firstLeaf: RiftCheckedLeaf^{region} = firstWrapper.make(2)
+        val secondLeaf: RiftCheckedLeaf^{region} = secondWrapper.make(2)
+
+        firstLeaf.value + secondLeaf.value - 85 + 42 +
+          (System.identityHashCode(first) & 0) +
+          (System.identityHashCode(second) & 0) +
+          (System.identityHashCode(firstWrapper) & 0) +
+          (System.identityHashCode(secondWrapper) & 0) +
+          (System.identityHashCode(firstLeaf) & 0) +
+          (System.identityHashCode(secondLeaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected selected owned Some/Option aliases, wrapper closures, and closure-body allocations to be region allocated, observed $delta region objects",
+        delta >= 14L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedMethodReturnedTypedOptionWrapperInlineClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      def makeWrapper(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Option[Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} = {
+        val owner = r
+        val wrapper: Wrapper[RiftCheckedLeaf^{r}]^{r} =
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + value + keepOwner)
+            leaf
+          })
+        Option[Wrapper[RiftCheckedLeaf^{r}]^{r}](wrapper)
+      }
+
+      def forward(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Option[Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} =
+        makeWrapper(value)(using r)
+
+      def branch(value: Int, flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Option[Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} =
+        if flag then forward(value)(using r)
+        else makeWrapper(value + 1)(using r)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val direct
+            : Option[Wrapper[RiftCheckedLeaf^{region}]^{region}]^{region} =
+          forward(10)(using region)
+        val forwardedTrue
+            : Option[Wrapper[RiftCheckedLeaf^{region}]^{region}]^{region} =
+          branch(20, true)(using region)
+        val forwardedFalse
+            : Option[Wrapper[RiftCheckedLeaf^{region}]^{region}]^{region} =
+          branch(30, false)(using region)
+        val directWrapper
+            : Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          direct.get
+        val forwardedTrueWrapper
+            : Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          forwardedTrue.get
+        val forwardedFalseWrapper
+            : Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          forwardedFalse.get
+        val directFn = directWrapper.make
+        val forwardedTrueFn = forwardedTrueWrapper.make
+        val forwardedFalseFn = forwardedFalseWrapper.make
+        val directLeaf: RiftCheckedLeaf^{region} = directFn(2)
+        val forwardedTrueLeaf: RiftCheckedLeaf^{region} =
+          forwardedTrueFn(2)
+        val forwardedFalseLeaf: RiftCheckedLeaf^{region} =
+          forwardedFalseFn(2)
+        directLeaf.value + forwardedTrueLeaf.value + forwardedFalseLeaf.value -
+          12 - 22 - 33 + 42 +
+          (System.identityHashCode(direct) & 0) +
+          (System.identityHashCode(forwardedTrue) & 0) +
+          (System.identityHashCode(forwardedFalse) & 0) +
+          (System.identityHashCode(directWrapper) & 0) +
+          (System.identityHashCode(forwardedTrueWrapper) & 0) +
+          (System.identityHashCode(forwardedFalseWrapper) & 0) +
+          (System.identityHashCode(directFn) & 0) +
+          (System.identityHashCode(forwardedTrueFn) & 0) +
+          (System.identityHashCode(forwardedFalseFn) & 0) +
+          (System.identityHashCode(directLeaf) & 0) +
+          (System.identityHashCode(forwardedTrueLeaf) & 0) +
+          (System.identityHashCode(forwardedFalseLeaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected direct and branch-forwarded typed Option plus wrapper, inline closure values, and closure-body allocations to be region allocated, observed $delta region objects",
+        delta >= 12L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def scopedRegionInfersForwardedMethodReturnedSomeWrapperNestedPayloadAllocation()
       : Unit = {
     RiftRegion.init(1)
@@ -7925,6 +8434,53 @@ class RiftRegionCheckedTest {
     }
   }
 
+  @Test def scopedRegionInfersRawSomeOptionDirectNestedWrapperPayloadAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      final class OtherLeaf(val value: Int)
+      final class Wrapper[A <: Object^](val value: A)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val some: Some[Wrapper[RiftCheckedLeaf^{region}]^{region}]^{region} =
+          Some[Wrapper[RiftCheckedLeaf^{region}]^{region}](
+            new Wrapper[RiftCheckedLeaf^{region}](new RiftCheckedLeaf(40))
+          )
+        val option: Option[Wrapper[OtherLeaf^{region}]^{region}]^{region} =
+          Option[Wrapper[OtherLeaf^{region}]^{region}](
+            new Wrapper[OtherLeaf^{region}](new OtherLeaf(50))
+          )
+
+        val leftWrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          some.value
+        val rightWrapper: Wrapper[OtherLeaf^{region}]^{region} =
+          option.get
+        val leftLeaf: RiftCheckedLeaf^{region} = leftWrapper.value
+        val rightLeaf: OtherLeaf^{region} = rightWrapper.value
+
+        leftLeaf.value + rightLeaf.value - 48 +
+          (System.identityHashCode(some) & 0) +
+          (System.identityHashCode(option) & 0) +
+          (System.identityHashCode(leftWrapper) & 0) +
+          (System.identityHashCode(rightWrapper) & 0) +
+          (System.identityHashCode(leftLeaf) & 0) +
+          (System.identityHashCode(rightLeaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected raw Some/Option wrappers plus nested wrapper payloads to be region allocated, observed $delta region objects",
+        delta >= 6L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
   @Test def scopedRegionInfersForwardedMethodReturnedEitherWrapperNestedPayloadAllocation()
       : Unit = {
     RiftRegion.init(1)
@@ -7985,6 +8541,1744 @@ class RiftRegionCheckedTest {
       assertTrue(
         s"expected direct and branch-forwarded method-returned Either plus wrapper and nested payloads to be region allocated, observed $delta region objects",
         delta >= 9L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedMethodReturnedTypedTupleWrapperInlineClosureValueAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      def makePair(base: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} = {
+        val owner = r
+        val first: Wrapper[RiftCheckedLeaf^{r}]^{r} =
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + base + keepOwner)
+            leaf
+          })
+        val second: Wrapper[RiftCheckedLeaf^{r}]^{r} =
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + base + 2 + keepOwner)
+            leaf
+          })
+        Tuple2[
+          Wrapper[RiftCheckedLeaf^{r}]^{r},
+          Wrapper[RiftCheckedLeaf^{r}]^{r}
+        ](first, second)
+      }
+
+      def forward(base: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} =
+        makePair(base)(using r)
+
+      def branch(base: Int, flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} =
+        if flag then forward(base)(using r)
+        else makePair(base + 1)(using r)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val direct
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          forward(10)(using region)
+        val forwardedTrue
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          branch(20, true)(using region)
+        val forwardedFalse
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          branch(30, false)(using region)
+
+        42 + (System.identityHashCode(direct) & 0) +
+          (System.identityHashCode(forwardedTrue) & 0) +
+          (System.identityHashCode(forwardedFalse) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected direct and branch-forwarded typed Tuple2 plus wrapper and inline closure values to be region allocated, observed $delta region objects",
+        delta >= 15L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedMethodReturnedTypedTupleWrapperFieldExtractionClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      def makePair(base: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} = {
+        val owner = r
+        val first: Wrapper[RiftCheckedLeaf^{r}]^{r} =
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + base + keepOwner)
+            leaf
+          })
+        val second: Wrapper[RiftCheckedLeaf^{r}]^{r} =
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + base + 2 + keepOwner)
+            leaf
+          })
+        Tuple2[
+          Wrapper[RiftCheckedLeaf^{r}]^{r},
+          Wrapper[RiftCheckedLeaf^{r}]^{r}
+        ](first, second)
+      }
+
+      def forward(base: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} =
+        makePair(base)(using r)
+
+      def branch(base: Int, flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} =
+        if flag then forward(base)(using r)
+        else makePair(base + 1)(using r)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val direct
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          forward(10)(using region)
+        val forwardedTrue
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          branch(20, true)(using region)
+        val forwardedFalse
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          branch(30, false)(using region)
+
+        val directFirst: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          direct._1
+        val directSecond: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          direct._2
+        val forwardedTrueFirst: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          forwardedTrue._1
+        val forwardedTrueSecond: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          forwardedTrue._2
+        val forwardedFalseFirst: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          forwardedFalse._1
+        val forwardedFalseSecond: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          forwardedFalse._2
+
+        val directFirstLeaf: RiftCheckedLeaf^{region} = directFirst.make(1)
+        val directSecondLeaf: RiftCheckedLeaf^{region} =
+          directSecond.make(2)
+        val forwardedTrueFirstLeaf: RiftCheckedLeaf^{region} =
+          forwardedTrueFirst.make(1)
+        val forwardedTrueSecondLeaf: RiftCheckedLeaf^{region} =
+          forwardedTrueSecond.make(2)
+        val forwardedFalseFirstLeaf: RiftCheckedLeaf^{region} =
+          forwardedFalseFirst.make(1)
+        val forwardedFalseSecondLeaf: RiftCheckedLeaf^{region} =
+          forwardedFalseSecond.make(2)
+
+        directFirstLeaf.value + directSecondLeaf.value +
+          forwardedTrueFirstLeaf.value + forwardedTrueSecondLeaf.value +
+          forwardedFalseFirstLeaf.value + forwardedFalseSecondLeaf.value -
+          95 + (System.identityHashCode(direct) & 0) +
+          (System.identityHashCode(forwardedTrue) & 0) +
+          (System.identityHashCode(forwardedFalse) & 0) +
+          (System.identityHashCode(directFirst) & 0) +
+          (System.identityHashCode(directSecond) & 0) +
+          (System.identityHashCode(forwardedTrueFirst) & 0) +
+          (System.identityHashCode(forwardedTrueSecond) & 0) +
+          (System.identityHashCode(forwardedFalseFirst) & 0) +
+          (System.identityHashCode(forwardedFalseSecond) & 0) +
+          (System.identityHashCode(directFirstLeaf) & 0) +
+          (System.identityHashCode(directSecondLeaf) & 0) +
+          (System.identityHashCode(forwardedTrueFirstLeaf) & 0) +
+          (System.identityHashCode(forwardedTrueSecondLeaf) & 0) +
+          (System.identityHashCode(forwardedFalseFirstLeaf) & 0) +
+          (System.identityHashCode(forwardedFalseSecondLeaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected direct and branch-forwarded typed Tuple2 field extraction plus wrapper, inline closure values, and closure-body allocations to be region allocated, observed $delta region objects",
+        delta >= 21L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedMethodReturnedDirectNestedTypedTupleWrapperInlineClosureValueAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      def makePair(base: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} = {
+        val owner = r
+        Tuple2[
+          Wrapper[RiftCheckedLeaf^{r}]^{r},
+          Wrapper[RiftCheckedLeaf^{r}]^{r}
+        ](
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + base + keepOwner)
+            leaf
+          }),
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + base + 2 + keepOwner)
+            leaf
+          })
+        )
+      }
+
+      def forward(base: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} =
+        makePair(base)(using r)
+
+      def branch(base: Int, flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} =
+        if flag then forward(base)(using r)
+        else makePair(base + 1)(using r)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val direct
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          forward(10)(using region)
+        val forwardedTrue
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          branch(20, true)(using region)
+        val forwardedFalse
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          branch(30, false)(using region)
+
+        42 + (System.identityHashCode(direct) & 0) +
+          (System.identityHashCode(forwardedTrue) & 0) +
+          (System.identityHashCode(forwardedFalse) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected direct and branch-forwarded direct-nested typed Tuple2 plus wrapper and inline closure values to be region allocated, observed $delta region objects",
+        delta >= 15L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersPolymorphicTupleFactoryWrapperLocalOperandInlineClosureValueAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      def make[A, B](using r: RiftRegion.ScopedRegion^)(
+          left: A^{r},
+          right: B^{r}
+      ): Tuple2[A^{r}, B^{r}]^{r} =
+        Tuple2(left, right)
+
+      def makePair(base: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} = {
+        val owner = r
+        val first: Wrapper[RiftCheckedLeaf^{r}]^{r} =
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + base + keepOwner)
+            leaf
+          })
+        val second: Wrapper[RiftCheckedLeaf^{r}]^{r} =
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + base + 2 + keepOwner)
+            leaf
+          })
+        make[
+          Wrapper[RiftCheckedLeaf^{r}],
+          Wrapper[RiftCheckedLeaf^{r}]
+        ](using r)(first, second)
+      }
+
+      def forward(base: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} =
+        makePair(base)(using r)
+
+      def branch(base: Int, flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} =
+        if flag then forward(base)(using r)
+        else makePair(base + 1)(using r)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val direct
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          forward(10)(using region)
+        val forwardedTrue
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          branch(20, true)(using region)
+        val forwardedFalse
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          branch(30, false)(using region)
+
+        42 + (System.identityHashCode(direct) & 0) +
+          (System.identityHashCode(forwardedTrue) & 0) +
+          (System.identityHashCode(forwardedFalse) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected polymorphic Tuple2 factory bridge plus wrapper locals and inline closure values to be region allocated, observed $delta region objects",
+        delta >= 15L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOwnedTuple2WrapperLocalOperandInlineClosureValueAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      def makePair(base: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} = {
+        val owner = r
+        val first: Wrapper[RiftCheckedLeaf^{r}]^{r} =
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + base + keepOwner)
+            leaf
+          })
+        val second: Wrapper[RiftCheckedLeaf^{r}]^{r} =
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + base + 2 + keepOwner)
+            leaf
+          })
+        RiftRegion.ownedTuple2[
+          Wrapper[RiftCheckedLeaf^{r}],
+          Wrapper[RiftCheckedLeaf^{r}]
+        ](using r)(first, second)
+      }
+
+      def forward(base: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} =
+        makePair(base)(using r)
+
+      def branch(base: Int, flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} =
+        if flag then forward(base)(using r)
+        else makePair(base + 1)(using r)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val direct
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          forward(10)(using region)
+        val forwardedTrue
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          branch(20, true)(using region)
+        val forwardedFalse
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          branch(30, false)(using region)
+
+        42 + (System.identityHashCode(direct) & 0) +
+          (System.identityHashCode(forwardedTrue) & 0) +
+          (System.identityHashCode(forwardedFalse) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected RiftRegion.ownedTuple2 bridge plus wrapper locals and inline closure values to be region allocated, observed $delta region objects",
+        delta >= 15L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOwnedTuple2DirectNestedWrapperClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      def makePair(base: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} = {
+        val owner = r
+        RiftRegion.ownedTuple2[
+          Wrapper[RiftCheckedLeaf^{r}],
+          Wrapper[RiftCheckedLeaf^{r}]
+        ](using r)(
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + base + keepOwner)
+            leaf
+          }),
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + base + 2 + keepOwner)
+            leaf
+          })
+        )
+      }
+
+      def forward(base: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} =
+        makePair(base)(using r)
+
+      def branch(base: Int, flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Tuple2[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} =
+        if flag then forward(base)(using r)
+        else makePair(base + 1)(using r)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val direct
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          forward(10)(using region)
+        val forwardedTrue
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          branch(20, true)(using region)
+        val forwardedFalse
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          branch(30, false)(using region)
+
+        val directFirst: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          direct._1
+        val directSecond: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          direct._2
+        val forwardedTrueFirst: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          forwardedTrue._1
+        val forwardedTrueSecond: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          forwardedTrue._2
+        val forwardedFalseFirst: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          forwardedFalse._1
+        val forwardedFalseSecond: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          forwardedFalse._2
+
+        val directFirstLeaf: RiftCheckedLeaf^{region} = directFirst.make(1)
+        val directSecondLeaf: RiftCheckedLeaf^{region} =
+          directSecond.make(2)
+        val forwardedTrueFirstLeaf: RiftCheckedLeaf^{region} =
+          forwardedTrueFirst.make(1)
+        val forwardedTrueSecondLeaf: RiftCheckedLeaf^{region} =
+          forwardedTrueSecond.make(2)
+        val forwardedFalseFirstLeaf: RiftCheckedLeaf^{region} =
+          forwardedFalseFirst.make(1)
+        val forwardedFalseSecondLeaf: RiftCheckedLeaf^{region} =
+          forwardedFalseSecond.make(2)
+
+        directFirstLeaf.value + directSecondLeaf.value +
+          forwardedTrueFirstLeaf.value + forwardedTrueSecondLeaf.value +
+          forwardedFalseFirstLeaf.value + forwardedFalseSecondLeaf.value -
+          95 + (System.identityHashCode(direct) & 0) +
+          (System.identityHashCode(forwardedTrue) & 0) +
+          (System.identityHashCode(forwardedFalse) & 0) +
+          (System.identityHashCode(directFirst) & 0) +
+          (System.identityHashCode(directSecond) & 0) +
+          (System.identityHashCode(forwardedTrueFirst) & 0) +
+          (System.identityHashCode(forwardedTrueSecond) & 0) +
+          (System.identityHashCode(forwardedFalseFirst) & 0) +
+          (System.identityHashCode(forwardedFalseSecond) & 0) +
+          (System.identityHashCode(directFirstLeaf) & 0) +
+          (System.identityHashCode(directSecondLeaf) & 0) +
+          (System.identityHashCode(forwardedTrueFirstLeaf) & 0) +
+          (System.identityHashCode(forwardedTrueSecondLeaf) & 0) +
+          (System.identityHashCode(forwardedFalseFirstLeaf) & 0) +
+          (System.identityHashCode(forwardedFalseSecondLeaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected RiftRegion.ownedTuple2 direct-nested wrapper, inline closure values, and closure-body allocations to be region allocated, observed $delta region objects",
+        delta >= 21L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOwnedTuple2SelectWrapperClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val owner = region
+
+        val firstLeftSource: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          new Wrapper[RiftCheckedLeaf^{region}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + 40 + keepOwner)
+            leaf
+          })
+        val firstRightSource: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          new Wrapper[RiftCheckedLeaf^{region}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + 41 + keepOwner)
+            leaf
+          })
+        val secondLeftSource: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          new Wrapper[RiftCheckedLeaf^{region}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + 50 + keepOwner)
+            leaf
+          })
+        val secondRightSource: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          new Wrapper[RiftCheckedLeaf^{region}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + 51 + keepOwner)
+            leaf
+          })
+
+        val firstSource
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          RiftRegion.ownedTuple2[
+            Wrapper[RiftCheckedLeaf^{region}],
+            Wrapper[RiftCheckedLeaf^{region}]
+          ](using region)(firstLeftSource, firstRightSource)
+        val secondSource
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          RiftRegion.ownedTuple2[
+            Wrapper[RiftCheckedLeaf^{region}],
+            Wrapper[RiftCheckedLeaf^{region}]
+          ](using region)(secondLeftSource, secondRightSource)
+
+        val first
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          RiftRegion.ownedSelect[
+            Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]
+          ](using region)(true, firstSource, secondSource)
+        val second
+            : Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          RiftRegion.ownedSelect[
+            Tuple2[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]
+          ](using region)(false, firstSource, secondSource)
+
+        val firstLeft: Wrapper[RiftCheckedLeaf^{region}]^{region} = first._1
+        val firstRight: Wrapper[RiftCheckedLeaf^{region}]^{region} = first._2
+        val secondLeft: Wrapper[RiftCheckedLeaf^{region}]^{region} = second._1
+        val secondRight: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          second._2
+
+        val firstLeftLeaf: RiftCheckedLeaf^{region} = firstLeft.make(2)
+        val firstRightLeaf: RiftCheckedLeaf^{region} = firstRight.make(3)
+        val secondLeftLeaf: RiftCheckedLeaf^{region} = secondLeft.make(2)
+        val secondRightLeaf: RiftCheckedLeaf^{region} = secondRight.make(3)
+
+        firstLeftLeaf.value + firstRightLeaf.value +
+          secondLeftLeaf.value + secondRightLeaf.value - 192 + 42 +
+          (System.identityHashCode(first) & 0) +
+          (System.identityHashCode(second) & 0) +
+          (System.identityHashCode(firstLeft) & 0) +
+          (System.identityHashCode(firstRight) & 0) +
+          (System.identityHashCode(secondLeft) & 0) +
+          (System.identityHashCode(secondRight) & 0) +
+          (System.identityHashCode(firstLeftLeaf) & 0) +
+          (System.identityHashCode(firstRightLeaf) & 0) +
+          (System.identityHashCode(secondLeftLeaf) & 0) +
+          (System.identityHashCode(secondRightLeaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected selected owned Tuple2 aliases, wrapper closures, and closure-body allocations to be region allocated, observed $delta region objects",
+        delta >= 14L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersForwardedMethodReturnedTypedEitherWrapperInlineClosureValueAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      import scala.util.*
+
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      def makeWrapper(value: Int, left: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Either[Wrapper[RiftCheckedLeaf^{r}]^{r}, Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} = {
+        val owner = r
+        val wrapper: Wrapper[RiftCheckedLeaf^{r}]^{r} =
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + value + keepOwner)
+            leaf
+          })
+        if left then
+          Left[
+            Wrapper[RiftCheckedLeaf^{r}]^{r},
+            Wrapper[RiftCheckedLeaf^{r}]^{r}
+          ](wrapper)
+        else
+          Right[
+            Wrapper[RiftCheckedLeaf^{r}]^{r},
+            Wrapper[RiftCheckedLeaf^{r}]^{r}
+          ](wrapper)
+      }
+
+      def forward(value: Int, left: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Either[Wrapper[RiftCheckedLeaf^{r}]^{r}, Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} =
+        makeWrapper(value, left)(using r)
+
+      def branch(value: Int, flag: Boolean, left: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Either[Wrapper[RiftCheckedLeaf^{r}]^{r}, Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} =
+        if flag then forward(value, left)(using r)
+        else makeWrapper(value + 1, left)(using r)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val direct
+            : Either[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          forward(10, true)(using region)
+        val forwardedTrue
+            : Either[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          branch(20, true, false)(using region)
+        val forwardedFalse
+            : Either[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          branch(30, false, true)(using region)
+
+        42 + (System.identityHashCode(direct) & 0) +
+          (System.identityHashCode(forwardedTrue) & 0) +
+          (System.identityHashCode(forwardedFalse) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected direct and branch-forwarded typed Either plus wrapper and inline closure values to be region allocated, observed $delta region objects",
+        delta >= 9L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOwnedEitherWrapperInlineClosureValueAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      import scala.util.*
+
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      def makeWrapper(value: Int, left: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Either[Wrapper[RiftCheckedLeaf^{r}]^{r}, Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} = {
+        val owner = r
+        val wrapper: Wrapper[RiftCheckedLeaf^{r}]^{r} =
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + value + keepOwner)
+            leaf
+          })
+        if left then
+          RiftRegion.ownedLeft[
+            Wrapper[RiftCheckedLeaf^{r}],
+            Wrapper[RiftCheckedLeaf^{r}]
+          ](using r)(wrapper)
+        else
+          RiftRegion.ownedRight[
+            Wrapper[RiftCheckedLeaf^{r}],
+            Wrapper[RiftCheckedLeaf^{r}]
+          ](using r)(wrapper)
+      }
+
+      def forward(value: Int, left: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Either[Wrapper[RiftCheckedLeaf^{r}]^{r}, Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} =
+        makeWrapper(value, left)(using r)
+
+      def branch(value: Int, flag: Boolean, left: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Either[Wrapper[RiftCheckedLeaf^{r}]^{r}, Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} =
+        if flag then forward(value, left)(using r)
+        else makeWrapper(value + 1, left)(using r)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val direct
+            : Either[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          forward(10, true)(using region)
+        val forwardedTrue
+            : Either[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          branch(20, true, false)(using region)
+        val forwardedFalse
+            : Either[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          branch(30, false, true)(using region)
+
+        42 + (System.identityHashCode(direct) & 0) +
+          (System.identityHashCode(forwardedTrue) & 0) +
+          (System.identityHashCode(forwardedFalse) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected RiftRegion.ownedLeft/ownedRight plus wrapper and inline closure values to be region allocated, observed $delta region objects",
+        delta >= 9L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOwnedEitherDirectNestedWrapperClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      import scala.util.*
+
+      final class RightLeaf(val value: Int)
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      def makeLeft(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Left[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RightLeaf^{r}]^{r}
+      ]^{r} = {
+        val owner = r
+        RiftRegion.ownedLeft[
+          Wrapper[RiftCheckedLeaf^{r}],
+          Wrapper[RightLeaf^{r}]
+        ](using r)(
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + value + keepOwner)
+            leaf
+          })
+        )
+      }
+
+      def makeRight(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Right[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RightLeaf^{r}]^{r}
+      ]^{r} = {
+        val owner = r
+        RiftRegion.ownedRight[
+          Wrapper[RiftCheckedLeaf^{r}],
+          Wrapper[RightLeaf^{r}]
+        ](using r)(
+          new Wrapper[RightLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RightLeaf^{owner} = new RightLeaf(n + value + keepOwner)
+            leaf
+          })
+        )
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val leftCase
+            : Left[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RightLeaf^{region}]^{region}
+            ]^{region} =
+          makeLeft(40)(using region)
+        val rightCase
+            : Right[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RightLeaf^{region}]^{region}
+            ]^{region} =
+          makeRight(50)(using region)
+
+        val leftWrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          RiftRegion.ownedLeftValue[
+            Wrapper[RiftCheckedLeaf^{region}],
+            Wrapper[RightLeaf^{region}]
+          ](using region)(leftCase)
+        val rightWrapper: Wrapper[RightLeaf^{region}]^{region} =
+          RiftRegion.ownedRightValue[
+            Wrapper[RiftCheckedLeaf^{region}],
+            Wrapper[RightLeaf^{region}]
+          ](using region)(rightCase)
+
+        val leftLeaf: RiftCheckedLeaf^{region} = leftWrapper.make(2)
+        val rightLeaf: RightLeaf^{region} = rightWrapper.make(3)
+
+        leftLeaf.value + rightLeaf.value - 95 + 42 +
+          (System.identityHashCode(leftCase) & 0) +
+          (System.identityHashCode(rightCase) & 0) +
+          (System.identityHashCode(leftWrapper) & 0) +
+          (System.identityHashCode(rightWrapper) & 0) +
+          (System.identityHashCode(leftLeaf) & 0) +
+          (System.identityHashCode(rightLeaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected owned Either direct-nested wrapper, inline closure values, and closure-body allocations to be region allocated, observed $delta region objects",
+        delta >= 8L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOwnedEitherValueWrapperClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      import scala.util.*
+
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      def makeWrapper(value: Int, left: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Either[Wrapper[RiftCheckedLeaf^{r}]^{r}, Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} = {
+        val owner = r
+        val wrapper: Wrapper[RiftCheckedLeaf^{r}]^{r} =
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + value + keepOwner)
+            leaf
+          })
+        if left then
+          RiftRegion.ownedLeft[
+            Wrapper[RiftCheckedLeaf^{r}],
+            Wrapper[RiftCheckedLeaf^{r}]
+          ](using r)(wrapper)
+        else
+          RiftRegion.ownedRight[
+            Wrapper[RiftCheckedLeaf^{r}],
+            Wrapper[RiftCheckedLeaf^{r}]
+          ](using r)(wrapper)
+      }
+
+      def forward(value: Int, left: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Either[Wrapper[RiftCheckedLeaf^{r}]^{r}, Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} =
+        makeWrapper(value, left)(using r)
+
+      def branch(value: Int, flag: Boolean, left: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Either[Wrapper[RiftCheckedLeaf^{r}]^{r}, Wrapper[RiftCheckedLeaf^{r}]^{r}]^{r} =
+        if flag then forward(value, left)(using r)
+        else makeWrapper(value + 1, left)(using r)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val direct
+            : Either[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          forward(10, true)(using region)
+        val forwardedTrue
+            : Either[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          branch(20, true, false)(using region)
+        val forwardedFalse
+            : Either[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          branch(30, false, true)(using region)
+
+        val directWrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          RiftRegion.ownedEitherValue[Wrapper[RiftCheckedLeaf^{region}]](
+            using region
+          )(direct)
+        val forwardedTrueWrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          RiftRegion.ownedEitherValue[Wrapper[RiftCheckedLeaf^{region}]](
+            using region
+          )(forwardedTrue)
+        val forwardedFalseWrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          RiftRegion.ownedEitherValue[Wrapper[RiftCheckedLeaf^{region}]](
+            using region
+          )(forwardedFalse)
+
+        val directLeaf: RiftCheckedLeaf^{region} = directWrapper.make(1)
+        val forwardedTrueLeaf: RiftCheckedLeaf^{region} =
+          forwardedTrueWrapper.make(2)
+        val forwardedFalseLeaf: RiftCheckedLeaf^{region} =
+          forwardedFalseWrapper.make(3)
+
+        directLeaf.value + forwardedTrueLeaf.value +
+          forwardedFalseLeaf.value - 67 + 42 +
+          (System.identityHashCode(direct) & 0) +
+          (System.identityHashCode(forwardedTrue) & 0) +
+          (System.identityHashCode(forwardedFalse) & 0) +
+          (System.identityHashCode(directWrapper) & 0) +
+          (System.identityHashCode(forwardedTrueWrapper) & 0) +
+          (System.identityHashCode(forwardedFalseWrapper) & 0) +
+          (System.identityHashCode(directLeaf) & 0) +
+          (System.identityHashCode(forwardedTrueLeaf) & 0) +
+          (System.identityHashCode(forwardedFalseLeaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected owned Either extraction plus wrapper, inline closure values, and closure-body allocations to be region allocated, observed $delta region objects",
+        delta >= 12L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOwnedEitherFoldWrapperClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      import scala.util.*
+
+      final class RightLeaf(val value: Int)
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val owner = region
+        val leftEither
+            : Either[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RightLeaf^{region}]^{region}
+            ]^{region} =
+          RiftRegion.ownedLeft[
+            Wrapper[RiftCheckedLeaf^{region}],
+            Wrapper[RightLeaf^{region}]
+          ](using region)(
+            new Wrapper[RiftCheckedLeaf^{region}]((n: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(40 + n + keepOwner)
+              leaf
+            })
+          )
+        val rightEither
+            : Either[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RightLeaf^{region}]^{region}
+            ]^{region} =
+          RiftRegion.ownedRight[
+            Wrapper[RiftCheckedLeaf^{region}],
+            Wrapper[RightLeaf^{region}]
+          ](using region)(
+            new Wrapper[RightLeaf^{region}]((n: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RightLeaf^{owner} =
+                new RightLeaf(50 + n + keepOwner)
+              leaf
+            })
+          )
+
+        val leftTotal = RiftRegion.ownedEitherFold(using region)(leftEither)(
+          leftWrapper =>
+            val leaf: RiftCheckedLeaf^{region} = leftWrapper.make(2)
+            leaf.value,
+          rightWrapper =>
+            val leaf: RightLeaf^{region} = rightWrapper.make(3)
+            leaf.value
+        )
+        val rightTotal = RiftRegion.ownedEitherFold(using region)(rightEither)(
+          leftWrapper =>
+            val leaf: RiftCheckedLeaf^{region} = leftWrapper.make(2)
+            leaf.value,
+          rightWrapper =>
+            val leaf: RightLeaf^{region} = rightWrapper.make(3)
+            leaf.value - 11
+        )
+
+        leftTotal + rightTotal - 84 + 42 +
+          (System.identityHashCode(leftEither) & 0) +
+          (System.identityHashCode(rightEither) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected owned Either fold plus branch-specific wrappers, inline closure values, and closure-body allocations to be region allocated, observed $delta region objects",
+        delta >= 8L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOwnedEitherDifferingPayloadAllocation(): Unit = {
+    RiftRegion.init(1)
+    try {
+      final class RightLeaf(val value: Int)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val first: RiftCheckedLeaf^{region} = new RiftCheckedLeaf(40)
+        val second: RightLeaf^{region} = new RightLeaf(50)
+        val leftEither
+            : Either[RiftCheckedLeaf^{region}, RightLeaf^{region}]^{region} =
+          RiftRegion.ownedEither(using region)(true, first, second)
+        val rightEither
+            : Either[RiftCheckedLeaf^{region}, RightLeaf^{region}]^{region} =
+          RiftRegion.ownedEither(using region)(false, first, second)
+        val leftTotal = RiftRegion.ownedEitherFold(using region)(leftEither)(
+          _.value,
+          _.value
+        )
+        val rightTotal = RiftRegion.ownedEitherFold(using region)(rightEither)(
+          _.value,
+          _.value
+        )
+        leftTotal + rightTotal - 90 + 42 +
+          (System.identityHashCode(leftEither) & 0) +
+          (System.identityHashCode(rightEither) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected differing-payload owned Either values to be region allocated, observed $delta region objects",
+        delta >= 4L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOwnedLeftRightValueWrapperClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      import scala.util.*
+
+      final class RightLeaf(val value: Int)
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      def makeLeft(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Left[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RightLeaf^{r}]^{r}
+      ]^{r} = {
+        val owner = r
+        val wrapper: Wrapper[RiftCheckedLeaf^{r}]^{r} =
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + value + keepOwner)
+            leaf
+          })
+        RiftRegion.ownedLeft[
+          Wrapper[RiftCheckedLeaf^{r}],
+          Wrapper[RightLeaf^{r}]
+        ](using r)(wrapper)
+      }
+
+      def makeRight(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Right[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RightLeaf^{r}]^{r}
+      ]^{r} = {
+        val owner = r
+        val wrapper: Wrapper[RightLeaf^{r}]^{r} =
+          new Wrapper[RightLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RightLeaf^{owner} = new RightLeaf(n + value + keepOwner)
+            leaf
+          })
+        RiftRegion.ownedRight[
+          Wrapper[RiftCheckedLeaf^{r}],
+          Wrapper[RightLeaf^{r}]
+        ](using r)(wrapper)
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val leftCase
+            : Left[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RightLeaf^{region}]^{region}
+            ]^{region} =
+          makeLeft(40)(using region)
+        val rightCase
+            : Right[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RightLeaf^{region}]^{region}
+            ]^{region} =
+          makeRight(50)(using region)
+
+        val leftWrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          RiftRegion.ownedLeftValue[
+            Wrapper[RiftCheckedLeaf^{region}],
+            Wrapper[RightLeaf^{region}]
+          ](using region)(leftCase)
+        val rightWrapper: Wrapper[RightLeaf^{region}]^{region} =
+          RiftRegion.ownedRightValue[
+            Wrapper[RiftCheckedLeaf^{region}],
+            Wrapper[RightLeaf^{region}]
+          ](using region)(rightCase)
+
+        val leftLeaf: RiftCheckedLeaf^{region} = leftWrapper.make(2)
+        val rightLeaf: RightLeaf^{region} = rightWrapper.make(3)
+
+        leftLeaf.value + rightLeaf.value - 95 + 42 +
+          (System.identityHashCode(leftCase) & 0) +
+          (System.identityHashCode(rightCase) & 0) +
+          (System.identityHashCode(leftWrapper) & 0) +
+          (System.identityHashCode(rightWrapper) & 0) +
+          (System.identityHashCode(leftLeaf) & 0) +
+          (System.identityHashCode(rightLeaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected owned Left/Right extraction plus wrapper, inline closure values, and closure-body allocations to be region allocated, observed $delta region objects",
+        delta >= 8L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRawConcreteLeftRightValueWrapperClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      import scala.util.*
+
+      final class RightLeaf(val value: Int)
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      def makeLeft(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Left[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RightLeaf^{r}]^{r}
+      ]^{r} = {
+        val owner = r
+        val wrapper: Wrapper[RiftCheckedLeaf^{r}]^{r} =
+          new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RiftCheckedLeaf^{owner} =
+              new RiftCheckedLeaf(n + value + keepOwner)
+            leaf
+          })
+        RiftRegion.ownedLeft[
+          Wrapper[RiftCheckedLeaf^{r}],
+          Wrapper[RightLeaf^{r}]
+        ](using r)(wrapper)
+      }
+
+      def makeRight(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Right[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RightLeaf^{r}]^{r}
+      ]^{r} = {
+        val owner = r
+        val wrapper: Wrapper[RightLeaf^{r}]^{r} =
+          new Wrapper[RightLeaf^{r}]((n: Int) => {
+            val keepOwner = System.identityHashCode(owner) & 0
+            val leaf: RightLeaf^{owner} = new RightLeaf(n + value + keepOwner)
+            leaf
+          })
+        RiftRegion.ownedRight[
+          Wrapper[RiftCheckedLeaf^{r}],
+          Wrapper[RightLeaf^{r}]
+        ](using r)(wrapper)
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val leftCase
+            : Left[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RightLeaf^{region}]^{region}
+            ]^{region} =
+          makeLeft(40)(using region)
+        val rightCase
+            : Right[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RightLeaf^{region}]^{region}
+            ]^{region} =
+          makeRight(50)(using region)
+
+        val leftWrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          leftCase.value
+        val rightWrapper: Wrapper[RightLeaf^{region}]^{region} =
+          rightCase.value
+
+        val leftLeaf: RiftCheckedLeaf^{region} = leftWrapper.make(2)
+        val rightLeaf: RightLeaf^{region} = rightWrapper.make(3)
+
+        leftLeaf.value + rightLeaf.value - 95 + 42 +
+          (System.identityHashCode(leftCase) & 0) +
+          (System.identityHashCode(rightCase) & 0) +
+          (System.identityHashCode(leftWrapper) & 0) +
+          (System.identityHashCode(rightWrapper) & 0) +
+          (System.identityHashCode(leftLeaf) & 0) +
+          (System.identityHashCode(rightLeaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected raw concrete Left.value/Right.value extraction plus wrapper, inline closure values, and closure-body allocations to be region allocated, observed $delta region objects",
+        delta >= 8L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRawConcreteLeftRightValueWrapperPayloadAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      import scala.util.*
+
+      final class RightLeaf(val value: Int)
+      final class Wrapper[A <: Object^](val value: A)
+
+      def makeLeft(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Left[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RightLeaf^{r}]^{r}
+      ]^{r} = {
+        val wrapper: Wrapper[RiftCheckedLeaf^{r}]^{r} =
+          new Wrapper[RiftCheckedLeaf^{r}](new RiftCheckedLeaf(value))
+        RiftRegion.ownedLeft[
+          Wrapper[RiftCheckedLeaf^{r}],
+          Wrapper[RightLeaf^{r}]
+        ](using r)(wrapper)
+      }
+
+      def makeRight(value: Int)(using
+          r: RiftRegion.ScopedRegion^
+      ): Right[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RightLeaf^{r}]^{r}
+      ]^{r} = {
+        val wrapper: Wrapper[RightLeaf^{r}]^{r} =
+          new Wrapper[RightLeaf^{r}](new RightLeaf(value))
+        RiftRegion.ownedRight[
+          Wrapper[RiftCheckedLeaf^{r}],
+          Wrapper[RightLeaf^{r}]
+        ](using r)(wrapper)
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val leftCase
+            : Left[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RightLeaf^{region}]^{region}
+            ]^{region} =
+          makeLeft(40)(using region)
+        val rightCase
+            : Right[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RightLeaf^{region}]^{region}
+            ]^{region} =
+          makeRight(50)(using region)
+
+        val leftWrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          leftCase.value
+        val rightWrapper: Wrapper[RightLeaf^{region}]^{region} =
+          rightCase.value
+        val leftLeaf: RiftCheckedLeaf^{region} = leftWrapper.value
+        val rightLeaf: RightLeaf^{region} = rightWrapper.value
+
+        leftLeaf.value + rightLeaf.value - 48 +
+          (System.identityHashCode(leftCase) & 0) +
+          (System.identityHashCode(rightCase) & 0) +
+          (System.identityHashCode(leftWrapper) & 0) +
+          (System.identityHashCode(rightWrapper) & 0) +
+          (System.identityHashCode(leftLeaf) & 0) +
+          (System.identityHashCode(rightLeaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected raw concrete Left.value/Right.value extraction plus wrapper payloads to be region allocated, observed $delta region objects",
+        delta >= 6L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRawConcreteLeftRightWrapperClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      import scala.util.*
+
+      final class RightLeaf(val value: Int)
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val owner = region
+        val leftCase
+            : Left[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RightLeaf^{region}]^{region}
+            ]^{region} =
+          Left[
+            Wrapper[RiftCheckedLeaf^{region}]^{region},
+            Wrapper[RightLeaf^{region}]^{region}
+          ](
+            new Wrapper[RiftCheckedLeaf^{region}]((n: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(n + 40 + keepOwner)
+              leaf
+            })
+          )
+        val rightCase
+            : Right[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RightLeaf^{region}]^{region}
+            ]^{region} =
+          Right[
+            Wrapper[RiftCheckedLeaf^{region}]^{region},
+            Wrapper[RightLeaf^{region}]^{region}
+          ](
+            new Wrapper[RightLeaf^{region}]((n: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RightLeaf^{owner} =
+                new RightLeaf(n + 50 + keepOwner)
+              leaf
+            })
+          )
+
+        val leftWrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          leftCase.value
+        val rightWrapper: Wrapper[RightLeaf^{region}]^{region} =
+          rightCase.value
+
+        val leftLeaf: RiftCheckedLeaf^{region} = leftWrapper.make(2)
+        val rightLeaf: RightLeaf^{region} = rightWrapper.make(3)
+
+        leftLeaf.value + rightLeaf.value - 95 + 42 +
+          (System.identityHashCode(leftCase) & 0) +
+          (System.identityHashCode(rightCase) & 0) +
+          (System.identityHashCode(leftWrapper) & 0) +
+          (System.identityHashCode(rightWrapper) & 0) +
+          (System.identityHashCode(leftLeaf) & 0) +
+          (System.identityHashCode(rightLeaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected raw concrete Left/Right construction plus raw value extraction, wrapper records, inline closure values, and closure-body allocations to be region allocated, observed $delta region objects",
+        delta >= 8L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersRawConcreteLeftRightWrapperPayloadAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      import scala.util.*
+
+      final class RightLeaf(val value: Int)
+      final class Wrapper[A <: Object^](val value: A)
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val leftCase
+            : Left[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RightLeaf^{region}]^{region}
+            ]^{region} =
+          Left[
+            Wrapper[RiftCheckedLeaf^{region}]^{region},
+            Wrapper[RightLeaf^{region}]^{region}
+          ](new Wrapper[RiftCheckedLeaf^{region}](new RiftCheckedLeaf(40)))
+        val rightCase
+            : Right[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RightLeaf^{region}]^{region}
+            ]^{region} =
+          Right[
+            Wrapper[RiftCheckedLeaf^{region}]^{region},
+            Wrapper[RightLeaf^{region}]^{region}
+          ](new Wrapper[RightLeaf^{region}](new RightLeaf(50)))
+
+        val leftWrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          leftCase.value
+        val rightWrapper: Wrapper[RightLeaf^{region}]^{region} =
+          rightCase.value
+        val leftLeaf: RiftCheckedLeaf^{region} = leftWrapper.value
+        val rightLeaf: RightLeaf^{region} = rightWrapper.value
+
+        leftLeaf.value + rightLeaf.value - 48 +
+          (System.identityHashCode(leftCase) & 0) +
+          (System.identityHashCode(rightCase) & 0) +
+          (System.identityHashCode(leftWrapper) & 0) +
+          (System.identityHashCode(rightWrapper) & 0) +
+          (System.identityHashCode(leftLeaf) & 0) +
+          (System.identityHashCode(rightLeaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected raw concrete Left/Right construction plus wrapper payloads to be region allocated, observed $delta region objects",
+        delta >= 6L
+      )
+    } finally {
+      RiftRegion.shutdown()
+    }
+  }
+
+  @Test def scopedRegionInfersOwnedEitherSelectWrapperClosureBodyAllocation()
+      : Unit = {
+    RiftRegion.init(1)
+    try {
+      import scala.util.*
+
+      final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+
+      def makeEither(flag: Boolean)(using
+          r: RiftRegion.ScopedRegion^
+      ): Either[
+        Wrapper[RiftCheckedLeaf^{r}]^{r},
+        Wrapper[RiftCheckedLeaf^{r}]^{r}
+      ]^{r} = {
+        val owner = r
+        val first
+            : Either[
+              Wrapper[RiftCheckedLeaf^{r}]^{r},
+              Wrapper[RiftCheckedLeaf^{r}]^{r}
+            ]^{r} =
+          RiftRegion.ownedLeft[
+            Wrapper[RiftCheckedLeaf^{r}],
+            Wrapper[RiftCheckedLeaf^{r}]
+          ](using r)(
+            new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(n + 40 + keepOwner)
+              leaf
+            })
+          )
+        val second
+            : Either[
+              Wrapper[RiftCheckedLeaf^{r}]^{r},
+              Wrapper[RiftCheckedLeaf^{r}]^{r}
+            ]^{r} =
+          RiftRegion.ownedRight[
+            Wrapper[RiftCheckedLeaf^{r}],
+            Wrapper[RiftCheckedLeaf^{r}]
+          ](using r)(
+            new Wrapper[RiftCheckedLeaf^{r}]((n: Int) => {
+              val keepOwner = System.identityHashCode(owner) & 0
+              val leaf: RiftCheckedLeaf^{owner} =
+                new RiftCheckedLeaf(n + 41 + keepOwner)
+              leaf
+            })
+          )
+        RiftRegion.ownedSelect[
+          Either[
+            Wrapper[RiftCheckedLeaf^{r}]^{r},
+            Wrapper[RiftCheckedLeaf^{r}]^{r}
+          ]
+        ](using r)(flag, first, second)
+      }
+
+      RiftAllocator.Impl.statsReset()
+      val before = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val total = RiftRegion.scoped { region ?=>
+        val first
+            : Either[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          makeEither(true)(using region)
+        val second
+            : Either[
+              Wrapper[RiftCheckedLeaf^{region}]^{region},
+              Wrapper[RiftCheckedLeaf^{region}]^{region}
+            ]^{region} =
+          makeEither(false)(using region)
+
+        val firstWrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          RiftRegion.ownedEitherValue[Wrapper[RiftCheckedLeaf^{region}]](
+            using region
+          )(first)
+        val secondWrapper: Wrapper[RiftCheckedLeaf^{region}]^{region} =
+          RiftRegion.ownedEitherValue[Wrapper[RiftCheckedLeaf^{region}]](
+            using region
+          )(second)
+
+        val firstLeaf: RiftCheckedLeaf^{region} = firstWrapper.make(2)
+        val secondLeaf: RiftCheckedLeaf^{region} = secondWrapper.make(2)
+
+        firstLeaf.value + secondLeaf.value - 85 + 42 +
+          (System.identityHashCode(first) & 0) +
+          (System.identityHashCode(second) & 0) +
+          (System.identityHashCode(firstWrapper) & 0) +
+          (System.identityHashCode(secondWrapper) & 0) +
+          (System.identityHashCode(firstLeaf) & 0) +
+          (System.identityHashCode(secondLeaf) & 0)
+      }
+      val after = rawSizeToLong(RiftAllocator.Impl.statsAllocObjectTotal())
+      val delta = after - before
+
+      assertEquals(42, total)
+      assertTrue(
+        s"expected selected owned Either aliases, wrapper closures, and closure-body allocations to be region allocated, observed $delta region objects",
+        delta >= 14L
       )
     } finally {
       RiftRegion.shutdown()
@@ -13566,9 +15860,9 @@ class RiftRegionCheckedTest {
     assertEquals(42, result)
   }
 
-  @Test def automaticInferenceLocalEscapeUsesRegionAllocation(): Unit = {
-    // Verify that local-escape allocations use region memory, not heap.
-    // If automatic inference works, statsAllocObjectTotal should increase.
+  @Test def automaticInferenceLocalEscapeDefaultsToHeapFallback(): Unit = {
+    // Broad local-escape automatic scopes are opt-in. The validated default
+    // keeps ordinary unannotated allocations on the GC heap.
     RiftAllocator.Impl.statsReset()
     val before = fromRawUSize(RiftAllocator.Impl.statsAllocObjectTotal()).toLong
     def compute(): Int =
@@ -13578,11 +15872,11 @@ class RiftRegionCheckedTest {
     val result = compute()
     val after = fromRawUSize(RiftAllocator.Impl.statsAllocObjectTotal()).toLong
     assertEquals(42 + 3 + 4, result)
-    // At least 2 region allocations should have occurred (AutoBox + AutoPair)
     val delta = after - before
-    assertTrue(
-      s"Expected region allocation delta >= 2, got $delta",
-      delta >= 2
+    assertEquals(
+      "Expected automatic local-escape allocations to use heap fallback by default",
+      0L,
+      delta
     )
   }
 }

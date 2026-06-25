@@ -30,6 +30,27 @@ trait NirGenType(using Context) {
     defnNir.USizeClass
   )
 
+  protected def riftClosureEffectHiddenOwnerSym(
+      sym: Symbol
+  ): Option[Symbol] =
+    // Hidden effect-owner parameters require rewriting the closure class
+    // environment and every generated adapter together. The current inference
+    // layer can still region-place closures whose owner is a normal captured
+    // value, but type-only effect owners must fall back until that bridge is
+    // implemented end to end.
+    None
+
+  protected def riftClosureEffectHiddenOwnerParamType(
+      sym: Symbol
+  ): Option[nir.Type] =
+    riftClosureEffectHiddenOwnerSym(sym).map { owner =>
+      val result = owner.info.resultType
+      val tpe =
+        if result == NoType || result.isInstanceOf[MethodType] then owner.info
+        else result
+      genType(tpe)
+    }
+
   extension (sym: Symbol)
     def isTraitOrInterface: Boolean =
       sym.is(Trait) || sym.isAllOf(JavaInterface)
@@ -359,7 +380,7 @@ trait NirGenType(using Context) {
     } else Map.empty
 
     val info = sym.info
-    for {
+    val params = for {
       (paramTypes, paramNames) <- info.paramInfoss zip info.paramNamess
       (paramType, paramName) <- paramTypes zip paramNames
     } yield {
@@ -368,5 +389,7 @@ trait NirGenType(using Context) {
       else if (isExtern) genExternType(paramType)
       else genType(paramType)
     }
+    if isExtern then params
+    else params ++ riftClosureEffectHiddenOwnerParamType(sym)
   }
 }

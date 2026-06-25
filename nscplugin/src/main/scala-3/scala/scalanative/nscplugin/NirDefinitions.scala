@@ -149,6 +149,76 @@ final class NirDefinitions()(using ctx: Context) {
       try Some(cls.requiredMethod("close"))
       catch case _: Throwable => None
     }
+  @tu lazy val RiftRegion_ownedScopedSomeInferred: Option[Symbol] =
+    RiftRegionModule.flatMap { mod =>
+      try Some(mod.requiredMethod("ownedScopedSomeInferred"))
+      catch case _: Throwable => None
+    }
+  @tu lazy val RiftRegion_ownedScopedOptionInferred: Option[Symbol] =
+    RiftRegionModule.flatMap { mod =>
+      try Some(mod.requiredMethod("ownedScopedOptionInferred"))
+      catch case _: Throwable => None
+    }
+  @tu lazy val RiftRegion_ownedOpenSomeInferred: Option[Symbol] =
+    RiftRegionModule.flatMap { mod =>
+      try Some(mod.requiredMethod("ownedOpenSomeInferred"))
+      catch case _: Throwable => None
+    }
+  @tu lazy val RiftRegion_ownedOpenOptionInferred: Option[Symbol] =
+    RiftRegionModule.flatMap { mod =>
+      try Some(mod.requiredMethod("ownedOpenOptionInferred"))
+      catch case _: Throwable => None
+    }
+  @tu lazy val RiftRegion_ownedOpenHandleSomeInferred: Option[Symbol] =
+    RiftRegionModule.flatMap { mod =>
+      try Some(mod.requiredMethod("ownedOpenHandleSomeInferred"))
+      catch case _: Throwable => None
+    }
+  @tu lazy val RiftRegion_ownedOpenHandleOptionInferred: Option[Symbol] =
+    RiftRegionModule.flatMap { mod =>
+      try Some(mod.requiredMethod("ownedOpenHandleOptionInferred"))
+      catch case _: Throwable => None
+    }
+  @tu lazy val RiftRegion_ownedScopedLeftInferred: Option[Symbol] =
+    RiftRegionModule.flatMap { mod =>
+      try Some(mod.requiredMethod("ownedScopedLeftInferred"))
+      catch case _: Throwable => None
+    }
+  @tu lazy val RiftRegion_ownedScopedRightInferred: Option[Symbol] =
+    RiftRegionModule.flatMap { mod =>
+      try Some(mod.requiredMethod("ownedScopedRightInferred"))
+      catch case _: Throwable => None
+    }
+  @tu lazy val RiftRegion_ownedOpenLeftInferred: Option[Symbol] =
+    RiftRegionModule.flatMap { mod =>
+      try Some(mod.requiredMethod("ownedOpenLeftInferred"))
+      catch case _: Throwable => None
+    }
+  @tu lazy val RiftRegion_ownedOpenRightInferred: Option[Symbol] =
+    RiftRegionModule.flatMap { mod =>
+      try Some(mod.requiredMethod("ownedOpenRightInferred"))
+      catch case _: Throwable => None
+    }
+  @tu lazy val RiftRegion_ownedOpenHandleLeftInferred: Option[Symbol] =
+    RiftRegionModule.flatMap { mod =>
+      try Some(mod.requiredMethod("ownedOpenHandleLeftInferred"))
+      catch case _: Throwable => None
+    }
+  @tu lazy val RiftRegion_ownedOpenHandleRightInferred: Option[Symbol] =
+    RiftRegionModule.flatMap { mod =>
+      try Some(mod.requiredMethod("ownedOpenHandleRightInferred"))
+      catch case _: Throwable => None
+    }
+  @tu lazy val RiftRegion_ownedLeftValue: Option[Symbol] =
+    RiftRegionModule.flatMap { mod =>
+      try Some(mod.requiredMethod("ownedLeftValue"))
+      catch case _: Throwable => None
+    }
+  @tu lazy val RiftRegion_ownedRightValue: Option[Symbol] =
+    RiftRegionModule.flatMap { mod =>
+      try Some(mod.requiredMethod("ownedRightValue"))
+      catch case _: Throwable => None
+    }
 
   // Runtime intriniscs
   @tu lazy val IntrinsicMarker = RuntimePackageClass.requiredMethod("intrinsic")

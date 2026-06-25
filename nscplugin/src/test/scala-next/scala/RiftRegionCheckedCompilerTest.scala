@@ -603,6 +603,39 @@ class RiftRegionCheckedCompilerTest {
       "Rift checked region allocation cannot store an unrooted heap object"
     )
 
+  @Test def tuple2IntegerValueOfCannotEnterRegionWithoutRoot(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |def bad(): java.lang.Integer =
+      |  RiftRegion.scoped { region ?=>
+      |    val boxed: java.lang.Integer = java.lang.Integer.valueOf(40)
+      |    val pair: Tuple2[java.lang.Integer, Int]^{region} =
+      |      Tuple2(boxed, 2)
+      |    pair._1
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def listFactoryCannotEnterRegionWithoutLibraryNodeSupport(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val box: Box^{region} = new Box(40)
+      |    val list: List[Box^{region}]^{region} = List(box)
+      |    list.head.value
+      |  }
+      |""".stripMargin,
+      "List[Box^{region}] is a pure type"
+    )
+
   @Test def tupleLiteralRegionPlacementRejectsUnrootedHeapMetadata(): Unit =
     assertDoesNotCompileWith("""
       |import scala.language.experimental.captureChecking
@@ -15375,6 +15408,527 @@ class RiftRegionCheckedCompilerTest {
       "does not conform"
     )
 
+  @Test def inferredOwnedSomeOptionCanStoreDirectNestedWrapperClosureBody()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean, useOption: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(value: Int, useOption: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      if useOption then
+      |        RiftRegion.ownedOption[Wrapper[Box^{r}]](using r)(
+      |          new Wrapper[Box^{r}](
+      |            (n: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: Box^{owner} = new Box(n + value + keepOwner)
+      |              box
+      |          )
+      |        )
+      |      else
+      |        RiftRegion.ownedSome[Wrapper[Box^{r}]](using r)(
+      |          new Wrapper[Box^{r}](
+      |            (n: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: Box^{owner} = new Box(n + value + keepOwner)
+      |              box
+      |          )
+      |        )
+      |
+      |    def branch(value: Int, flag: Boolean, useOption: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then makeWrapper(value, useOption)(using r)
+      |      else makeWrapper(value + 1, useOption)(using r)
+      |
+      |    val expected = if flag then 42 else 43
+      |    branch(40, flag, useOption)(using region).get.make(2).value -
+      |      expected + 42
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredOwnedSomeCannotEscapeAsAnyRef()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val option: Option[Wrapper[Box^{region}]^{region}]^{region} =
+      |      RiftRegion.ownedSome[Wrapper[Box^{region}]](using region)(
+      |        new Wrapper[Box^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + keepOwner)
+      |            box
+      |        )
+      |      )
+      |    Holder.retained = option
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
+  @Test def inferredOwnedSomeCannotExposeUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val metadata = new Metadata(40)
+      |    val option: Option[Wrapper[Entry^{region}]^{region}]^{region} =
+      |      RiftRegion.ownedSome[Wrapper[Entry^{region}]](using region)(
+      |        new Wrapper[Entry^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val entry: Entry^{owner} = new Entry(metadata)
+      |            if keepOwner == -1 then entry else entry
+      |        )
+      |      )
+      |    val entry = option.get.make(2)
+      |    System.identityHashCode(entry)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRawSomeOptionCanStoreDirectNestedWrapperClosureBody()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val some: Some[Wrapper[Box^{region}]^{region}]^{region} =
+      |      Some[Wrapper[Box^{region}]^{region}](
+      |        new Wrapper[Box^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(40 + n + keepOwner)
+      |            box
+      |        )
+      |      )
+      |    val option: Option[Wrapper[OtherBox^{region}]^{region}]^{region} =
+      |      Option[Wrapper[OtherBox^{region}]^{region}](
+      |        new Wrapper[OtherBox^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: OtherBox^{owner} = new OtherBox(50 + n + keepOwner)
+      |            box
+      |        )
+      |      )
+      |    val left: Box^{region} = some.value.make(2)
+      |    val right: OtherBox^{region} = option.get.make(3)
+      |    left.value + right.value - 95 + 42
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRawSomeOptionCanStoreDirectNestedWrapperPayload()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val some: Some[Wrapper[Box^{region}]^{region}]^{region} =
+      |      Some[Wrapper[Box^{region}]^{region}](
+      |        new Wrapper[Box^{region}](new Box(40))
+      |      )
+      |    val option: Option[Wrapper[OtherBox^{region}]^{region}]^{region} =
+      |      Option[Wrapper[OtherBox^{region}]^{region}](
+      |        new Wrapper[OtherBox^{region}](new OtherBox(50))
+      |      )
+      |    some.value.value.value + option.get.value.value - 48
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRawSomeCannotEscapeAsAnyRef()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val some: Some[Wrapper[Box^{region}]^{region}]^{region} =
+      |      Some[Wrapper[Box^{region}]^{region}](
+      |        new Wrapper[Box^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + keepOwner)
+      |            box
+      |        )
+      |      )
+      |    Holder.retained = some
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
+  @Test def inferredRawSomeCannotExposeUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val metadata = new Metadata(40)
+      |    val some: Some[Wrapper[Entry^{region}]^{region}]^{region} =
+      |      Some[Wrapper[Entry^{region}]^{region}](
+      |        new Wrapper[Entry^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val entry: Entry^{owner} = new Entry(metadata)
+      |            if keepOwner == -1 then entry else entry
+      |        )
+      |      )
+      |    val entry = some.value.make(2)
+      |    System.identityHashCode(entry)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRawSomePayloadCannotExposeUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val metadata = new Metadata(40)
+      |    val some: Some[Wrapper[Entry^{region}]^{region}]^{region} =
+      |      Some[Wrapper[Entry^{region}]^{region}](
+      |        new Wrapper[Entry^{region}](new Entry(metadata))
+      |      )
+      |    System.identityHashCode(some.value.value)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRawOptionCannotExposeUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val metadata = new Metadata(40)
+      |    val option: Option[Wrapper[Entry^{region}]^{region}]^{region} =
+      |      Option[Wrapper[Entry^{region}]^{region}](
+      |        new Wrapper[Entry^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val entry: Entry^{owner} = new Entry(metadata)
+      |            if keepOwner == -1 then entry else entry
+      |        )
+      |      )
+      |    val entry = option.get.make(2)
+      |    System.identityHashCode(entry)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredOwnedSomeOptionSelectedAliasCanStoreWrapperClosureBody()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val first: Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |        RiftRegion.ownedSome[Wrapper[Box^{r}]](using r)(
+      |          new Wrapper[Box^{r}](
+      |            (n: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: Box^{owner} = new Box(n + 40 + keepOwner)
+      |              box
+      |          )
+      |        )
+      |      val second: Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |        RiftRegion.ownedOption[Wrapper[Box^{r}]](using r)(
+      |          new Wrapper[Box^{r}](
+      |            (n: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: Box^{owner} = new Box(n + 41 + keepOwner)
+      |              box
+      |          )
+      |        )
+      |      RiftRegion.ownedSelect[
+      |        Option[Wrapper[Box^{r}]^{r}]
+      |      ](using r)(flag, first, second)
+      |
+      |    val expected = if flag then 42 else 43
+      |    makeWrapper(flag)(using region).get.make(2).value - expected + 42
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredOwnedSomeOptionSelectedAliasCannotEscapeAsAnyRef()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val first: Option[Wrapper[Box^{region}]^{region}]^{region} =
+      |      RiftRegion.ownedSome[Wrapper[Box^{region}]](using region)(
+      |        new Wrapper[Box^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + keepOwner)
+      |            box
+      |        )
+      |      )
+      |    val second: Option[Wrapper[Box^{region}]^{region}]^{region} =
+      |      RiftRegion.ownedOption[Wrapper[Box^{region}]](using region)(
+      |        new Wrapper[Box^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + 1 + keepOwner)
+      |            box
+      |        )
+      |      )
+      |    val selected: Option[Wrapper[Box^{region}]^{region}]^{region} =
+      |      RiftRegion.ownedSelect[
+      |        Option[Wrapper[Box^{region}]^{region}]
+      |      ](using region)(flag, first, second)
+      |    Holder.retained = selected
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
+  @Test def inferredOwnedSomeOptionSelectedAliasCannotExposeUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val metadata = new Metadata(40)
+      |    val first: Option[Wrapper[Entry^{region}]^{region}]^{region} =
+      |      RiftRegion.ownedSome[Wrapper[Entry^{region}]](using region)(
+      |        new Wrapper[Entry^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val entry: Entry^{owner} = new Entry(metadata)
+      |            if keepOwner == -1 then entry else entry
+      |        )
+      |      )
+      |    val second: Option[Wrapper[Entry^{region}]^{region}]^{region} =
+      |      RiftRegion.ownedOption[Wrapper[Entry^{region}]](using region)(
+      |        new Wrapper[Entry^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val entry: Entry^{owner} = new Entry(metadata)
+      |            if keepOwner == -1 then entry else entry
+      |        )
+      |      )
+      |    val selected: Option[Wrapper[Entry^{region}]^{region}]^{region} =
+      |      RiftRegion.ownedSelect[
+      |        Option[Wrapper[Entry^{region}]^{region}]
+      |      ](using region)(flag, first, second)
+      |    val entry = selected.get.make(2)
+      |    System.identityHashCode(entry)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredMethodReturnedTypedSomeWrapperCanStoreInlineClosureBodyAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val wrapper: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + 40 + keepOwner)
+      |            box
+      |      )
+      |      Some[Wrapper[Box^{r}]^{r}](wrapper)
+      |
+      |    makeWrapper(using region).get.make(2).value
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredForwardedMethodReturnedTypedSomeWrapperCanStoreInlineClosureBodyAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(value: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val wrapper: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + value + keepOwner)
+      |            box
+      |      )
+      |      Some[Wrapper[Box^{r}]^{r}](wrapper)
+      |
+      |    def forward(value: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      makeWrapper(value)(using r)
+      |
+      |    def branch(value: Int, flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then forward(value)(using r)
+      |      else makeWrapper(value + 1)(using r)
+      |
+      |    val expected = if flag then 42 else 43
+      |    branch(40, flag)(using region).get.make(2).value - expected + 42
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredForwardedMethodReturnedTypedOptionWrapperCanStoreInlineClosureBodyAllocation()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(value: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val wrapper: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + value + keepOwner)
+      |            box
+      |      )
+      |      Option[Wrapper[Box^{r}]^{r}](wrapper)
+      |
+      |    def forward(value: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      makeWrapper(value)(using r)
+      |
+      |    def branch(value: Int, flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Option[Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then forward(value)(using r)
+      |      else makeWrapper(value + 1)(using r)
+      |
+      |    val expected = if flag then 42 else 43
+      |    branch(40, flag)(using region).get.make(2).value - expected + 42
+      |  }
+      |""".stripMargin)
+
   @Test def inferredMethodReturnedSomeWrapperCanStoreNestedPayloadAllocation()
       : Unit =
     assertCompiles("""
@@ -15543,6 +16097,1520 @@ class RiftRegionCheckedCompilerTest {
       |    42 + (System.identityHashCode(either) & 0)
       |  }
       |""".stripMargin)
+
+  @Test def inferredForwardedMethodReturnedTypedEitherWrapperCanStoreInlineClosureValue()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean, left: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val wrapper: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + value + keepOwner)
+      |            box
+      |      )
+      |      if left then
+      |        Left[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}](wrapper)
+      |      else
+      |        Right[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}](wrapper)
+      |
+      |    def forward(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      makeWrapper(value, left)(using r)
+      |
+      |    def branch(value: Int, flag: Boolean, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then forward(value, left)(using r)
+      |      else makeWrapper(value + 1, left)(using r)
+      |
+      |    val either
+      |        : Either[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[Box^{region}]^{region}
+      |        ]^{region} =
+      |      branch(42, flag, left)(using region)
+      |    42 + (System.identityHashCode(either) & 0)
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredForwardedMethodReturnedTypedEitherWrapperFieldExtractionCaptureWideningFallsBack()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean, left: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val wrapper: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + value + keepOwner)
+      |            box
+      |      )
+      |      if left then
+      |        Left[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}](wrapper)
+      |      else
+      |        Right[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}](wrapper)
+      |
+      |    def forward(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      makeWrapper(value, left)(using r)
+      |
+      |    def branch(value: Int, flag: Boolean, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then forward(value, left)(using r)
+      |      else makeWrapper(value + 1, left)(using r)
+      |
+      |    val either
+      |        : Either[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[Box^{region}]^{region}
+      |        ]^{region} =
+      |      branch(42, flag, left)(using region)
+      |    val wrapper: Wrapper[Box^{region}]^{region} =
+      |      either match
+      |        case Left(value) => value
+      |        case Right(value) => value
+      |    val box: Box^{region} = wrapper.make(2)
+      |    val expected = if flag then 44 else 45
+      |    box.value - expected + 42
+      |  }
+      |""".stripMargin,
+      "does not conform"
+    )
+
+  @Test def inferredOwnedEitherWrapperCanStoreInlineClosureValue()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean, left: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val wrapper: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + value + keepOwner)
+      |            box
+      |      )
+      |      if left then
+      |        RiftRegion.ownedLeft[
+      |          Wrapper[Box^{r}],
+      |          Wrapper[Box^{r}]
+      |        ](using r)(wrapper)
+      |      else
+      |        RiftRegion.ownedRight[
+      |          Wrapper[Box^{r}],
+      |          Wrapper[Box^{r}]
+      |        ](using r)(wrapper)
+      |
+      |    def branch(value: Int, flag: Boolean, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then makeWrapper(value, left)(using r)
+      |      else makeWrapper(value + 1, left)(using r)
+      |
+      |    val either
+      |        : Either[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[Box^{region}]^{region}
+      |        ]^{region} =
+      |      branch(42, flag, left)(using region)
+      |    42 + (System.identityHashCode(either) & 0)
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredOwnedEitherWrapperCannotEscapeAsAnyRef()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(left: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val wrapper: Wrapper[Box^{region}]^{region} =
+      |      new Wrapper[Box^{region}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val box: Box^{owner} = new Box(n + keepOwner)
+      |          box
+      |    )
+      |    val either
+      |        : Either[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[Box^{region}]^{region}
+      |        ]^{region} =
+      |      if left then
+      |        RiftRegion.ownedLeft[
+      |          Wrapper[Box^{region}],
+      |          Wrapper[Box^{region}]
+      |        ](using region)(wrapper)
+      |      else
+      |        RiftRegion.ownedRight[
+      |          Wrapper[Box^{region}],
+      |          Wrapper[Box^{region}]
+      |        ](using region)(wrapper)
+      |    Holder.retained = either
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
+  @Test def inferredOwnedEitherCannotAcceptUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |
+      |def bad(left: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val metadata = new Metadata(40)
+      |    val either
+      |        : Either[Metadata^{region}, Metadata^{region}]^{region} =
+      |      if left then
+      |        RiftRegion.ownedLeft[
+      |          Metadata,
+      |          Metadata
+      |        ](using region)(metadata)
+      |      else
+      |        RiftRegion.ownedRight[
+      |          Metadata,
+      |          Metadata
+      |        ](using region)(metadata)
+      |    System.identityHashCode(either)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredOwnedEitherCanStoreDirectNestedWrapperClosureBody()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val leftCase
+      |        : Left[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedLeft[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(
+      |        new Wrapper[Box^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(40 + n + keepOwner)
+      |            box
+      |        )
+      |      )
+      |    val rightCase
+      |        : Right[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedRight[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(
+      |        new Wrapper[OtherBox^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: OtherBox^{owner} = new OtherBox(50 + n + keepOwner)
+      |            box
+      |        )
+      |      )
+      |    val leftWrapper: Wrapper[Box^{region}]^{region} =
+      |      RiftRegion.ownedLeftValue[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(leftCase)
+      |    val rightWrapper: Wrapper[OtherBox^{region}]^{region} =
+      |      RiftRegion.ownedRightValue[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(rightCase)
+      |    val leftBox: Box^{region} = leftWrapper.make(2)
+      |    val rightBox: OtherBox^{region} = rightWrapper.make(3)
+      |    leftBox.value + rightBox.value - 95 + 42
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredOwnedEitherDirectNestedWrapperCannotEscapeAsAnyRef()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val leftCase
+      |        : Left[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedLeft[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(
+      |        new Wrapper[Box^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + keepOwner)
+      |            box
+      |        )
+      |      )
+      |    Holder.retained = leftCase
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
+  @Test def inferredOwnedEitherDirectNestedWrapperCannotExposeUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val metadata = new Metadata(40)
+      |    val leftCase
+      |        : Left[
+      |          Wrapper[Entry^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedLeft[
+      |        Wrapper[Entry^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(
+      |        new Wrapper[Entry^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val entry: Entry^{owner} = new Entry(metadata)
+      |            if keepOwner == -1 then entry else entry
+      |        )
+      |      )
+      |    val extracted: Wrapper[Entry^{region}]^{region} =
+      |      RiftRegion.ownedLeftValue[
+      |        Wrapper[Entry^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(leftCase)
+      |    val entry = extracted.make(2)
+      |    System.identityHashCode(entry)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredOwnedEitherValueCanExtractWrapperClosureBody()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean, left: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeWrapper(value: Int, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val wrapper: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + value + keepOwner)
+      |            box
+      |      )
+      |      if left then
+      |        RiftRegion.ownedLeft[
+      |          Wrapper[Box^{r}],
+      |          Wrapper[Box^{r}]
+      |        ](using r)(wrapper)
+      |      else
+      |        RiftRegion.ownedRight[
+      |          Wrapper[Box^{r}],
+      |          Wrapper[Box^{r}]
+      |        ](using r)(wrapper)
+      |
+      |    def branch(value: Int, flag: Boolean, left: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then makeWrapper(value, left)(using r)
+      |      else makeWrapper(value + 1, left)(using r)
+      |
+      |    val either
+      |        : Either[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[Box^{region}]^{region}
+      |        ]^{region} =
+      |      branch(42, flag, left)(using region)
+      |    val wrapper: Wrapper[Box^{region}]^{region} =
+      |      RiftRegion.ownedEitherValue[Wrapper[Box^{region}]](using region)(either)
+      |    val box: Box^{region} = wrapper.make(2)
+      |    val expected = if flag then 44 else 45
+      |    box.value - expected + 42
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredOwnedEitherValueCannotEscapeAsAnyRef()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(left: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val wrapper: Wrapper[Box^{region}]^{region} =
+      |      new Wrapper[Box^{region}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val box: Box^{owner} = new Box(n + keepOwner)
+      |          box
+      |    )
+      |    val either
+      |        : Either[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[Box^{region}]^{region}
+      |        ]^{region} =
+      |      if left then
+      |        RiftRegion.ownedLeft[
+      |          Wrapper[Box^{region}],
+      |          Wrapper[Box^{region}]
+      |        ](using region)(wrapper)
+      |      else
+      |        RiftRegion.ownedRight[
+      |          Wrapper[Box^{region}],
+      |          Wrapper[Box^{region}]
+      |        ](using region)(wrapper)
+      |    val extracted: Wrapper[Box^{region}]^{region} =
+      |      RiftRegion.ownedEitherValue[Wrapper[Box^{region}]](using region)(either)
+      |    Holder.retained = extracted
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
+  @Test def inferredOwnedEitherValueCannotExposeUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(left: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val metadata = new Metadata(40)
+      |    val wrapper: Wrapper[Entry^{region}]^{region} =
+      |      new Wrapper[Entry^{region}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val entry: Entry^{owner} = new Entry(metadata)
+      |          if keepOwner == -1 then entry else entry
+      |    )
+      |    val either
+      |        : Either[
+      |          Wrapper[Entry^{region}]^{region},
+      |          Wrapper[Entry^{region}]^{region}
+      |        ]^{region} =
+      |      if left then
+      |        RiftRegion.ownedLeft[
+      |          Wrapper[Entry^{region}],
+      |          Wrapper[Entry^{region}]
+      |        ](using region)(wrapper)
+      |      else
+      |        RiftRegion.ownedRight[
+      |          Wrapper[Entry^{region}],
+      |          Wrapper[Entry^{region}]
+      |        ](using region)(wrapper)
+      |    val extracted: Wrapper[Entry^{region}]^{region} =
+      |      RiftRegion.ownedEitherValue[Wrapper[Entry^{region}]](using region)(either)
+      |    val entry = extracted.make(2)
+      |    System.identityHashCode(entry)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredOwnedEitherFoldCanExtractBranchSpecificWrapperClosureBody()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(left: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val either
+      |        : Either[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      if left then
+      |        RiftRegion.ownedLeft[
+      |          Wrapper[Box^{region}],
+      |          Wrapper[OtherBox^{region}]
+      |        ](using region)(
+      |          new Wrapper[Box^{region}](
+      |            (n: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: Box^{owner} = new Box(40 + n + keepOwner)
+      |              box
+      |          )
+      |        )
+      |      else
+      |        RiftRegion.ownedRight[
+      |          Wrapper[Box^{region}],
+      |          Wrapper[OtherBox^{region}]
+      |        ](using region)(
+      |          new Wrapper[OtherBox^{region}](
+      |            (n: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: OtherBox^{owner} = new OtherBox(50 + n + keepOwner)
+      |              box
+      |          )
+      |        )
+      |    RiftRegion.ownedEitherFold(using region)(either)(
+      |      leftWrapper =>
+      |        val box: Box^{region} = leftWrapper.make(2)
+      |        box.value,
+      |      rightWrapper =>
+      |        val box: OtherBox^{region} = rightWrapper.make(3)
+      |        box.value - 11
+      |    )
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredOwnedEitherFoldStillNeedsTypedBranchHelpers()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(left: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val either
+      |        : Either[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      if left then
+      |        RiftRegion.ownedLeft(using region)(
+      |          new Wrapper[Box^{region}](
+      |            (n: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: Box^{owner} = new Box(40 + n + keepOwner)
+      |              box
+      |          )
+      |        )
+      |      else
+      |        RiftRegion.ownedRight(using region)(
+      |          new Wrapper[OtherBox^{region}](
+      |            (n: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: OtherBox^{owner} = new OtherBox(50 + n + keepOwner)
+      |              box
+      |          )
+      |        )
+      |    RiftRegion.ownedEitherFold(using region)(either)(
+      |      leftWrapper =>
+      |        val box: Box^{region} = leftWrapper.make(2)
+      |        box.value,
+      |      rightWrapper =>
+      |        val box: OtherBox^{region} = rightWrapper.make(3)
+      |        box.value - 11
+      |    )
+      |  }
+      |""".stripMargin,
+      "does not conform"
+    )
+
+  @Test def inferredOwnedEitherInfersBothBranchTypesForFold(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class OtherBox(val value: Int)
+      |
+      |def ok(left: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val first: Box^{region} = new Box(40)
+      |    val second: OtherBox^{region} = new OtherBox(50)
+      |    val either
+      |        : Either[
+      |          Box^{region},
+      |          OtherBox^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedEither(using region)(
+      |        left,
+      |        first,
+      |        second
+      |      )
+      |    RiftRegion.ownedEitherFold(using region)(either)(
+      |      first => first.value + 2,
+      |      second => second.value - 9
+      |    )
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredOwnedEitherRejectsUnrootedHeapMetadata(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |final class OtherBox(val value: Int)
+      |
+      |def bad(left: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val metadata = new Metadata(40)
+      |    val other: OtherBox^{region} = new OtherBox(50)
+      |    val either
+      |        : Either[
+      |          Metadata^{region},
+      |          OtherBox^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedEither(using region)(
+      |        left,
+      |        metadata,
+      |        other
+      |      )
+      |    RiftRegion.ownedEitherFold(using region)(either)(
+      |      metadata => System.identityHashCode(metadata),
+      |      other => System.identityHashCode(other)
+      |    )
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredOwnedEitherWrapperClosureStillNeedsTypedHelpers(): Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(left: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val first: Wrapper[Box^{region}]^{region} =
+      |      new Wrapper[Box^{region}]((n: Int) =>
+      |        val keepOwner = System.identityHashCode(owner) & 0
+      |        val box: Box^{owner} = new Box(40 + n + keepOwner)
+      |        box
+      |      )
+      |    val second: Wrapper[OtherBox^{region}]^{region} =
+      |      new Wrapper[OtherBox^{region}]((n: Int) =>
+      |        val keepOwner = System.identityHashCode(owner) & 0
+      |        val box: OtherBox^{owner} = new OtherBox(50 + n + keepOwner)
+      |        box
+      |      )
+      |    val either
+      |        : Either[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedEither(using region)(left, first, second)
+      |    RiftRegion.ownedEitherFold(using region)(either)(
+      |      first => first.make(2).value,
+      |      second => second.make(3).value - 11
+      |    )
+      |  }
+      |""".stripMargin,
+      "does not conform"
+    )
+
+  @Test def inferredOwnedEitherFoldCannotExposeUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(left: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val metadata = new Metadata(40)
+      |    val either
+      |        : Either[
+      |          Wrapper[Entry^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      if left then
+      |        RiftRegion.ownedLeft[
+      |          Wrapper[Entry^{region}],
+      |          Wrapper[OtherBox^{region}]
+      |        ](using region)(
+      |          new Wrapper[Entry^{region}](
+      |            (n: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val entry: Entry^{owner} = new Entry(metadata)
+      |              if keepOwner == -1 then entry else entry
+      |          )
+      |        )
+      |      else
+      |        RiftRegion.ownedRight[
+      |          Wrapper[Entry^{region}],
+      |          Wrapper[OtherBox^{region}]
+      |        ](using region)(
+      |          new Wrapper[OtherBox^{region}](
+      |            (n: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: OtherBox^{owner} = new OtherBox(n + keepOwner)
+      |              box
+      |          )
+      |        )
+      |    RiftRegion.ownedEitherFold(using region)(either)(
+      |      leftWrapper =>
+      |        val entry: Entry^{region} = leftWrapper.make(2)
+      |        System.identityHashCode(entry)
+      |        (),
+      |      rightWrapper =>
+      |        System.identityHashCode(rightWrapper.make(2))
+      |        ()
+      |    )
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredOwnedEitherSelectCanExtractWrapperClosureBody()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makeEither(flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val first: Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |        RiftRegion.ownedLeft[
+      |          Wrapper[Box^{r}],
+      |          Wrapper[Box^{r}]
+      |        ](using r)(
+      |          new Wrapper[Box^{r}](
+      |            (n: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: Box^{owner} = new Box(n + 40 + keepOwner)
+      |              box
+      |          )
+      |        )
+      |      val second: Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |        RiftRegion.ownedRight[
+      |          Wrapper[Box^{r}],
+      |          Wrapper[Box^{r}]
+      |        ](using r)(
+      |          new Wrapper[Box^{r}](
+      |            (n: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: Box^{owner} = new Box(n + 41 + keepOwner)
+      |              box
+      |          )
+      |        )
+      |      RiftRegion.ownedSelect[
+      |        Either[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]
+      |      ](using r)(flag, first, second)
+      |
+      |    val selected
+      |        : Either[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[Box^{region}]^{region}
+      |        ]^{region} =
+      |      makeEither(flag)(using region)
+      |    val wrapper: Wrapper[Box^{region}]^{region} =
+      |      RiftRegion.ownedEitherValue[Wrapper[Box^{region}]](using region)(selected)
+      |    val expected = if flag then 42 else 43
+      |    wrapper.make(2).value - expected + 42
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredOwnedEitherSelectCannotEscapeAsAnyRef()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val first: Either[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      RiftRegion.ownedLeft[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[Box^{region}]
+      |      ](using region)(
+      |        new Wrapper[Box^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + keepOwner)
+      |            box
+      |        )
+      |      )
+      |    val second: Either[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      RiftRegion.ownedRight[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[Box^{region}]
+      |      ](using region)(
+      |        new Wrapper[Box^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + 1 + keepOwner)
+      |            box
+      |        )
+      |      )
+      |    val selected: Either[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      RiftRegion.ownedSelect[
+      |        Either[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]
+      |      ](using region)(flag, first, second)
+      |    Holder.retained = selected
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
+  @Test def inferredOwnedEitherSelectCannotExposeUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val metadata = new Metadata(40)
+      |    val first: Either[Wrapper[Entry^{region}]^{region}, Wrapper[Entry^{region}]^{region}]^{region} =
+      |      RiftRegion.ownedLeft[
+      |        Wrapper[Entry^{region}],
+      |        Wrapper[Entry^{region}]
+      |      ](using region)(
+      |        new Wrapper[Entry^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val entry: Entry^{owner} = new Entry(metadata)
+      |            if keepOwner == -1 then entry else entry
+      |        )
+      |      )
+      |    val second: Either[Wrapper[Entry^{region}]^{region}, Wrapper[Entry^{region}]^{region}]^{region} =
+      |      RiftRegion.ownedRight[
+      |        Wrapper[Entry^{region}],
+      |        Wrapper[Entry^{region}]
+      |      ](using region)(
+      |        new Wrapper[Entry^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val entry: Entry^{owner} = new Entry(metadata)
+      |            if keepOwner == -1 then entry else entry
+      |        )
+      |      )
+      |    val selected: Either[Wrapper[Entry^{region}]^{region}, Wrapper[Entry^{region}]^{region}]^{region} =
+      |      RiftRegion.ownedSelect[
+      |        Either[Wrapper[Entry^{region}]^{region}, Wrapper[Entry^{region}]^{region}]
+      |      ](using region)(flag, first, second)
+      |    val wrapper: Wrapper[Entry^{region}]^{region} =
+      |      RiftRegion.ownedEitherValue[Wrapper[Entry^{region}]](using region)(selected)
+      |    val entry = wrapper.make(2)
+      |    System.identityHashCode(entry)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredOwnedLeftRightValueCanExtractBranchSpecificWrapperClosureBody()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val leftWrapper: Wrapper[Box^{region}]^{region} =
+      |      new Wrapper[Box^{region}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val box: Box^{owner} = new Box(40 + n + keepOwner)
+      |          box
+      |      )
+      |    val rightWrapper: Wrapper[OtherBox^{region}]^{region} =
+      |      new Wrapper[OtherBox^{region}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val box: OtherBox^{owner} = new OtherBox(50 + n + keepOwner)
+      |          box
+      |      )
+      |    val leftCase
+      |        : Left[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedLeft[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(leftWrapper)
+      |    val rightCase
+      |        : Right[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedRight[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(rightWrapper)
+      |    val extractedLeft: Wrapper[Box^{region}]^{region} =
+      |      RiftRegion.ownedLeftValue[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(leftCase)
+      |    val extractedRight: Wrapper[OtherBox^{region}]^{region} =
+      |      RiftRegion.ownedRightValue[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(rightCase)
+      |    val leftBox: Box^{region} = extractedLeft.make(2)
+      |    val rightBox: OtherBox^{region} = extractedRight.make(3)
+      |    leftBox.value + rightBox.value - 95 + 42
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRawConcreteLeftRightValueCanExtractBranchSpecificWrapperClosureBody()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val leftWrapper: Wrapper[Box^{region}]^{region} =
+      |      new Wrapper[Box^{region}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val box: Box^{owner} = new Box(40 + n + keepOwner)
+      |          box
+      |      )
+      |    val rightWrapper: Wrapper[OtherBox^{region}]^{region} =
+      |      new Wrapper[OtherBox^{region}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val box: OtherBox^{owner} = new OtherBox(50 + n + keepOwner)
+      |          box
+      |      )
+      |    val leftCase
+      |        : Left[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedLeft[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(leftWrapper)
+      |    val rightCase
+      |        : Right[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedRight[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(rightWrapper)
+      |    val extractedLeft: Wrapper[Box^{region}]^{region} = leftCase.value
+      |    val extractedRight: Wrapper[OtherBox^{region}]^{region} =
+      |      rightCase.value
+      |    val leftBox: Box^{region} = extractedLeft.make(2)
+      |    val rightBox: OtherBox^{region} = extractedRight.make(3)
+      |    leftBox.value + rightBox.value - 95 + 42
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRawConcreteLeftRightValueCanExtractBranchSpecificWrapperPayload()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val leftWrapper: Wrapper[Box^{region}]^{region} =
+      |      new Wrapper[Box^{region}](new Box(40))
+      |    val rightWrapper: Wrapper[OtherBox^{region}]^{region} =
+      |      new Wrapper[OtherBox^{region}](new OtherBox(50))
+      |    val leftCase
+      |        : Left[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedLeft[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(leftWrapper)
+      |    val rightCase
+      |        : Right[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedRight[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(rightWrapper)
+      |    val extractedLeft: Wrapper[Box^{region}]^{region} = leftCase.value
+      |    val extractedRight: Wrapper[OtherBox^{region}]^{region} =
+      |      rightCase.value
+      |    extractedLeft.value.value + extractedRight.value.value - 48
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRawConcreteLeftRightCanStoreDirectNestedWrapperClosureBody()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val leftCase
+      |        : Left[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      Left[
+      |        Wrapper[Box^{region}]^{region},
+      |        Wrapper[OtherBox^{region}]^{region}
+      |      ](
+      |        new Wrapper[Box^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(40 + n + keepOwner)
+      |            box
+      |        )
+      |      )
+      |    val rightCase
+      |        : Right[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      Right[
+      |        Wrapper[Box^{region}]^{region},
+      |        Wrapper[OtherBox^{region}]^{region}
+      |      ](
+      |        new Wrapper[OtherBox^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: OtherBox^{owner} = new OtherBox(50 + n + keepOwner)
+      |            box
+      |        )
+      |      )
+      |    val leftWrapper: Wrapper[Box^{region}]^{region} = leftCase.value
+      |    val rightWrapper: Wrapper[OtherBox^{region}]^{region} =
+      |      rightCase.value
+      |    val leftBox: Box^{region} = leftWrapper.make(2)
+      |    val rightBox: OtherBox^{region} = rightWrapper.make(3)
+      |    leftBox.value + rightBox.value - 95 + 42
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRawConcreteLeftRightCanStoreDirectNestedWrapperPayload()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val leftCase
+      |        : Left[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      Left[
+      |        Wrapper[Box^{region}]^{region},
+      |        Wrapper[OtherBox^{region}]^{region}
+      |      ](new Wrapper[Box^{region}](new Box(40)))
+      |    val rightCase
+      |        : Right[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      Right[
+      |        Wrapper[Box^{region}]^{region},
+      |        Wrapper[OtherBox^{region}]^{region}
+      |      ](new Wrapper[OtherBox^{region}](new OtherBox(50)))
+      |    leftCase.value.value.value + rightCase.value.value.value - 48
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredRawConcreteLeftPayloadCannotExposeUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val metadata = new Metadata(40)
+      |    val leftCase
+      |        : Left[
+      |          Wrapper[Entry^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      Left[
+      |        Wrapper[Entry^{region}]^{region},
+      |        Wrapper[OtherBox^{region}]^{region}
+      |      ](new Wrapper[Entry^{region}](new Entry(metadata)))
+      |    System.identityHashCode(leftCase.value.value)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRawConcreteLeftCannotEscapeAsAnyRef()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val leftCase
+      |        : Left[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      Left[
+      |        Wrapper[Box^{region}]^{region},
+      |        Wrapper[OtherBox^{region}]^{region}
+      |      ](
+      |        new Wrapper[Box^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + keepOwner)
+      |            box
+      |        )
+      |      )
+      |    Holder.retained = leftCase
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
+  @Test def inferredRawConcreteLeftCannotExposeUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val metadata = new Metadata(40)
+      |    val leftCase
+      |        : Left[
+      |          Wrapper[Entry^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      Left[
+      |        Wrapper[Entry^{region}]^{region},
+      |        Wrapper[OtherBox^{region}]^{region}
+      |      ](
+      |        new Wrapper[Entry^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val entry: Entry^{owner} = new Entry(metadata)
+      |            if keepOwner == -1 then entry else entry
+      |        )
+      |      )
+      |    val extracted: Wrapper[Entry^{region}]^{region} = leftCase.value
+      |    val entry = extracted.make(2)
+      |    System.identityHashCode(entry)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRawConcreteLeftValuePayloadCannotExposeUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val value: A)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val metadata = new Metadata(40)
+      |    val wrapper: Wrapper[Entry^{region}]^{region} =
+      |      new Wrapper[Entry^{region}](new Entry(metadata))
+      |    val leftCase
+      |        : Left[
+      |          Wrapper[Entry^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedLeft[
+      |        Wrapper[Entry^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(wrapper)
+      |    val extracted: Wrapper[Entry^{region}]^{region} = leftCase.value
+      |    System.identityHashCode(extracted.value)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredRawConcreteLeftValueCannotEscapeAsAnyRef()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val wrapper: Wrapper[Box^{region}]^{region} =
+      |      new Wrapper[Box^{region}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val box: Box^{owner} = new Box(n + keepOwner)
+      |          box
+      |      )
+      |    val leftCase
+      |        : Left[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedLeft[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(wrapper)
+      |    val extracted: Wrapper[Box^{region}]^{region} = leftCase.value
+      |    Holder.retained = extracted
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
+  @Test def inferredRawConcreteLeftValueCannotExposeUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val metadata = new Metadata(40)
+      |    val wrapper: Wrapper[Entry^{region}]^{region} =
+      |      new Wrapper[Entry^{region}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val entry: Entry^{owner} = new Entry(metadata)
+      |          if keepOwner == -1 then entry else entry
+      |      )
+      |    val leftCase
+      |        : Left[
+      |          Wrapper[Entry^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedLeft[
+      |        Wrapper[Entry^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(wrapper)
+      |    val extracted: Wrapper[Entry^{region}]^{region} = leftCase.value
+      |    val entry = extracted.make(2)
+      |    System.identityHashCode(entry)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredOwnedLeftValueCannotEscapeAsAnyRef()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Box(val value: Int)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val wrapper: Wrapper[Box^{region}]^{region} =
+      |      new Wrapper[Box^{region}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val box: Box^{owner} = new Box(n + keepOwner)
+      |          box
+      |      )
+      |    val leftCase
+      |        : Left[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedLeft[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(wrapper)
+      |    val extracted: Wrapper[Box^{region}]^{region} =
+      |      RiftRegion.ownedLeftValue[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(leftCase)
+      |    Holder.retained = extracted
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
+  @Test def inferredOwnedLeftValueCannotExposeUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |import scala.util.*
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val metadata = new Metadata(40)
+      |    val wrapper: Wrapper[Entry^{region}]^{region} =
+      |      new Wrapper[Entry^{region}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val entry: Entry^{owner} = new Entry(metadata)
+      |          if keepOwner == -1 then entry else entry
+      |      )
+      |    val leftCase
+      |        : Left[
+      |          Wrapper[Entry^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedLeft[
+      |        Wrapper[Entry^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(wrapper)
+      |    val extracted: Wrapper[Entry^{region}]^{region} =
+      |      RiftRegion.ownedLeftValue[
+      |        Wrapper[Entry^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(leftCase)
+      |    val entry = extracted.make(2)
+      |    System.identityHashCode(entry)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
 
   @Test def inferredMethodReturnedEitherWrapperFieldExtractionCaptureWideningFallsBack()
       : Unit =
@@ -15794,6 +17862,1027 @@ class RiftRegionCheckedCompilerTest {
       |
       |    val pair = makePair(using region)
       |    pair._1.value.value + pair._2.value.value
+      |  }
+      |""".stripMargin,
+      "does not conform"
+    )
+
+  @Test def inferredForwardedMethodReturnedTypedTupleWrapperCanStoreInlineClosureValues()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makePair(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val first: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + base + keepOwner)
+      |            box
+      |      )
+      |      val second: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + base + 2 + keepOwner)
+      |            box
+      |      )
+      |      Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}](first, second)
+      |
+      |    def forward(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      makePair(base)(using r)
+      |
+      |    def branch(base: Int, flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then forward(base)(using r)
+      |      else makePair(base + 1)(using r)
+      |
+      |    val pair
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      branch(20, flag)(using region)
+      |    42 + (System.identityHashCode(pair) & 0)
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredForwardedMethodReturnedUntypedTupleWrapperLocalOperandsCaptureWideningFallsBack()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makePair(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val first: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + base + keepOwner)
+      |            box
+      |      )
+      |      val second: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + base + 2 + keepOwner)
+      |            box
+      |      )
+      |      Tuple2(first, second)
+      |
+      |    def forward(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      makePair(base)(using r)
+      |
+      |    def branch(base: Int, flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then forward(base)(using r)
+      |      else makePair(base + 1)(using r)
+      |
+      |    val pair
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      branch(20, flag)(using region)
+      |    42 + (System.identityHashCode(pair) & 0)
+      |  }
+      |""".stripMargin,
+      "does not conform"
+    )
+
+  @Test def inferredForwardedMethodReturnedTupleLiteralWrapperLocalOperandsCaptureWideningFallsBack()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makePair(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val first: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + base + keepOwner)
+      |            box
+      |      )
+      |      val second: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + base + 2 + keepOwner)
+      |            box
+      |      )
+      |      (first, second)
+      |
+      |    def forward(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      makePair(base)(using r)
+      |
+      |    def branch(base: Int, flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then forward(base)(using r)
+      |      else makePair(base + 1)(using r)
+      |
+      |    val pair
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      branch(20, flag)(using region)
+      |    42 + (System.identityHashCode(pair) & 0)
+      |  }
+      |""".stripMargin,
+      "does not conform"
+    )
+
+  @Test def inferredForwardedMethodReturnedPolymorphicTupleFactoryWrapperLocalOperandsCanStoreInlineClosureValues()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def make[A, B](using r: RiftRegion.ScopedRegion^)(
+      |        left: A^{r},
+      |        right: B^{r}
+      |    ): Tuple2[A^{r}, B^{r}]^{r} =
+      |      Tuple2(left, right)
+      |
+      |    def makePair(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val first: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + base + keepOwner)
+      |            box
+      |      )
+      |      val second: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + base + 2 + keepOwner)
+      |            box
+      |      )
+      |      make[Wrapper[Box^{r}], Wrapper[Box^{r}]](using r)(first, second)
+      |
+      |    def forward(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      makePair(base)(using r)
+      |
+      |    def branch(base: Int, flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then forward(base)(using r)
+      |      else makePair(base + 1)(using r)
+      |
+      |    val direct
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      forward(10)(using region)
+      |    val forwardedTrue
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      branch(20, true)(using region)
+      |    val forwardedFalse
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      branch(30, false)(using region)
+      |    42 + (System.identityHashCode(direct) & 0) +
+      |      (System.identityHashCode(forwardedTrue) & 0) +
+      |      (System.identityHashCode(forwardedFalse) & 0)
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredPolymorphicTupleFactoryWrapperLocalOperandsCannotEscapeAsAnyRef()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    def make[A, B](using r: RiftRegion.ScopedRegion^)(
+      |        left: A^{r},
+      |        right: B^{r}
+      |    ): Tuple2[A^{r}, B^{r}]^{r} =
+      |      Tuple2(left, right)
+      |
+      |    def makePair(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val first: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + base + keepOwner)
+      |            box
+      |      )
+      |      val second: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + base + 2 + keepOwner)
+      |            box
+      |      )
+      |      make[Wrapper[Box^{r}], Wrapper[Box^{r}]](using r)(first, second)
+      |
+      |    val pair
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      makePair(40)(using region)
+      |    Holder.retained = pair
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
+  @Test def inferredPolymorphicTupleFactoryWrapperClosureBodyCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    def make[A, B](using r: RiftRegion.ScopedRegion^)(
+      |        left: A^{r},
+      |        right: B^{r}
+      |    ): Tuple2[A^{r}, B^{r}]^{r} =
+      |      Tuple2(left, right)
+      |
+      |    def makePair(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Entry^{r}]^{r}, Wrapper[Entry^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val metadata = new Metadata(40)
+      |      val first: Wrapper[Entry^{r}]^{r} =
+      |        new Wrapper[Entry^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val entry: Entry^{owner} = new Entry(metadata)
+      |            if keepOwner == -1 then entry else entry
+      |      )
+      |      val second: Wrapper[Entry^{r}]^{r} =
+      |        new Wrapper[Entry^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val entry: Entry^{owner} = new Entry(metadata)
+      |            if keepOwner == -1 then entry else entry
+      |      )
+      |      make[Wrapper[Entry^{r}], Wrapper[Entry^{r}]](using r)(first, second)
+      |
+      |    val pair
+      |        : Tuple2[
+      |          Wrapper[Entry^{region}]^{region},
+      |          Wrapper[Entry^{region}]^{region}
+      |        ]^{region} =
+      |      makePair(using region)
+      |    val entry = pair._1.make(2)
+      |    System.identityHashCode(entry)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredOwnedTuple2WrapperLocalOperandsCanStoreInlineClosureValues()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makePair(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val first: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + base + keepOwner)
+      |            box
+      |      )
+      |      val second: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + base + 2 + keepOwner)
+      |            box
+      |      )
+      |      RiftRegion.ownedTuple2[
+      |        Wrapper[Box^{r}],
+      |        Wrapper[Box^{r}]
+      |      ](using r)(first, second)
+      |
+      |    def branch(base: Int, flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then makePair(base)(using r)
+      |      else makePair(base + 1)(using r)
+      |
+      |    val pair
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      branch(20, flag)(using region)
+      |    42 + (System.identityHashCode(pair) & 0)
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredOwnedTuple2WrapperLocalOperandsCannotEscapeAsAnyRef()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val first: Wrapper[Box^{region}]^{region} =
+      |      new Wrapper[Box^{region}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val box: Box^{owner} = new Box(n + keepOwner)
+      |          box
+      |    )
+      |    val second: Wrapper[Box^{region}]^{region} =
+      |      new Wrapper[Box^{region}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val box: Box^{owner} = new Box(n + 2 + keepOwner)
+      |          box
+      |    )
+      |    val pair
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      RiftRegion.ownedTuple2[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[Box^{region}]
+      |      ](using region)(first, second)
+      |    Holder.retained = pair
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
+  @Test def inferredOwnedTuple2WrapperClosureBodyCannotStoreUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val metadata = new Metadata(40)
+      |    val first: Wrapper[Entry^{region}]^{region} =
+      |      new Wrapper[Entry^{region}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val entry: Entry^{owner} = new Entry(metadata)
+      |          if keepOwner == -1 then entry else entry
+      |    )
+      |    val second: Wrapper[Entry^{region}]^{region} =
+      |      new Wrapper[Entry^{region}](
+      |        (n: Int) =>
+      |          val keepOwner = System.identityHashCode(owner) & 0
+      |          val entry: Entry^{owner} = new Entry(metadata)
+      |          if keepOwner == -1 then entry else entry
+      |    )
+      |    val pair
+      |        : Tuple2[
+      |          Wrapper[Entry^{region}]^{region},
+      |          Wrapper[Entry^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedTuple2[
+      |        Wrapper[Entry^{region}],
+      |        Wrapper[Entry^{region}]
+      |      ](using region)(first, second)
+      |    val entry = pair._1.make(2)
+      |    System.identityHashCode(entry)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredOwnedTuple2CanStoreDirectNestedWrapperClosureBodies()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class OtherBox(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val pair
+      |        : Tuple2[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[OtherBox^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedTuple2[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[OtherBox^{region}]
+      |      ](using region)(
+      |        new Wrapper[Box^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(40 + n + keepOwner)
+      |            box
+      |        ),
+      |        new Wrapper[OtherBox^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: OtherBox^{owner} = new OtherBox(50 + n + keepOwner)
+      |            box
+      |        )
+      |      )
+      |    val first: Wrapper[Box^{region}]^{region} = pair._1
+      |    val second: Wrapper[OtherBox^{region}]^{region} = pair._2
+      |    val firstBox: Box^{region} = first.make(2)
+      |    val secondBox: OtherBox^{region} = second.make(3)
+      |    firstBox.value + secondBox.value - 95 + 42
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredOwnedTuple2DirectNestedWrapperCannotEscapeAsAnyRef()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val pair
+      |        : Tuple2[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[Box^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedTuple2[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[Box^{region}]
+      |      ](using region)(
+      |        new Wrapper[Box^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + keepOwner)
+      |            box
+      |        ),
+      |        new Wrapper[Box^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + 1 + keepOwner)
+      |            box
+      |        )
+      |      )
+      |    Holder.retained = pair
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
+  @Test def inferredOwnedTuple2DirectNestedWrapperCannotExposeUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val metadata = new Metadata(40)
+      |    val pair
+      |        : Tuple2[
+      |          Wrapper[Entry^{region}]^{region},
+      |          Wrapper[Entry^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedTuple2[
+      |        Wrapper[Entry^{region}],
+      |        Wrapper[Entry^{region}]
+      |      ](using region)(
+      |        new Wrapper[Entry^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val entry: Entry^{owner} = new Entry(metadata)
+      |            if keepOwner == -1 then entry else entry
+      |        ),
+      |        new Wrapper[Entry^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val entry: Entry^{owner} = new Entry(metadata)
+      |            if keepOwner == -1 then entry else entry
+      |        )
+      |      )
+      |    val entry = pair._1.make(2)
+      |    System.identityHashCode(entry)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredOwnedTuple2SelectCanExtractWrapperClosureBodies()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makePair(flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val first: Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |        RiftRegion.ownedTuple2[
+      |          Wrapper[Box^{r}],
+      |          Wrapper[Box^{r}]
+      |        ](using r)(
+      |          new Wrapper[Box^{r}](
+      |            (n: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: Box^{owner} = new Box(n + 40 + keepOwner)
+      |              box
+      |          ),
+      |          new Wrapper[Box^{r}](
+      |            (n: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: Box^{owner} = new Box(n + 41 + keepOwner)
+      |              box
+      |          )
+      |        )
+      |      val second: Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |        RiftRegion.ownedTuple2[
+      |          Wrapper[Box^{r}],
+      |          Wrapper[Box^{r}]
+      |        ](using r)(
+      |          new Wrapper[Box^{r}](
+      |            (n: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: Box^{owner} = new Box(n + 50 + keepOwner)
+      |              box
+      |          ),
+      |          new Wrapper[Box^{r}](
+      |            (n: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: Box^{owner} = new Box(n + 51 + keepOwner)
+      |              box
+      |          )
+      |        )
+      |      RiftRegion.ownedSelect[
+      |        Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]
+      |      ](using r)(flag, first, second)
+      |
+      |    val selected
+      |        : Tuple2[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[Box^{region}]^{region}
+      |        ]^{region} =
+      |      makePair(flag)(using region)
+      |    val first: Wrapper[Box^{region}]^{region} = selected._1
+      |    val second: Wrapper[Box^{region}]^{region} = selected._2
+      |    val sum = first.make(2).value + second.make(3).value
+      |    val expected = if flag then 86 else 106
+      |    sum - expected + 42
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredOwnedTuple2SelectCannotEscapeAsAnyRef()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |object Holder:
+      |  var retained: AnyRef = null
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val first: Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      RiftRegion.ownedTuple2[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[Box^{region}]
+      |      ](using region)(
+      |        new Wrapper[Box^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + keepOwner)
+      |            box
+      |        ),
+      |        new Wrapper[Box^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + 1 + keepOwner)
+      |            box
+      |        )
+      |      )
+      |    val second: Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      RiftRegion.ownedTuple2[
+      |        Wrapper[Box^{region}],
+      |        Wrapper[Box^{region}]
+      |      ](using region)(
+      |        new Wrapper[Box^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + 2 + keepOwner)
+      |            box
+      |        ),
+      |        new Wrapper[Box^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + 3 + keepOwner)
+      |            box
+      |        )
+      |      )
+      |    val selected
+      |        : Tuple2[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[Box^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedSelect[
+      |        Tuple2[
+      |          Wrapper[Box^{region}]^{region},
+      |          Wrapper[Box^{region}]^{region}
+      |        ]
+      |      ](using region)(flag, first, second)
+      |    Holder.retained = selected
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
+  @Test def inferredOwnedTuple2SelectCannotExposeUnrootedHeapMetadata()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val value: Int)
+      |final class Entry(val metadata: Metadata)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def bad(flag: Boolean): Unit =
+      |  RiftRegion.scoped { region ?=>
+      |    val owner = region
+      |    val metadata = new Metadata(40)
+      |    val first
+      |        : Tuple2[
+      |          Wrapper[Entry^{region}]^{region},
+      |          Wrapper[Entry^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedTuple2[
+      |        Wrapper[Entry^{region}],
+      |        Wrapper[Entry^{region}]
+      |      ](using region)(
+      |        new Wrapper[Entry^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val entry: Entry^{owner} = new Entry(metadata)
+      |            if keepOwner == -1 then entry else entry
+      |        ),
+      |        new Wrapper[Entry^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val entry: Entry^{owner} = new Entry(metadata)
+      |            if keepOwner == -1 then entry else entry
+      |        )
+      |      )
+      |    val second
+      |        : Tuple2[
+      |          Wrapper[Entry^{region}]^{region},
+      |          Wrapper[Entry^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedTuple2[
+      |        Wrapper[Entry^{region}],
+      |        Wrapper[Entry^{region}]
+      |      ](using region)(
+      |        new Wrapper[Entry^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val entry: Entry^{owner} = new Entry(metadata)
+      |            if keepOwner == -1 then entry else entry
+      |        ),
+      |        new Wrapper[Entry^{region}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val entry: Entry^{owner} = new Entry(metadata)
+      |            if keepOwner == -1 then entry else entry
+      |        )
+      |      )
+      |    val selected
+      |        : Tuple2[
+      |          Wrapper[Entry^{region}]^{region},
+      |          Wrapper[Entry^{region}]^{region}
+      |        ]^{region} =
+      |      RiftRegion.ownedSelect[
+      |        Tuple2[
+      |          Wrapper[Entry^{region}]^{region},
+      |          Wrapper[Entry^{region}]^{region}
+      |        ]
+      |      ](using region)(flag, first, second)
+      |    val entry = selected._1.make(2)
+      |    System.identityHashCode(entry)
+      |    ()
+      |  }
+      |""".stripMargin,
+      "Rift checked region allocation cannot store an unrooted heap object"
+    )
+
+  @Test def inferredForwardedMethodReturnedTypedTupleWrapperFieldExtractionCanRunInlineClosureBodies()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makePair(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val first: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + base + keepOwner)
+      |            box
+      |      )
+      |      val second: Wrapper[Box^{r}]^{r} =
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + base + 2 + keepOwner)
+      |            box
+      |      )
+      |      Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}](first, second)
+      |
+      |    def forward(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      makePair(base)(using r)
+      |
+      |    def branch(base: Int, flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then forward(base)(using r)
+      |      else makePair(base + 1)(using r)
+      |
+      |    val pair
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      branch(20, flag)(using region)
+      |    val first: Wrapper[Box^{region}]^{region} = pair._1
+      |    val second: Wrapper[Box^{region}]^{region} = pair._2
+      |    val firstBox: Box^{region} = first.make(1)
+      |    val secondBox: Box^{region} = second.make(2)
+      |    val expected = if flag then 45 else 47
+      |    firstBox.value + secondBox.value - expected + 42
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredForwardedMethodReturnedDirectNestedTypedTupleWrapperCanStoreInlineClosureValues()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makePair(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}](
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + base + keepOwner)
+      |            box
+      |        ),
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + base + 2 + keepOwner)
+      |            box
+      |        )
+      |      )
+      |
+      |    def forward(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      makePair(base)(using r)
+      |
+      |    def branch(base: Int, flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then forward(base)(using r)
+      |      else makePair(base + 1)(using r)
+      |
+      |    val direct
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      forward(10)(using region)
+      |    val forwardedTrue
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      branch(20, true)(using region)
+      |    val forwardedFalse
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      branch(30, false)(using region)
+      |    42 + (System.identityHashCode(direct) & 0) +
+      |      (System.identityHashCode(forwardedTrue) & 0) +
+      |      (System.identityHashCode(forwardedFalse) & 0)
+      |  }
+      |""".stripMargin)
+
+  @Test def inferredForwardedMethodReturnedLocalAscribedUntypedTupleWrapperCaptureWideningFallsBack()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makePair(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      val pair: Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |        Tuple2(
+      |          new Wrapper[Box^{r}](
+      |            (n: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: Box^{owner} = new Box(n + base + keepOwner)
+      |              box
+      |          ),
+      |          new Wrapper[Box^{r}](
+      |            (n: Int) =>
+      |              val keepOwner = System.identityHashCode(owner) & 0
+      |              val box: Box^{owner} = new Box(n + base + 2 + keepOwner)
+      |              box
+      |          )
+      |        )
+      |      pair
+      |
+      |    def forward(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      makePair(base)(using r)
+      |
+      |    def branch(base: Int, flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then forward(base)(using r)
+      |      else makePair(base + 1)(using r)
+      |
+      |    val direct
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      forward(10)(using region)
+      |    val forwardedTrue
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      branch(20, true)(using region)
+      |    val forwardedFalse
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      branch(30, false)(using region)
+      |    42 + (System.identityHashCode(direct) & 0) +
+      |      (System.identityHashCode(forwardedTrue) & 0) +
+      |      (System.identityHashCode(forwardedFalse) & 0)
+      |  }
+      |""".stripMargin,
+      "cannot flow into capture set"
+    )
+
+  @Test def inferredForwardedMethodReturnedUntypedDirectNestedTupleWrapperCaptureWideningFallsBack()
+      : Unit =
+    assertDoesNotCompileWith("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Box(val value: Int)
+      |final class Wrapper[A <: Object^](val make: Function1[Int, A]^)
+      |
+      |def ok(flag: Boolean): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    def makePair(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      val owner = r
+      |      Tuple2(
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + base + keepOwner)
+      |            box
+      |        ),
+      |        new Wrapper[Box^{r}](
+      |          (n: Int) =>
+      |            val keepOwner = System.identityHashCode(owner) & 0
+      |            val box: Box^{owner} = new Box(n + base + 2 + keepOwner)
+      |            box
+      |        )
+      |      )
+      |
+      |    def forward(base: Int)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      makePair(base)(using r)
+      |
+      |    def branch(base: Int, flag: Boolean)(using
+      |        r: RiftRegion.ScopedRegion^
+      |    ): Tuple2[Wrapper[Box^{r}]^{r}, Wrapper[Box^{r}]^{r}]^{r} =
+      |      if flag then forward(base)(using r)
+      |      else makePair(base + 1)(using r)
+      |
+      |    val direct
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      forward(10)(using region)
+      |    val forwardedTrue
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      branch(20, true)(using region)
+      |    val forwardedFalse
+      |        : Tuple2[Wrapper[Box^{region}]^{region}, Wrapper[Box^{region}]^{region}]^{region} =
+      |      branch(30, false)(using region)
+      |    42 + (System.identityHashCode(direct) & 0) +
+      |      (System.identityHashCode(forwardedTrue) & 0) +
+      |      (System.identityHashCode(forwardedFalse) & 0)
       |  }
       |""".stripMargin,
       "does not conform"
@@ -17309,9 +20398,9 @@ class RiftRegionCheckedCompilerTest {
     )
 
   // Effect-polymorphic closure tests:
-  // A closure whose expected type has a captured owner should be able to
-  // allocate in that region, even if it doesn't explicitly capture the owner.
-  // This is the ReML-style allocation effect mechanism.
+  // A closure whose expected type has a captured owner can typecheck without an
+  // explicit owner capture, but allocation stays on the heap until the backend
+  // can rewrite the lambda environment and every generated adapter together.
   @Test def effectPolymorphicClosureBodyCanAllocateWithExpectedTypeOwner()
       : Unit =
     assertCompiles("""
@@ -17330,6 +20419,26 @@ class RiftRegionCheckedCompilerTest {
       |  }
       |""".stripMargin)
 
+  @Test def effectPolymorphicClosureBodyHiddenOwnerFallsBackWithHeapMetadata()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val shard: Int)
+      |final class Entry(val metadata: Metadata)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Entry^{r}]^{r} =
+      |  (value: Int) =>
+      |    val metadata = new Metadata(value)
+      |    new Entry(metadata)
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(42).metadata.shard
+      |  }
+      |""".stripMargin)
+
   @Test def effectPolymorphicClosureBodyCanReturnOptionFactory()
       : Unit =
     assertCompiles("""
@@ -17345,6 +20454,26 @@ class RiftRegionCheckedCompilerTest {
       |def ok(): Int =
       |  RiftRegion.scoped { region ?=>
       |    make(using region)(42).get.value
+      |  }
+      |""".stripMargin)
+
+  @Test def effectPolymorphicClosureBodyOptionFactoryHiddenOwnerFallsBackWithHeapMetadata()
+      : Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |import scala.scalanative.memory.RiftRegion
+      |
+      |final class Metadata(val shard: Int)
+      |final class Entry(val metadata: Metadata)
+      |
+      |def make(using r: RiftRegion.ScopedRegion^): Function1[Int, Option[Entry^{r}]^{r}]^{r} =
+      |  (value: Int) =>
+      |    val metadata = new Metadata(value)
+      |    Some(new Entry(metadata))
+      |
+      |def bad(): Int =
+      |  RiftRegion.scoped { region ?=>
+      |    make(using region)(42).get.metadata.shard
       |  }
       |""".stripMargin)
 
@@ -17552,5 +20681,42 @@ class RiftRegionCheckedCompilerTest {
       |  box.value
       |
       |def ok(): Int = compute(true)
+      |""".stripMargin)
+
+  @Test def ordinaryHeapConcurrencyStyleAllocationsStayOnHeap(): Unit =
+    assertCompiles("""
+      |import scala.language.experimental.captureChecking
+      |
+      |trait MyRunnable:
+      |  def run(): Unit
+      |
+      |final class NoOpRunnable extends MyRunnable:
+      |  def run(): Unit = ()
+      |
+      |final class Executor:
+      |  private var saved: MyRunnable = null
+      |  def submit(r: MyRunnable, result: String): String =
+      |    saved = r
+      |    result
+      |
+      |final class Mutex:
+      |  private var locked = false
+      |  def lock(): Unit = locked = true
+      |  def unlock(): Unit = locked = false
+      |
+      |final class BooleanLatch:
+      |  private var open = false
+      |  def signal(): Unit = open = true
+      |  def isOpen: Boolean = open
+      |
+      |def ok(): String =
+      |  val e = new Executor
+      |  val f = e.submit(new NoOpRunnable, "ok")
+      |  val m = new Mutex
+      |  val latch = new BooleanLatch
+      |  m.lock()
+      |  latch.signal()
+      |  m.unlock()
+      |  f + latch.isOpen.toString
       |""".stripMargin)
 }

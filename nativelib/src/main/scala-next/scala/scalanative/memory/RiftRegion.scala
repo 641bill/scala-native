@@ -7445,6 +7445,232 @@ object RiftRegion extends RiftRegionCompanionScalaVersionSpecific {
   ): T^{region} =
     RiftAllocator.allocate(region, obj)
 
+  /** Selects one of two values already owned by the same checked region.
+   *
+   *  This is a non-allocating, object-only bridge for source shapes where raw
+   *  `if`/`match` selection widens the owner before Rift lowering can observe
+   *  the same-region proof.
+   */
+  def ownedSelect[A <: Object^](using region: RiftRegion^)(
+      chooseFirst: Boolean,
+      first: A^{region},
+      second: A^{region}
+  ): A^{region} =
+    (if chooseFirst then first else second).asInstanceOf[A^{region}]
+
+  /** Builds a region-owned `Tuple2` from values already owned by the same
+   *  checked region.
+   *
+   *  This is intentionally object-only: primitive boxes and boxed-key cache
+   *  semantics need separate identity-aware support.
+   */
+  inline def ownedTuple2[A <: Object^, B <: Object^](using
+      region: RiftRegion^
+  )(inline left: A^{region}, inline right: B^{region})
+      : Tuple2[A^{region}, B^{region}]^{region} =
+    Tuple2[A^{region}, B^{region}](left, right)
+
+  /** Builds a region-owned `Some` from a value already owned by the same
+   *  checked region. Object-only for the same reason as `ownedTuple2`.
+   */
+  inline def ownedSome[A <: Object^](using
+      region: RiftRegion^
+  )(inline value: A^{region}): Some[A^{region}]^{region} =
+    Some[A^{region}](value)
+
+  /** Builds a null-preserving region-owned `Option` from a value already owned
+   *  by the same checked region. Object-only for the same reason as
+   *  `ownedTuple2`.
+   */
+  inline def ownedOption[A <: Object^](using
+      region: RiftRegion^
+  )(inline value: A^{region}): Option[A^{region}]^{region} =
+    Option[A^{region}](value)
+
+  /** Non-inline compiler bridge for raw `Some(...)` rewrites emitted after the
+   *  frontend inline phase for scoped-region owners.
+   */
+  def ownedScopedSomeInferred[A <: Object^](using
+      region: ScopedRegion^
+  )(value: A^{region}): Some[A^{region}]^{region} =
+    RiftAllocator.allocate(region, new Some[A^{region}](value))
+
+  /** Non-inline compiler bridge for raw `Option(...)` rewrites emitted after
+   *  the frontend inline phase for scoped-region owners.
+   */
+  def ownedScopedOptionInferred[A <: Object^](using
+      region: ScopedRegion^
+  )(value: A^{region}): Option[A^{region}]^{region} =
+    if value == null then None
+    else RiftAllocator.allocate(region, new Some[A^{region}](value))
+
+  /** Non-inline compiler bridge for raw `Some(...)` rewrites emitted after the
+   *  frontend inline phase for open streaming owners.
+   */
+  def ownedOpenSomeInferred[A <: Object^](using
+      region: OpenStreamingRegion^
+  )(value: A^{region}): Some[A^{region}]^{region} =
+    RiftAllocator.allocateOpen(region, new Some[A^{region}](value))
+
+  /** Non-inline compiler bridge for raw `Option(...)` rewrites emitted after
+   *  the frontend inline phase for open streaming owners.
+   */
+  def ownedOpenOptionInferred[A <: Object^](using
+      region: OpenStreamingRegion^
+  )(value: A^{region}): Option[A^{region}]^{region} =
+    if value == null then None
+    else RiftAllocator.allocateOpen(region, new Some[A^{region}](value))
+
+  /** Non-inline compiler bridge for raw `Some(...)` rewrites emitted after the
+   *  frontend inline phase for internal open-handle owners.
+   */
+  def ownedOpenHandleSomeInferred[A <: Object^](using
+      region: RiftOpenStreamingHandle^
+  )(value: A^{region}): Some[A^{region}]^{region} =
+    RiftAllocator.allocateOpenHandle(region, new Some[A^{region}](value))
+
+  /** Non-inline compiler bridge for raw `Option(...)` rewrites emitted after
+   *  the frontend inline phase for internal open-handle owners.
+   */
+  def ownedOpenHandleOptionInferred[A <: Object^](using
+      region: RiftOpenStreamingHandle^
+  )(value: A^{region}): Option[A^{region}]^{region} =
+    if value == null then None
+    else RiftAllocator.allocateOpenHandle(region, new Some[A^{region}](value))
+
+  /** Builds a region-owned `Left` from a value already owned by the same
+   *  checked region. Object-only for the same reason as `ownedTuple2`.
+   */
+  inline def ownedLeft[A <: Object^, B <: Object^](using
+      region: RiftRegion^
+  )(inline value: A^{region}): scala.util.Left[A^{region}, B^{region}]^{region} =
+    scala.util.Left[A^{region}, B^{region}](value)
+
+  /** Builds a region-owned `Right` from a value already owned by the same
+   *  checked region. Object-only for the same reason as `ownedTuple2`.
+   */
+  inline def ownedRight[A <: Object^, B <: Object^](using
+      region: RiftRegion^
+  )(inline value: B^{region}): scala.util.Right[A^{region}, B^{region}]^{region} =
+    scala.util.Right[A^{region}, B^{region}](value)
+
+  /** Builds a region-owned `Either` from both branch values.
+   *
+   *  This preserves the same checked owner while allowing Scala to infer both
+   *  branch types from the arguments, rather than relying on expected-owner
+   *  propagation through a raw `if` expression.
+   */
+  // ponytail: source bridge; remove when capture checking preserves raw branch owners.
+  inline def ownedEither[A <: Object^, B <: Object^](using
+      region: RiftRegion^
+  )(
+      inline chooseLeft: Boolean,
+      inline left: A^{region},
+      inline right: B^{region}
+  ): Either[A^{region}, B^{region}]^{region} =
+    if chooseLeft then ownedLeft[A, B](using region)(left)
+    else ownedRight[A, B](using region)(right)
+
+  /** Non-inline compiler bridge for raw `Left(...)` rewrites emitted after the
+   *  frontend inline phase for scoped-region owners.
+   */
+  def ownedScopedLeftInferred[A <: Object^, B <: Object^](using
+      region: ScopedRegion^
+  )(value: A^{region}): scala.util.Left[A^{region}, B^{region}]^{region} =
+    scala.util.Left[A^{region}, B^{region}](value)
+
+  /** Non-inline compiler bridge for raw `Right(...)` rewrites emitted after the
+   *  frontend inline phase for scoped-region owners.
+   */
+  def ownedScopedRightInferred[A <: Object^, B <: Object^](using
+      region: ScopedRegion^
+  )(value: B^{region}): scala.util.Right[A^{region}, B^{region}]^{region} =
+    scala.util.Right[A^{region}, B^{region}](value)
+
+  /** Non-inline compiler bridge for raw `Left(...)` rewrites emitted after the
+   *  frontend inline phase for open streaming owners.
+   */
+  def ownedOpenLeftInferred[A <: Object^, B <: Object^](using
+      region: OpenStreamingRegion^
+  )(value: A^{region}): scala.util.Left[A^{region}, B^{region}]^{region} =
+    scala.util.Left[A^{region}, B^{region}](value)
+
+  /** Non-inline compiler bridge for raw `Right(...)` rewrites emitted after the
+   *  frontend inline phase for open streaming owners.
+   */
+  def ownedOpenRightInferred[A <: Object^, B <: Object^](using
+      region: OpenStreamingRegion^
+  )(value: B^{region}): scala.util.Right[A^{region}, B^{region}]^{region} =
+    scala.util.Right[A^{region}, B^{region}](value)
+
+  /** Non-inline compiler bridge for raw `Left(...)` rewrites emitted after the
+   *  frontend inline phase for internal open-handle owners.
+   */
+  def ownedOpenHandleLeftInferred[A <: Object^, B <: Object^](using
+      region: RiftOpenStreamingHandle^
+  )(value: A^{region}): scala.util.Left[A^{region}, B^{region}]^{region} =
+    scala.util.Left[A^{region}, B^{region}](value)
+
+  /** Non-inline compiler bridge for raw `Right(...)` rewrites emitted after the
+   *  frontend inline phase for internal open-handle owners.
+   */
+  def ownedOpenHandleRightInferred[A <: Object^, B <: Object^](using
+      region: RiftOpenStreamingHandle^
+  )(value: B^{region}): scala.util.Right[A^{region}, B^{region}]^{region} =
+    scala.util.Right[A^{region}, B^{region}](value)
+
+  /** Extracts a value from a concrete region-owned `Left`.
+   *
+   *  This is intentionally branch-specific: callers must already have a
+   *  `Left[A, B]` owned by the checked region.
+   */
+  def ownedLeftValue[A <: Object^, B <: Object^](using
+      region: RiftRegion^
+  )(left: scala.util.Left[A^{region}, B^{region}]^{region}): A^{region} =
+    left.asInstanceOf[scala.util.Left[A^{region}, B^{region}]].value
+
+  /** Extracts a value from a concrete region-owned `Right`.
+   *
+   *  This is intentionally branch-specific: callers must already have a
+   *  `Right[A, B]` owned by the checked region.
+   */
+  def ownedRightValue[A <: Object^, B <: Object^](using
+      region: RiftRegion^
+  )(right: scala.util.Right[A^{region}, B^{region}]^{region}): B^{region} =
+    right.asInstanceOf[scala.util.Right[A^{region}, B^{region}]].value
+
+  /** Extracts a value from a region-owned same-type `Either`.
+   *
+   *  This deliberately covers only `Either[A, A]`: branch-specific owner
+   *  recovery for unrelated left/right types needs a richer effect summary.
+   */
+  def ownedEitherValue[A <: Object^](using
+      region: RiftRegion^
+  )(either: Either[A^{region}, A^{region}]^{region}): A^{region} =
+    either match
+      case left: scala.util.Left[?, ?] =>
+        left.asInstanceOf[scala.util.Left[A^{region}, A^{region}]].value
+      case right: scala.util.Right[?, ?] =>
+        right.asInstanceOf[scala.util.Right[A^{region}, A^{region}]].value
+
+  /** Folds a region-owned `Either` while preserving branch payload owners.
+   *
+   *  ponytail: source bridge for abstract `Either[A, B]`; replace with
+   *  automatic pattern extraction when capture checking preserves branch
+   *  owners through raw matches.
+   */
+  inline def ownedEitherFold[A <: Object^, B <: Object^, C](using
+      region: RiftRegion^
+  )(either: Either[A, B]^{region})(
+      inline leftFn: A => C,
+      inline rightFn: B => C
+  ): C =
+    either match
+      case left: scala.util.Left[?, ?] =>
+        leftFn(left.asInstanceOf[scala.util.Left[A, B]].value)
+      case right: scala.util.Right[?, ?] =>
+        rightFn(right.asInstanceOf[scala.util.Right[A, B]].value)
+
   /** Summon the implicit Rift region. */
   transparent inline def region(using region: RiftRegion^): RiftRegion^{region} =
     region

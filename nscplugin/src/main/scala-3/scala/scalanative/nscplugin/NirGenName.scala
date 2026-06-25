@@ -78,8 +78,9 @@ trait NirGenName(using Context) {
       else if (sym.isStaticMethod) nir.Sig.Scope.PublicStatic
       else nir.Sig.Scope.Public
 
-    def paramTypes = sym.info.paramInfoss.flatten
-      .map(genType(_))
+    def paramTypes =
+      sym.info.paramInfoss.flatten.map(genType(_)) ++
+        riftClosureEffectHiddenOwnerParamType(sym)
 
     if (sym == defn.`String_+`) genMethodName(defnNir.String_concat)
     else if (sym.isExtern) owner.member(genExternSigImpl(sym, id))
@@ -128,8 +129,9 @@ trait NirGenName(using Context) {
       if (sym.isPrivate) nir.Sig.Scope.PrivateStatic(owner)
       else nir.Sig.Scope.PublicStatic
 
-    val paramTypes = sym.info.paramInfoss.flatten
-      .map(genType(_))
+    val paramTypes =
+      sym.info.paramInfoss.flatten.map(genType(_)) ++
+        riftClosureEffectHiddenOwnerParamType(sym)
     val retType = genType(sym.info.resultType)
 
     val sig = nir.Sig.Method(id, paramTypes :+ retType, scope)

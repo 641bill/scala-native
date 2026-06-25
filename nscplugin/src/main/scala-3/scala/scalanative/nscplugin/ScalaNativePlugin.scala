@@ -31,6 +31,9 @@ class ScalaNativePlugin extends StandardPlugin:
           |     If none of the patches matches path would be relative to -sourcepath if defined or -sourceroot otherwise.
           |  -P:$name:riftInferReport
           |     Emit opt-in diagnostics for Rift region placement inference decisions.
+          |  -P:$name:riftInferAutomaticScopes
+          |     Experimental: enable prototype automatic local-escape region scopes.
+          |     Off by default; not a validated safety/performance mode.
           |""".stripMargin
     )
 
@@ -45,6 +48,8 @@ class ScalaNativePlugin extends StandardPlugin:
           genConfig.copy(forceStrictFinalFields = true) -> riftConfig
         case ((genConfig, riftConfig), "riftInferReport") =>
           genConfig -> riftConfig.copy(reportDecisions = true)
+        case ((genConfig, riftConfig), "riftInferAutomaticScopes") =>
+          genConfig -> riftConfig.copy(enableAutomaticRegionScopes = true)
         case ((genConfig, riftConfig), s"positionRelativizationPaths:${paths}") =>
           genConfig.copy(positionRelativizationPaths =
             (genConfig.positionRelativizationPaths ++ paths

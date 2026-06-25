@@ -397,6 +397,15 @@ trait NirGenStat(using Context) {
       curMethodEnv.enter(sym, param)
       param
     }
+    val hiddenOwnerParams =
+      riftClosureEffectHiddenOwnerSym(sym).toList.flatMap { ownerSym =>
+        riftClosureEffectHiddenOwnerParamType(sym).map { ty =>
+          val name = genLocalName(ownerSym) + "$riftEffectOwner"
+          val param = nir.Val.Local(fresh.namedId(name), ty)
+          curMethodEnv.enter(ownerSym, param)
+          param
+        }
+      }
     val thisParam = Option.unless(isStatic) {
       nir.Val.Local(
         fresh.namedId("this"), {
@@ -406,7 +415,7 @@ trait NirGenStat(using Context) {
         }
       )
     }
-    val params = thisParam.toList ::: argParams
+    val params = thisParam.toList ::: argParams ::: hiddenOwnerParams
 
     def genEntry(): Unit = {
       buf.label(fresh(), params)

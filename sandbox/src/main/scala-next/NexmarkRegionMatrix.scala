@@ -2552,6 +2552,167 @@ object NexmarkRegionMatrixHelpers {
     RunOutcome(checksum, outputCount)
   }
 
+  def runRiftCheckedFoldApi(
+      query: String,
+      emitDiagnostics: Boolean = true
+  ): RunOutcome = {
+    if (query != "q5")
+      throw new IllegalArgumentException(
+        "rift-checked-fold-api currently supports only NEXMark q5"
+      )
+
+    val cfg = NexmarkRegionConfig
+    val diag = q5Diag(query, "rift-checked-fold-api", emitDiagnostics)
+    var outputCount = 0L
+    val checksum = RiftRegion.streaming { stream ?=>
+      final class Record(
+          val kind: Int,
+          val id: Int,
+          val key: Int,
+          val bidder: Int,
+          val price: Long,
+          val timestamp: Long
+      ) extends RiftRegion.StreamAppendNode
+
+      val foldWindow = RiftRegion.streamWindowFold[Record](
+        cfg.eventsPerBucket.toLong,
+        cfg.auctionSpace
+      )
+      var running = 0L
+      var outputs = 0L
+
+      def topAuctionFold(): Int = {
+        var best = 0
+        var bestCount = RiftRegion.foldCount(stream, foldWindow, 0)
+        var bestSum = RiftRegion.foldValue(stream, foldWindow, 0)
+        var key = 1
+        while (key < cfg.auctionSpace) {
+          val count = RiftRegion.foldCount(stream, foldWindow, key)
+          val sum = RiftRegion.foldValue(stream, foldWindow, key)
+          if (
+            count > bestCount ||
+            (count == bestCount && sum > bestSum) ||
+            (count == bestCount && sum == bestSum && key < best)
+          ) {
+            best = key
+            bestCount = count
+            bestSum = sum
+          }
+          key += 1
+        }
+        best
+      }
+
+      def topAuctionFoldProfiled(): Int =
+        if (!diag.enabled) topAuctionFold()
+        else {
+          val start = System.nanoTime()
+          val result = topAuctionFold()
+          diag.recordTopScan(cfg.auctionSpace, System.nanoTime() - start)
+          result
+        }
+
+      def consume(
+          bucket: RiftRegion.StreamBucket^{stream},
+          cursor: RiftRegion.StreamAppendCursor[Record]^{stream}
+      ): Unit =
+        while (cursor.hasNext) {
+          val record: Record^{stream} = cursor.next()
+          diag.recordRemove()
+          val nextSum =
+            RiftRegion.removeFoldContribution(
+              stream,
+              foldWindow,
+              record.key,
+              record.price
+            )
+          val nextCount = RiftRegion.foldCount(stream, foldWindow, record.key)
+          running = fold(
+            running,
+            record.kind + 40,
+            record.id,
+            record.key,
+            nextCount,
+            nextSum,
+            bucket.startSeconds
+          )
+        }
+
+      def closeExpired(cutoffSeconds: Long): Unit =
+        RiftRegion.closeFoldBucketsBeforeWithCursor(
+          stream,
+          foldWindow,
+          cutoffSeconds
+        ) { (bucket, cursor) =>
+          diag.recordClosedBucket()
+          consume(bucket, cursor)
+        }
+
+      var currentStartSeconds = Long.MinValue
+      var currentBucket: RiftRegion.StreamBucket^{stream} = null
+      var currentBucketRegion: RiftRegion.StreamingRegion^{stream} = null
+      var i = 0
+      while (i < cfg.events) {
+        val startSeconds = bucketStart(i)
+        if (startSeconds != currentStartSeconds) {
+          closeExpired(closeCutoff(startSeconds))
+          currentStartSeconds = startSeconds
+          currentBucket =
+            RiftRegion.streamWindowFoldBucketFor(
+              stream,
+              foldWindow,
+              startSeconds
+            )
+          currentBucketRegion =
+            RiftRegion.streamBucketRegion(stream, currentBucket)
+        }
+
+        val auction = auctionId(i)
+        val bidPrice = price(i)
+        val bid: Record^{stream} =
+          RiftRegion.alloc(
+            new Record(15, i, auction, bidderId(i), bidPrice, i.toLong)
+          )(using currentBucketRegion)
+        RiftRegion.putFoldInBucket(
+          stream,
+          foldWindow,
+          currentBucket,
+          auction,
+          bidPrice,
+          bid
+        )
+        diag.recordAdd()
+        if (i % cfg.sampleEvery == 0) {
+          diag.recordSample()
+          val hot = topAuctionFoldProfiled()
+          running = fold(
+            running,
+            55,
+            i,
+            hot,
+            RiftRegion.foldCount(stream, foldWindow, hot),
+            RiftRegion.foldValue(stream, foldWindow, hot),
+            startSeconds
+          )
+          outputs += 1L
+        }
+        i += 1
+      }
+
+      RiftRegion.closeAllFoldBucketsWithCursor(stream, foldWindow) {
+        (bucket, cursor) =>
+          diag.recordClosedBucket()
+          consume(bucket, cursor)
+      }
+      outputCount = outputs
+      running
+    }
+    diag.print(query, cfg.events)
+    checksumSink = checksum
+    outputSink = outputCount
+    RunOutcome(checksum, outputCount)
+  }
+
   private def runMode(
       mode: String,
       query: String,
@@ -2567,6 +2728,8 @@ object NexmarkRegionMatrixHelpers {
         runRiftChecked(query, emitDiagnostics)
       case "rift-checked-join-api" =>
         runRiftCheckedJoinApi(query)
+      case "rift-checked-fold-api" =>
+        runRiftCheckedFoldApi(query, emitDiagnostics)
       case "rift-hp" =>
         runRiftTrusted(query, RiftRegion.HPZone, mode, emitDiagnostics)
       case "rift-streaming" =>
@@ -2578,7 +2741,8 @@ object NexmarkRegionMatrixHelpers {
   def validateMode(mode: String): Unit =
     mode match {
       case "heap" | "safezone" | "heap-join-api" | "rift-checked" |
-          "rift-checked-join-api" | "rift-hp" | "rift-streaming" =>
+          "rift-checked-join-api" | "rift-checked-fold-api" | "rift-hp" |
+          "rift-streaming" =>
         ()
       case other =>
         throw new IllegalArgumentException(s"unknown NEXMark mode '$other'")

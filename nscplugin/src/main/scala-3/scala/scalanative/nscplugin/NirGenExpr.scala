@@ -472,7 +472,7 @@ trait NirGenExpr(using Context) {
           case Ident(_) =>
             val sym = tree.symbol
             sym != NoSymbol &&
-              (sym.is(Param) || sym.owner == curMethodSym.get) &&
+              sym.is(Param) &&
               (treeTypeMentionsRiftCapture(tree) ||
                 typeMentionsRiftCapture(sym.info))
           case TypeApply(Select(qualifier, nme.asInstanceOf_), _) =>
@@ -1048,7 +1048,8 @@ trait NirGenExpr(using Context) {
     // Check if an allocation is local-escape based on escape analysis
     private def isLocalEscapeAllocation(app: Apply): Boolean = {
       val sym = calledSymbol(app)
-      sym.isClassConstructor && {
+      RiftRegionInference.automaticRegionScopesEnabled &&
+        sym.isClassConstructor && {
         RiftRegionInference.sourceSpanKey(app.srcPos).exists { posKey =>
           RiftRegionInference.isLocalEscape(posKey)
         }
@@ -1064,6 +1065,7 @@ trait NirGenExpr(using Context) {
     // Calls RiftRegion.open(Scoped) as a Scala method to create a proper
     // RiftRegion object. This avoids interflow crashes from raw extern calls.
     private def getOrCreateAutomaticRegion(): Option[nir.Val] = {
+      if !RiftRegionInference.automaticRegionScopesEnabled then return None
       val methodSym = curMethodSym.get
       if methodSym == NoSymbol then return None
       automaticRegionCache.get(methodSym) match {
@@ -1115,6 +1117,7 @@ trait NirGenExpr(using Context) {
     // allocations. This ensures the region handle exists before any allocation
     // site and can be properly closed before the method returns.
     def precacheAutomaticRegion(): Unit = {
+      if !RiftRegionInference.automaticRegionScopesEnabled then return
       val methodSym = curMethodSym.get
       if methodSym == NoSymbol then return
       if !RiftRegionInference.hasLocalEscapeAllocations(methodSym) then return
@@ -2147,7 +2150,7 @@ trait NirGenExpr(using Context) {
       // If the closure has an allocation effect (its expected type has a
       // captured owner), resolve the owner value so the lambda body can
       // use it for allocation.
-      val allocationEffectOwner: Option[(Symbol, nir.Val)] =
+      val allocationEffectOwnerSym: Option[Symbol] =
         RiftRegionInference.inferredClosureAllocationEffects
           .get(funSym)
           .orElse(
@@ -2158,10 +2161,29 @@ trait NirGenExpr(using Context) {
                   .get
               )
           )
+          .orElse(riftClosureEffectHiddenOwnerSym(funSym))
+      val allocationEffectOwner: Option[(Symbol, nir.Val)] =
+        allocationEffectOwnerSym
           .flatMap { ownerSym =>
             inferredRiftOwnerValue(ownerSym).map(ownerSym -> _)
           }
-      val captureTypesAndNames = {
+      def normalCapturesContainOwner(
+          ownerSym: Symbol,
+          ownerValue: nir.Val
+      ): Boolean =
+        allCaptureValues.exists { capture =>
+          isCheckedRiftAllocationOwnerValue(capture) &&
+            (capture.symbol == ownerSym ||
+              inferredDecisionOwner(capture.symbol).contains(ownerSym) ||
+              ownerSymbolRuntimeValues(capture.symbol).contains(ownerValue))
+        }
+      val hiddenAllocationEffectOwner =
+        allocationEffectOwner.filter { case (ownerSym, _) =>
+          riftClosureEffectHiddenOwnerSym(funSym).contains(ownerSym)
+        }.filterNot { case (ownerSym, ownerValue) =>
+          normalCapturesContainOwner(ownerSym, ownerValue)
+        }
+      val normalCaptureTypesAndNames = {
         for
           (tree, idx) <- allCaptureValues.zipWithIndex
           tpe = tree match {
@@ -2171,6 +2193,16 @@ trait NirGenExpr(using Context) {
           name = anonClassName.member(nir.Sig.Field(s"capture$idx"))
         yield (tpe, name)
       }
+      val hiddenCaptureTypesAndNames =
+        hiddenAllocationEffectOwner.toList.flatMap { case (_, _) =>
+          riftClosureEffectHiddenOwnerParamType(funSym).map { tpe =>
+            val idx = allCaptureValues.size
+            val name = anonClassName.member(nir.Sig.Field(s"capture$idx"))
+            (tpe, name)
+          }
+        }
+      val captureTypesAndNames =
+        normalCaptureTypesAndNames ++ hiddenCaptureTypesAndNames
       val (captureTypes, captureNames) = captureTypesAndNames.unzip
 
       def genAnonymousClass: nir.Defn = {
@@ -2278,14 +2310,6 @@ trait NirGenExpr(using Context) {
             curMethodInfo := CollectMethodInfo(),
             curUnwindHandler := None
           ) {
-            // Register allocation effect owner in the lambda body's environment.
-            // This enables effect-polymorphic closures: the closure body can
-            // allocate in the owner region even if it doesn't explicitly capture
-            // the owner term.
-            allocationEffectOwner.foreach { (ownerSym, ownerValue) =>
-              curMethodEnv.get.enter(ownerSym, ownerValue)
-            }
-
             val self = nir.Val.Local(fresh(), selfType)
             val params = sigTypes.map(nir.Val.Local(fresh(), _))
 
@@ -2300,11 +2324,28 @@ trait NirGenExpr(using Context) {
               yield ensureUnboxed(param, tpe)
 
             val captureVals =
-              for (sym, (tpe, name)) <- captureSyms.zip(captureTypesAndNames)
+              for (sym, (tpe, name)) <- captureSyms.zip(
+                  normalCaptureTypesAndNames
+                )
               yield buf.fieldload(tpe, self, name, unwind)
+            val hiddenOwnerVals =
+              for (_, (tpe, name)) <-
+                  hiddenAllocationEffectOwner.toList.zip(
+                    hiddenCaptureTypesAndNames
+                  )
+              yield buf.fieldload(tpe, self, name, unwind)
+            hiddenAllocationEffectOwner
+              .map(_._1)
+              .toList
+              .zip(hiddenOwnerVals)
+              .foreach { (ownerSym, owner) =>
+                curMethodEnv.get.enter(ownerSym, owner)
+              }
 
             val allVals =
-              (captureVals ++ paramVals).toList.map(ValTree(_)(sym.span))
+              (captureVals ++ paramVals).toList.map(
+                ValTree(_)(sym.span)
+              )
             val res = if (isStaticCall) {
               scoped(curMethodThis := None) {
                 buf.genApplyStaticMethod(
@@ -2358,15 +2399,50 @@ trait NirGenExpr(using Context) {
 
       def allocateClosure() = {
         val bodyOwnerSym =
-          RiftRegionInference.inferredClosureBodyOwners.get(funSym)
+          RiftRegionInference.inferredClosureBodyOwners
+            .get(funSym)
+            .orElse(
+              RiftRegionInference
+                .sourceSpanKey(tree.srcPos)
+                .flatMap(
+                  RiftRegionInference.inferredClosureBodyOwnersBySourceSpan.get
+                )
+            )
+            .orElse(
+              RiftRegionInference
+                .sourceLineKey(tree.srcPos)
+                .flatMap { key =>
+                  RiftRegionInference.inferredClosureBodyOwnersBySourceLine
+                    .get(key)
+                    .flatMap { owners =>
+                      owners.toList.distinct match {
+                        case owner :: Nil => Some(owner)
+                        case _            => None
+                      }
+                    }
+                }
+            )
         val inferredOwnerSym = inferredClosureOwnerSym(tree)
+        val capturedOwnerSym = capturedClosureOwnerSym(tree)
+        val typeOnlyCapturedOwnerSym =
+          Option
+            .when(treeTypeMentionsRiftCapture(tree))(capturedOwnerSym)
+            .flatten
+        val currentEffectOwnerForCapturedClosure =
+          Option
+            .when(capturedOwnerSym.nonEmpty)(
+              riftClosureEffectHiddenOwnerSym(curMethodSym.get)
+            )
+            .flatten
         val resolvedOwner =
           (
             tree
               .getAttachment(NirDefinitions.InferredRiftAllocationOwner)
               .toList :::
               inferredOwnerSym.toList :::
-              bodyOwnerSym.toList
+              bodyOwnerSym.toList :::
+              typeOnlyCapturedOwnerSym.toList :::
+              currentEffectOwnerForCapturedClosure.toList
           ).distinct.view
             .flatMap(sym => inferredRiftOwnerValue(sym).map(sym -> _))
             .headOption
@@ -2381,6 +2457,8 @@ trait NirGenExpr(using Context) {
             .map(_._1)
             .orElse(inferredOwnerSym)
             .orElse(bodyOwnerSym)
+            .orElse(typeOnlyCapturedOwnerSym)
+            .orElse(currentEffectOwnerForCapturedClosure)
             .orElse(allocationEffectOwner.map(_._1))
         val captureZone = resolvedOwner.map(_._2)
         // Also check for allocation effect owners (effect-polymorphic closures)
@@ -2396,7 +2474,9 @@ trait NirGenExpr(using Context) {
           }
         }
         val alloc = buf.classalloc(anonClassName, unwind, zone)
-        val captures = allCaptureValues.map(genExpr)
+        val captures =
+          allCaptureValues.map(genExpr) ++
+            hiddenAllocationEffectOwner.toList.map(_._2)
         buf.call(
           ctorTy,
           nir.Val.Global(ctorName, nir.Type.Ptr),
@@ -3406,6 +3486,31 @@ trait NirGenExpr(using Context) {
       genApplyMethod(method, statically = true, self, args)
     }
 
+    private def genHiddenRiftClosureEffectArgs(
+        sym: Symbol,
+        explicitArgs: Seq[nir.Val]
+    ): Seq[nir.Val] =
+      riftClosureEffectHiddenOwnerSym(sym)
+        .flatMap { ownerSym =>
+          def uniqueExplicitArgByType(ty: nir.Type): Option[nir.Val] = {
+            val matches = explicitArgs.filter(_.ty == ty).distinct
+            matches match {
+              case value :: Nil => Some(value)
+              case _            => None
+            }
+          }
+          inferredRiftOwnerValue(ownerSym)
+            .orElse(
+              riftClosureEffectHiddenOwnerParamType(sym)
+                .flatMap { ty =>
+                  curMethodEnv.get
+                    .getUniqueByType(ty)
+                    .orElse(uniqueExplicitArgByType(ty))
+                }
+            )
+        }
+        .toList
+
     def genApplyMethod(
         sym: Symbol,
         statically: Boolean,
@@ -3435,7 +3540,9 @@ trait NirGenExpr(using Context) {
       val sig =
         if isExtern then genExternMethodSig(sym)
         else origSig
-      val args = genMethodArgs(sym, argsp)
+      val explicitArgs = genMethodArgs(sym, argsp)
+      val args =
+        explicitArgs ++ genHiddenRiftClosureEffectArgs(sym, explicitArgs)
 
       val isStaticCall = statically || owner.isStruct || isExtern
       val method =
@@ -3464,7 +3571,9 @@ trait NirGenExpr(using Context) {
       require(!sym.isExtern, sym)
 
       val sig = genMethodSig(sym, statically = true)
-      val args = genMethodArgs(sym, argsp)
+      val explicitArgs = genMethodArgs(sym, argsp)
+      val args =
+        explicitArgs ++ genHiddenRiftClosureEffectArgs(sym, explicitArgs)
       val methodName = genStaticMemberName(sym, receiver)
       val method = nir.Val.Global(methodName, nir.Type.Ptr)
       buf.call(sig, method, args, unwind)
